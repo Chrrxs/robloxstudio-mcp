@@ -8,11 +8,11 @@
 
 ## Why you should use this over other MCP servers
 
-Two independent Roblox Studio MCP servers exist today: the [official Roblox one](https://create.roblox.com/docs/studio/mcp) and [boshyxd's](https://github.com/boshyxd/robloxstudio-mcp). This package is a fork of boshyxd's, picking up his 43-tool surface and adding the playtest-driving pieces that neither alternative ships out of the box.
+Two independent Roblox Studio MCP servers exist today: the [official Roblox one](https://create.roblox.com/docs/studio/mcp) and [boshyxd's](https://github.com/boshyxd/robloxstudio-mcp). This package is a fork of boshyxd's, picking up his 43-tool surface (now 46 tools with v2.11.0's `export_rbxm`, `import_rbxm`, and `get_memory_breakdown`) and adding the playtest-driving pieces that neither alternative ships out of the box.
 
 What you get here that you don't get from either of those:
 
-1. **boshyxd's 43-tool surface** — full file-tree browsing, mass property reads/writes, script search-and-replace, attribute/tag management, build import/export, asset insertion, screenshot capture, ScriptEditorService integration. The official Roblox MCP exposes a much smaller surface.
+1. **46-tool surface** — boshyxd's original 43 plus this fork's `export_rbxm` / `import_rbxm` (`SerializationService` round-trip) and `get_memory_breakdown` (per-peer `Stats` snapshot). Full file-tree browsing, mass property reads/writes, script search-and-replace, attribute/tag management, build import/export, asset insertion, screenshot capture, ScriptEditorService integration, .rbxm bundling, runtime memory inspection. The official Roblox MCP exposes a much smaller surface.
 2. **Game-VM eval bridges for playtest debugging** — `eval_server_runtime` and `eval_client_runtime` run inside the running game's Script / LocalScript VMs, not a sandboxed plugin VM. This is the only way to inspect runtime-mutated module state during a playtest (e.g., a networking lib's cached counters, an ECS world's tick state, a datastore wrapper's batch queue). Both the official MCP's `execute_luau` and boshyxd's `execute_luau target=client-N` run in isolated VMs where `require(SomeModule)` returns a fresh table every call. Bridge scripts are ported from [chrrxs/roblox-mcp-primitives](https://github.com/Chrrxs/roblox-mcp-primitives), auto-installed at `start_playtest`, auto-removed at `stop_playtest`. Zero manual setup.
 3. **Auto-connect across every DataModel** — boshyxd's plugin only registers with MCP when you click a button in its dock widget, but that widget is *invisible in play DMs*, so `target=server` and `target=client-N` never worked out of the box. This fork auto-activates on plugin load in every DM (edit, play server, every play client), uses a server-peer broker to route `target=client-N` past the engine's "client can't `HttpService:RequestAsync`" restriction, and adds an edit-proxy so `stop_playtest` calls `StudioTestService:EndTest` from the play server DM where it's actually legal.
 
@@ -49,6 +49,12 @@ Use the new tools when you need to inspect runtime-mutated module state (e.g., a
 Same release fixes a long-standing reconnect issue: when the MCP server process restarts (e.g., Claude Code reconnects mid-session), the plugin now auto re-registers with the new server within ~500 ms via a `knownInstance` poll-response signal. No more manual Disconnect+Connect button-clicking in the plugin dock widget.
 
 `client-N` allocation is also now stateless lowest-unused — the first connected client is always `client-1` regardless of how many playtest cycles or Claude restarts you've done since. Verification recipes can hardcode `target=client-1`.
+
+## New in v2.11.0: `export_rbxm` / `import_rbxm` and `get_memory_breakdown`
+
+**`export_rbxm` / `import_rbxm`** wrap engine v668's `SerializationService:SerializeInstancesAsync` / `DeserializeInstancesAsync` (PluginSecurity). `export_rbxm` serializes DataModel paths to a `.rbxm` on disk; `import_rbxm` reads bytes (local path, URL, or inline base64), deserializes, and parents the result under a chosen instance. Parenting is all-or-nothing — partial imports roll back. `target=edit` wraps the import in `ChangeHistoryService:TryBeginRecording` so one Ctrl+Z reverses the bundle. Non-creatable instances and services are rejected by the engine itself; the plugin surfaces the engine's error verbatim. No `read_rbxm_metadata` tool — the `.rbxm` format has no stability contract outside `DeserializeInstancesAsync`.
+
+**`get_memory_breakdown`** iterates `Enum.DeveloperMemoryTag` and calls `Stats:GetMemoryUsageMbForTag` per item, returning a per-peer `{ total_mb, categories, timestamp }`. `target=all` (default) fans out to every connected peer except `edit-proxy`, including clients via an added `ClientBroker` route. The per-tag loop is the workaround for `Stats:GetMemoryUsageMbAllCategories` being gated by `Capabilities: InternalTest` and therefore not callable from plugin context — `GetMemoryUsageMbForTag` is `Security: None` and works. In Studio Play mode all three peers (edit/server/client-N) share one OS process and report identical totals; in `mode=run` or Team Test the numbers diverge.
 
 ## New in v2.10.1: `eval_server_runtime` no longer needs `LoadStringEnabled`
 
@@ -125,7 +131,7 @@ Ask things like: *"What's the structure of this game?"*, *"Find scripts with dep
 
 A lighter, **read-only** version that only exposes inspection tools. No writes, no script edits, no object creation/deletion. Ideal for safely browsing game structure, reviewing scripts, and debugging without risk of accidental changes.
 
-**31 read-only tools:** `get_file_tree`, `search_files`, `get_place_info`, `get_services`, `search_objects`, `get_instance_properties`, `get_instance_children`, `search_by_property`, `get_class_info`, `get_project_structure`, `mass_get_property`, `get_script_source`, `grep_scripts`, `get_attributes`, `get_tags`, `get_tagged`, `get_selection`, `get_playtest_output`, `get_connected_instances`, `get_descendants`, `compare_instances`, `get_output_log`, `export_build`, `list_library`, `search_materials`, `get_build`, `search_assets`, `get_asset_details`, `get_asset_thumbnail`, `preview_asset`, `capture_screenshot`
+**33 read-only tools:** `get_file_tree`, `search_files`, `get_place_info`, `get_services`, `search_objects`, `get_instance_properties`, `get_instance_children`, `search_by_property`, `get_class_info`, `get_project_structure`, `mass_get_property`, `get_script_source`, `grep_scripts`, `get_attributes`, `get_tags`, `get_tagged`, `get_selection`, `get_playtest_output`, `get_connected_instances`, `get_descendants`, `compare_instances`, `get_output_log`, `export_build`, `list_library`, `search_materials`, `get_build`, `search_assets`, `get_asset_details`, `get_asset_thumbnail`, `preview_asset`, `capture_screenshot`, `export_rbxm`, `get_memory_breakdown`
 
 **Setup** - same plugin family, different rbxmx file. Install **only one variant at a time** - having `MCPPlugin.rbxmx` and `MCPInspectorPlugin.rbxmx` in `Plugins/` simultaneously causes double-registration with the MCP server and breaks per-peer routing. Use `--replace-variant` to swap atomically:
 
@@ -182,7 +188,7 @@ gemini mcp add robloxstudio-inspector npx --trust -- -y @chrrxs/robloxstudio-mcp
 ---
 
 <!-- VERSION_LINE -->
-**v2.10.1** - based on boshyxd v2.7.0 + four plugin-side fixes
+**v2.11.0** - based on boshyxd v2.7.0 + four plugin-side fixes + SerializationService round-trip + per-peer memory snapshots
 
 ## Building & releasing
 
@@ -221,6 +227,19 @@ mcp__Roblox_Studio__execute_luau target=server              # IsServer=true, Loc
 mcp__Roblox_Studio__execute_luau target=client-N            # IsClient=true, LocalPlayer=<name>
 mcp__Roblox_Studio__stop_playtest                           # "Playtest stopped via edit-proxy/EndTest"
 mcp__Roblox_Studio__execute_luau target=server              # "Target instance 'server' disconnected"
+
+# v2.11.0 rbxm round-trip
+mcp__Roblox_Studio__export_rbxm instance_paths=["Workspace.SpawnLocation"] output_path="/tmp/test.rbxm"
+mcp__Roblox_Studio__import_rbxm source={path:"/tmp/test.rbxm"} parent_path="ServerStorage"
+# expect ServerStorage.SpawnLocation to now exist; Ctrl+Z in Studio removes it
+mcp__Roblox_Studio__mass_get_property paths=["Workspace.SpawnLocation","ServerStorage.SpawnLocation"] propertyName="Size"
+# expect identical Size values - property bag round-trips through .rbxm
+
+# v2.11.0 memory snapshot
+mcp__Roblox_Studio__get_memory_breakdown target=edit         # total_mb + per-category MB
+mcp__Roblox_Studio__start_playtest mode=play numPlayers=1
+mcp__Roblox_Studio__get_memory_breakdown target=all          # edit + server + client-1 entries
+mcp__Roblox_Studio__get_memory_breakdown target=client-1 tags=["LuaHeap","Instances","Script"]
 ```
 
 [Report Issues](https://github.com/chrrxs/robloxstudio-mcp/issues) | Upstream: [boshyxd/robloxstudio-mcp](https://github.com/boshyxd/robloxstudio-mcp) | [DevForum (upstream)](https://devforum.roblox.com/t/v180-roblox-studio-mcp-speed-up-your-workflow-by-letting-ai-read-paths-and-properties/3707071) | MIT Licensed

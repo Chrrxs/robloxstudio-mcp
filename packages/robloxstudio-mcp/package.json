@@ -1,6 +1,6 @@
 {
   "name": "@chrrxs/robloxstudio-mcp",
-  "version": "2.10.1",
+  "version": "2.11.0",
   "description": "MCP Server for Roblox Studio Integration (fork of boshyxd/robloxstudio-mcp with per-peer execute_luau + stop_playtest fixes)",
   "main": "dist/index.js",
   "type": "module",

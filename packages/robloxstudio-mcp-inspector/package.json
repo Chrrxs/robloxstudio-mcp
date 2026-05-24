@@ -1,6 +1,6 @@
 {
   "name": "@chrrxs/robloxstudio-mcp-inspector",
-  "version": "2.10.1",
+  "version": "2.11.0",
   "description": "Read-only MCP Server for Roblox Studio (fork of boshyxd/robloxstudio-mcp-inspector with per-peer execute_luau fixes baked in)",
   "main": "dist/index.js",
   "type": "module",

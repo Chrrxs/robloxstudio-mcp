@@ -1,6 +1,6 @@
 {
   "name": "@chrrxs/robloxstudio-mcp-core",
-  "version": "2.10.1",
+  "version": "2.11.0",
   "private": true,
   "type": "module",
   "main": "dist/index.js",
