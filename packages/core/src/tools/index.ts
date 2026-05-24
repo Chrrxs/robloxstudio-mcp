@@ -2071,13 +2071,40 @@ export class RobloxStudioTools {
       }
       sourceLabel = resolved;
     } else if (source.url !== undefined) {
+      // SSRF guard: only http(s). Blocks file://, ftp://, gopher://, etc.
+      // Does NOT block requests to internal IPs (127.0.0.1, 169.254.x, RFC1918) —
+      // a local MCP server has legitimate reasons to hit localhost, so internal-IP
+      // blocking should be opt-in if needed.
+      let parsedUrl: URL;
+      try {
+        parsedUrl = new URL(source.url);
+      } catch {
+        return { content: [{ type: 'text', text: JSON.stringify({ error: `import_rbxm url is not a valid URL: ${source.url}` }) }] };
+      }
+      if (parsedUrl.protocol !== 'http:' && parsedUrl.protocol !== 'https:') {
+        return { content: [{ type: 'text', text: JSON.stringify({ error: `import_rbxm url must use http(s); got ${parsedUrl.protocol}` }) }] };
+      }
+
+      // 50 MiB matches the project's existing express.json('50mb') cap and is
+      // empirically well within the Studio plugin's HttpService:RequestAsync
+      // response ceiling (probed up to 100 MiB without issue, 150+ stalls on
+      // Studio memory, not protocol). Far above any realistic rbxm size.
+      const MAX_IMPORT_BYTES = 50 * 1024 * 1024;
       try {
         const res = await fetch(source.url);
         if (!res.ok) {
           const snippet = (await res.text()).slice(0, 500);
           return { content: [{ type: 'text', text: JSON.stringify({ error: `fetch ${source.url} returned ${res.status}: ${snippet}` }) }] };
         }
-        bytes = Buffer.from(await res.arrayBuffer());
+        const claimed = Number(res.headers.get('content-length') ?? '0');
+        if (claimed > MAX_IMPORT_BYTES) {
+          return { content: [{ type: 'text', text: JSON.stringify({ error: `fetch ${source.url}: content-length ${claimed} exceeds ${MAX_IMPORT_BYTES} byte cap` }) }] };
+        }
+        const arr = await res.arrayBuffer();
+        if (arr.byteLength > MAX_IMPORT_BYTES) {
+          return { content: [{ type: 'text', text: JSON.stringify({ error: `fetch ${source.url}: downloaded ${arr.byteLength} bytes exceeds ${MAX_IMPORT_BYTES} byte cap` }) }] };
+        }
+        bytes = Buffer.from(arr);
       } catch (err) {
         return { content: [{ type: 'text', text: JSON.stringify({ error: `fetch ${source.url} failed: ${(err as Error).message}` }) }] };
       }

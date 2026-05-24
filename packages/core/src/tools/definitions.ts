@@ -1602,12 +1602,11 @@ part(0,2,0,2,1,1,"b")`,
     }
   },
 
-  // === Find and Replace ===
   // === Per-peer memory breakdown ===
   {
     name: 'get_memory_breakdown',
     category: 'read',
-    description: 'Read per-category memory usage via Stats:GetMemoryUsageMbAllCategories() + Stats:GetTotalMemoryUsageMb() on one or all peers. target="all" (default) returns { peer: { total_mb, categories, timestamp } } for every connected peer except edit-proxy; single-peer targets return that peer\'s object directly. Optional tags whitelist filters to only those DeveloperMemoryTag entries; unknown tags come back with value 0 and are listed in unknown_tags so cross-version drift doesn\'t error. Per-peer MemoryTrackingEnabled=false surfaces as { error } on that peer only.',
+    description: 'Read per-category memory usage by iterating Enum.DeveloperMemoryTag and calling Stats:GetMemoryUsageMbForTag per item (workaround for Stats:GetMemoryUsageMbAllCategories being gated by Capabilities: InternalTest and not callable from plugin context), plus Stats:GetTotalMemoryUsageMb for the rollup. target="all" (default) returns { peer: { total_mb, categories, timestamp } } for every connected peer except edit-proxy; single-peer targets return that peer\'s object directly. Optional tags whitelist filters to only those DeveloperMemoryTag entries; unknown tags come back with value 0 and are listed in unknown_tags so cross-version drift doesn\'t error. timestamp is Unix milliseconds (DateTime.now().UnixTimestampMillis). Per-peer MemoryTrackingEnabled=false surfaces as { error } on that peer only.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -1659,12 +1658,17 @@ part(0,2,0,2,1,1,"b")`,
       properties: {
         source: {
           type: 'object',
-          description: 'Exactly one of { path }, { url }, or { base64 }. path = read from local disk; url = fetched by the MCP server process; base64 = raw bytes inline.',
+          description: 'Exactly one of { path }, { url }, or { base64 }. path = read from local disk; url = http(s) only, fetched by the MCP server process, capped at 50 MiB; base64 = raw bytes inline.',
           properties: {
             path: { type: 'string' },
             url: { type: 'string' },
             base64: { type: 'string' }
-          }
+          },
+          oneOf: [
+            { required: ['path'] },
+            { required: ['url'] },
+            { required: ['base64'] }
+          ]
         },
         parent_path: {
           type: 'string',
@@ -1680,6 +1684,7 @@ part(0,2,0,2,1,1,"b")`,
     }
   },
 
+  // === Find and Replace ===
   {
     name: 'find_and_replace_in_scripts',
     category: 'write',

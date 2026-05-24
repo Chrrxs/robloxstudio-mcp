@@ -7,6 +7,11 @@ yarn-error.log*
 # Build outputs
 dist/
 *.tsbuildinfo
+# studio-plugin/out is the compiled Luau output (rbxtsc); rebuilt by `npm run build`.
+studio-plugin/out/
+# Compiled rbxmx artifacts — produced by `npm run build:plugin`, attached to GitHub releases.
+studio-plugin/MCPPlugin.rbxmx
+studio-plugin/MCPInspectorPlugin.rbxmx
 
 # Environment files
 .env
@@ -64,29 +69,13 @@ forum-title.txt
 lune.exe
 lune.zip
 
-# Build library (local user data)
-build-library/
-
-# Local notes
-notes/
-
 # Shell/OS junk
 bash.exe.stackdump
 *.FullName
 
-# Fork-specific
-# SPEC.md is the internal engineering brief — not for the public repo.
-SPEC.md
-# Maintainer briefings for individual releases — same reason, kept local.
-MAINTAINER_BRIEFING*.md
-# patches/ holds the historical Python hot-patch — superseded by the TS fork.
-patches/
-# references/ holds frozen upstream snapshots for diffing — not part of fork source.
-references/
-# studio-plugin/out is the compiled Luau output (rbxtsc); rebuilt by `npm run build`.
-studio-plugin/out/
-# Compiled rbxmx artifacts — produced by `npm run build:plugin`, attached to GitHub releases.
-studio-plugin/MCPPlugin.rbxmx
-studio-plugin/MCPInspectorPlugin.rbxmx
-
-scripts/install-mcp.mjs
+# Developer-local files — anything ending in .local.* or living under local/
+# is ignored. Use this for per-contributor scripts (e.g. install-mcp.local.mjs),
+# personal docs (SPEC.local.md), maintainer briefings, frozen upstream snapshots,
+# scratch notes, and the like — keep ad-hoc paths out of this file.
+*.local.*
+local/

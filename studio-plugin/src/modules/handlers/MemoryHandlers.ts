@@ -35,7 +35,7 @@ function getMemoryBreakdown(requestData: Record<string, unknown>): unknown {
 		total_mb: Stats.GetTotalMemoryUsageMb(),
 		categories,
 		memory_tracking_enabled: true,
-		timestamp: os.clock(),
+		timestamp: DateTime.now().UnixTimestampMillis,
 	};
 	if (unknownTags.size() > 0) result.unknown_tags = unknownTags;
 	return result;
