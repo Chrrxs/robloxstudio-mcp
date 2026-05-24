@@ -44,6 +44,53 @@ function luaLongQuote(s: string): string {
   return `[${eq}[\n${s}\n]${eq}]`;
 }
 
+// Build the executeLuau payload that creates a fresh ModuleScript holding
+// the user's eval code, invokes a same-VM BindableFunction with the
+// ModuleScript reference, then JSON-encodes {bridge, ok, result}. Shared
+// between evalServerRuntime and evalClientRuntime - the only difference is
+// which service hosts the bridge.
+//
+// IIFE wrap: ModuleScripts must `return` exactly one value. User code like
+// `print("x")` has no return, which would fail with "Module code did not
+// return exactly one value". Wrapping in `return ((function() ... end)())`
+// gives ModuleScript a single value even when user code returns nothing.
+// The DOUBLE parens are load-bearing - in Luau, outer parens around a call
+// adjust a multi-value tuple to exactly one value.
+function buildModuleScriptInvokeWrapper(opts: {
+  service: 'ServerScriptService' | 'ReplicatedStorage';
+  bridgeName: string;
+  missingError: string;
+  userCode: string;
+}): string {
+  const wrapped = `return ((function()\n${opts.userCode}\nend)())`;
+  return `
+local HttpService = game:GetService("HttpService")
+local bf = game:GetService("${opts.service}"):FindFirstChild("${opts.bridgeName}")
+if not bf then
+\treturn HttpService:JSONEncode({
+\t\tbridge = "missing",
+\t\terror = ${luaLongQuote(opts.missingError)},
+\t})
+end
+local USER_CODE = ${luaLongQuote(wrapped)}
+local m = Instance.new("ModuleScript")
+m.Name = "__MCPEvalPayload"
+local okSet, setErr = pcall(function() m.Source = USER_CODE end)
+if not okSet then
+\tm:Destroy()
+\treturn HttpService:JSONEncode({ bridge = "ok", ok = false, result = "ModuleScript Source set failed: " .. tostring(setErr) })
+end
+m.Parent = workspace
+local ok, result = bf:Invoke(m)
+m:Destroy()
+return HttpService:JSONEncode({
+\tbridge = "ok",
+\tok = ok,
+\tresult = if result == nil then nil else tostring(result),
+})
+`;
+}
+
 // Parse the structured JSON result that eval_*_runtime wrappers return.
 // MetadataHandlers.executeLuau wraps the wrapper's return in
 // `{ success, returnValue: tostring(result), output, message }`. Our
@@ -713,32 +760,23 @@ export class RobloxStudioTools {
     if (!code) {
       throw new Error('Code is required for eval_server_runtime');
     }
-    // The server-peer plugin invokes the bridge's BindableFunction in
-    // ServerScriptService. The bridge's loadstring runs in the running
-    // server's Script VM, so module require cache is shared with the
-    // user's game scripts.
+    // The server-peer plugin creates a fresh ModuleScript with the user's
+    // code as Source, then invokes the bridge's BindableFunction (which
+    // lives in the Script VM). The bridge requires the ModuleScript, so
+    // the user code runs in the server VM and shares its require cache
+    // with the running game's Scripts. No loadstring involved - works
+    // regardless of ServerScriptService.LoadStringEnabled.
     //
     // Wrapper JSON-encodes the result table because the underlying
     // execute_luau handler tostring()s any non-string return - JSON-encoding
     // here keeps structured fields {bridge, ok, result} intact across the
     // wire. TS side parses returnValue back into a structured object.
-    const wrapper = `
-local HttpService = game:GetService("HttpService")
-local bf = game:GetService("ServerScriptService"):FindFirstChild("${SERVER_LOCAL_NAME}")
-if not bf then
-\treturn HttpService:JSONEncode({
-\t\tbridge = "missing",
-\t\terror = "ServerEvalBridge not installed. Bridges are auto-installed at start_playtest and removed at stop_playtest. Start a playtest before calling eval_server_runtime.",
-\t})
-end
-local USER_CODE = ${luaLongQuote(code)}
-local ok, result = bf:Invoke(USER_CODE)
-return HttpService:JSONEncode({
-\tbridge = "ok",
-\tok = ok,
-\tresult = if result == nil then nil else tostring(result),
-})
-`;
+    const wrapper = buildModuleScriptInvokeWrapper({
+      service: 'ServerScriptService',
+      bridgeName: SERVER_LOCAL_NAME,
+      missingError: 'ServerEvalBridge not installed. Bridges are auto-installed at start_playtest and removed at stop_playtest. Start a playtest before calling eval_server_runtime.',
+      userCode: code,
+    });
     const response = await this.client.request('/api/execute-luau', { code: wrapper }, 'server');
     return {
       content: [
@@ -758,39 +796,15 @@ return HttpService:JSONEncode({
     if (!clientTarget.startsWith('client-')) {
       throw new Error(`eval_client_runtime requires target=client-N (got: ${clientTarget})`);
     }
-    // The client-peer plugin creates a fresh ModuleScript with the user's
-    // code as Source, then invokes the bridge's BindableFunction (which
-    // lives in the LocalScript VM). The bridge requires the ModuleScript,
-    // so the user code runs in the LocalScript VM and shares its require
-    // cache with the running game's LocalScripts.
-    //
-    // Same JSON-encode dance as evalServerRuntime to preserve return shape.
-    const wrapper = `
-local HttpService = game:GetService("HttpService")
-local bf = game:GetService("ReplicatedStorage"):FindFirstChild("${CLIENT_LOCAL_NAME}")
-if not bf then
-\treturn HttpService:JSONEncode({
-\t\tbridge = "missing",
-\t\terror = "ClientEvalBridge not installed. Bridges are auto-installed at start_playtest and removed at stop_playtest. Start a playtest before calling eval_client_runtime.",
-\t})
-end
-local USER_CODE = ${luaLongQuote(code)}
-local m = Instance.new("ModuleScript")
-m.Name = "__MCPEvalPayload"
-local okSet, setErr = pcall(function() m.Source = USER_CODE end)
-if not okSet then
-\tm:Destroy()
-\treturn HttpService:JSONEncode({ bridge = "ok", ok = false, result = "ModuleScript Source set failed: " .. tostring(setErr) })
-end
-m.Parent = workspace
-local ok, result = bf:Invoke(m)
-m:Destroy()
-return HttpService:JSONEncode({
-\tbridge = "ok",
-\tok = ok,
-\tresult = if result == nil then nil else tostring(result),
-})
-`;
+    // Symmetric to evalServerRuntime: plugin creates ModuleScript locally,
+    // bridge requires it. ModuleScript runs in the LocalScript VM and
+    // shares its require cache with the running game's LocalScripts.
+    const wrapper = buildModuleScriptInvokeWrapper({
+      service: 'ReplicatedStorage',
+      bridgeName: CLIENT_LOCAL_NAME,
+      missingError: 'ClientEvalBridge not installed. Bridges are auto-installed at start_playtest and removed at stop_playtest. Start a playtest before calling eval_client_runtime.',
+      userCode: code,
+    });
     const response = await this.client.request('/api/execute-luau', { code: wrapper }, clientTarget);
     return {
       content: [

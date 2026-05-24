@@ -15,6 +15,9 @@ const modulesDir = join(outDir, 'modules');
 const includeDir = join(pluginDir, 'include');
 const nodeModulesRbxtsDir = join(pluginDir, 'node_modules', '@rbxts');
 
+// Three icon variants per build, swapped by the plugin at runtime to reflect
+// connection state. Until separate white/yellow/green assets are uploaded, all
+// three slots point at the same legacy ID so behavior is unchanged visually.
 const VARIANTS = {
   main: {
     scriptName: 'MCPPlugin',
@@ -22,7 +25,9 @@ const VARIANTS = {
     toolbarName: 'MCP Integration',
     buttonTitle: 'MCP Server',
     buttonTooltip: 'Connect to MCP Server for AI Integration',
-    buttonIconId: '10734944444',
+    buttonIconDisconnected: '75876056391496',  // red
+    buttonIconConnecting: '71302583919560',    // yellow
+    buttonIconConnected: '130958234173611',    // green
   },
   inspector: {
     scriptName: 'MCPInspectorPlugin',
@@ -30,7 +35,9 @@ const VARIANTS = {
     toolbarName: 'MCP Inspector',
     buttonTitle: 'MCP Inspector',
     buttonTooltip: 'Connect to MCP Inspector (read-only) for AI Integration',
-    buttonIconId: '125921838360800',
+    buttonIconDisconnected: '125921838360800', // TODO: replace with white-variant asset ID
+    buttonIconConnecting: '125921838360800',   // TODO: replace with yellow-variant asset ID
+    buttonIconConnected: '125921838360800',    // TODO: replace with green-variant asset ID
   },
 };
 
@@ -54,7 +61,9 @@ function injectVersion(source) {
     .replace(/__TOOLBAR_NAME__/g, variant.toolbarName)
     .replace(/__BUTTON_TITLE__/g, variant.buttonTitle)
     .replace(/__BUTTON_TOOLTIP__/g, variant.buttonTooltip)
-    .replace(/__BUTTON_ICON_ID__/g, variant.buttonIconId);
+    .replace(/__BUTTON_ICON_DISCONNECTED__/g, variant.buttonIconDisconnected)
+    .replace(/__BUTTON_ICON_CONNECTING__/g, variant.buttonIconConnecting)
+    .replace(/__BUTTON_ICON_CONNECTED__/g, variant.buttonIconConnected);
 }
 
 const serverInitPath = join(serverDir, 'init.server.luau');

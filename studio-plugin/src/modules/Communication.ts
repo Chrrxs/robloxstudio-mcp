@@ -181,6 +181,7 @@ function pollForRequests(connIndex: number) {
 
 	const ui = UI.getElements();
 	UI.updateTabDot(connIndex);
+	if (connIndex === State.getActiveTabIndex()) UI.updateToolbarIcon();
 
 	if (success && (result.Success || result.StatusCode === 503)) {
 		conn.consecutiveFailures = 0;
@@ -333,7 +334,6 @@ function activatePlugin(connIndex?: number) {
 	conn.isActive = true;
 	conn.consecutiveFailures = 0;
 	conn.currentRetryDelay = 0.5;
-	ui.screenGui.Enabled = true;
 
 	if (idx === State.getActiveTabIndex()) {
 		conn.serverUrl = ui.urlInput.Text;

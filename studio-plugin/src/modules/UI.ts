@@ -30,6 +30,39 @@ let elements: UIElements = undefined!;
 let pulseAnimation: Tween | undefined;
 let buttonHover = false;
 
+interface ToolbarIcons {
+	disconnected: string;
+	connecting: string;
+	connected: string;
+}
+let toolbarButton: PluginToolbarButton | undefined;
+let toolbarIcons: ToolbarIcons | undefined;
+let lastToolbarIcon: string | undefined;
+
+function setToolbarButton(btn: PluginToolbarButton, icons: ToolbarIcons) {
+	toolbarButton = btn;
+	toolbarIcons = icons;
+	lastToolbarIcon = undefined;
+	updateToolbarIcon();
+}
+
+function updateToolbarIcon() {
+	if (!toolbarButton || !toolbarIcons) return;
+	const conn = State.getActiveConnection();
+	let nextIcon: string;
+	if (!conn || !conn.isActive) {
+		nextIcon = toolbarIcons.disconnected;
+	} else if (conn.lastHttpOk && conn.lastMcpOk) {
+		nextIcon = toolbarIcons.connected;
+	} else {
+		nextIcon = toolbarIcons.connecting;
+	}
+	if (nextIcon !== lastToolbarIcon) {
+		(toolbarButton as unknown as { Icon: string }).Icon = nextIcon;
+		lastToolbarIcon = nextIcon;
+	}
+}
+
 interface TabButton {
 	frame: Frame;
 	label: TextLabel;
@@ -596,6 +629,7 @@ function init(pluginRef: Plugin) {
 }
 
 function updateUIState() {
+	updateToolbarIcon();
 	const conn = State.getActiveConnection();
 	if (!conn) return;
 	const el = elements;
@@ -723,5 +757,7 @@ export = {
 	updateTabLabel,
 	stopPulseAnimation,
 	startPulseAnimation,
+	setToolbarButton,
+	updateToolbarIcon,
 	getElements: () => elements,
 };

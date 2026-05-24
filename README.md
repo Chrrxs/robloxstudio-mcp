@@ -36,7 +36,7 @@ All four are implemented in TypeScript under [studio-plugin/src/](studio-plugin/
 | Tool | Runs in | Shares require cache with | Needs LoadStringEnabled? |
 |---|---|---|---|
 | `execute_luau target=server` | Server peer plugin VM | None (fresh per call) | No |
-| `eval_server_runtime` | Server peer **Script VM** | Running game's server scripts | **Yes** - clear error surfaced at start_playtest + per-call if disabled |
+| `eval_server_runtime` | Server peer **Script VM** | Running game's server scripts | No (v2.10.1+) |
 | `execute_luau target=client-N` | Client peer plugin VM | None (fresh per call) | No |
 | `eval_client_runtime` | Client peer **LocalScript VM** | Running game's LocalScripts | No |
 
@@ -49,6 +49,10 @@ Use the new tools when you need to inspect runtime-mutated module state (e.g., a
 Same release fixes a long-standing reconnect issue: when the MCP server process restarts (e.g., Claude Code reconnects mid-session), the plugin now auto re-registers with the new server within ~500 ms via a `knownInstance` poll-response signal. No more manual Disconnect+Connect button-clicking in the plugin dock widget.
 
 `client-N` allocation is also now stateless lowest-unused — the first connected client is always `client-1` regardless of how many playtest cycles or Claude restarts you've done since. Verification recipes can hardcode `target=client-1`.
+
+## New in v2.10.1: `eval_server_runtime` no longer needs `LoadStringEnabled`
+
+The server eval bridge now uses the same `ModuleScript + require` shape as the client bridge, removing the dependency on `ServerScriptService.LoadStringEnabled`. `eval_server_runtime` works in fresh places out of the box (LoadStringEnabled defaults to false). Require-cache sharing with the running server's Scripts is unchanged.
 
 ---
 
@@ -178,7 +182,7 @@ gemini mcp add robloxstudio-inspector npx --trust -- -y @chrrxs/robloxstudio-mcp
 ---
 
 <!-- VERSION_LINE -->
-**v2.10.0** - based on boshyxd v2.7.0 + four plugin-side fixes
+**v2.10.1** - based on boshyxd v2.7.0 + four plugin-side fixes
 
 ## Building & releasing
 

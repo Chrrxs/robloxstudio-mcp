@@ -13,8 +13,13 @@ UI.init(plugin);
 const elements = UI.getElements();
 
 
+const ICON_DISCONNECTED = "rbxassetid://__BUTTON_ICON_DISCONNECTED__";
+const ICON_CONNECTING = "rbxassetid://__BUTTON_ICON_CONNECTING__";
+const ICON_CONNECTED = "rbxassetid://__BUTTON_ICON_CONNECTED__";
+
 const toolbar = plugin.CreateToolbar("__TOOLBAR_NAME__");
-const button = toolbar.CreateButton("__BUTTON_TITLE__", "__BUTTON_TOOLTIP__", "rbxassetid://__BUTTON_ICON_ID__");
+const button = toolbar.CreateButton("__BUTTON_TITLE__", "__BUTTON_TOOLTIP__", ICON_DISCONNECTED);
+UI.setToolbarButton(button, { disconnected: ICON_DISCONNECTED, connecting: ICON_CONNECTING, connected: ICON_CONNECTED });
 
 
 elements.connectButton.Activated.Connect(() => {

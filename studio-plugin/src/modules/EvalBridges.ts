@@ -5,14 +5,21 @@
 // `require(SomeModule)` returns a fresh copy, not the one the running game
 // scripts hold. So runtime-mutated module state is invisible to probes.
 //
-// These bridges fix that by living inside the user's game scripts:
-//   - Server: a Script in ServerScriptService that creates a BindableFunction
-//     (for our server-peer plugin to invoke directly) plus a RemoteFunction
-//     (kept for parity with the upstream primitive's client-callable shape).
+// These bridges fix that by living inside the user's game scripts. Both
+// peers use the same symmetric shape:
+//   - Server: a Script in ServerScriptService that creates a BindableFunction.
+//     Plugin (server peer) invokes it with a fresh ModuleScript payload;
+//     require() runs inside the Script VM so it shares the running server's
+//     require cache.
 //   - Client: a LocalScript in StarterPlayer.StarterPlayerScripts that
 //     creates a BindableFunction. Plugin invokes it with a fresh ModuleScript
 //     payload; require() runs inside the LocalScript VM so it shares the
 //     game's require cache.
+//
+// Why ModuleScript+require on both sides (no loadstring): require'd modules
+// run with the security level they were created at and don't need
+// ServerScriptService.LoadStringEnabled, so eval_server_runtime works even
+// when LoadStringEnabled=false (the default in fresh places).
 //
 // Lifecycle: TestHandlers.startPlaytest inserts both scripts into the EDIT
 // DM right before ExecutePlayModeAsync. ExecutePlayModeAsync clones the
@@ -47,7 +54,6 @@ const CLIENT_SCRIPT_NAME = "__MCP_ClientEvalBridge";
 export const BRIDGE_NAMES = {
 	serverScript: SERVER_SCRIPT_NAME,
 	clientScript: CLIENT_SCRIPT_NAME,
-	serverRemote: "__MCP_ServerEvalRemote",
 	serverLocal: "__MCP_ServerEvalLocal",
 	clientLocal: "__MCP_ClientEvalBridge",
 } as const;
@@ -59,7 +65,6 @@ const SERVER_BRIDGE_SOURCE = `
 -- stop_playtest. Provides shared-require-cache eval on the server peer for
 -- the eval_server_runtime MCP tool.
 
-local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local ServerScriptService = game:GetService("ServerScriptService")
 local RunService = game:GetService("RunService")
 
@@ -67,49 +72,18 @@ if not RunService:IsStudio() then
 	return
 end
 
-local function evalCode(source)
-	if type(source) ~= "string" then
-		return false, "source must be a string"
-	end
-	local fn, compileErr = loadstring(source, "MCPServerEval")
-	if not fn then
-		local errStr = tostring(compileErr or "loadstring returned nil")
-		-- Roblox returns nil from loadstring when LoadStringEnabled=false.
-		-- Surface a clear, actionable error.
-		if string.find(errStr, "not enabled", 1, true)
-			or string.find(errStr, "disabled", 1, true)
-			or errStr == "loadstring returned nil"
-		then
-			return false,
-				"ServerScriptService.LoadStringEnabled is false. eval_server_runtime requires it. "
-				.. "Enable it in Studio (ServerScriptService > Properties > LoadStringEnabled = true) "
-				.. "and restart the playtest."
-		end
-		return false, errStr
-	end
-	return pcall(fn)
-end
-
--- Defensive cleanup of stale instances from a prior session.
-local prevRf = ReplicatedStorage:FindFirstChild("${BRIDGE_NAMES.serverRemote}")
-if prevRf then prevRf:Destroy() end
 local prevBf = ServerScriptService:FindFirstChild("${BRIDGE_NAMES.serverLocal}")
 if prevBf then prevBf:Destroy() end
-
-local rf = Instance.new("RemoteFunction")
-rf.Name = "${BRIDGE_NAMES.serverRemote}"
-rf.Archivable = false
-rf.Parent = ReplicatedStorage
-rf.OnServerInvoke = function(_player, source)
-	return evalCode(source)
-end
 
 local bf = Instance.new("BindableFunction")
 bf.Name = "${BRIDGE_NAMES.serverLocal}"
 bf.Archivable = false
 bf.Parent = ServerScriptService
-bf.OnInvoke = function(source)
-	return evalCode(source)
+bf.OnInvoke = function(payload)
+	if typeof(payload) ~= "Instance" or not payload:IsA("ModuleScript") then
+		return false, "payload must be a ModuleScript instance"
+	end
+	return pcall(require, payload)
 end
 `;
 
@@ -200,16 +174,5 @@ export function installBridges(): { installed: boolean; error?: string } {
 		return { installed: false, error: tostring(err) };
 	}
 	return { installed: true };
-}
-
-// Heuristic check so start_playtest can surface a warning when
-// LoadStringEnabled is false (eval_server_runtime won't work in that mode).
-// We can't import the runtime LoadStringEnabled value cleanly without
-// pulling in the type — read defensively.
-export function loadStringEnabled(): boolean {
-	const [ok, value] = pcall(
-		() => (ServerScriptService as unknown as { LoadStringEnabled: boolean }).LoadStringEnabled,
-	);
-	return ok && value === true;
 }
 

@@ -96,8 +96,23 @@ function searchFiles(requestData: Record<string, unknown>) {
 }
 
 function getPlaceInfo(_requestData: Record<string, unknown>) {
+	const dataModelName = game.Name;
+	let placeName = dataModelName;
+
+	if (game.PlaceId > 0) {
+		const MarketplaceService = game.GetService("MarketplaceService");
+		const [ok, info] = pcall(() => MarketplaceService.GetProductInfo(game.PlaceId));
+		if (ok && info !== undefined) {
+			const name = (info as { Name?: string }).Name;
+			if (typeIs(name, "string") && name !== "") {
+				placeName = name;
+			}
+		}
+	}
+
 	return {
-		placeName: game.Name,
+		placeName,
+		dataModelName,
 		placeId: game.PlaceId,
 		gameId: game.GameId,
 		jobId: game.JobId,

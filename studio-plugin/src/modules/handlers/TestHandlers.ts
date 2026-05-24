@@ -1,5 +1,5 @@
 import { HttpService, LogService } from "@rbxts/services";
-import { installBridges, cleanupBridges, loadStringEnabled } from "../EvalBridges";
+import { installBridges, cleanupBridges } from "../EvalBridges";
 
 const StudioTestService = game.GetService("StudioTestService");
 const ServerScriptService = game.GetService("ServerScriptService");
@@ -159,7 +159,6 @@ function startPlaytest(requestData: Record<string, unknown>) {
 	// so eval_server_runtime / eval_client_runtime work without manual setup.
 	// Bridges are cleaned up from the edit DM after the play DMs tear down.
 	const bridgeInstall = installBridges();
-	const hasLoadString = loadStringEnabled();
 	if (!bridgeInstall.installed) {
 		warn(`[MCP] Eval bridge install failed: ${bridgeInstall.error}`);
 	}
@@ -202,17 +201,6 @@ function startPlaytest(requestData: Record<string, unknown>) {
 		message: msg,
 		evalBridges: bridgeInstall.installed ? "installed" : `failed: ${bridgeInstall.error}`,
 	};
-
-	// Surface loadstring availability up-front so callers know whether
-	// eval_server_runtime will work before they try it. eval_client_runtime
-	// doesn't need loadstring (it uses ModuleScript+require), so this only
-	// affects the server bridge.
-	if (!hasLoadString) {
-		response.serverEvalNote =
-			"ServerScriptService.LoadStringEnabled is false. eval_server_runtime will not work " +
-			"until you enable it (ServerScriptService > Properties > LoadStringEnabled = true) " +
-			"and restart the playtest. eval_client_runtime is unaffected.";
-	}
 
 	return response;
 }
