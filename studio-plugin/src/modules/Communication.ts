@@ -13,6 +13,7 @@ import AssetHandlers from "./handlers/AssetHandlers";
 import CaptureHandlers from "./handlers/CaptureHandlers";
 import InputHandlers from "./handlers/InputHandlers";
 import LogHandlers from "./handlers/LogHandlers";
+import SerializationHandlers from "./handlers/SerializationHandlers";
 import { Connection, RequestPayload, PollResponse, ReadyResponse } from "../types";
 
 const instanceId = HttpService.GenerateGUID(false);
@@ -95,6 +96,9 @@ const routeMap: Record<string, Handler> = {
 	"/api/find-and-replace-in-scripts": ScriptHandlers.findAndReplaceInScripts,
 
 	"/api/get-runtime-logs": LogHandlers.getRuntimeLogs,
+
+	"/api/export-rbxm": SerializationHandlers.exportRbxm,
+	"/api/import-rbxm": SerializationHandlers.importRbxm,
 };
 
 function processRequest(request: RequestPayload): unknown {

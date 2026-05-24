@@ -1958,6 +1958,117 @@ export class RobloxStudioTools {
     };
   }
 
+  async exportRbxm(instancePaths: string[], outputPath: string, target?: string) {
+    if (!Array.isArray(instancePaths) || instancePaths.length === 0) {
+      throw new Error('instance_paths must be a non-empty array for export_rbxm');
+    }
+    if (!outputPath || typeof outputPath !== 'string') {
+      throw new Error('output_path is required for export_rbxm');
+    }
+    const tgt = target || 'edit';
+    if (tgt !== 'edit' && tgt !== 'server') {
+      throw new Error(`export_rbxm target must be "edit" or "server" (got: ${tgt})`);
+    }
+
+    const response = await this.client.request(
+      '/api/export-rbxm',
+      { instance_paths: instancePaths },
+      tgt,
+    ) as { error?: string; base64?: string; instance_count?: number };
+
+    if (response.error) {
+      return { content: [{ type: 'text', text: JSON.stringify({ error: response.error }) }] };
+    }
+    if (!response.base64) {
+      return { content: [{ type: 'text', text: JSON.stringify({ error: 'plugin returned no base64 payload' }) }] };
+    }
+
+    const bytes = Buffer.from(response.base64, 'base64');
+    const resolved = path.resolve(outputPath);
+    try {
+      fs.mkdirSync(path.dirname(resolved), { recursive: true });
+      fs.writeFileSync(resolved, bytes);
+    } catch (err) {
+      return { content: [{ type: 'text', text: JSON.stringify({ error: `failed to write ${resolved}: ${(err as Error).message}` }) }] };
+    }
+
+    return {
+      content: [{
+        type: 'text',
+        text: JSON.stringify({
+          bytes_written: bytes.length,
+          instance_count: response.instance_count ?? instancePaths.length,
+          output_path: resolved,
+        }),
+      }],
+    };
+  }
+
+  async importRbxm(
+    source: { path?: string; url?: string; base64?: string } | undefined,
+    parentPath: string,
+    target?: string,
+  ) {
+    if (!source || typeof source !== 'object') {
+      throw new Error('source is required for import_rbxm');
+    }
+    if (!parentPath || typeof parentPath !== 'string') {
+      throw new Error('parent_path is required for import_rbxm');
+    }
+    const tgt = target || 'edit';
+    if (tgt !== 'edit' && tgt !== 'server') {
+      throw new Error(`import_rbxm target must be "edit" or "server" (got: ${tgt})`);
+    }
+
+    const modes = ['path', 'url', 'base64'].filter((k) => (source as Record<string, unknown>)[k] !== undefined);
+    if (modes.length !== 1) {
+      throw new Error(`source must contain exactly one of { path, url, base64 } (got: ${modes.join(', ') || 'none'})`);
+    }
+
+    let bytes: Buffer;
+    let sourceLabel: string;
+    if (source.path !== undefined) {
+      const resolved = path.resolve(source.path);
+      try {
+        bytes = fs.readFileSync(resolved);
+      } catch (err) {
+        return { content: [{ type: 'text', text: JSON.stringify({ error: `failed to read ${resolved}: ${(err as Error).message}` }) }] };
+      }
+      sourceLabel = resolved;
+    } else if (source.url !== undefined) {
+      try {
+        const res = await fetch(source.url);
+        if (!res.ok) {
+          const snippet = (await res.text()).slice(0, 500);
+          return { content: [{ type: 'text', text: JSON.stringify({ error: `fetch ${source.url} returned ${res.status}: ${snippet}` }) }] };
+        }
+        bytes = Buffer.from(await res.arrayBuffer());
+      } catch (err) {
+        return { content: [{ type: 'text', text: JSON.stringify({ error: `fetch ${source.url} failed: ${(err as Error).message}` }) }] };
+      }
+      sourceLabel = source.url;
+    } else {
+      try {
+        bytes = Buffer.from(source.base64 as string, 'base64');
+      } catch (err) {
+        return { content: [{ type: 'text', text: JSON.stringify({ error: `base64 decode failed: ${(err as Error).message}` }) }] };
+      }
+      sourceLabel = `base64(${bytes.length}B)`;
+    }
+
+    const response = await this.client.request(
+      '/api/import-rbxm',
+      {
+        base64: bytes.toString('base64'),
+        parent_path: parentPath,
+        source_label: sourceLabel,
+      },
+      tgt,
+    );
+
+    return { content: [{ type: 'text', text: JSON.stringify(response) }] };
+  }
+
   async captureScreenshot() {
     const response = await this.client.request('/api/capture-screenshot', {}) as RawImageCaptureResponse;
 

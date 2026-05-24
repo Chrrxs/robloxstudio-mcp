@@ -97,6 +97,8 @@ export const TOOL_HANDLERS: Record<string, ToolHandler> = {
   simulate_mouse_input: (tools, body) => tools.simulateMouseInput(body.action, body.x, body.y, body.button, body.scrollDirection, body.target),
   simulate_keyboard_input: (tools, body) => tools.simulateKeyboardInput(body.keyCode, body.action, body.duration, body.target),
   character_navigation: (tools, body) => tools.characterNavigation(body.position, body.instancePath, body.waitForCompletion, body.timeout, body.target),
+  export_rbxm: (tools, body) => tools.exportRbxm(body.instance_paths, body.output_path, body.target),
+  import_rbxm: (tools, body) => tools.importRbxm(body.source, body.parent_path, body.target),
   find_and_replace_in_scripts: (tools, body) => tools.findAndReplaceInScripts(body.pattern, body.replacement, {
     caseSensitive: body.caseSensitive,
     usePattern: body.usePattern,

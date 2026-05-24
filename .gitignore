@@ -88,3 +88,5 @@ studio-plugin/out/
 # Compiled rbxmx artifacts — produced by `npm run build:plugin`, attached to GitHub releases.
 studio-plugin/MCPPlugin.rbxmx
 studio-plugin/MCPInspectorPlugin.rbxmx
+
+scripts/install-mcp.mjs

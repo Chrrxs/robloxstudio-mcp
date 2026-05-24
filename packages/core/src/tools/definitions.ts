@@ -1603,6 +1603,62 @@ part(0,2,0,2,1,1,"b")`,
   },
 
   // === Find and Replace ===
+  // === SerializationService round-trip ===
+  {
+    name: 'export_rbxm',
+    category: 'read',
+    description: 'Serialize one or more instances to a .rbxm file on disk via SerializationService:SerializeInstancesAsync (engine v668+, PluginSecurity). Throws if any path resolves to nil, a service, or a non-creatable instance.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        instance_paths: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'DataModel paths to serialize (e.g. ["Workspace.TestRig", "ServerStorage.Templates.NPC"])'
+        },
+        output_path: {
+          type: 'string',
+          description: 'Absolute filesystem path where the .rbxm should be written'
+        },
+        target: {
+          type: 'string',
+          enum: ['edit', 'server'],
+          description: 'Which DataModel to read from (default: "edit"). "server" serializes live runtime state during a playtest.'
+        }
+      },
+      required: ['instance_paths', 'output_path']
+    }
+  },
+  {
+    name: 'import_rbxm',
+    category: 'write',
+    description: 'Deserialize a .rbxm via SerializationService:DeserializeInstancesAsync (engine v668+, PluginSecurity) and parent the resulting instances under parent_path. All-or-nothing parenting: if any single instance fails to parent, every already-parented sibling is unparented and the call errors. Wrapped in ChangeHistoryService for edit target so one Ctrl+Z reverses the whole import.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        source: {
+          type: 'object',
+          description: 'Exactly one of { path }, { url }, or { base64 }. path = read from local disk; url = fetched by the MCP server process; base64 = raw bytes inline.',
+          properties: {
+            path: { type: 'string' },
+            url: { type: 'string' },
+            base64: { type: 'string' }
+          }
+        },
+        parent_path: {
+          type: 'string',
+          description: 'DataModel path of the Instance to parent imported instances under (e.g. "ServerStorage.Imported")'
+        },
+        target: {
+          type: 'string',
+          enum: ['edit', 'server'],
+          description: 'Which DataModel to import into (default: "edit"). "server" parents into the live play-server DM.'
+        }
+      },
+      required: ['source', 'parent_path']
+    }
+  },
+
   {
     name: 'find_and_replace_in_scripts',
     category: 'write',
