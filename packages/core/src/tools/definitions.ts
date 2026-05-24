@@ -1603,6 +1603,27 @@ part(0,2,0,2,1,1,"b")`,
   },
 
   // === Find and Replace ===
+  // === Per-peer memory breakdown ===
+  {
+    name: 'get_memory_breakdown',
+    category: 'read',
+    description: 'Read per-category memory usage via Stats:GetMemoryUsageMbAllCategories() + Stats:GetTotalMemoryUsageMb() on one or all peers. target="all" (default) returns { peer: { total_mb, categories, timestamp } } for every connected peer except edit-proxy; single-peer targets return that peer\'s object directly. Optional tags whitelist filters to only those DeveloperMemoryTag entries; unknown tags come back with value 0 and are listed in unknown_tags so cross-version drift doesn\'t error. Per-peer MemoryTrackingEnabled=false surfaces as { error } on that peer only.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        target: {
+          type: 'string',
+          description: 'Peer to read from: "edit", "server", "client-N", or "all" (default).'
+        },
+        tags: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Optional DeveloperMemoryTag whitelist. Unknown tag names return 0 + unknown_tags list.'
+        }
+      }
+    }
+  },
+
   // === SerializationService round-trip ===
   {
     name: 'export_rbxm',

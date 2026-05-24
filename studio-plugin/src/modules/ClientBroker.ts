@@ -1,5 +1,6 @@
 import { HttpService, Players, ReplicatedStorage, RunService } from "@rbxts/services";
 import RuntimeLogBuffer from "./RuntimeLogBuffer";
+import MemoryHandlers from "./handlers/MemoryHandlers";
 
 // The client peer cannot reach the MCP HTTP server - Roblox forbids
 // HttpService:RequestAsync from the client DM even under PluginSecurity, and
@@ -45,6 +46,7 @@ interface ExecuteResult {
 const CLIENT_BROKER_ALLOWED_ENDPOINTS = new Set<string>([
 	"/api/execute-luau",
 	"/api/get-runtime-logs",
+	"/api/get-memory-breakdown",
 ]);
 
 interface ReadyResponseBody {
@@ -144,6 +146,9 @@ function setupClientBroker() {
 		// when endpoint is missing.
 		if (payload && payload.endpoint === "/api/get-runtime-logs") {
 			return handleGetRuntimeLogs(payload.data);
+		}
+		if (payload && payload.endpoint === "/api/get-memory-breakdown") {
+			return MemoryHandlers.getMemoryBreakdown(payload.data ?? {});
 		}
 		if (payload && payload.endpoint === "/api/execute-luau") {
 			return handleExecuteLuau(payload.data);

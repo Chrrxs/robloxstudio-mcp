@@ -14,6 +14,7 @@ import CaptureHandlers from "./handlers/CaptureHandlers";
 import InputHandlers from "./handlers/InputHandlers";
 import LogHandlers from "./handlers/LogHandlers";
 import SerializationHandlers from "./handlers/SerializationHandlers";
+import MemoryHandlers from "./handlers/MemoryHandlers";
 import { Connection, RequestPayload, PollResponse, ReadyResponse } from "../types";
 
 const instanceId = HttpService.GenerateGUID(false);
@@ -99,6 +100,8 @@ const routeMap: Record<string, Handler> = {
 
 	"/api/export-rbxm": SerializationHandlers.exportRbxm,
 	"/api/import-rbxm": SerializationHandlers.importRbxm,
+
+	"/api/get-memory-breakdown": MemoryHandlers.getMemoryBreakdown,
 };
 
 function processRequest(request: RequestPayload): unknown {

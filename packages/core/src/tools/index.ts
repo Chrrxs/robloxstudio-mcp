@@ -1958,6 +1958,41 @@ export class RobloxStudioTools {
     };
   }
 
+  async getMemoryBreakdown(target?: string, tags?: string[]) {
+    const tgt = target ?? 'all';
+    const data: Record<string, unknown> = {};
+    if (tags !== undefined) data.tags = tags;
+
+    if (tgt !== 'all') {
+      const response = await this.client.request('/api/get-memory-breakdown', data, tgt);
+      return { content: [{ type: 'text', text: JSON.stringify(response) }] };
+    }
+
+    const targets = this.bridge.getInstances()
+      .filter((i) => i.role !== 'edit-proxy')
+      .map((i) => i.role);
+
+    const responses = await Promise.allSettled(
+      targets.map(async (t) => ({
+        peer: t,
+        result: await this.client.request('/api/get-memory-breakdown', data, t),
+      })),
+    );
+
+    const body: Record<string, unknown> = {};
+    for (let i = 0; i < responses.length; i++) {
+      const r = responses[i];
+      const peer = targets[i];
+      if (r.status === 'fulfilled') {
+        body[peer] = r.value.result;
+      } else {
+        body[peer] = { error: 'disconnected' };
+      }
+    }
+
+    return { content: [{ type: 'text', text: JSON.stringify(body) }] };
+  }
+
   async exportRbxm(instancePaths: string[], outputPath: string, target?: string) {
     if (!Array.isArray(instancePaths) || instancePaths.length === 0) {
       throw new Error('instance_paths must be a non-empty array for export_rbxm');
