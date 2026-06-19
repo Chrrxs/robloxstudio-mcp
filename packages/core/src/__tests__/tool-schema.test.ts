@@ -167,6 +167,8 @@ describe('Tool schema compatibility', () => {
       character_navigation: 'characterNavigation',
       get_memory_breakdown: 'getMemoryBreakdown',
       get_scene_analysis: 'getSceneAnalysis',
+      debug_control: 'debugControl',
+      debug_inspect: 'debugInspect',
       export_rbxm: 'exportRbxm',
       import_rbxm: 'importRbxm',
       find_and_replace_in_scripts: 'findAndReplaceInScripts',

@@ -17,6 +17,7 @@ import LogHandlers from "./handlers/LogHandlers";
 import SerializationHandlers from "./handlers/SerializationHandlers";
 import MemoryHandlers from "./handlers/MemoryHandlers";
 import SceneAnalysisHandlers from "./handlers/SceneAnalysisHandlers";
+import DebuggerHandlers from "./handlers/DebuggerHandlers";
 import EvalRuntimeHandlers from "./handlers/EvalRuntimeHandlers";
 import ServerUrlSettings from "./ServerUrlSettings";
 import HttpDiagnostics from "./HttpDiagnostics";
@@ -171,6 +172,9 @@ const routeMap: Record<string, Handler> = {
 
 	"/api/get-memory-breakdown": MemoryHandlers.getMemoryBreakdown,
 	"/api/get-scene-analysis": SceneAnalysisHandlers.getSceneAnalysis,
+
+	"/api/debug-control": DebuggerHandlers.debugControl,
+	"/api/debug-inspect": DebuggerHandlers.debugInspect,
 };
 
 function processRequest(request: RequestPayload): unknown {

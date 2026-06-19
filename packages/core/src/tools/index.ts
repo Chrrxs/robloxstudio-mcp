@@ -3571,6 +3571,34 @@ export class RobloxStudioTools {
     return { content: [{ type: 'text', text: JSON.stringify(body) }] };
   }
 
+  async debugControl(action: string, params?: Record<string, unknown>, target?: string, instance_id?: string) {
+    if (!action || typeof action !== 'string') {
+      throw new Error('debug_control requires an "action" string');
+    }
+    const tgt = target ?? 'edit';
+    const response = await this._callSingle(
+      '/api/debug-control',
+      { action, params: params ?? {} },
+      tgt,
+      instance_id,
+    );
+    return { content: [{ type: 'text', text: JSON.stringify(response) }] };
+  }
+
+  async debugInspect(action: string, params?: Record<string, unknown>, target?: string, instance_id?: string) {
+    if (!action || typeof action !== 'string') {
+      throw new Error('debug_inspect requires an "action" string');
+    }
+    const tgt = target ?? 'edit';
+    const response = await this._callSingle(
+      '/api/debug-inspect',
+      { action, params: params ?? {} },
+      tgt,
+      instance_id,
+    );
+    return { content: [{ type: 'text', text: JSON.stringify(response) }] };
+  }
+
   async exportRbxm(instancePaths: string[], outputPath: string, target?: string, instance_id?: string) {
     if (!Array.isArray(instancePaths) || instancePaths.length === 0) {
       throw new Error('instance_paths must be a non-empty array for export_rbxm');

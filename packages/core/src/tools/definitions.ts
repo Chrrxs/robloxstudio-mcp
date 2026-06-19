@@ -2281,6 +2281,66 @@ part(0,2,0,2,1,1,"b")`,
     }
   },
 
+  // === ScriptDebuggerService (Studio Debugger Luau API beta) ===
+  {
+    name: 'debug_inspect',
+    category: 'read',
+    description: 'Read-only debugger access. Actions: status (paused/reason/threads), wait_for_stop (long-poll until OnStopped fires, timeout_ms default 10000, capped at ~50s), list_breakpoints (local registry), threads (GetThreads), stack (GetStackTrace, needs thread_id, optional start_frame), variables (GetRootVariables when frame_id set, or GetVariables when variables_reference set), evaluate (Evaluate expression, optional frame_id). Requires Studio Debugger Luau API beta enabled.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        action: {
+          type: 'string',
+          enum: ['status', 'wait_for_stop', 'list_breakpoints', 'threads', 'stack', 'variables', 'evaluate'],
+          description: 'Which inspection action to run.'
+        },
+        params: {
+          type: 'object',
+          description: 'Action-specific parameters. wait_for_stop: {timeout_ms?}. stack: {thread_id, start_frame?}. variables: {frame_id} OR {variables_reference}. evaluate: {expression, frame_id?}.',
+          additionalProperties: true
+        },
+        target: {
+          type: 'string',
+          description: 'Peer to target: "edit" (default), "server", or "client-N". ScriptDebuggerService normally runs in the edit DM.'
+        },
+        instance_id: {
+          type: 'string',
+          description: 'Which connected Studio place to target. Required when multiple places are connected.'
+        }
+      },
+      required: ['action']
+    }
+  },
+  {
+    name: 'debug_control',
+    category: 'write',
+    description: 'Mutate debugger state. Actions: set_breakpoint ({script_path, line, condition?, log_message?, continue_execution?}), remove_breakpoint ({script_path, line}), clear_breakpoints, set_exception_mode ({mode: never|always|unhandled}), pause, resume ({action: continue|step_in|step_over|step_out}). The resume action satisfies the parked OnStopped callback. Requires Studio Debugger Luau API beta enabled.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        action: {
+          type: 'string',
+          enum: ['set_breakpoint', 'remove_breakpoint', 'clear_breakpoints', 'set_exception_mode', 'pause', 'resume'],
+          description: 'Which control action to run.'
+        },
+        params: {
+          type: 'object',
+          description: 'Action-specific parameters. See description for the per-action schema.',
+          additionalProperties: true
+        },
+        target: {
+          type: 'string',
+          description: 'Peer to target: "edit" (default), "server", or "client-N".'
+        },
+        instance_id: {
+          type: 'string',
+          description: 'Which connected Studio place to target. Required when multiple places are connected.'
+        }
+      },
+      required: ['action']
+    }
+  },
+
   // === SerializationService round-trip ===
   {
     name: 'export_rbxm',
