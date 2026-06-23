@@ -1,3 +1,4 @@
+import { RunService } from "@rbxts/services";
 import State from "../modules/State";
 import UI from "../modules/UI";
 import Communication from "../modules/Communication";
@@ -6,6 +7,7 @@ import ServerUrlSettings from "../modules/ServerUrlSettings";
 import { cleanupLegacyEditBridges, ensureRuntimeBridgeInstalled } from "../modules/EvalBridges";
 import RuntimeLogBuffer from "../modules/RuntimeLogBuffer";
 import StopPlayMonitor from "../modules/StopPlayMonitor";
+import { ensureNavCommandListener } from "../modules/NavCommandListener";
 import BreakpointHandlers from "../modules/handlers/BreakpointHandlers";
 import * as RenderMonitor from "../modules/RenderMonitor";
 
@@ -72,6 +74,10 @@ UI.updateUIState();
 Communication.checkForUpdates();
 task.delay(TOOLBAR_REGISTRATION_DELAY_SECONDS, registerToolbarButton);
 
+if (RunService.IsRunning() && RunService.IsServer()) {
+	ensureNavCommandListener();
+}
+
 // Auto-activate per peer. The boshyxd plugin only registers with MCP when the
 // user clicks Connect in its UI, but that UI is invisible in play DMs - so
 // play peers' plugin instances load without ever registering. Run after a
@@ -110,6 +116,7 @@ task.delay(2, () => {
 		});
 	}
 	if (role === "server") {
+		ensureNavCommandListener();
 		ClientBroker.setupServerBroker();
 		// The play-server DM is the only one where StudioTestService:EndTest is
 		// legal, so the stop-play monitor lives here. It consumes tokenized
