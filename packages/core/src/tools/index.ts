@@ -5,6 +5,7 @@ import { OpenCloudClient } from '../opencloud-client.js';
 import { RobloxCookieClient } from '../roblox-cookie-client.js';
 import { StudioInstanceManager, type ManagedStudioInstance, type StudioLaunchSource } from '../studio-instance-manager.js';
 import { decodeImagePathToRgba, decodePngToRgba } from '../image-decode.js';
+import { DOC_CATEGORIES, getRobloxDoc, isDocCategory } from '../roblox-docs.js';
 import { rgbaToJpeg } from '../jpeg-encoder.js';
 import { rgbaToPng } from '../png-encoder.js';
 import * as fs from 'fs';
@@ -777,6 +778,18 @@ export class RobloxStudioTools {
 
   private _textResult(body: Record<string, unknown>) {
     return { content: [{ type: 'text', text: JSON.stringify(body) }] };
+  }
+
+  async getRobloxDocs(name: string, docType?: string, section?: string) {
+    if (!name || typeof name !== 'string') {
+      throw new Error('get_roblox_docs requires a name (e.g. "ProximityPrompt")');
+    }
+    const category = docType ?? 'classes';
+    if (!isDocCategory(category)) {
+      throw new Error(`Invalid doc_type "${category}". Valid categories: ${DOC_CATEGORIES.join(', ')}`);
+    }
+    const result = await getRobloxDoc(category, name.trim(), section);
+    return { content: [{ type: 'text', text: result.content }] };
   }
 
   private _parseTextResult(result: any): Record<string, any> {
@@ -2840,9 +2853,9 @@ export class RobloxStudioTools {
       if (instance_id) {
         const managedClose = this.instanceManager.closeByInstanceId(instance_id);
         if (managedClose.status !== 'not_found') {
-          this.bridge.unregisterInstanceId(instance_id);
+          await this.bridge.unregisterInstanceIdEverywhere(instance_id);
           await sleep(500);
-          this.bridge.unregisterInstanceId(instance_id);
+          await this.bridge.unregisterInstanceIdEverywhere(instance_id);
           return this._textResult({
             instance_id,
             message: managedClose.status === 'already_closed'
@@ -2868,7 +2881,7 @@ export class RobloxStudioTools {
             instance_id,
           });
         }
-        this.bridge.unregisterInstanceId(instance_id);
+        await this.bridge.unregisterInstanceIdEverywhere(instance_id);
         return this._textResult({
           instance_id,
           message: 'Studio instance closed.',
@@ -2887,11 +2900,11 @@ export class RobloxStudioTools {
         record = active[0];
       }
 
-      if (record.instanceId) this.bridge.unregisterInstanceId(record.instanceId);
+      if (record.instanceId) await this.bridge.unregisterInstanceIdEverywhere(record.instanceId);
       const closeResult = this.instanceManager.close(record);
       if (record.instanceId) {
         await sleep(500);
-        this.bridge.unregisterInstanceId(record.instanceId);
+        await this.bridge.unregisterInstanceIdEverywhere(record.instanceId);
       }
       return this._textResult({
         instance_id: record.instanceId,

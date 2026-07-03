@@ -244,6 +244,7 @@ describe('Smoke', () => {
       isRunning: true,
     });
     const closeConnectedInstance = jest.fn();
+    const unregisterInstanceIdEverywhere = jest.spyOn(bridge, 'unregisterInstanceIdEverywhere');
     (tools as any).instanceManager = {
       closeByInstanceId: () => ({ status: 'not_found' }),
       closeConnectedInstance,
@@ -264,6 +265,7 @@ describe('Smoke', () => {
       role: 'edit',
       dataModelName: 'ExternalPlace',
     }));
+    expect(unregisterInstanceIdEverywhere).toHaveBeenCalledWith('anon:external');
     expect(bridge.getPublicInstances()).toEqual([]);
   });
 
@@ -1017,19 +1019,33 @@ describe('Smoke', () => {
       throw new Error('Studio resolver should not be needed when textureId is available');
     });
 
-    const imageId = await tools.uploadGenerateModelReferenceImage(Buffer.from('not actually png'), 'place:test');
+    // The Open Cloud upload path requires a creator identity from the environment.
+    const prevUserId = process.env.ROBLOX_CREATOR_USER_ID;
+    const prevGroupId = process.env.ROBLOX_CREATOR_GROUP_ID;
+    process.env.ROBLOX_CREATOR_USER_ID = '123456';
+    delete process.env.ROBLOX_CREATOR_GROUP_ID;
 
-    expect(imageId).toBe(777);
-    expect(tools.openCloudClient.createAsset).toHaveBeenCalledWith(
-      expect.objectContaining({
-        assetType: 'Decal',
-        displayName: 'Studio Assistant Source Image',
-        description: 'Studio Assistant Source Image',
-      }),
-      expect.any(Buffer),
-      'generate-model-reference.png',
-    );
-    expect(tools.resolveImageId).not.toHaveBeenCalled();
+    try {
+      const imageId = await tools.uploadGenerateModelReferenceImage(Buffer.from('not actually png'), 'place:test');
+
+      expect(imageId).toBe(777);
+      expect(tools.openCloudClient.createAsset).toHaveBeenCalledWith(
+        expect.objectContaining({
+          assetType: 'Decal',
+          displayName: 'Studio Assistant Source Image',
+          description: 'Studio Assistant Source Image',
+          creationContext: { creator: { userId: '123456' } },
+        }),
+        expect.any(Buffer),
+        'generate-model-reference.png',
+      );
+      expect(tools.resolveImageId).not.toHaveBeenCalled();
+    } finally {
+      if (prevUserId === undefined) delete process.env.ROBLOX_CREATOR_USER_ID;
+      else process.env.ROBLOX_CREATOR_USER_ID = prevUserId;
+      if (prevGroupId === undefined) delete process.env.ROBLOX_CREATOR_GROUP_ID;
+      else process.env.ROBLOX_CREATOR_GROUP_ID = prevGroupId;
+    }
   });
 
   test('get_script_source shows plugin truncation range and note', async () => {

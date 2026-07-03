@@ -112,7 +112,7 @@ gemini mcp add robloxstudio-inspector npx --trust -- -y @chrrxs/robloxstudio-mcp
 ---
 
 <!-- VERSION_LINE -->
-**v2.19.1**
+**v2.20.0**
 
 ## Building from source
 

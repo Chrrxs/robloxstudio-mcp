@@ -126,6 +126,7 @@ describe('Tool schema compatibility', () => {
     'generate_build',
     'get_connected_instances',
     'manage_instance',
+    'get_roblox_docs',
   ]);
 
   function toolHandlerBody(toolName: string): string {

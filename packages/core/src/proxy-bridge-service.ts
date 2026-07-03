@@ -1,4 +1,4 @@
-import { BridgeService, PluginInstance } from './bridge-service.js';
+import { BridgeService, PluginInstance, PublicPluginInstance } from './bridge-service.js';
 import { v4 as uuidv4 } from 'uuid';
 
 export class ProxyBridgeService extends BridgeService {
@@ -40,6 +40,27 @@ export class ProxyBridgeService extends BridgeService {
 
   override getInstances(): PluginInstance[] {
     return this.cachedInstances;
+  }
+
+  override async unregisterInstanceIdEverywhere(instanceId: string): Promise<PublicPluginInstance[]> {
+    const response = await fetch(`${this.primaryBaseUrl}/unregister-instance-id`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ instanceId }),
+    });
+
+    if (!response.ok) {
+      const body = await response.text().catch(() => '');
+      throw new Error(`Proxy unregister failed (${response.status}): ${body || response.statusText}`);
+    }
+
+    const result = await response.json() as { removed?: PublicPluginInstance[] };
+    const removed = Array.isArray(result.removed) ? result.removed : [];
+    const removedKeys = new Set(removed.map((inst) => `${inst.instanceId}\0${inst.role}`));
+    if (removedKeys.size > 0) {
+      this.cachedInstances = this.cachedInstances.filter((inst) => !removedKeys.has(`${inst.instanceId}\0${inst.role}`));
+    }
+    return removed;
   }
 
   /** Called when this proxy is being discarded (e.g. promotion to primary

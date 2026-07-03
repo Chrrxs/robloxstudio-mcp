@@ -12,7 +12,7 @@ import { RobloxStudioTools } from './tools/index.js';
 import { BridgeService, RoutingFailure } from './bridge-service.js';
 import { ProxyBridgeService } from './proxy-bridge-service.js';
 import type { ToolDefinition } from './tools/definitions.js';
-import { registerEmptyResourceShim } from './mcp-compat.js';
+import { registerResourceHandlers } from './mcp-compat.js';
 
 export interface ServerConfig {
   name: string;
@@ -46,7 +46,7 @@ export class RobloxStudioMCPServer {
 
     this.bridge = new BridgeService();
     this.tools = new RobloxStudioTools(this.bridge);
-    registerEmptyResourceShim(this.server);
+    registerResourceHandlers(this.server);
     this.setupToolHandlers();
   }
 

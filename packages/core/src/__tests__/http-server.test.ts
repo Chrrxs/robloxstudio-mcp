@@ -269,6 +269,25 @@ describe('HTTP Server', () => {
       expect(app.isPluginConnected()).toBe(false);
     });
 
+    test('unregisters every peer for an instance id for proxy cleanup', async () => {
+      await request(app).post('/ready').send(READY_BODY).expect(200);
+      await request(app).post('/ready').send({
+        ...READY_BODY,
+        pluginSessionId: 'session-server',
+        role: 'server',
+        isRunning: true,
+      }).expect(200);
+
+      const response = await request(app)
+        .post('/unregister-instance-id')
+        .send({ instanceId: 'place:test' })
+        .expect(200);
+
+      expect(response.body).toMatchObject({ success: true });
+      expect(response.body.removed.map((inst: { role: string }) => inst.role).sort()).toEqual(['edit', 'server']);
+      expect(app.isPluginConnected()).toBe(false);
+    });
+
     test('disconnect rejects pending requests targeting that tuple', async () => {
       await request(app).post('/ready').send(READY_BODY).expect(200);
       const p1 = bridge.sendRequest('/api/test1', {}, 'place:test', 'edit');

@@ -2610,6 +2610,32 @@ part(0,2,0,2,1,1,"b")`,
       required: ['pattern', 'replacement']
     }
   },
+
+  // === Documentation ===
+  {
+    name: 'get_roblox_docs',
+    category: 'read',
+    description: 'Fetch official Roblox engine API documentation as markdown from create.roblox.com. Call this BEFORE writing or editing code that uses an engine class, enum, datatype, or Luau library you are not fully certain about (e.g. ProximityPrompt, Enum.KeyCode, CFrame, TweenService) — the page includes the description, properties, methods, events, and code samples. Results are cached, so repeat lookups are cheap. Very large pages are truncated with a section index; pass section (e.g. "Properties", "Methods", "Events") to read one section in full.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        name: {
+          type: 'string',
+          description: 'Exact PascalCase name of the class, enum, datatype, or library (e.g. "ProximityPrompt", "KeyCode", "CFrame", "table")'
+        },
+        doc_type: {
+          type: 'string',
+          enum: ['classes', 'enums', 'datatypes', 'libraries', 'globals'],
+          description: 'Documentation category (default: classes)'
+        },
+        section: {
+          type: 'string',
+          description: 'Optional "##"-level section to return instead of the whole page (e.g. "Description", "Properties", "Methods", "Events", "Code Samples")'
+        }
+      },
+      required: ['name']
+    }
+  },
 ];
 
 export const DEPRECATED_TOOL_DEFINITIONS: ToolDefinition[] = [

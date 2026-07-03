@@ -1,6 +1,6 @@
 {
   "name": "@chrrxs/robloxstudio-mcp-monorepo",
-  "version": "2.19.1",
+  "version": "2.20.0",
   "private": true,
   "type": "module",
   "workspaces": [
@@ -11,7 +11,7 @@
     "compile:plugin": "npm --prefix studio-plugin run build",
     "build:plugin": "npm run compile:plugin && node scripts/build-plugin.mjs",
     "build:plugin:inspector": "npm run compile:plugin && node scripts/build-plugin.mjs --variant inspector",
-    "build:plugins": "npm run compile:plugin && node scripts/build-plugin.mjs && node scripts/build-plugin.mjs --variant inspector",
+    "build:plugins": "npm run compile:plugin && node scripts/build-plugin.mjs --variant inspector && node scripts/build-plugin.mjs",
     "build:all": "npm run build && npm run build:plugins",
     "clean": "npm exec --workspaces -- npx rimraf dist",
     "dev": "npm run build -w packages/core && tsx packages/robloxstudio-mcp/src/index.ts",

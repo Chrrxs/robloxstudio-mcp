@@ -313,6 +313,10 @@ export class BridgeService {
     return removed;
   }
 
+  async unregisterInstanceIdEverywhere(instanceId: string): Promise<PublicPluginInstance[]> {
+    return this.unregisterInstanceId(instanceId);
+  }
+
   getInstances(): PluginInstance[] {
     return Array.from(this.instances.values());
   }

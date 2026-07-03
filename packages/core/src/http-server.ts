@@ -13,7 +13,7 @@ import { RobloxStudioTools } from './tools/index.js';
 import { BridgeService, RoutingFailure, toPublic } from './bridge-service.js';
 import type { RegisterInstanceResult } from './bridge-service.js';
 import type { ToolDefinition } from './tools/definitions.js';
-import { registerEmptyResourceShim } from './mcp-compat.js';
+import { registerResourceHandlers } from './mcp-compat.js';
 
 interface StreamableHttpConfig {
   name: string;
@@ -79,6 +79,7 @@ function requiredClosedLineRange(body: any, toolName: string): { startLine: numb
 }
 
 export const TOOL_HANDLERS: Record<string, ToolHandler> = {
+  get_roblox_docs: (tools, body) => tools.getRobloxDocs(body.name, body.doc_type, body.section),
   get_file_tree: (tools, body) => tools.getFileTree(body.path, body.instance_id),
   search_files: (tools, body) => tools.searchFiles(body.query, body.searchType, body.instance_id),
   get_place_info: (tools, body) => tools.getPlaceInfo(body.instance_id),
@@ -378,6 +379,17 @@ export function createHttpServer(tools: RobloxStudioTools, bridge: BridgeService
     res.json({ success: true });
   });
 
+  app.post('/unregister-instance-id', (req, res) => {
+    const { instanceId } = req.body;
+    if (typeof instanceId !== 'string' || instanceId.length === 0) {
+      res.status(400).json({ error: 'instanceId is required' });
+      return;
+    }
+
+    const removed = bridge.unregisterInstanceId(instanceId);
+    res.json({ success: true, removed });
+  });
+
 
   app.get('/status', (req, res) => {
     const instances = bridge.getInstances();
@@ -532,7 +544,7 @@ export function createHttpServer(tools: RobloxStudioTools, bridge: BridgeService
           { capabilities: { tools: {} } }
         );
 
-        registerEmptyResourceShim(server);
+        registerResourceHandlers(server);
 
         server.setRequestHandler(ListToolsRequestSchema, async () => ({
           tools: filteredTools.map(t => ({

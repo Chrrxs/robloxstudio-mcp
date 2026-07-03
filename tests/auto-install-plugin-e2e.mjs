@@ -196,11 +196,11 @@ async function ensureLocalBuild(tmpRoot) {
   const buildInstallDir = path.join(tmpRoot, 'local-build-plugin-install');
   await runChecked('npm', ['run', 'build'], { timeoutMs: 120000 });
   await runChecked('npm', ['run', 'compile:plugin'], { timeoutMs: 120000 });
-  await runChecked('node', ['scripts/build-plugin.mjs'], {
+  await runChecked('node', ['scripts/build-plugin.mjs', '--variant', 'inspector'], {
     env: { MCP_PLUGINS_DIR: buildInstallDir },
     timeoutMs: 120000,
   });
-  await runChecked('node', ['scripts/build-plugin.mjs', '--variant', 'inspector'], {
+  await runChecked('node', ['scripts/build-plugin.mjs'], {
     env: { MCP_PLUGINS_DIR: buildInstallDir },
     timeoutMs: 120000,
   });
