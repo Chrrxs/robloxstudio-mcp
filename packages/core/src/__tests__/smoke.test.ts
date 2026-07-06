@@ -1,8 +1,9 @@
 import { BridgeService } from '../bridge-service.js';
 import { createHttpServer } from '../http-server.js';
 import { RobloxStudioTools } from '../tools/index.js';
-import { buildStudioLaunchArgs, cleanupManagedBaseplateFiles, StudioInstanceManager } from '../studio-instance-manager.js';
+import { buildStudioLaunchArgs, cleanupManagedBaseplateFiles, StudioInstanceManager, sweepStaleBaseplateFiles } from '../studio-instance-manager.js';
 import request from 'supertest';
+import { spawnSync } from 'child_process';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
@@ -675,6 +676,72 @@ describe('Smoke', () => {
 
     expect(fs.existsSync(placeFile)).toBe(true);
     fs.rmSync(placeFile, { force: true });
+  });
+
+  test('baseplate sweep deletes stale files from dead servers but keeps fresh and foreign files', () => {
+    const dir = path.join(os.tmpdir(), 'robloxstudio-mcp-baseplates');
+    fs.mkdirSync(dir, { recursive: true });
+    // A pid that is guaranteed dead: a child that has already exited.
+    const deadPid = spawnSync(process.execPath, ['-e', '']).pid;
+    const oldTime = new Date(Date.now() - 25 * 60 * 60 * 1000);
+
+    const stale = path.join(dir, `Baseplate-${deadPid}-100.rbxl`);
+    const staleLock = `${stale}.lock`;
+    const fresh = path.join(dir, `Baseplate-${deadPid}-200.rbxl`);
+    const foreign = path.join(dir, 'Baseplate-user-owned.rbxlx');
+    for (const file of [stale, staleLock, fresh, foreign]) fs.writeFileSync(file, '<roblox />', 'utf8');
+    for (const file of [stale, staleLock, foreign]) fs.utimesSync(file, oldTime, oldTime);
+
+    try {
+      sweepStaleBaseplateFiles();
+
+      expect(fs.existsSync(stale)).toBe(false);
+      expect(fs.existsSync(staleLock)).toBe(false);
+      expect(fs.existsSync(fresh)).toBe(true);
+      expect(fs.existsSync(foreign)).toBe(true);
+    } finally {
+      for (const file of [stale, staleLock, fresh, foreign]) fs.rmSync(file, { force: true });
+    }
+  });
+
+  test('baseplate sweep keeps stale files whose owner server is still running', () => {
+    const dir = path.join(os.tmpdir(), 'robloxstudio-mcp-baseplates');
+    fs.mkdirSync(dir, { recursive: true });
+    const oldTime = new Date(Date.now() - 25 * 60 * 60 * 1000);
+    // The jest runner's parent process is alive for the duration of the test.
+    const alivePid = process.ppid;
+    const staleAlive = path.join(dir, `Baseplate-${alivePid}-100.rbxl`);
+    fs.writeFileSync(staleAlive, '<roblox />', 'utf8');
+    fs.utimesSync(staleAlive, oldTime, oldTime);
+
+    try {
+      sweepStaleBaseplateFiles();
+
+      expect(fs.existsSync(staleAlive)).toBe(true);
+    } finally {
+      fs.rmSync(staleAlive, { force: true });
+    }
+  });
+
+  test('baseplate launch sweeps stale files as a side effect', () => {
+    const dir = path.join(os.tmpdir(), 'robloxstudio-mcp-baseplates');
+    fs.mkdirSync(dir, { recursive: true });
+    const deadPid = spawnSync(process.execPath, ['-e', '']).pid;
+    const oldTime = new Date(Date.now() - 25 * 60 * 60 * 1000);
+    const stale = path.join(dir, `Baseplate-${deadPid}-300.rbxl`);
+    fs.writeFileSync(stale, '<roblox />', 'utf8');
+    fs.utimesSync(stale, oldTime, oldTime);
+
+    const args = buildStudioLaunchArgs({ source: 'baseplate' });
+    const generated = args[3];
+
+    try {
+      expect(fs.existsSync(stale)).toBe(false);
+      expect(fs.existsSync(generated)).toBe(true);
+    } finally {
+      fs.rmSync(stale, { force: true });
+      fs.rmSync(generated, { force: true });
+    }
   });
 
   test('managed baseplate launch matching ignores unrelated existing Studio connections', () => {

@@ -150,8 +150,48 @@ function resolveBaseplateTemplatePath(): string {
   throw new Error(`Baseplate template not found. Expected ${BASEPLATE_TEMPLATE_NAME} in one of: ${candidates.join(', ')}`);
 }
 
+const STALE_BASEPLATE_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+const BASEPLATE_TEMP_SWEEP_NAME = /^Baseplate-(\d+)-\d+\.rbxl(\.lock)?$/;
+
+function isProcessAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code === 'EPERM';
+  }
+}
+
+// Close-time deletion is best-effort (Windows can hold the place/.lock handle
+// briefly after Studio exits) and never happens if the server dies, so old
+// files accumulate — Windows never cleans %TEMP% on its own. Sweep anything
+// matching our naming pattern that is older than a day.
+export function sweepStaleBaseplateFiles(): void {
+  let entries: string[];
+  try {
+    entries = readdirSync(BASEPLATE_TEMP_DIR);
+  } catch {
+    return;
+  }
+  const cutoff = Date.now() - STALE_BASEPLATE_MAX_AGE_MS;
+  for (const entry of entries) {
+    const match = BASEPLATE_TEMP_SWEEP_NAME.exec(entry);
+    if (!match) continue;
+    // Owner server still running → its instance may still have the file open
+    // (a WSL server can unlink a file Studio holds open across \\wsl.localhost).
+    if (Number(match[1]) !== process.pid && isProcessAlive(Number(match[1]))) continue;
+    const file = path.join(BASEPLATE_TEMP_DIR, entry);
+    try {
+      if (statSync(file).mtimeMs < cutoff) rmSync(file, { force: true });
+    } catch {
+      // Still locked or already gone; retry on a future sweep.
+    }
+  }
+}
+
 function createBaseplatePlaceFile(): string {
   mkdirSync(BASEPLATE_TEMP_DIR, { recursive: true });
+  sweepStaleBaseplateFiles();
   const file = path.join(BASEPLATE_TEMP_DIR, `Baseplate-${process.pid}-${Date.now()}.rbxl`);
   copyFileSync(resolveBaseplateTemplatePath(), file);
   return file;
@@ -167,8 +207,16 @@ export function cleanupManagedBaseplateFiles(record: Pick<ManagedStudioInstance,
   if (record.source !== 'baseplate' || !record.localPlaceFile) return;
   if (!isGeneratedBaseplatePlaceFile(record.localPlaceFile)) return;
 
-  rmSync(record.localPlaceFile, { force: true });
-  rmSync(`${record.localPlaceFile}.lock`, { force: true });
+  // Best effort: on Windows, Studio can hold the place/.lock handle for a
+  // moment after close, so rmSync may throw EPERM/EBUSY. A leftover file in
+  // the dedicated temp dir is harmless and must not fail the close itself.
+  for (const file of [record.localPlaceFile, `${record.localPlaceFile}.lock`]) {
+    try {
+      rmSync(file, { force: true });
+    } catch {
+      // Locked by a lingering Studio handle; leave it for the OS temp cleanup.
+    }
+  }
 }
 
 function prepareStudioLaunchOptions(options: StudioLaunchOptions): StudioLaunchOptions {
