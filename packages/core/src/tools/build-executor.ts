@@ -1,4 +1,4 @@
-import * as vm from 'vm';
+import { runRestrictedScript, ScriptTimeoutError } from './build-interpreter.js';
 
 export interface BuildExecutorResult {
   parts: any[][];
@@ -497,9 +497,15 @@ export function runBuildExecutor(
     ]);
   }
 
-  // -- Build the sandbox context --
+  // -- Build the sandbox globals --
 
   const rng = createSeededRng(seed ?? 42);
+
+  // Frozen copy of Math so build code can't mutate the real global Math
+  // (Math's own properties are non-enumerable, so spread won't copy them).
+  const safeMath = Object.freeze(
+    Object.create(null, Object.getOwnPropertyDescriptors(Math)),
+  );
 
   const sandbox: Record<string, any> = {
     part: partFn,
@@ -517,25 +523,19 @@ export function runBuildExecutor(
     column: columnFn,
     pew: pewFn,
     fence: fenceFn,
-    Math: Math,
+    Math: safeMath,
     GRID_SIZE: 1,
     rng: rng,
-    console: { log: () => {}, warn: () => {}, error: () => {} },
+    console: Object.freeze({ log: () => {}, warn: () => {}, error: () => {} }),
   };
 
-  const context = vm.createContext(sandbox, {
-    codeGeneration: { strings: false, wasm: false }
-  });
-
-  const script = new vm.Script(code, { filename: 'build-generator.js' });
-
   try {
-    script.runInContext(context, { timeout });
+    runRestrictedScript(code, sandbox, { timeoutMs: timeout });
   } catch (err: any) {
-    if (err.code === 'ERR_SCRIPT_EXECUTION_TIMEOUT') {
+    if (err instanceof ScriptTimeoutError) {
       throw new Error(`Build code execution timed out after ${timeout}ms`);
     }
-    throw new Error(`Build code execution error: ${err.message}`);
+    throw new Error(`Build code execution error: ${err?.message ?? String(err)}`);
   }
 
   if (parts.length === 0) {

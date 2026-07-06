@@ -1809,7 +1809,7 @@ CYLINDER AXIS: Roblox cylinders extend along the X axis. For upright cylinders, 
 EXAMPLE - compact cabin (17 lines):
 room(0,0,0,8,4,6,"a","b","a")
 roof(0,4,0,8,6,"gable","c")
-wall(-4,0,-2,4,0,-2,4,1,"a")
+wall(-4,-2,4,-2,4,1,"a")
 part(0,2,3,3,3,0.3,"a","Block",0.4)
 row(-2,0,-1,3,0,2,(i,cx,cy,cz)=>{pew(cx,0,cz,3,2,"d")})
 column(-3,0,-2,4,0.5,"a","b")

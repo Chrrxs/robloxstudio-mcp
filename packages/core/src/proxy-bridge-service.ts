@@ -3,15 +3,17 @@ import { v4 as uuidv4 } from 'uuid';
 
 export class ProxyBridgeService extends BridgeService {
   private primaryBaseUrl: string;
+  private authToken?: string;
   readonly proxyInstanceId: string;
   private proxyRequestTimeout = 30000;
   private cachedInstances: PluginInstance[] = [];
   private refreshTimer?: ReturnType<typeof setInterval>;
   private static REFRESH_INTERVAL_MS = 1000;
 
-  constructor(primaryBaseUrl: string) {
+  constructor(primaryBaseUrl: string, authToken?: string) {
     super();
     this.primaryBaseUrl = primaryBaseUrl;
+    this.authToken = authToken;
     this.proxyInstanceId = uuidv4();
     // Mirror the primary's peer list locally so getInstances() / resolveTarget
     // see real data. Without this, anything that enumerates peers from a
@@ -24,9 +26,17 @@ export class ProxyBridgeService extends BridgeService {
     );
   }
 
+  private authHeaders(extra?: Record<string, string>): Record<string, string> {
+    const headers: Record<string, string> = { ...extra };
+    if (this.authToken) headers['X-MCP-Auth'] = this.authToken;
+    return headers;
+  }
+
   private async refreshInstances(): Promise<void> {
     try {
-      const res = await fetch(`${this.primaryBaseUrl}/instances`);
+      const res = await fetch(`${this.primaryBaseUrl}/instances`, {
+        headers: this.authHeaders(),
+      });
       if (!res.ok) return;
       const body = (await res.json()) as { instances?: PluginInstance[] };
       if (Array.isArray(body.instances)) {
@@ -45,7 +55,7 @@ export class ProxyBridgeService extends BridgeService {
   override async unregisterInstanceIdEverywhere(instanceId: string): Promise<PublicPluginInstance[]> {
     const response = await fetch(`${this.primaryBaseUrl}/unregister-instance-id`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: this.authHeaders({ 'Content-Type': 'application/json' }),
       body: JSON.stringify({ instanceId }),
     });
 
@@ -84,7 +94,7 @@ export class ProxyBridgeService extends BridgeService {
     try {
       const response = await fetch(`${this.primaryBaseUrl}/proxy`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: this.authHeaders({ 'Content-Type': 'application/json' }),
         body: JSON.stringify({
           endpoint,
           data,

@@ -1,5 +1,4 @@
 import express from 'express';
-import cors from 'cors';
 import http from 'http';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
@@ -14,6 +13,16 @@ import { BridgeService, RoutingFailure, toPublic } from './bridge-service.js';
 import type { RegisterInstanceResult } from './bridge-service.js';
 import type { ToolDefinition } from './tools/definitions.js';
 import { registerResourceHandlers } from './mcp-compat.js';
+import { tokensMatch } from './auth.js';
+
+export interface HttpSecurityOptions {
+  /** When set, tool-invoking endpoints require this token. */
+  authToken?: string;
+  /** Where the token came from — used to build a helpful 401 message. */
+  authTokenHint?: string;
+  /** Origins allowed to make cross-origin (browser) requests. Default: none. */
+  allowedOrigins?: string[];
+}
 
 interface StreamableHttpConfig {
   name: string;
@@ -218,7 +227,7 @@ export const TOOL_HANDLERS: Record<string, ToolHandler> = {
   }, body.instance_id),
 };
 
-export function createHttpServer(tools: RobloxStudioTools, bridge: BridgeService, allowedTools?: Set<string>, serverConfig?: StreamableHttpConfig) {
+export function createHttpServer(tools: RobloxStudioTools, bridge: BridgeService, allowedTools?: Set<string>, serverConfig?: StreamableHttpConfig, security?: HttpSecurityOptions) {
   const app = express();
   let mcpServerActive = false;
   let lastMCPActivity = 0;
@@ -252,7 +261,68 @@ export function createHttpServer(tools: RobloxStudioTools, bridge: BridgeService
     return bridge.getInstances().length > 0;
   };
 
-  app.use(cors());
+  // -- Origin policy --
+  // The Studio plugin is a native HTTP client and never sends an Origin
+  // header. Any request that DOES carry one comes from a browser context; we
+  // reject it unless the origin is explicitly allowlisted. This replaces the
+  // previous blanket `cors()` (allow-all), which let any web page drive the
+  // API via the victim's browser.
+  const allowedOrigins = new Set(security?.allowedOrigins ?? []);
+  app.use((req, res, next) => {
+    const origin = req.headers.origin;
+    if (typeof origin !== 'string' || origin === '') {
+      next();
+      return;
+    }
+    if (!allowedOrigins.has(origin)) {
+      res.status(403).json({
+        error: 'forbidden_origin',
+        message: `Cross-origin requests are not allowed from ${origin}. ` +
+          'Set ROBLOX_STUDIO_ALLOWED_ORIGINS to allowlist specific origins.',
+      });
+      return;
+    }
+    res.setHeader('Access-Control-Allow-Origin', origin);
+    res.setHeader('Vary', 'Origin');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-MCP-Auth, Mcp-Protocol-Version');
+    if (req.method === 'OPTIONS') {
+      res.status(204).end();
+      return;
+    }
+    next();
+  });
+
+  // -- Shared-secret auth --
+  // Tool-invoking endpoints require the token; plugin-facing endpoints
+  // (/ready, /poll, /response, /disconnect) and passive status endpoints
+  // stay open because the Studio plugin can't read local files. Those routes
+  // only register/poll — they cannot invoke tools.
+  const authToken = security?.authToken;
+  const authRequired = (path: string) =>
+    path === '/mcp' || path.startsWith('/mcp/') ||
+    path === '/proxy' || path === '/instances' || path === '/unregister-instance-id';
+  app.use((req, res, next) => {
+    if (!authToken || !authRequired(req.path)) {
+      next();
+      return;
+    }
+    const headerToken = req.headers['x-mcp-auth'];
+    const bearer = typeof req.headers.authorization === 'string' && req.headers.authorization.startsWith('Bearer ')
+      ? req.headers.authorization.slice('Bearer '.length)
+      : undefined;
+    const provided = typeof headerToken === 'string' && headerToken !== '' ? headerToken : bearer;
+    if (provided !== undefined && tokensMatch(provided, authToken)) {
+      next();
+      return;
+    }
+    res.status(401).json({
+      error: 'unauthorized',
+      message: 'Missing or invalid auth token. Send it as "X-MCP-Auth: <token>" or "Authorization: Bearer <token>". ' +
+        (security?.authTokenHint ?? 'The token is in ~/.robloxstudio-mcp/auth-token (or ROBLOX_STUDIO_AUTH_TOKEN).'),
+    });
+  });
+
   app.use(express.json({ limit: '50mb' }));
   app.use(express.urlencoded({ limit: '50mb', extended: true }));
 

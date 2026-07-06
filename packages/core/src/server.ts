@@ -8,6 +8,8 @@ import {
 } from '@modelcontextprotocol/sdk/types.js';
 import http from 'http';
 import { createHttpServer, listenWithRetry, TOOL_HANDLERS } from './http-server.js';
+import type { HttpSecurityOptions } from './http-server.js';
+import { resolveAuthToken } from './auth.js';
 import { RobloxStudioTools } from './tools/index.js';
 import { BridgeService, RoutingFailure } from './bridge-service.js';
 import { ProxyBridgeService } from './proxy-bridge-service.js';
@@ -104,7 +106,35 @@ export class RobloxStudioMCPServer {
 
   async run() {
     const basePort = process.env.ROBLOX_STUDIO_PORT ? parseInt(process.env.ROBLOX_STUDIO_PORT) : 58741;
-    const host = process.env.ROBLOX_STUDIO_HOST || '0.0.0.0';
+    // Bind loopback-only by default. Exposing the bridge on other interfaces
+    // (e.g. 0.0.0.0) is an explicit opt-in via ROBLOX_STUDIO_HOST.
+    const host = process.env.ROBLOX_STUDIO_HOST?.trim() || '127.0.0.1';
+    if (host !== '127.0.0.1' && host !== 'localhost' && host !== '::1') {
+      console.error(
+        `WARNING: ROBLOX_STUDIO_HOST=${host} exposes the MCP bridge beyond this machine. ` +
+        'Anyone who can reach the port and knows the auth token can control Roblox Studio.',
+      );
+    }
+
+    const auth = resolveAuthToken();
+    const security: HttpSecurityOptions = {
+      authToken: auth.token,
+      authTokenHint: auth.source === 'env'
+        ? 'The token comes from ROBLOX_STUDIO_AUTH_TOKEN.'
+        : auth.filePath
+          ? `The token is in ${auth.filePath}.`
+          : undefined,
+      allowedOrigins: (process.env.ROBLOX_STUDIO_ALLOWED_ORIGINS || '')
+        .split(',')
+        .map((o) => o.trim())
+        .filter((o) => o !== ''),
+    };
+    if (auth.source === 'disabled') {
+      console.error('WARNING: ROBLOX_STUDIO_NO_AUTH is set - tool endpoints accept unauthenticated requests.');
+    } else if (auth.filePath) {
+      console.error(`Auth token loaded from ${auth.filePath} (HTTP clients must send X-MCP-Auth or Authorization: Bearer)`);
+    }
+
     let bridgeMode: 'primary' | 'proxy' = 'primary';
     let httpHandle: http.Server | undefined;
     let primaryApp: ReturnType<typeof createHttpServer> | undefined;
@@ -119,7 +149,7 @@ export class RobloxStudioMCPServer {
     // every subsequent session = proxy forwarding to basePort. This matches the
     // official Roblox Studio MCP (Roblox/studio-rust-mcp-server, main.rs:43).
     try {
-      primaryApp = createHttpServer(this.tools, this.bridge, this.allowedToolNames, this.config);
+      primaryApp = createHttpServer(this.tools, this.bridge, this.allowedToolNames, this.config, security);
       const result = await listenWithRetry(primaryApp, host, basePort, 1);
       httpHandle = result.server;
       boundPort = result.port;
@@ -130,7 +160,7 @@ export class RobloxStudioMCPServer {
       // Fall back to proxy mode and forward all bridge calls through it.
       bridgeMode = 'proxy';
       primaryApp = undefined;
-      const proxyBridge = new ProxyBridgeService(`http://localhost:${basePort}`);
+      const proxyBridge = new ProxyBridgeService(`http://localhost:${basePort}`, auth.token);
       this.bridge = proxyBridge;
       this.tools = new RobloxStudioTools(this.bridge);
       console.error(`Port ${basePort} in use - entering proxy mode (forwarding to localhost:${basePort})`);
@@ -149,7 +179,7 @@ export class RobloxStudioMCPServer {
       promotionInterval = setInterval(async () => {
         const candidateBridge = new BridgeService();
         const candidateTools = new RobloxStudioTools(candidateBridge);
-        const candidateApp = createHttpServer(candidateTools, candidateBridge, this.allowedToolNames, this.config);
+        const candidateApp = createHttpServer(candidateTools, candidateBridge, this.allowedToolNames, this.config, security);
         try {
           const result = await listenWithRetry(candidateApp, host, basePort, 1);
           // Bind succeeded — atomically swap to primary mode (synchronous from here).
@@ -179,7 +209,7 @@ export class RobloxStudioMCPServer {
     let legacyHandle: http.Server | undefined;
     let legacyApp: ReturnType<typeof createHttpServer> | undefined;
     if (boundPort !== LEGACY_PORT && bridgeMode === 'primary') {
-      legacyApp = createHttpServer(this.tools, this.bridge, this.allowedToolNames, this.config);
+      legacyApp = createHttpServer(this.tools, this.bridge, this.allowedToolNames, this.config, security);
       try {
         const result = await listenWithRetry(legacyApp, host, LEGACY_PORT, 1);
         legacyHandle = result.server;
