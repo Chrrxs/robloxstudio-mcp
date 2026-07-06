@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { spawn } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { createConnection } from 'node:net';
 import { existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { mkdtemp } from 'node:fs/promises';
@@ -35,28 +35,6 @@ const SERVER_ENV = {
 };
 
 let localBuildDone = false;
-
-const PLACE_FIXTURE_XML = `<?xml version="1.0" encoding="utf-8"?>
-<roblox version="4">
-  <External>null</External>
-  <External>nil</External>
-  <Item class="Workspace" referent="RBX0">
-    <Properties>
-      <string name="Name">Workspace</string>
-    </Properties>
-  </Item>
-  <Item class="ServerStorage" referent="RBX1">
-    <Properties>
-      <string name="Name">ServerStorage</string>
-    </Properties>
-  </Item>
-  <Item class="Lighting" referent="RBX2">
-    <Properties>
-      <string name="Name">Lighting</string>
-    </Properties>
-  </Item>
-</roblox>
-`;
 
 function assert(cond, message) {
   if (!cond) throw new Error(message);
@@ -154,14 +132,6 @@ function restorePluginFiles(pluginsDir, backups) {
 function removeVariantFiles(pluginsDir) {
   rmSync(path.join(pluginsDir, 'MCPPlugin.rbxmx'), { force: true });
   rmSync(path.join(pluginsDir, 'MCPInspectorPlugin.rbxmx'), { force: true });
-}
-
-function createPlaceFixture(pluginsDir) {
-  const fixtureDir = path.join(path.dirname(pluginsDir), 'robloxstudio-mcp-e2e');
-  mkdirSync(fixtureDir, { recursive: true });
-  const placePath = path.join(fixtureDir, 'AutoInstallE2E.rbxlx');
-  writeFileSync(placePath, PLACE_FIXTURE_XML, 'utf8');
-  return { fixtureDir, placePath };
 }
 
 function packTarballPath(stdout, destination) {
@@ -359,13 +329,17 @@ async function startManagerForArtifact(label, managerArtifact) {
   return startClient(label, managerArtifact, { autoInstall: false });
 }
 
-async function launchManagedPlace(managerClient, placePath) {
+async function launchManagedPlace(managerClient) {
   const launched = await managerClient.callTool('manage_instance', {
     action: 'launch',
-    source: 'local_file',
-    local_place_file: placePath,
+    source: 'baseplate',
     timeout_ms: 120000,
-  });
+  }, 150000);
+  if (!launched.instance_id) {
+    console.error(`--- server stderr tail (${managerClient.label ?? 'launcher'}) ---\n${managerClient.recentStderr(50)}\n--- end stderr ---`);
+    const connected = await managerClient.callTool('get_connected_instances', {}).catch((err) => `get_connected_instances failed: ${err.message}`);
+    console.error(`--- connected instances at timeout ---\n${JSON.stringify(connected, undefined, 2)}\n--- end connected ---`);
+  }
   assert(!!launched.instance_id, `manage_instance launched Studio (${JSON.stringify(launched)})`);
   return launched.instance_id;
 }
@@ -427,7 +401,7 @@ async function waitForStudioLog(client, instanceId, needle, timeoutMs = 30000) {
   throw new Error(`Studio output did not contain ${needle}. Last logs: ${JSON.stringify(last)}`);
 }
 
-async function runMatchingCase(artifact, managerArtifact, pluginsDir, placePath) {
+async function runMatchingCase(artifact, managerArtifact, pluginsDir) {
   console.log(`\n=== ${artifact.variant} auto-install loads matching plugin ===`);
   removeVariantFiles(pluginsDir);
 
@@ -446,7 +420,7 @@ async function runMatchingCase(artifact, managerArtifact, pluginsDir, placePath)
     assert(!existsSync(path.join(pluginsDir, artifact.otherAsset)), `${artifact.otherAsset} is absent`);
     assert(compareFiles(artifact.assetPath, installed), 'installed plugin matches artifact bundle');
 
-    instanceId = await launchManagedPlace(launcher, placePath);
+    instanceId = await launchManagedPlace(launcher);
     const edit = await waitForEditInstance(client, {
       variant: artifact.variant,
       version: artifact.version,
@@ -467,7 +441,7 @@ async function runMatchingCase(artifact, managerArtifact, pluginsDir, placePath)
   }
 }
 
-async function runMismatchCase(artifact, managerArtifact, pluginsDir, placePath) {
+async function runMismatchCase(artifact, managerArtifact, pluginsDir) {
   console.log(`\n=== ${artifact.variant} mismatch is visible and repairable ===`);
   removeVariantFiles(pluginsDir);
   writeMismatchedPlugin(artifact, pluginsDir);
@@ -483,7 +457,7 @@ async function runMismatchCase(artifact, managerArtifact, pluginsDir, placePath)
     mismatchClient = await startClient(`${artifact.variant}-mismatch`, artifact, { autoInstall: false });
     const mismatchLauncher = mismatchManager ?? mismatchClient;
 
-    mismatchInstanceId = await launchManagedPlace(mismatchLauncher, placePath);
+    mismatchInstanceId = await launchManagedPlace(mismatchLauncher);
     mismatchEdit = await waitForEditInstance(mismatchClient, {
       variant: artifact.variant,
       version: `${artifact.version}-mismatch`,
@@ -518,7 +492,7 @@ async function runMismatchCase(artifact, managerArtifact, pluginsDir, placePath)
     const repairLauncher = repairManager ?? repairClient;
 
     assert(compareFiles(artifact.assetPath, path.join(pluginsDir, artifact.asset)), 'auto-install repaired mismatched plugin file');
-    repairInstanceId = await launchManagedPlace(repairLauncher, placePath);
+    repairInstanceId = await launchManagedPlace(repairLauncher);
     await waitForEditInstance(repairClient, {
       variant: artifact.variant,
       version: artifact.version,
@@ -545,6 +519,23 @@ async function main() {
   if (await isPortOpen(58741)) {
     throw new Error('Port 58741 is already occupied. Stop existing MCP servers before running this E2E.');
   }
+  // Under WSL, a Windows-side MCP server on 127.0.0.1:58741 is invisible to the
+  // WSL loopback check above, but Studio (a Windows process) connects to it
+  // instead of the test server — every launch then times out waiting for the
+  // plugin. Check the Windows side explicitly.
+  if (existsSync('/mnt/c/Windows')) {
+    try {
+      const out = execFileSync('powershell.exe', ['-NoProfile', '-Command',
+        "if (Get-NetTCPConnection -LocalPort 58741 -State Listen -ErrorAction SilentlyContinue) { 'LISTENING' }",
+      ], { encoding: 'utf8', cwd: '/mnt/c/Windows', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+      if (out.includes('LISTENING')) {
+        throw new Error('A Windows process is listening on 127.0.0.1:58741 (likely another robloxstudio-mcp server, e.g. one spawned by an MCP client). Studio would connect to it instead of the test server. Stop it before running this E2E.');
+      }
+    } catch (err) {
+      if (err.message?.includes('127.0.0.1:58741')) throw err;
+      // powershell.exe unavailable or failed — fall through; the WSL-side check already ran.
+    }
+  }
   const existingStudio = listStudioProcesses();
   if (existingStudio.length > 0) {
     throw new Error(`Close existing Studio windows before running this E2E: ${JSON.stringify(existingStudio)}`);
@@ -553,8 +544,8 @@ async function main() {
   const tmpRoot = await mkdtemp(path.join(os.tmpdir(), 'robloxstudio-mcp-e2e-'));
   const pluginsDir = resolvePluginsDir();
   const backups = backupPluginFiles(pluginsDir);
-  const { fixtureDir, placePath } = createPlaceFixture(pluginsDir);
 
+  let primaryError;
   try {
     const mainArtifact = await selectArtifact(VARIANTS.main, tmpRoot);
     const artifacts = [
@@ -563,20 +554,27 @@ async function main() {
     ];
 
     for (const artifact of artifacts) {
-      await runMatchingCase(artifact, mainArtifact, pluginsDir, placePath);
-      await runMismatchCase(artifact, mainArtifact, pluginsDir, placePath);
+      await runMatchingCase(artifact, mainArtifact, pluginsDir);
+      await runMismatchCase(artifact, mainArtifact, pluginsDir);
     }
+  } catch (err) {
+    primaryError = err;
+    throw err;
   } finally {
     restorePluginFiles(pluginsDir, backups);
-    rmSync(fixtureDir, { recursive: true, force: true });
     const remaining = listStudioProcesses();
     if (remaining.length > 0) {
-      throw new Error(`Studio processes remain after cleanup: ${JSON.stringify(remaining)}`);
+      const message = `Studio processes remain after cleanup: ${JSON.stringify(remaining)}`;
+      if (primaryError) {
+        console.warn(`  (cleanup warning): ${message}`);
+      } else {
+        throw new Error(message);
+      }
     }
   }
 }
 
 main().catch((err) => {
-  console.error(`\n❌ auto-install plugin E2E failed: ${err instanceof Error ? err.message : String(err)}`);
+  console.error(`\n❌ auto-install plugin E2E failed: ${err instanceof Error ? err.stack ?? err.message : String(err)}`);
   process.exit(1);
 });

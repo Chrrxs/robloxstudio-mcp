@@ -160,12 +160,12 @@ export class McpClient {
 
   /** tools/call wrapper. Returns the parsed first text-content body (the
       common shape used by the Roblox Studio MCP). Throws if no text content. */
-  async callTool(name, args = {}) {
+  async callTool(name, args = {}, timeoutMs = 30_000) {
     const routedArgs = { ...args };
     if (process.env.MCP_INSTANCE_ID && ROUTED_TOOLS.has(name) && routedArgs.instance_id === undefined) {
       routedArgs.instance_id = process.env.MCP_INSTANCE_ID;
     }
-    const res = await this.rpc('tools/call', { name, arguments: routedArgs });
+    const res = await this.rpc('tools/call', { name, arguments: routedArgs }, timeoutMs);
     const text = res?.content?.[0]?.text;
     if (text == null) {
       throw new Error(`Tool ${name} returned no text content: ${JSON.stringify(res)}`);
