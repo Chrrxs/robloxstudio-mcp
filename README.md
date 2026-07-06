@@ -1,31 +1,40 @@
-# Roblox Studio MCP Server
+# Roblox Studio MCP — Agentic Runtime Debugging
 
-**An MCP server for Roblox Studio runtime debugging, playtest automation, and bulk place editing from Claude, Cursor, Codex, or Gemini.**
+**Debug your game while it runs.** The most capable Roblox Studio MCP server: live game-VM eval, log breakpoints, profiler captures, and full playtest automation — built for agent-driven development from Claude, Cursor, Codex, or Gemini.
 
 [![NPM Version](https://img.shields.io/npm/v/@chrrxs/robloxstudio-mcp)](https://www.npmjs.com/package/@chrrxs/robloxstudio-mcp)
 
-## Why this server
+When you start using agents to drive development, runtime debugging is what matters: not just reading scripts, but watching state change in a live playtest and steering from there. That is what this server is built around. SOTA models are insanely capable — this MCP gives them the runtime access to prove it.
 
-Use this when you want your agent to debug and operate a live Roblox Studio session with precise runtime control:
+## The tools that matter
 
-- `edit`, `server`, and `client-N` targeting for live playtests.
-- Game-VM eval on the server or a specific client, sharing the same `require` cache as your scripts.
-- Studio log breakpoints that let agents instrument live code without stopping the playtest.
-- Script Profiler captures for server/client CPU hotspots, debug labels, and microsecond timing summaries.
-- `solo_playtest` and `multiplayer_playtest` lifecycle tools for starting, stopping, inspecting, and ending playtests without hidden companion-tool discovery.
-- `manage_instance` for launching Studio windows, closing explicit connected instances, and listing place versions for revision launches.
-- Runtime log capture buffers, plus Stats memory and Scene Analysis attribution per peer.
-- Viewport screenshots plus virtual mouse, keyboard, and UI interaction.
-- Bulk property/script/attribute/tag operations for large places.
-- `.rbxm` import/export through `SerializationService`.
-- A read-only inspector package for safer review/debugging sessions.
+77 tools total. These are the ones that do the heavy lifting:
 
-77 advertised tools, including file tree inspection, mass reads/writes, script search-and-replace, asset insertion, build import/export, screenshot capture, log breakpoints, Script Profiler captures, runtime eval, memory tools, Scene Analysis, instance management, and playtest control.
+**Runtime debugging** — the reason this server exists
+- `eval_server_runtime` / `eval_client_runtime` — run Luau in the live game VM on the server or a specific client, sharing the same `require` cache as your scripts. Inspect `MatchService.activeMatches` mid-match.
+- `breakpoints` — log breakpoints that instrument live code without pausing the playtest.
+- `get_runtime_logs` — buffered log capture per peer (`edit`, `server`, `client-N`), including boot-time prints.
+
+**Playtest automation**
+- `solo_playtest` / `multiplayer_playtest` — start, inspect, and stop playtests, including multi-client sessions.
+- `manage_instance` — launch and close Studio windows, open blank baseplates, local files, or specific published place revisions.
+
+**Profiling & performance**
+- `capture_script_profiler` / `capture_micro_profiler` — CPU hotspots with debug labels and microsecond timing, on server or client.
+- `get_memory_breakdown` / `get_scene_analysis` — memory and scene attribution per peer.
+
+**Editing & automation at scale**
+- `execute_luau` — full-power edit-context scripting with output capture.
+- `mass_set_property`, `bulk_set_attributes`, `find_and_replace_in_scripts` — bulk operations for large places.
+- `capture_screenshot` + simulated mouse/keyboard input — see the viewport and interact with UI.
+
+**Agent guidance**
+- `get_roblox_docs` — official engine API docs fetched as markdown, so your agent checks `ProximityPrompt` or `CFrame` semantics before writing code instead of hallucinating them.
 
 ## Setup
 
 1. Enable **Allow HTTP Requests** in Game Settings → Security
-2. Wire up your AI. `@latest` floats the server package to the newest npm release, and `--auto-install-plugin` copies the matching Studio plugin into Roblox Studio's Plugins folder when the server starts:
+2. Wire up your AI — `--auto-install-plugin` installs the matching Studio plugin automatically:
 
 ```bash
 # Claude Code
@@ -38,15 +47,9 @@ codex mcp add robloxstudio -- npx -y @chrrxs/robloxstudio-mcp@latest --auto-inst
 gemini mcp add robloxstudio npx --trust -- -y @chrrxs/robloxstudio-mcp@latest --auto-install-plugin
 ```
 
-Fully close and reopen Studio after the plugin is first installed or updated. Plugin shows "Connected" when ready.
+3. Fully close and reopen Studio after the plugin is first installed or updated. The plugin shows **Connected** when ready.
 
-Prefer manual plugin install? Run `npx -y @chrrxs/robloxstudio-mcp@latest --install-plugin`.
-
-> **Custom Plugins folder?** Set `MCP_PLUGINS_DIR` before `--auto-install-plugin` or `--install-plugin`. Works on Windows, macOS, and WSL.
-
-For multiple open Studio places, connect each plugin to the same MCP server URL. The MCP server tracks every connected place; call `get_connected_instances` and pass the returned `instance_id` to route a tool call to a specific game. Per-place port tabs such as `58742` are not the supported routing model.
-
-If the Studio plugin and MCP server versions differ, the plugin stays connected but shows a yellow warning banner. `get_connected_instances`, `/health`, and `/status` also report `pluginVersion`, `serverVersion`, and `versionMismatch`.
+Multiple open places connect to the same server; call `get_connected_instances` and pass `instance_id` to route tool calls. Custom Plugins folder: set `MCP_PLUGINS_DIR`. Manual plugin install: `npx -y @chrrxs/robloxstudio-mcp@latest --install-plugin`.
 
 <details>
 <summary>Other MCP clients (Claude Desktop, Cursor, etc.)</summary>
@@ -77,53 +80,32 @@ On Windows, wrap with `cmd /c` if `npx` doesn't resolve:
 
 ## What you can ask
 
-> *"What's the structure of this game?"*
-> *"Find scripts using deprecated APIs and rewrite them."*
 > *"Start a multiplayer test with 2 clients, read the server log, and tell me why the round never starts."*
 > *"Evaluate `MatchService.activeMatches` on the server while a match is running."*
 > *"Set a log breakpoint on the damage function, reproduce the hit, then read the breakpoint logs."*
 > *"Capture a server Script Profiler sample while the wave spawns and rank the hottest functions."*
+> *"Find scripts using deprecated APIs and rewrite them."*
 > *"List recent versions for this place, then open version 3134 in a managed Studio window."*
-> *"Spawn 50 NPCs in a 10x5 grid for stress testing."*
-
-## Deprecated API
-
-The split playtest tools are still callable by exact name for existing integrations, but they are no longer advertised through `tools/list`. New integrations should use `solo_playtest` and `multiplayer_playtest`.
-
-Deprecated names: `start_playtest`, `stop_playtest`, `multiplayer_test_start`, `multiplayer_test_state`, `multiplayer_test_add_players`, `multiplayer_test_leave_client`, `multiplayer_test_end`.
 
 ## Inspector edition (read-only)
 
 [![NPM Version](https://img.shields.io/npm/v/@chrrxs/robloxstudio-mcp-inspector)](https://www.npmjs.com/package/@chrrxs/robloxstudio-mcp-inspector)
 
-Same plugin family, different `.rbxmx`. 36 read-only tools — no writes, no script edits, no creation/deletion. Safe for browsing, code review, and debugging without risk of accidental changes.
-
-Install only one variant at a time. Do not leave both `MCPPlugin.rbxmx` and `MCPInspectorPlugin.rbxmx` in the Studio Plugins folder; Studio loads both and they can register duplicate runtime peers. The CLI installers remove the other variant before installing:
+36 read-only tools — no writes, no script edits. Safe for browsing, code review, and debugging without risk of accidental changes. Install only one variant at a time (the installers remove the other automatically):
 
 ```bash
-npx -y @chrrxs/robloxstudio-mcp-inspector@latest --install-plugin
-
-# Claude / Codex / Gemini — same shape, different package name
 claude mcp add robloxstudio-inspector -- npx -y @chrrxs/robloxstudio-mcp-inspector@latest --auto-install-plugin
-codex mcp add robloxstudio-inspector -- npx -y @chrrxs/robloxstudio-mcp-inspector@latest --auto-install-plugin
-gemini mcp add robloxstudio-inspector npx --trust -- -y @chrrxs/robloxstudio-mcp-inspector@latest --auto-install-plugin
 ```
+
+## More
+
+- [Security model & environment variables](docs/security.md)
+- [Building from source](docs/building-from-source.md)
+- [Deprecated tool names](docs/deprecated-api.md)
 
 ---
 
 <!-- VERSION_LINE -->
 **v2.20.0**
-
-## Building from source
-
-```bash
-npm install && cd studio-plugin && npm install && cd ..
-npm run build                                            # node packages
-cd studio-plugin && npm run build && cd ..               # plugin TS → Luau
-node scripts/build-plugin.mjs                            # → MCPPlugin.rbxmx
-node scripts/build-plugin.mjs --variant inspector        # → MCPInspectorPlugin.rbxmx
-```
-
-On WSL the `.rbxmx` is auto-installed into `/mnt/c/Users/<you>/AppData/Local/Roblox/Plugins/`, and the local build script removes the other plugin variant from that folder. Set `MCP_PLUGINS_DIR` to override. **Fully close and reopen Studio** after a plugin rebuild, and verify only the one variant you intend to test remains in the Plugins folder.
 
 [Report Issues](https://github.com/chrrxs/robloxstudio-mcp/issues) · MIT Licensed · Based on [boshyxd/robloxstudio-mcp](https://github.com/boshyxd/robloxstudio-mcp) v2.7.0

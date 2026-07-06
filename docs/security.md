@@ -1,0 +1,20 @@
+# Security
+
+The bridge binds to `127.0.0.1` and refuses cross-origin browser requests by default. Tool-invoking HTTP endpoints (`/mcp`, `/mcp/<tool>`, `/proxy`, `/instances`) require a shared-secret token, auto-generated on first run at `~/.robloxstudio-mcp/auth-token` (mode 0600). The stdio MCP transport (the normal `claude mcp add` path) is unaffected; HTTP MCP clients must send the token as `X-MCP-Auth: <token>` or `Authorization: Bearer <token>`. Plugin-facing endpoints (`/ready`, `/poll`, `/response`, `/disconnect`) stay tokenless — Studio plugins can't read local files, and those routes only register/poll and cannot invoke tools. `generate_build` code runs in a restricted AST interpreter with no access to Node globals, `Function`, or prototype chains.
+
+## Version mismatch behavior
+
+If the Studio plugin and MCP server versions differ, the plugin stays connected but shows a yellow warning banner. `get_connected_instances`, `/health`, and `/status` also report `pluginVersion`, `serverVersion`, and `versionMismatch`.
+
+## Multiple connected places
+
+For multiple open Studio places, connect each plugin to the same MCP server URL. The MCP server tracks every connected place; call `get_connected_instances` and pass the returned `instance_id` to route a tool call to a specific game. Per-place port tabs such as `58742` are not the supported routing model.
+
+## Environment variables
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `ROBLOX_STUDIO_HOST` | `127.0.0.1` | Bind address. Setting e.g. `0.0.0.0` exposes the bridge to the network — only do this on trusted networks. |
+| `ROBLOX_STUDIO_AUTH_TOKEN` | *(auto-generated file)* | Explicit shared secret; overrides the token file. |
+| `ROBLOX_STUDIO_NO_AUTH` | *(unset)* | Set to `1` to disable token auth (not recommended). |
+| `ROBLOX_STUDIO_ALLOWED_ORIGINS` | *(none)* | Comma-separated browser origins allowed to call the API cross-origin. |
