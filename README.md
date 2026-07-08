@@ -4,13 +4,11 @@
 
 [![NPM Version](https://img.shields.io/npm/v/@chrrxs/robloxstudio-mcp)](https://www.npmjs.com/package/@chrrxs/robloxstudio-mcp)
 
-When you start using agents to drive development, runtime debugging is what matters: not just reading scripts, but watching state change in a live playtest and steering from there. That is what this server is built around. SOTA models are insanely capable, and this MCP gives them the runtime access to prove it.
-
 ## The tools that matter
 
 77 tools total. These are the ones that do the heavy lifting:
 
-**Runtime debugging**, the reason this server exists
+**Runtime debugging**
 - `eval_server_runtime` / `eval_client_runtime`: run Luau in the live game VM on the server or a specific client, sharing the same `require` cache as your scripts. Inspect `MatchService.activeMatches` mid-match.
 - `breakpoints`: log breakpoints that instrument live code without pausing the playtest.
 - `get_runtime_logs`: buffered log capture per peer (`edit`, `server`, `client-N`), including boot-time prints.
