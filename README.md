@@ -6,7 +6,7 @@
 
 ## The tools that matter
 
-77 tools total. These are the ones that do the heavy lifting:
+78 tools total. These are the ones that do the heavy lifting:
 
 **Runtime debugging**
 - `eval_server_runtime` / `eval_client_runtime`: run Luau in the live game VM on the server or a specific client, sharing the same `require` cache as your scripts. Inspect `MatchService.activeMatches` mid-match.
@@ -28,6 +28,7 @@
 
 **Agent guidance**
 - `get_roblox_docs`: official engine API docs fetched as markdown, so your agent checks `ProximityPrompt` or `CFrame` semantics before writing code instead of hallucinating them.
+- `get_roblox_skills`: list and retrieve Roblox-authored skills directly from the locally installed Studio Assistant bundle, without Roblox's built-in MCP or a connected place.
 
 ## Setup
 
@@ -89,7 +90,7 @@ On Windows, wrap with `cmd /c` if `npx` doesn't resolve:
 
 [![NPM Version](https://img.shields.io/npm/v/@chrrxs/robloxstudio-mcp-inspector)](https://www.npmjs.com/package/@chrrxs/robloxstudio-mcp-inspector)
 
-36 read-only tools: no writes, no script edits. Safe for browsing, code review, and debugging without risk of accidental changes. Install only one variant at a time (the installers remove the other automatically):
+37 read-only tools: no writes, no script edits. Safe for browsing, code review, and debugging without risk of accidental changes. Install only one variant at a time (the installers remove the other automatically):
 
 ```bash
 claude mcp add robloxstudio-inspector -- npx -y @chrrxs/robloxstudio-mcp-inspector@latest --auto-install-plugin

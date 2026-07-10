@@ -6,6 +6,7 @@ import { RobloxCookieClient } from '../roblox-cookie-client.js';
 import { StudioInstanceManager, type ManagedStudioInstance, type StudioLaunchSource } from '../studio-instance-manager.js';
 import { decodeImagePathToRgba, decodePngToRgba } from '../image-decode.js';
 import { DOC_CATEGORIES, getRobloxDoc, isDocCategory } from '../roblox-docs.js';
+import { findBuiltInStudioSkill, loadBuiltInStudioSkills } from '../studio-skills.js';
 import { rgbaToJpeg } from '../jpeg-encoder.js';
 import { rgbaToPng } from '../png-encoder.js';
 import * as fs from 'fs';
@@ -779,6 +780,54 @@ export class RobloxStudioTools {
 
   private _textResult(body: Record<string, unknown>) {
     return { content: [{ type: 'text', text: JSON.stringify(body) }] };
+  }
+
+  async getRobloxSkills(action: string, name?: string) {
+    if (action !== 'list' && action !== 'get') {
+      throw new Error('get_roblox_skills action must be "list" or "get"');
+    }
+
+    const bundle = loadBuiltInStudioSkills();
+    const bundleMetadata = {
+      source: 'installed-studio-assistant',
+      studioVersion: bundle.studioVersion,
+      bundlePath: bundle.bundlePath,
+      bundleModifiedAt: bundle.bundleModifiedAt,
+      bundleSha256: bundle.bundleSha256,
+    };
+
+    if (action === 'list') {
+      return this._textResult({
+        action,
+        ...bundleMetadata,
+        count: bundle.skills.length,
+        skills: bundle.skills.map((skill) => ({
+          name: skill.name,
+          sourceName: skill.sourceName,
+          description: skill.description,
+          document: skill.document,
+          hasCombinedDocument: skill.hasCombinedDocument,
+          contentLength: skill.contentLength,
+          contentSha256: skill.contentSha256,
+        })),
+      });
+    }
+
+    if (!name || typeof name !== 'string' || !name.trim()) {
+      throw new Error('get_roblox_skills action="get" requires a skill name from action="list"');
+    }
+    const skill = findBuiltInStudioSkill(bundle, name);
+    if (!skill) {
+      throw new Error(
+        `Built-in Studio skill "${name}" was not found. Available skills: ` +
+        bundle.skills.map((candidate) => candidate.name).join(', '),
+      );
+    }
+    return this._textResult({
+      action,
+      ...bundleMetadata,
+      skill,
+    });
   }
 
   async getRobloxDocs(name: string, docType?: string, section?: string) {

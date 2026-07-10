@@ -95,6 +95,19 @@ describe('Tool schema compatibility', () => {
     expect(props).not.toHaveProperty('lineRange');
   });
 
+  test('get_roblox_skills exposes list/get without Studio routing', () => {
+    const tool = TOOL_DEFINITIONS.find((candidate) => candidate.name === 'get_roblox_skills');
+    expect(tool).toBeDefined();
+    const schema = tool!.inputSchema as {
+      properties?: Record<string, { enum?: string[] }>;
+      required?: string[];
+    };
+    expect(schema.required).toEqual(['action']);
+    expect(schema.properties?.action.enum).toEqual(['list', 'get']);
+    expect(schema.properties).not.toHaveProperty('instance_id');
+    expect(TOOL_HANDLERS.get_roblox_skills).toBeDefined();
+  });
+
   test('script line tools expose line_range instead of startLine/endLine', () => {
     for (const name of ['edit_script_lines', 'delete_script_lines']) {
       const tool = TOOL_DEFINITIONS.find(tool => tool.name === name);
@@ -127,6 +140,7 @@ describe('Tool schema compatibility', () => {
     'get_connected_instances',
     'manage_instance',
     'get_roblox_docs',
+    'get_roblox_skills',
   ]);
 
   function toolHandlerBody(toolName: string): string {

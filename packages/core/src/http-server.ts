@@ -88,6 +88,7 @@ function requiredClosedLineRange(body: any, toolName: string): { startLine: numb
 }
 
 export const TOOL_HANDLERS: Record<string, ToolHandler> = {
+  get_roblox_skills: (tools, body) => tools.getRobloxSkills(body.action, body.name),
   get_roblox_docs: (tools, body) => tools.getRobloxDocs(body.name, body.doc_type, body.section),
   get_file_tree: (tools, body) => tools.getFileTree(body.path, body.instance_id),
   search_files: (tools, body) => tools.searchFiles(body.query, body.searchType, body.instance_id),

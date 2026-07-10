@@ -2615,6 +2615,28 @@ part(0,2,0,2,1,1,"b")`,
     }
   },
 
+  // === Installed Studio Skills ===
+  {
+    name: 'get_roblox_skills',
+    category: 'read',
+    description: 'List or retrieve Roblox-authored skills embedded in the locally installed Studio Assistant bundle. This reads the installed Assistant.rbxm directly, so it does not require a connected Studio place or Roblox\'s built-in MCP. Use action="list" to discover available names, then action="get" to retrieve the exact Markdown for one skill.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        action: {
+          type: 'string',
+          enum: ['list', 'get'],
+          description: 'List installed built-in skills or get one skill document.'
+        },
+        name: {
+          type: 'string',
+          description: 'Skill name returned by action="list". Required for action="get"; both canonical rbx-* and embedded source names are accepted.'
+        }
+      },
+      required: ['action']
+    }
+  },
+
   // === Documentation ===
   {
     name: 'get_roblox_docs',

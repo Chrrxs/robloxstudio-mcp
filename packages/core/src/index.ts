@@ -16,6 +16,14 @@ export type { ToolDefinition, ToolCategory } from './tools/definitions.js';
 export { OpenCloudClient } from './opencloud-client.js';
 export { getPluginsFolder, isWSL, handleVariantConflict } from './install-plugin-helpers.js';
 export { RobloxCookieClient } from './roblox-cookie-client.js';
+export {
+  canonicalBuiltInSkillName,
+  findBuiltInStudioSkill,
+  loadBuiltInStudioSkills,
+  parseBuiltInStudioSkills,
+  resolveAssistantBundlePath,
+} from './studio-skills.js';
+export type { BuiltInStudioSkill, BuiltInStudioSkillsBundle } from './studio-skills.js';
 export type {
   OpenCloudConfig,
   AssetSearchParams,
