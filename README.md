@@ -28,7 +28,7 @@
 
 **Agent guidance**
 - `get_roblox_docs`: official engine API docs fetched as markdown, so your agent checks `ProximityPrompt` or `CFrame` semantics before writing code instead of hallucinating them.
-- `get_roblox_skills`: list and retrieve Roblox-authored skills directly from the locally installed Studio Assistant bundle, without Roblox's built-in MCP or a connected place.
+- `get_roblox_skills`: list and retrieve Roblox-authored skills.
 
 ## Setup
 
