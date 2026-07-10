@@ -15,7 +15,7 @@
 
 **Playtest automation**
 - `solo_playtest` / `multiplayer_playtest`: start, inspect, and stop playtests, including multi-client sessions.
-- `manage_instance`: launch and close Studio windows, open blank baseplates, local files, or specific published place revisions.
+- `manage_instance`: launch and close Studio windows, open blank baseplates, local files, or specific published place revisions. Launches return an opaque `launch_id`, native PID, source path, and `launching | connected | exited | failed` lifecycle state, so asynchronous and failed launches remain inspectable and closable before a plugin connects.
 
 **Profiling & performance**
 - `capture_script_profiler` / `capture_micro_profiler`: CPU hotspots with debug labels and microsecond timing, on server or client.

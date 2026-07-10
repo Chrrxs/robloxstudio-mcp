@@ -7,6 +7,9 @@ const LOCK_STALE_MS = 10000;
 const LOCK_RETRY_MS = 25;
 const LOCK_TIMEOUT_MS = 5000;
 const EVENT_RETENTION_DAYS = 2;
+const TERMINAL_RECORD_RETENTION_MS = 24 * 60 * 60 * 1000;
+
+export type ManagedInstanceLifecycleState = 'launching' | 'connected' | 'exited' | 'failed';
 
 export interface ManagedInstanceRegistryRecord {
   version: 1;
@@ -14,6 +17,7 @@ export interface ManagedInstanceRegistryRecord {
   instanceId?: string;
   source: string;
   nativeProcessId?: number;
+  nativeProcessStartedAt?: string;
   spawnPid?: number;
   exe: string;
   args: string[];
@@ -24,6 +28,12 @@ export interface ManagedInstanceRegistryRecord {
   deleteLocalPlaceFileOnClose?: boolean;
   launchedAt: number;
   attachedAt?: number;
+  connectionDeadlineAt?: number;
+  state?: ManagedInstanceLifecycleState;
+  failedAt?: number;
+  exitedAt?: number;
+  exitCode?: number;
+  failureReason?: string;
   closedAt?: number;
   ownerPid?: number;
   bootId: string;
@@ -120,11 +130,22 @@ export class ManagedInstanceRegistry {
     );
   }
 
+  findAnyByRecordId(recordId: string, options: RegistrySweepOptions): ManagedInstanceRegistryRecord | undefined {
+    return this.withLock(() => {
+      this.sweepUnlocked(options);
+      return this.readRecordsUnlocked().find((record) => record.recordId === recordId);
+    });
+  }
+
   listOpen(options: RegistrySweepOptions): ManagedInstanceRegistryRecord[] {
     return this.withLock(() => {
       this.sweepUnlocked(options);
       return this.readOpenRecordsUnlocked();
     });
+  }
+
+  listOpenUnchecked(): ManagedInstanceRegistryRecord[] {
+    return this.withLock(() => this.readOpenRecordsUnlocked());
   }
 
   markClosed(recordId: string, closedAt = Date.now()): void {
@@ -320,43 +341,56 @@ export class ManagedInstanceRegistry {
         continue;
       }
 
-      if (parsed.closedAt !== undefined) {
-        fs.rmSync(file, { force: true });
-        this.appendEventUnlocked({
-          event: 'registry_pruned_closed_record',
-          recordId: parsed.recordId,
-          instanceId: parsed.instanceId,
-          source: parsed.source,
-          reason: 'closed_at_present',
-          action: 'deleted_record',
-        }, now);
+      const terminalAt = parsed.closedAt ?? parsed.exitedAt;
+      if (terminalAt !== undefined) {
+        if (now - terminalAt > TERMINAL_RECORD_RETENTION_MS) {
+          fs.rmSync(file, { force: true });
+          this.appendEventUnlocked({
+            event: 'registry_pruned_terminal_record',
+            recordId: parsed.recordId,
+            instanceId: parsed.instanceId,
+            source: parsed.source,
+            reason: 'terminal_retention_expired',
+            action: 'deleted_record',
+          }, now);
+        }
         continue;
       }
 
       if (parsed.bootId !== options.currentBootId) {
         this.cleanupRecord(options, parsed);
-        fs.rmSync(file, { force: true });
+        parsed.state = parsed.state === 'failed' ? 'failed' : 'exited';
+        parsed.exitedAt = now;
+        parsed.closedAt = now;
+        parsed.failureReason ??= 'Studio process belongs to a previous host boot.';
+        this.writeRecordUnlocked(parsed);
         this.appendEventUnlocked({
-          event: 'registry_pruned_previous_boot',
+          event: 'registry_marked_previous_boot_exited',
           recordId: parsed.recordId,
           instanceId: parsed.instanceId,
           source: parsed.source,
           reason: 'boot_id_changed',
-          action: 'deleted_record_and_cleaned_baseplate',
+          action: 'marked_exited_and_cleaned_baseplate',
         }, now);
         continue;
       }
 
       if (options.isProcessRunning && (parsed.nativeProcessId || parsed.spawnPid) && !options.isProcessRunning(parsed)) {
         this.cleanupRecord(options, parsed);
-        fs.rmSync(file, { force: true });
+        parsed.state = parsed.state === 'failed' ? 'failed' : 'exited';
+        parsed.exitedAt = now;
+        parsed.closedAt = now;
+        parsed.failureReason ??= parsed.instanceId
+          ? 'Studio process exited.'
+          : 'Studio process exited before the MCP plugin connected.';
+        this.writeRecordUnlocked(parsed);
         this.appendEventUnlocked({
-          event: 'registry_pruned_stale_process',
+          event: 'registry_marked_process_exited',
           recordId: parsed.recordId,
           instanceId: parsed.instanceId,
           source: parsed.source,
           reason: 'pid_not_running',
-          action: 'deleted_record_and_cleaned_baseplate',
+          action: 'marked_exited_and_cleaned_baseplate',
         }, now);
       }
     }

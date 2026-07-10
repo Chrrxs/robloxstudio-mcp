@@ -774,6 +774,7 @@ export class RobloxStudioTools {
     this.openCloudClient = new OpenCloudClient();
     this.cookieClient = new RobloxCookieClient();
     this.instanceManager = new StudioInstanceManager();
+    this.bridge.onInstanceRegistered((instance) => this._associateManagedEditConnection(instance));
   }
 
   private _textResult(body: Record<string, unknown>) {
@@ -2731,6 +2732,15 @@ export class RobloxStudioTools {
     return true;
   }
 
+  private _associateManagedEditConnection(instance: PublicPluginInstance): void {
+    if (instance.role !== 'edit') return;
+    const candidate = this.instanceManager.pendingLaunches()
+      .filter((record) => instance.connectedAt >= record.launchedAt - 1000)
+      .filter((record) => this._matchesManagedLaunch(record, instance))
+      .sort((a, b) => a.launchedAt - b.launchedAt)[0];
+    if (candidate) this.instanceManager.attachInstanceId(candidate, instance.instanceId);
+  }
+
   private async _deriveUniverseId(placeId: number): Promise<number> {
     const response = await fetch(`https://apis.roblox.com/universes/v1/places/${placeId}/universe`);
     if (!response.ok) {
@@ -2751,6 +2761,10 @@ export class RobloxStudioTools {
   ): Promise<PublicPluginInstance | undefined> {
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
+      this.instanceManager.refresh(record);
+      if (record.state === 'failed' || record.state === 'exited' || record.closedAt !== undefined) {
+        return undefined;
+      }
       const candidates = this.bridge.getPublicInstances()
         .filter((instance) => instance.role === 'edit')
         .filter((instance) => !beforeKeys.has(this._publicInstanceKey(instance)))
@@ -2765,14 +2779,27 @@ export class RobloxStudioTools {
   }
 
   private _managedStatus(record: ManagedStudioInstance): Record<string, unknown> {
+    this.instanceManager.refresh(record);
     const connected = record.instanceId
       ? this.bridge.getPublicInstances().filter((instance) => instance.instanceId === record.instanceId)
       : [];
     return {
+      launch_id: record.recordId,
       instance_id: record.instanceId,
+      managed: true,
+      state: record.state,
+      pid: record.nativeProcessId ?? record.spawnPid,
+      process_running: record.closedAt === undefined && record.exitedAt === undefined,
       source: record.source,
+      local_place_file: record.localPlaceFile,
       place_id: record.placeId,
       place_version: record.placeVersion,
+      launched_at: new Date(record.launchedAt).toISOString(),
+      connected_at: record.connectedAt ? new Date(record.connectedAt).toISOString() : undefined,
+      failed_at: record.failedAt ? new Date(record.failedAt).toISOString() : undefined,
+      exited_at: record.exitedAt ? new Date(record.exitedAt).toISOString() : undefined,
+      exit_code: record.exitCode,
+      failure_reason: record.failureReason,
       connected: connected.length > 0,
       roles: connected.map((instance) => instance.role).sort(),
     };
@@ -2786,6 +2813,11 @@ export class RobloxStudioTools {
   async manageInstance(request: Record<string, unknown>) {
     const action = request.action;
     const instance_id = typeof request.instance_id === 'string' ? request.instance_id : undefined;
+    const launch_id = typeof request.launch_id === 'string' ? request.launch_id : undefined;
+
+    if (instance_id && launch_id) {
+      throw new Error('manage_instance accepts only one of instance_id or launch_id.');
+    }
 
     if (
       action !== 'launch' &&
@@ -2820,18 +2852,24 @@ export class RobloxStudioTools {
     }
 
     if (action === 'status') {
+      if (launch_id) {
+        const record = this.instanceManager.getByLaunchId(launch_id);
+        if (!record) return this._textResult({ error: 'Launch is not managed.', launch_id });
+        return this._textResult(this._managedStatus(record));
+      }
       if (instance_id) {
         const record = this.instanceManager.get(instance_id);
         const connected = this.bridge.getPublicInstances().filter((instance) => instance.instanceId === instance_id);
         if (!record && connected.length === 0) {
           return this._textResult({ error: 'Instance is not connected or managed.', instance_id });
         }
+        if (record) return this._textResult(this._managedStatus(record));
         return this._textResult({
           instance_id,
-          managed: !!record,
-          source: record?.source,
-          place_id: record?.placeId ?? connected[0]?.placeId,
-          place_version: record?.placeVersion,
+          managed: false,
+          state: 'connected',
+          place_id: connected[0]?.placeId,
+          connected: true,
           roles: connected.map((instance) => instance.role).sort(),
         });
       }
@@ -2850,14 +2888,37 @@ export class RobloxStudioTools {
 
     if (action === 'close') {
       let record: ManagedStudioInstance | undefined;
+      if (launch_id) {
+        record = this.instanceManager.getByLaunchId(launch_id);
+        if (!record) return this._textResult({ error: 'Launch is not managed.', launch_id });
+        const connectedInstanceId = record.instanceId;
+        const closeResult = record.closedAt === undefined
+          ? this.instanceManager.close(record)
+          : { status: 'already_closed' as const };
+        if (connectedInstanceId) {
+          await this.bridge.unregisterInstanceIdEverywhere(connectedInstanceId);
+          await sleep(500);
+          await this.bridge.unregisterInstanceIdEverywhere(connectedInstanceId);
+        }
+        return this._textResult({
+          ...this._managedStatus(record),
+          message: closeResult.status === 'already_closed'
+            ? 'Studio instance was already closed.'
+            : 'Studio instance closed.',
+        });
+      }
       if (instance_id) {
+        const recordBeforeClose = this.instanceManager.get(instance_id);
         const managedClose = this.instanceManager.closeByInstanceId(instance_id);
         if (managedClose.status !== 'not_found') {
           await this.bridge.unregisterInstanceIdEverywhere(instance_id);
           await sleep(500);
           await this.bridge.unregisterInstanceIdEverywhere(instance_id);
+          const closedRecord = recordBeforeClose ?? (managedClose.launchId
+            ? this.instanceManager.getByLaunchId(managedClose.launchId)
+            : undefined);
           return this._textResult({
-            instance_id,
+            ...(closedRecord ? this._managedStatus(closedRecord) : { instance_id }),
             message: managedClose.status === 'already_closed'
               ? 'Studio instance was already closed.'
               : 'Studio instance closed.',
@@ -2907,7 +2968,7 @@ export class RobloxStudioTools {
         await this.bridge.unregisterInstanceIdEverywhere(record.instanceId);
       }
       return this._textResult({
-        instance_id: record.instanceId,
+        ...this._managedStatus(record),
         message: closeResult.status === 'already_closed'
           ? 'Studio instance was already closed.'
           : 'Studio instance closed.',
@@ -2953,27 +3014,37 @@ export class RobloxStudioTools {
       placeId,
       universeId,
       placeVersion,
+      connectionTimeoutMs: timeoutMs,
     });
 
     if (!waitForConnection) {
-      return this._textResult({ message: 'Studio launch requested.' });
+      return this._textResult({
+        ...this._managedStatus(record),
+        message: 'Studio launch requested.',
+      });
     }
 
     const connected = await this._waitForManagedEditConnection(record, beforeKeys, timeoutMs);
     if (!connected) {
-      try {
-        this.instanceManager.close(record);
-      } catch {
-        // Best effort cleanup; the useful error is the connection timeout.
+      if (record.state === 'launching') {
+        this.instanceManager.markFailed(record, 'Studio launched, but the MCP plugin did not connect before timeout.');
+      }
+      if (record.closedAt === undefined) {
+        try {
+          this.instanceManager.close(record);
+        } catch {
+          // Best effort cleanup; the lifecycle error remains the useful result.
+        }
       }
       return this._textResult({
-        error: 'Studio launched, but the MCP plugin did not connect before timeout.',
+        ...this._managedStatus(record),
+        error: record.failureReason ?? 'Studio launched, but the MCP plugin did not connect before timeout.',
       });
     }
 
     this.instanceManager.attachInstanceId(record, connected.instanceId);
     return this._textResult({
-      instance_id: connected.instanceId,
+      ...this._managedStatus(record),
       message: launchSource === 'place_revision'
         ? `Studio opened place revision ${placeVersion}.`
         : 'Studio opened.',

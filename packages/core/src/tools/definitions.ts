@@ -978,7 +978,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
   {
     name: 'manage_instance',
     category: 'write',
-    description: 'Launch, close, inspect, and find revisions for Studio instances. Use action="launch" with source="baseplate" for a blank place, or source="local_file" with local_place_file for a local place; neither uses place_id. Use action="list_place_versions" with place_id to retrieve version numbers through Open Cloud asset versions, then action="launch" with source="place_revision", place_id, and place_version to open an older revision. action="close" can close an MCP-managed instance or an explicitly connected edit instance by instance_id. action="launch" source="published_place" opens the latest published place and is blocked if that place_id is already connected; source="place_revision" is allowed because Studio opens explicit past revisions as anonymous local copies. Requires ROBLOX_OPEN_CLOUD_API_KEY with asset:read for list_place_versions.',
+    description: 'Launch, close, inspect, and find revisions for Studio instances. Every launch returns launch_id, native pid, source, and lifecycle state; status and close accept launch_id before the plugin connects and instance_id after association. Use action="launch" with source="baseplate" for a blank place, or source="local_file" with local_place_file for a local place; neither uses place_id. Use action="list_place_versions" with place_id to retrieve version numbers through Open Cloud asset versions, then action="launch" with source="place_revision", place_id, and place_version to open an older revision. action="launch" source="published_place" opens the latest published place and is blocked if that place_id is already connected; source="place_revision" is allowed because Studio opens explicit past revisions as anonymous local copies. Requires ROBLOX_OPEN_CLOUD_API_KEY with asset:read for list_place_versions.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -1006,11 +1006,11 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
         },
         wait_for_connection: {
           type: 'boolean',
-          description: 'For action="launch": wait until the MCP plugin connects and return instance_id (default true).'
+          description: 'For action="launch": wait until the MCP plugin connects and return instance_id (default true). false returns launch_id immediately and continues association/failure tracking asynchronously.'
         },
         timeout_ms: {
           type: 'number',
-          description: 'For action="launch": max milliseconds to wait for plugin connection (default 120000).'
+          description: 'For action="launch": max milliseconds for plugin connection (default 120000). The deadline also applies asynchronously when wait_for_connection=false.'
         },
         max_page_size: {
           type: 'number',
@@ -1022,7 +1022,11 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
         },
         instance_id: {
           type: 'string',
-          description: 'For action="close" or action="status": Studio instance to inspect or close. close accepts MCP-managed instances and explicitly connected edit instances.'
+          description: 'For action="close" or action="status": connected Studio instance to inspect or close. Mutually exclusive with launch_id.'
+        },
+        launch_id: {
+          type: 'string',
+          description: 'For action="close" or action="status": opaque identifier returned by launch. Works before plugin connection and for retained terminal launch status. Mutually exclusive with instance_id.'
         }
       },
       required: ['action']

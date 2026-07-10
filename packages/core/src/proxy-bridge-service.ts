@@ -1,4 +1,4 @@
-import { BridgeService, PluginInstance, PublicPluginInstance } from './bridge-service.js';
+import { BridgeService, PluginInstance, PublicPluginInstance, toPublic } from './bridge-service.js';
 import { v4 as uuidv4 } from 'uuid';
 
 export class ProxyBridgeService extends BridgeService {
@@ -40,7 +40,14 @@ export class ProxyBridgeService extends BridgeService {
       if (!res.ok) return;
       const body = (await res.json()) as { instances?: PluginInstance[] };
       if (Array.isArray(body.instances)) {
+        const previousKeys = new Set(this.cachedInstances.map((instance) =>
+          `${instance.pluginSessionId}\0${instance.instanceId}\0${instance.role}\0${instance.connectedAt}`,
+        ));
         this.cachedInstances = body.instances;
+        for (const instance of body.instances) {
+          const key = `${instance.pluginSessionId}\0${instance.instanceId}\0${instance.role}\0${instance.connectedAt}`;
+          if (!previousKeys.has(key)) this.notifyInstanceRegistered(toPublic(instance));
+        }
       }
     } catch {
       // Primary unreachable — keep the last-known list rather than

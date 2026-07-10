@@ -80,6 +80,8 @@ export interface PublicPluginInstance {
   connectedAt: number;
 }
 
+export type InstanceRegisteredListener = (instance: PublicPluginInstance) => void;
+
 export interface ResolveTargetInput {
   instance_id?: string;
   target?: string;
@@ -142,7 +144,34 @@ export class BridgeService {
   // Keyed by pluginSessionId (the per-plugin GUID).
   private instances: Map<string, PluginInstance> = new Map();
   private instanceAliases: Map<string, InstanceAlias> = new Map();
+  private instanceRegisteredListeners: Set<InstanceRegisteredListener> = new Set();
   private requestTimeout = 30000;
+
+  onInstanceRegistered(listener: InstanceRegisteredListener): () => void {
+    this.instanceRegisteredListeners.add(listener);
+    // A proxy may already have populated its peer cache before its tools
+    // subscribe. Replay the current view so lifecycle correlation cannot miss
+    // a connection solely because discovery won the subscription race.
+    for (const instance of this.getPublicInstances()) {
+      try {
+        listener(instance);
+      } catch {
+        // Observers must not disrupt bridge setup.
+      }
+    }
+    return () => this.instanceRegisteredListeners.delete(listener);
+  }
+
+  protected notifyInstanceRegistered(instance: PublicPluginInstance): void {
+    for (const listener of this.instanceRegisteredListeners) {
+      try {
+        listener(instance);
+      } catch {
+        // Registration is the transport boundary. A lifecycle observer must
+        // not reject an otherwise valid plugin connection.
+      }
+    }
+  }
 
   private canonicalInstanceId(instanceId: string, placeId?: number): string {
     return publishedInstanceId(placeId) ?? instanceId;
@@ -265,7 +294,7 @@ export class BridgeService {
       };
     }
 
-    this.instances.set(pluginSessionId, {
+    const registered: PluginInstance = {
       pluginSessionId,
       instanceId,
       role: assignedRole,
@@ -279,7 +308,10 @@ export class BridgeService {
       versionMismatch,
       lastActivity: Date.now(),
       connectedAt: prior?.connectedAt ?? Date.now(),
-    });
+    };
+    this.instances.set(pluginSessionId, registered);
+
+    this.notifyInstanceRegistered(toPublic(registered));
 
     return { ok: true, assignedRole, instanceId };
   }

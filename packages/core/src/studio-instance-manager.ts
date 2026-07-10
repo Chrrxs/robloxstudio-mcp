@@ -3,7 +3,12 @@ import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, realpat
 import { randomUUID } from 'crypto';
 import * as os from 'os';
 import * as path from 'path';
-import { ManagedInstanceRegistry, type ManagedInstanceRegistryRecord, type RegistrySweepOptions } from './managed-instance-registry.js';
+import {
+  ManagedInstanceRegistry,
+  type ManagedInstanceLifecycleState,
+  type ManagedInstanceRegistryRecord,
+  type RegistrySweepOptions,
+} from './managed-instance-registry.js';
 
 export type StudioLaunchSource = 'baseplate' | 'local_file' | 'published_place' | 'place_revision';
 
@@ -13,13 +18,17 @@ export interface StudioLaunchOptions {
   placeId?: number;
   universeId?: number;
   placeVersion?: number;
+  connectionTimeoutMs?: number;
 }
+
+export type StudioLaunchState = ManagedInstanceLifecycleState;
 
 export interface ManagedStudioInstance {
   recordId?: string;
   source: StudioLaunchSource;
   instanceId?: string;
   nativeProcessId?: number;
+  nativeProcessStartedAt?: string;
   spawnPid?: number;
   exe: string;
   args: string[];
@@ -28,6 +37,13 @@ export interface ManagedStudioInstance {
   placeVersion?: number;
   localPlaceFile?: string;
   launchedAt: number;
+  connectionDeadlineAt?: number;
+  state: StudioLaunchState;
+  connectedAt?: number;
+  failedAt?: number;
+  exitedAt?: number;
+  exitCode?: number;
+  failureReason?: string;
   closedAt?: number;
   ownerPid?: number;
   bootId?: string;
@@ -40,6 +56,7 @@ export interface StudioProcessInfo {
   Path?: string;
   MainWindowTitle?: string;
   CommandLine?: string;
+  StartTimeUtcFileTime?: string;
 }
 
 const BASEPLATE_TEMP_DIR = path.join(os.tmpdir(), 'robloxstudio-mcp-baseplates');
@@ -56,7 +73,11 @@ export interface ConnectedStudioInstance {
 
 type StudioChildProcess = {
   pid?: number;
+  nativePid?: number;
+  nativeStartedAt?: string;
   unref: () => void;
+  onExit?: (listener: (code: number | null, signal: NodeJS.Signals | null) => void) => void;
+  onError?: (listener: (error: Error) => void) => void;
 };
 
 export interface StudioProcessAdapter {
@@ -74,9 +95,9 @@ export interface StudioInstanceManagerOptions {
 }
 
 export type ManagedStudioCloseResult =
-  | { status: 'closed'; instanceId?: string }
-  | { status: 'already_closed'; instanceId?: string }
-  | { status: 'not_found'; instanceId?: string };
+  | { status: 'closed'; launchId?: string; instanceId?: string }
+  | { status: 'already_closed'; launchId?: string; instanceId?: string }
+  | { status: 'not_found'; launchId?: string; instanceId?: string };
 
 function run(command: string, args: string[], options: Record<string, unknown> = {}): string {
   return execFileSync(command, args, {
@@ -121,6 +142,70 @@ function toWslPath(windowsPath: string): string {
 function toStudioLaunchArg(arg: string): string {
   if (!isWsl() || !path.isAbsolute(arg) || !existsSync(arg)) return arg;
   return run('wslpath', ['-w', arg]);
+}
+
+function powershellStringLiteral(value: string): string {
+  return `'${value.replace(/'/g, "''")}'`;
+}
+
+// Implements the quoting rules consumed by CommandLineToArgvW. PowerShell's
+// ProcessStartInfo.Arguments is a single command-line string, so paths with
+// spaces and trailing backslashes must be escaped before Studio receives them.
+export function quoteWindowsCommandLineArg(value: string): string {
+  if (value.length > 0 && !/[\s"]/u.test(value)) return value;
+  let quoted = '"';
+  let backslashes = 0;
+  for (const char of value) {
+    if (char === '\\') {
+      backslashes += 1;
+      continue;
+    }
+    if (char === '"') {
+      quoted += '\\'.repeat(backslashes * 2 + 1) + '"';
+      backslashes = 0;
+      continue;
+    }
+    quoted += '\\'.repeat(backslashes) + char;
+    backslashes = 0;
+  }
+  return `${quoted}${'\\'.repeat(backslashes * 2)}"`;
+}
+
+export function buildWindowsStudioStartScript(exe: string, args: string[]): string {
+  const windowsExe = toStudioLaunchArg(exe);
+  const commandLine = args.map(quoteWindowsCommandLineArg).join(' ');
+  return [
+    '$psi = New-Object System.Diagnostics.ProcessStartInfo',
+    `$psi.FileName = ${powershellStringLiteral(windowsExe)}`,
+    `$psi.Arguments = ${powershellStringLiteral(commandLine)}`,
+    // With UseShellExecute=false, Studio inherits the synchronous
+    // powershell.exe invocation's stdout/stderr pipe handles under WSL. Those
+    // handles keep execFileSync waiting until Studio exits even though
+    // PowerShell already printed the PID. Shell execution prevents that
+    // inheritance while Process.Start still returns the native Studio PID.
+    '$psi.UseShellExecute = $true',
+    '$studio = [System.Diagnostics.Process]::Start($psi)',
+    'if ($null -eq $studio) { throw "Roblox Studio process did not start." }',
+  ].join('; ');
+}
+
+function spawnWindowsStudioFromWsl(exe: string, args: string[]): StudioChildProcess {
+  const script = buildWindowsStudioStartScript(exe, args);
+  const output = powershell(`${script}; [PSCustomObject]@{ pid = $studio.Id; started = $studio.StartTime.ToUniversalTime().ToFileTimeUtc().ToString() } | ConvertTo-Json -Compress`);
+  const parsed = JSON.parse(output) as { pid?: unknown; started?: unknown };
+  const nativePid = Number(parsed.pid);
+  const nativeStartedAt = typeof parsed.started === 'string' && /^\d+$/u.test(parsed.started)
+    ? parsed.started
+    : undefined;
+  if (!Number.isSafeInteger(nativePid) || nativePid <= 0) {
+    throw new Error(`Could not determine the Windows Studio process id from: ${nativePid}`);
+  }
+  return {
+    pid: nativePid,
+    nativePid,
+    nativeStartedAt,
+    unref: () => {},
+  };
 }
 
 function resolveEntrypointDir(): string | undefined {
@@ -284,7 +369,9 @@ export function listStudioProcesses(): StudioProcessInfo[] {
   try {
     out = powershell(
       'Get-Process RobloxStudioBeta -ErrorAction SilentlyContinue | ' +
-      'Select-Object Id,Name,Path,MainWindowTitle | ConvertTo-Json -Compress',
+      'ForEach-Object { [PSCustomObject]@{ Id = $_.Id; Name = $_.Name; Path = $_.Path; ' +
+      'MainWindowTitle = $_.MainWindowTitle; StartTimeUtcFileTime = $_.StartTime.ToUniversalTime().ToFileTimeUtc().ToString() } } | ' +
+      'ConvertTo-Json -Compress',
     );
   } catch {
     return [];
@@ -357,6 +444,8 @@ function basenameAny(filePath: string): string {
 export class StudioInstanceManager {
   private managedByInstanceId = new Map<string, ManagedStudioInstance>();
   private pending = new Set<ManagedStudioInstance>();
+  private monitors = new Map<string, ReturnType<typeof setInterval>>();
+  private connectionTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private readonly registry: ManagedInstanceRegistry;
   private readonly processAdapter: StudioProcessAdapter;
 
@@ -367,6 +456,9 @@ export class StudioInstanceManager {
 
   list(): ManagedStudioInstance[] {
     this.sweepRegistry();
+    for (const record of [...this.managedByInstanceId.values(), ...this.pending]) {
+      this.refresh(record);
+    }
     const records = [...this.managedByInstanceId.values(), ...this.pending];
     for (const registryRecord of this.registry.listOpen(this.registrySweepOptions())) {
       const record = this.fromRegistryRecord(registryRecord);
@@ -378,29 +470,101 @@ export class StudioInstanceManager {
       }
       records.push(record);
     }
-    return records.filter((instance, index, all) => all.indexOf(instance) === index);
+    return records
+      .filter((record) => record.closedAt === undefined)
+      .filter((instance, index, all) => all.indexOf(instance) === index);
   }
 
   get(instanceId: string): ManagedStudioInstance | undefined {
     this.sweepRegistry();
     const memoryRecord = this.managedByInstanceId.get(instanceId);
-    if (memoryRecord) return memoryRecord;
-    const registryRecord = this.registry.findOpenByInstanceId(instanceId, this.registrySweepOptions());
-    return registryRecord ? this.fromRegistryRecord(registryRecord) : undefined;
+    if (memoryRecord) return this.refresh(memoryRecord);
+    const registryRecord = this.registry.findAnyByInstanceId(instanceId);
+    return registryRecord ? this.refresh(this.fromRegistryRecord(registryRecord)) : undefined;
+  }
+
+  getByLaunchId(launchId: string): ManagedStudioInstance | undefined {
+    this.sweepRegistry();
+    const memoryRecord = [...this.managedByInstanceId.values(), ...this.pending]
+      .find((record) => record.recordId === launchId);
+    if (memoryRecord) return this.refresh(memoryRecord);
+    const registryRecord = this.registry.findAnyByRecordId(launchId, this.registrySweepOptions());
+    return registryRecord ? this.refresh(this.fromRegistryRecord(registryRecord)) : undefined;
+  }
+
+  pendingLaunches(): ManagedStudioInstance[] {
+    const now = Date.now();
+    const records = [...this.pending];
+    for (const registryRecord of this.registry.listOpenUnchecked()) {
+      if (registryRecord.bootId !== this.getCurrentBootId()) continue;
+      if (records.some((record) => record.recordId === registryRecord.recordId)) continue;
+      records.push(this.fromRegistryRecord(registryRecord));
+    }
+    return records
+      .filter((record) => record.instanceId === undefined)
+      .filter((record) => record.state === 'launching')
+      .filter((record) => record.connectionDeadlineAt === undefined || record.connectionDeadlineAt > now);
   }
 
   attachInstanceId(record: ManagedStudioInstance, instanceId: string) {
+    this.refresh(record);
+    if (record.closedAt !== undefined || record.state === 'failed' || record.state === 'exited') return;
+    if (record.instanceId && record.instanceId !== instanceId) return;
     record.instanceId = instanceId;
+    record.state = 'connected';
+    record.connectedAt = record.connectedAt ?? Date.now();
+    this.clearConnectionTimer(record);
     this.pending.delete(record);
     this.managedByInstanceId.set(instanceId, record);
-    if (record.recordId) {
-      this.registry.attachInstanceId(record.recordId, instanceId);
+    this.persist(record);
+  }
+
+  markFailed(record: ManagedStudioInstance, reason: string): ManagedStudioInstance {
+    this.refresh(record);
+    if (record.closedAt !== undefined || record.state !== 'launching') return record;
+    record.state = 'failed';
+    record.failedAt = Date.now();
+    record.failureReason = reason;
+    this.clearConnectionTimer(record);
+    this.persist(record);
+    return record;
+  }
+
+  refresh(record: ManagedStudioInstance): ManagedStudioInstance {
+    if (record.closedAt !== undefined) return record;
+
+    const processId = record.nativeProcessId ?? record.spawnPid;
+    const studioProcess = processId ? this.findProcessById(processId) : undefined;
+    if (processId && (!studioProcess || !this.verifyProcessForRecord(record, studioProcess))) {
+      return this.markProcessExited(
+        record,
+        undefined,
+        studioProcess
+          ? 'Studio process identity changed; the retained PID was not reused.'
+          : record.instanceId
+            ? 'Studio process exited.'
+            : 'Studio process exited before the MCP plugin connected.',
+      );
     }
+
+    if (
+      record.state === 'launching' &&
+      record.connectionDeadlineAt !== undefined &&
+      Date.now() >= record.connectionDeadlineAt
+    ) {
+      record.state = 'failed';
+      record.failedAt = Date.now();
+      record.failureReason = 'Studio launched, but the MCP plugin did not connect before timeout.';
+      this.clearConnectionTimer(record);
+      this.persist(record);
+    }
+    return record;
   }
 
   async launch(options: StudioLaunchOptions): Promise<ManagedStudioInstance> {
     this.sweepRegistry();
     const preparedOptions = prepareStudioLaunchOptions(options);
+    const bootId = this.getCurrentBootId();
     const before = new Set(this.listStudioProcesses().map((proc) => proc.Id));
     const exe = this.processAdapter.resolveStudioExe?.() ?? resolveStudioExe();
     const args = buildStudioLaunchArgs(preparedOptions).map(toStudioLaunchArg);
@@ -409,14 +573,32 @@ export class StudioInstanceManager {
       detached: true,
       stdio: 'ignore',
     };
-    const proc = this.processAdapter.spawnStudio
-      ? this.processAdapter.spawnStudio(exe, args, spawnOptions)
-      : spawn(exe, args, spawnOptions);
-    proc.unref();
+    let proc: StudioChildProcess;
+    try {
+      if (this.processAdapter.spawnStudio) {
+        proc = this.processAdapter.spawnStudio(exe, args, spawnOptions);
+      } else if (isWsl()) {
+        proc = spawnWindowsStudioFromWsl(exe, args);
+      } else {
+        const child = spawn(exe, args, spawnOptions);
+        proc = {
+          pid: child.pid,
+          nativePid: child.pid,
+          unref: () => child.unref(),
+          onExit: (listener) => { child.once('exit', listener); },
+          onError: (listener) => { child.once('error', listener); },
+        };
+      }
+    } catch (error) {
+      cleanupManagedBaseplateFiles({ source: preparedOptions.source, localPlaceFile: preparedOptions.localPlaceFile });
+      throw error;
+    }
 
     const record: ManagedStudioInstance = {
       recordId: randomUUID(),
       source: options.source,
+      nativeProcessId: proc.nativePid,
+      nativeProcessStartedAt: proc.nativeStartedAt,
       spawnPid: proc.pid,
       exe,
       args,
@@ -425,19 +607,60 @@ export class StudioInstanceManager {
       placeVersion: preparedOptions.placeVersion,
       localPlaceFile: preparedOptions.localPlaceFile,
       launchedAt: Date.now(),
+      connectionDeadlineAt: Date.now() + (options.connectionTimeoutMs ?? 120000),
+      state: 'launching',
       ownerPid: process.pid,
-      bootId: this.getCurrentBootId(),
+      bootId,
       deleteLocalPlaceFileOnClose: options.source === 'baseplate',
     };
     this.pending.add(record);
-    this.registry.upsert(this.toRegistryRecord(record));
+    try {
+      // Persist before returning control to the child-process lifecycle. Once
+      // Studio exists, callers must always have a durable launch_id with which
+      // to inspect or close it.
+      this.persist(record);
+    } catch (error) {
+      this.pending.delete(record);
+      const processId = record.nativeProcessId ?? record.spawnPid;
+      let stopError: unknown;
+      if (processId) {
+        try {
+          this.closeProcess(processId);
+        } catch (caught) {
+          stopError = caught;
+        }
+      }
+      cleanupManagedBaseplateFiles(record);
+      const detail = error instanceof Error ? error.message : String(error);
+      const cleanupDetail = stopError
+        ? ` The newly launched process could not be stopped: ${stopError instanceof Error ? stopError.message : String(stopError)}`
+        : '';
+      throw new Error(`Studio launched, but its managed-instance record could not be persisted: ${detail}.${cleanupDetail}`);
+    }
+    proc.unref();
+
+    proc.onExit?.((code, signal) => {
+      this.markProcessExited(
+        record,
+        code ?? undefined,
+        signal
+          ? `Studio process exited from signal ${signal}.`
+          : record.instanceId
+            ? 'Studio process exited.'
+            : 'Studio process exited before the MCP plugin connected.',
+      );
+    });
+    proc.onError?.((error) => {
+      this.markFailed(record, `Studio process failed to start: ${error.message}`);
+    });
 
     const deadline = Date.now() + 5000;
     while (Date.now() < deadline && record.nativeProcessId === undefined) {
       const created = this.listStudioProcesses().find((candidate) => !before.has(candidate.Id));
       if (created) {
         record.nativeProcessId = created.Id;
-        this.registry.upsert(this.toRegistryRecord(record));
+        record.nativeProcessStartedAt = created.StartTimeUtcFileTime;
+        this.persist(record);
         break;
       }
       await delay(250);
@@ -445,13 +668,33 @@ export class StudioInstanceManager {
 
     if (record.nativeProcessId === undefined && process.platform !== 'win32' && !isWsl()) {
       record.nativeProcessId = proc.pid;
-      this.registry.upsert(this.toRegistryRecord(record));
+      this.persist(record);
     }
+
+    if (record.nativeProcessId !== undefined && record.nativeProcessStartedAt === undefined) {
+      const nativeProcess = this.findProcessById(record.nativeProcessId);
+      if (nativeProcess?.StartTimeUtcFileTime !== undefined) {
+        record.nativeProcessStartedAt = nativeProcess.StartTimeUtcFileTime;
+        this.persist(record);
+      }
+    }
+
+    this.startMonitor(record);
 
     return record;
   }
 
+  closeByLaunchId(launchId: string): ManagedStudioCloseResult {
+    const record = this.getByLaunchId(launchId);
+    if (!record) return { status: 'not_found', launchId };
+    if (record.closedAt !== undefined) {
+      return { status: 'already_closed', launchId, instanceId: record.instanceId };
+    }
+    return this.close(record);
+  }
+
   closeByInstanceId(instanceId: string): ManagedStudioCloseResult {
+    this.sweepRegistry();
     const memoryRecord = this.managedByInstanceId.get(instanceId);
     if (memoryRecord) return this.close(memoryRecord);
 
@@ -463,36 +706,26 @@ export class StudioInstanceManager {
 
     if (registryRecord.closedAt !== undefined) {
       this.cleanupManagedRecord(registryRecord);
-      this.registry.delete(registryRecord.recordId);
       this.registry.logEvent({
         event: 'registry_close_already_stopped',
         recordId: registryRecord.recordId,
         instanceId: registryRecord.instanceId,
         source: registryRecord.source,
         reason: 'closed_at_present',
-        action: 'deleted_record_and_cleaned_baseplate',
+        action: 'retained_terminal_record_and_cleaned_baseplate',
       });
-      return { status: 'already_closed', instanceId };
-    }
-
-    if (registryRecord.bootId !== this.getCurrentBootId()) {
-      this.cleanupManagedRecord(registryRecord);
-      this.registry.delete(registryRecord.recordId);
-      this.registry.logEvent({
-        event: 'registry_pruned_previous_boot',
-        recordId: registryRecord.recordId,
-        instanceId: registryRecord.instanceId,
-        source: registryRecord.source,
-        reason: 'boot_id_changed',
-        action: 'deleted_record_and_cleaned_baseplate',
-      });
-      return { status: 'already_closed', instanceId };
+      return { status: 'already_closed', launchId: registryRecord.recordId, instanceId };
     }
 
     return this.close(this.fromRegistryRecord(registryRecord));
   }
 
   close(record: ManagedStudioInstance): ManagedStudioCloseResult {
+    this.stopMonitor(record);
+    this.refresh(record);
+    if (record.closedAt !== undefined) {
+      return { status: 'already_closed', launchId: record.recordId, instanceId: record.instanceId };
+    }
     const processId = record.nativeProcessId ?? record.spawnPid;
     if (!processId) {
       throw new Error(`Cannot close ${record.instanceId ?? 'Studio launch'} because its process id was not detected.`);
@@ -501,8 +734,7 @@ export class StudioInstanceManager {
     const studioProcess = this.findProcessById(processId);
     if (!studioProcess) {
       this.cleanupManagedRecord(record);
-      this.markClosedInMemory(record);
-      this.markClosedInRegistry(record);
+      this.markProcessExited(record, undefined, record.failureReason);
       this.registry.logEvent({
         event: 'registry_close_already_stopped',
         recordId: record.recordId,
@@ -511,7 +743,7 @@ export class StudioInstanceManager {
         reason: 'pid_not_running',
         action: 'marked_closed_and_cleaned_baseplate',
       });
-      return { status: 'already_closed', instanceId: record.instanceId };
+      return { status: 'already_closed', launchId: record.recordId, instanceId: record.instanceId };
     }
 
     if (!this.verifyProcessForRecord(record, studioProcess)) {
@@ -538,16 +770,18 @@ export class StudioInstanceManager {
         action: 'marked_closed_and_cleaned_baseplate',
       });
       this.cleanupManagedRecord(record);
-      this.markClosedInMemory(record);
-      this.markClosedInRegistry(record);
-      return { status: 'already_closed', instanceId: record.instanceId };
+      this.markProcessExited(record, undefined, record.failureReason);
+      return { status: 'already_closed', launchId: record.recordId, instanceId: record.instanceId };
     }
 
-    record.closedAt = Date.now();
+    const closedAt = Date.now();
+    record.closedAt = closedAt;
+    record.exitedAt = record.exitedAt ?? closedAt;
+    if (record.state !== 'failed') record.state = 'exited';
     this.cleanupManagedRecord(record);
     this.markClosedInMemory(record);
-    this.markClosedInRegistry(record);
-    return { status: 'closed', instanceId: record.instanceId };
+    this.persist(record);
+    return { status: 'closed', launchId: record.recordId, instanceId: record.instanceId };
   }
 
   closeConnectedInstance(instance: ConnectedStudioInstance) {
@@ -636,6 +870,13 @@ export class StudioInstanceManager {
     const processName = `${studioProcess.Name ?? ''} ${studioProcess.Path ?? ''}`.toLowerCase();
     if (!processName.includes('robloxstudio')) return false;
 
+    if (
+      record.nativeProcessStartedAt !== undefined &&
+      studioProcess.StartTimeUtcFileTime !== record.nativeProcessStartedAt
+    ) {
+      return false;
+    }
+
     const processId = record.nativeProcessId ?? record.spawnPid;
     if (record.spawnPid && record.spawnPid === processId && studioProcess.Id === processId) return true;
 
@@ -661,10 +902,61 @@ export class StudioInstanceManager {
     record.closedAt = record.closedAt ?? Date.now();
     if (record.instanceId) this.managedByInstanceId.delete(record.instanceId);
     this.pending.delete(record);
+    this.stopMonitor(record);
   }
 
-  private markClosedInRegistry(record: ManagedStudioInstance) {
-    if (record.recordId) this.registry.markClosed(record.recordId, record.closedAt ?? Date.now());
+  private markProcessExited(
+    record: ManagedStudioInstance,
+    exitCode?: number,
+    reason?: string,
+  ): ManagedStudioInstance {
+    if (record.closedAt !== undefined) return record;
+    const exitedAt = Date.now();
+    record.exitedAt = exitedAt;
+    record.closedAt = exitedAt;
+    if (record.state !== 'failed') record.state = 'exited';
+    if (exitCode !== undefined) record.exitCode = exitCode;
+    if (reason) record.failureReason = reason;
+    this.cleanupManagedRecord(record);
+    this.markClosedInMemory(record);
+    this.persist(record);
+    return record;
+  }
+
+  private startMonitor(record: ManagedStudioInstance) {
+    if (!record.recordId || record.closedAt !== undefined || this.monitors.has(record.recordId)) return;
+    if (record.state === 'launching' && record.connectionDeadlineAt !== undefined) {
+      const timeout = setTimeout(() => {
+        this.markFailed(record, 'Studio launched, but the MCP plugin did not connect before timeout.');
+      }, Math.max(0, record.connectionDeadlineAt - Date.now()));
+      if (typeof timeout === 'object' && 'unref' in timeout) timeout.unref();
+      this.connectionTimers.set(record.recordId, timeout);
+    }
+    const timer = setInterval(() => {
+      this.refresh(record);
+      if (record.closedAt !== undefined) this.stopMonitor(record);
+    }, 5000);
+    if (typeof timer === 'object' && 'unref' in timer) timer.unref();
+    this.monitors.set(record.recordId, timer);
+  }
+
+  private stopMonitor(record: ManagedStudioInstance) {
+    if (!record.recordId) return;
+    const timer = this.monitors.get(record.recordId);
+    if (timer) clearInterval(timer);
+    this.monitors.delete(record.recordId);
+    this.clearConnectionTimer(record);
+  }
+
+  private clearConnectionTimer(record: ManagedStudioInstance) {
+    if (!record.recordId) return;
+    const timer = this.connectionTimers.get(record.recordId);
+    if (timer) clearTimeout(timer);
+    this.connectionTimers.delete(record.recordId);
+  }
+
+  private persist(record: ManagedStudioInstance) {
+    this.registry.upsert(this.toRegistryRecord(record));
   }
 
   private toRegistryRecord(record: ManagedStudioInstance): ManagedInstanceRegistryRecord {
@@ -676,6 +968,7 @@ export class StudioInstanceManager {
       instanceId: record.instanceId,
       source: record.source,
       nativeProcessId: record.nativeProcessId,
+      nativeProcessStartedAt: record.nativeProcessStartedAt,
       spawnPid: record.spawnPid,
       exe: record.exe,
       args: record.args,
@@ -685,7 +978,13 @@ export class StudioInstanceManager {
       localPlaceFile: record.localPlaceFile,
       deleteLocalPlaceFileOnClose: record.deleteLocalPlaceFileOnClose,
       launchedAt: record.launchedAt,
-      attachedAt: record.instanceId ? Date.now() : undefined,
+      attachedAt: record.connectedAt,
+      connectionDeadlineAt: record.connectionDeadlineAt,
+      state: record.state,
+      failedAt: record.failedAt,
+      exitedAt: record.exitedAt,
+      exitCode: record.exitCode,
+      failureReason: record.failureReason,
       closedAt: record.closedAt,
       ownerPid: record.ownerPid,
       bootId: record.bootId,
@@ -693,11 +992,13 @@ export class StudioInstanceManager {
   }
 
   private fromRegistryRecord(record: ManagedInstanceRegistryRecord): ManagedStudioInstance {
+    const state = record.state ?? (record.closedAt !== undefined ? 'exited' : record.instanceId ? 'connected' : 'launching');
     return {
       recordId: record.recordId,
       source: record.source as StudioLaunchSource,
       instanceId: record.instanceId,
       nativeProcessId: record.nativeProcessId,
+      nativeProcessStartedAt: record.nativeProcessStartedAt,
       spawnPid: record.spawnPid,
       exe: record.exe,
       args: record.args,
@@ -706,6 +1007,13 @@ export class StudioInstanceManager {
       placeVersion: record.placeVersion,
       localPlaceFile: record.localPlaceFile,
       launchedAt: record.launchedAt,
+      connectionDeadlineAt: record.connectionDeadlineAt ?? (state === 'launching' ? record.launchedAt + 120000 : undefined),
+      state,
+      connectedAt: record.attachedAt,
+      failedAt: record.failedAt,
+      exitedAt: record.exitedAt,
+      exitCode: record.exitCode,
+      failureReason: record.failureReason,
       closedAt: record.closedAt,
       ownerPid: record.ownerPid,
       bootId: record.bootId,

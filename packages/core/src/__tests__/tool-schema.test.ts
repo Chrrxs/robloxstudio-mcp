@@ -304,6 +304,7 @@ describe('Tool schema compatibility', () => {
     expect(Object.keys(props).sort()).toEqual([
       'action',
       'instance_id',
+      'launch_id',
       'local_place_file',
       'max_page_size',
       'page_token',

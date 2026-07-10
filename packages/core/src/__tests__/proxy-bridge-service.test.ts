@@ -19,6 +19,55 @@ function publicInstance(instance: PluginInstance): PublicPluginInstance {
 }
 
 describe('ProxyBridgeService', () => {
+  test('replays cached peers and reports peers discovered after subscription', async () => {
+    const now = Date.now();
+    const instances: PluginInstance[] = [
+      {
+        pluginSessionId: 'edit-session',
+        instanceId: 'anon:proxy-place',
+        role: 'edit',
+        placeId: 0,
+        placeName: 'ProxyPlace',
+        dataModelName: 'ProxyPlace',
+        isRunning: false,
+        pluginVersion: '2.21.0',
+        pluginVariant: 'main',
+        serverVersion: '2.21.0',
+        versionMismatch: false,
+        lastActivity: now,
+        connectedAt: now,
+      },
+    ];
+    const fetchMock = jest.spyOn(globalThis, 'fetch').mockImplementation(async (input: any) => {
+      if (String(input) === 'http://primary/instances') {
+        return { ok: true, json: async () => ({ instances: instances.map((instance) => ({ ...instance })) }) } as any;
+      }
+      throw new Error(`unexpected fetch ${String(input)}`);
+    });
+
+    const proxy = new ProxyBridgeService('http://primary');
+    try {
+      await new Promise((resolve) => setImmediate(resolve));
+
+      const observed: string[] = [];
+      proxy.onInstanceRegistered((instance) => observed.push(`${instance.instanceId}:${instance.role}`));
+      expect(observed).toEqual(['anon:proxy-place:edit']);
+
+      instances.push({
+        ...instances[0],
+        pluginSessionId: 'server-session',
+        role: 'server',
+        isRunning: true,
+        connectedAt: now + 1,
+      });
+      await (proxy as any).refreshInstances();
+      expect(observed).toEqual(['anon:proxy-place:edit', 'anon:proxy-place:server']);
+    } finally {
+      proxy.stop();
+      fetchMock.mockRestore();
+    }
+  });
+
   test('unregisterInstanceIdEverywhere removes peers from the primary bridge', async () => {
     const now = Date.now();
     const instances: PluginInstance[] = [
