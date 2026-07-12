@@ -77,14 +77,21 @@ interface LogHistoryEntry {
 }
 
 function seedRuntimeHistory(): void {
-	if (!RunService.IsRunning()) return;
-
 	const [ok, history] = pcall(() => LogService.GetLogHistory() as LogHistoryEntry[]);
 	if (!ok) return;
+	const isEdit = !RunService.IsRunning();
+	// GetLogHistory timestamps and DateTime.now() share Unix time, while
+	// os.clock() is elapsed time for this Studio process. Their difference is
+	// therefore the process launch boundary. Edit-mode history is filtered to
+	// that boundary so startup errors from this launch are recovered without
+	// importing history left by an earlier Studio process.
+	const processStartedAt = nowSec() - os.clock();
 
 	for (const entry of history) {
 		if (!typeIs(entry.message, "string")) continue;
-		pushEntry(entry.message, entry.messageType, typeIs(entry.timestamp, "number") ? entry.timestamp : undefined);
+		const timestamp = typeIs(entry.timestamp, "number") ? entry.timestamp : undefined;
+		if (isEdit && (timestamp === undefined || timestamp < processStartedAt - 1)) continue;
+		pushEntry(entry.message, entry.messageType, timestamp);
 	}
 }
 
@@ -92,9 +99,9 @@ function install(): void {
 	if (installed) return;
 	if (!RunService.IsStudio()) return;
 	installed = true;
-	// Play peers can emit startup logs before the plugin finishes loading.
-	// Seed from per-DataModel LogHistory so get_runtime_logs can still see
-	// those early messages; skip edit mode to avoid stale prior-session logs.
+	// Every peer can emit startup logs before the plugin finishes loading.
+	// Seed from per-DataModel LogHistory so get_runtime_logs can still see them;
+	// edit history is bounded to the current Studio process above.
 	seedRuntimeHistory();
 	LogService.MessageOut.Connect((msg, t) => {
 		pushEntry(msg, t);

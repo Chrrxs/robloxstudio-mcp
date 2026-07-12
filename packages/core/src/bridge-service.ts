@@ -127,6 +127,11 @@ export function toPublic(inst: PluginInstance): PublicPluginInstance {
 }
 
 const STALE_INSTANCE_MS = 30000;
+// A healthy plugin polls twice per second. If a duplicate tuple has not polled
+// for this long, it is no longer routable and a new plugin load may take over.
+// This is deliberately much shorter than general stale cleanup so a Studio
+// close/relaunch does not strand the replacement plugin for 30-35 seconds.
+const DUPLICATE_TAKEOVER_MS = 3000;
 const INSTANCE_ALIAS_TTL_MS = 5 * 60 * 1000;
 
 interface InstanceAlias {
@@ -284,14 +289,20 @@ export class BridgeService {
       (i) => i.instanceId === instanceId && i.role === assignedRole && i.pluginSessionId !== pluginSessionId,
     );
     if (existing) {
-      return {
-        ok: false,
-        error: {
-          code: 'duplicate_instance_role',
-          message: `Another plugin is already registered as (${instanceId}, ${assignedRole}).`,
-          existing: toPublic(existing),
-        },
-      };
+      if (Date.now() - existing.lastActivity > DUPLICATE_TAKEOVER_MS) {
+        // Reject requests owned by the unresponsive process instead of
+        // redelivering a potentially mutating in-flight call to the new load.
+        this.unregisterInstance(existing.pluginSessionId);
+      } else {
+        return {
+          ok: false,
+          error: {
+            code: 'duplicate_instance_role',
+            message: `Another plugin is already registered as (${instanceId}, ${assignedRole}).`,
+            existing: toPublic(existing),
+          },
+        };
+      }
     }
 
     const registered: PluginInstance = {

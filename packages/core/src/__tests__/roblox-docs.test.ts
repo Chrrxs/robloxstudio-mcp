@@ -1,4 +1,4 @@
-import { extractSection, listSections, isDocCategory, docUrl } from '../roblox-docs.js';
+import { extractSection, getRobloxDoc, listSections, isDocCategory, docUrl } from '../roblox-docs.js';
 
 const SAMPLE = [
   '# Class: ProximityPrompt',
@@ -51,5 +51,34 @@ describe('roblox-docs markdown helpers', () => {
   test('docUrl builds the create.roblox.com markdown URL', () => {
     expect(docUrl('classes', 'ProximityPrompt'))
       .toBe('https://create.roblox.com/docs/reference/engine/classes/ProximityPrompt.md');
+  });
+
+  test('an unresolved lookup returns ranked recommendations from the official engine index', async () => {
+    const fetchMock = jest.spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce({ status: 404, ok: false } as Response)
+      .mockResolvedValueOnce({
+        status: 200,
+        ok: true,
+        text: async () => [
+          'reference/engine/classes/Camera',
+          'reference/engine/classes/ProximityPrompt',
+          'reference/engine/datatypes/CFrame',
+          'reference/engine/enums/KeyCode',
+        ].join('\n'),
+      } as Response);
+
+    try {
+      const result = await getRobloxDoc('classes', 'ProximtyPrompt');
+
+      expect(result.recommendations?.[0]).toMatchObject({
+        category: 'classes',
+        name: 'ProximityPrompt',
+      });
+      expect(result.content).toContain('No exact Roblox documentation page found');
+      expect(result.content).toContain('classes/ProximityPrompt');
+      expect(result.content).toContain('datatypes/CFrame');
+    } finally {
+      fetchMock.mockRestore();
+    }
   });
 });

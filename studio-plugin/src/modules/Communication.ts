@@ -53,11 +53,11 @@ function computeInstanceId(): string {
 }
 
 let assignedRole: string | undefined;
-let duplicateInstanceRole = false;
 let hasVersionMismatch = false;
 let lastVersionMismatchWarningKey: string | undefined;
 let lastReadyInstanceId: string | undefined;
 const readyFailureLogKeys = new Set<string>();
+let retryingDuplicateReady = false;
 
 // Cache the published place name from MarketplaceService:GetProductInfo so
 // /ready can carry a friendly identifier (e.g. "Natural Disasters") distinct
@@ -248,9 +248,12 @@ function ensureIdentityWatcher(conn: Connection): void {
 }
 
 function sendReady(conn: Connection): void {
-	if (duplicateInstanceRole) return; // stop retrying once the server has rejected us
 	const now = tick();
-	if (now - lastReadyPostAt < 2) return; // throttle to ≤1 /ready every 2s
+	// Normal identity refreshes stay conservatively throttled. Once a stale
+	// predecessor causes 409, retry once per second so takeover follows the
+	// server's short inactivity lease without another two seconds of jitter.
+	const readyInterval = retryingDuplicateReady ? 1 : 2;
+	if (now - lastReadyPostAt < readyInterval) return;
 	lastReadyPostAt = now;
 	const instanceId = computeInstanceId();
 	task.spawn(() => {
@@ -278,28 +281,39 @@ function sendReady(conn: Connection): void {
 		const readyRole = detectRole();
 		const readyLogKey = `${conn.serverUrl}|${instanceId}|${readyRole}`;
 		if (!readyOk) {
+			const shouldLog = !readyFailureLogKeys.has(readyLogKey);
 			readyFailureLogKeys.add(readyLogKey);
-			warn(`[robloxstudio-mcp] /ready failed for ${instanceId}/${readyRole}: ${HttpDiagnostics.formatRequestFailure(readyUrl, readyOk, readyResult)}`);
+			if (shouldLog) {
+				warn(`[robloxstudio-mcp] /ready failed for ${instanceId}/${readyRole}: ${HttpDiagnostics.formatRequestFailure(readyUrl, readyOk, readyResult)}`);
+			}
 			return;
 		}
 		if (!readyResult.Success) {
 			const reason = HttpDiagnostics.formatRequestFailure(readyUrl, true, readyResult);
+			const shouldLog = !readyFailureLogKeys.has(readyLogKey);
 			readyFailureLogKeys.add(readyLogKey);
-			// 409 = duplicate_instance_role. Surface in UI and stop polling.
+			// A predecessor can remain registered briefly when Studio exits before
+			// its asynchronous /disconnect completes. Keep polling and retrying
+			// /ready: the server will take us over once the predecessor has stopped
+			// polling, while a genuinely active duplicate continues to hold routing.
 			if (readyResult.StatusCode === 409) {
-				duplicateInstanceRole = true;
-				conn.isActive = false;
+				retryingDuplicateReady = true;
 				const ui = UI.getElements();
-				ui.statusLabel.Text = "Duplicate instance";
-				ui.statusLabel.TextColor3 = Color3.fromRGB(239, 68, 68);
+				ui.statusLabel.Text = "Waiting for previous instance";
+				ui.statusLabel.TextColor3 = Color3.fromRGB(245, 158, 11);
 				ui.detailStatusLabel.Text = reason;
-				ui.detailStatusLabel.TextColor3 = Color3.fromRGB(239, 68, 68);
-				warn(`[robloxstudio-mcp] /ready rejected for ${instanceId}/${readyRole}: ${reason}`);
+				ui.detailStatusLabel.TextColor3 = Color3.fromRGB(245, 158, 11);
+				if (shouldLog) {
+					warn(`[robloxstudio-mcp] /ready rejected for ${instanceId}/${readyRole}: ${reason}`);
+				}
 				return;
 			}
-			warn(`[robloxstudio-mcp] /ready rejected for ${instanceId}/${readyRole}: ${reason}`);
+			if (shouldLog) {
+				warn(`[robloxstudio-mcp] /ready rejected for ${instanceId}/${readyRole}: ${reason}`);
+			}
 			return;
 		}
+		retryingDuplicateReady = false;
 		const [parseOk, readyData] = pcall(
 			() => HttpService.JSONDecode(readyResult.Body) as ReadyResponse,
 		);

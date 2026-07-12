@@ -10,6 +10,7 @@ export const DOC_CATEGORIES = ['classes', 'enums', 'datatypes', 'libraries', 'gl
 export type DocCategory = (typeof DOC_CATEGORIES)[number];
 
 const DOCS_BASE_URL = 'https://create.roblox.com/docs/reference/engine';
+const DOCS_INDEX_URL = DOCS_BASE_URL;
 const FETCH_TIMEOUT_MS = 15_000;
 const CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 const NEGATIVE_CACHE_TTL_MS = 5 * 60 * 1000;
@@ -25,6 +26,7 @@ interface CacheEntry {
 }
 
 const cache = new Map<string, CacheEntry>();
+let catalogCache: { fetchedAt: number; pages: DocRecommendation[] } | undefined;
 
 export function isDocCategory(value: string): value is DocCategory {
   return (DOC_CATEGORIES as readonly string[]).includes(value);
@@ -62,6 +64,124 @@ export class DocNotFoundError extends Error {
     );
     this.name = 'DocNotFoundError';
   }
+}
+
+export interface DocRecommendation {
+  category: DocCategory;
+  name: string;
+  url: string;
+}
+
+function normalizeDocName(value: string): string {
+  return value.toLowerCase().replace(/[^a-z0-9]/g, '');
+}
+
+function queryNameVariants(value: string): string[] {
+  const parts = value.split(/[./:#\s]+/).filter(Boolean);
+  const variants = new Set<string>([normalizeDocName(value)]);
+  for (const part of parts) {
+    const normalized = normalizeDocName(part);
+    if (normalized && normalized !== 'enum') variants.add(normalized);
+  }
+  return Array.from(variants).filter(Boolean);
+}
+
+function editDistance(left: string, right: string): number {
+  const previous = Array.from({ length: right.length + 1 }, (_, index) => index);
+  for (let i = 1; i <= left.length; i++) {
+    let diagonal = previous[0];
+    previous[0] = i;
+    for (let j = 1; j <= right.length; j++) {
+      const above = previous[j];
+      previous[j] = Math.min(
+        previous[j] + 1,
+        previous[j - 1] + 1,
+        diagonal + (left[i - 1] === right[j - 1] ? 0 : 1),
+      );
+      diagonal = above;
+    }
+  }
+  return previous[right.length];
+}
+
+async function fetchDocCatalog(): Promise<DocRecommendation[]> {
+  if (catalogCache && Date.now() - catalogCache.fetchedAt <= CACHE_TTL_MS) {
+    return catalogCache.pages;
+  }
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+  let response: Response;
+  try {
+    response = await fetch(DOCS_INDEX_URL, {
+      signal: controller.signal,
+      headers: { Accept: 'text/html' },
+    });
+  } finally {
+    clearTimeout(timer);
+  }
+  if (!response.ok) {
+    throw new Error(`Failed to fetch Roblox docs index: HTTP ${response.status}`);
+  }
+
+  const html = await response.text();
+  const pages = new Map<string, DocRecommendation>();
+  const routePattern = /reference\/engine\/(classes|enums|datatypes|libraries|globals)\/([A-Za-z0-9_]+)/g;
+  for (const match of html.matchAll(routePattern)) {
+    const category = match[1] as DocCategory;
+    const name = match[2];
+    const key = `${category}/${name}`;
+    pages.set(key, { category, name, url: docUrl(category, name) });
+  }
+  const result = Array.from(pages.values());
+  if (result.length === 0) {
+    throw new Error('Roblox docs index did not contain any engine reference pages');
+  }
+  catalogCache = { fetchedAt: Date.now(), pages: result };
+  return result;
+}
+
+export async function recommendRobloxDocs(
+  category: DocCategory,
+  name: string,
+  limit = 5,
+): Promise<DocRecommendation[]> {
+  const variants = queryNameVariants(name);
+  const catalog = await fetchDocCatalog();
+  return catalog
+    .map((page) => {
+      const candidate = normalizeDocName(page.name);
+      const similarity = Math.max(...variants.map((variant) => {
+        if (variant === candidate) return 2;
+        const distance = editDistance(variant, candidate);
+        const ratio = 1 - distance / Math.max(variant.length, candidate.length, 1);
+        const prefixBonus = variant.startsWith(candidate) || candidate.startsWith(variant) ? 0.15 : 0;
+        const containsBonus = variant.includes(candidate) || candidate.includes(variant) ? 0.05 : 0;
+        return ratio + prefixBonus + containsBonus;
+      }));
+      return { page, score: similarity + (page.category === category ? 0.08 : 0) };
+    })
+    .sort((a, b) => b.score - a.score || a.page.name.localeCompare(b.page.name))
+    .slice(0, Math.max(1, limit))
+    .map(({ page }) => page);
+}
+
+function recommendationsMarkdown(
+  requestedCategory: DocCategory,
+  requestedName: string,
+  recommendations: DocRecommendation[],
+): string {
+  const lines = recommendations.map((page) =>
+    `- [${page.category}/${page.name}](${page.url}) — ` +
+    `retry with \`name="${page.name}", doc_type="${page.category}"\``,
+  );
+  return [
+    `# No exact Roblox documentation page found`,
+    '',
+    `The lookup \`${requestedCategory}/${requestedName}\` did not resolve. Recommended pages:`,
+    '',
+    ...lines,
+  ].join('\n');
 }
 
 export async function fetchRobloxDoc(category: DocCategory, name: string): Promise<string> {
@@ -142,6 +262,7 @@ export interface DocResult {
   content: string;
   truncated: boolean;
   sections: string[];
+  recommendations?: DocRecommendation[];
 }
 
 /**
@@ -150,7 +271,25 @@ export interface DocResult {
  * a specific section instead.
  */
 export async function getRobloxDoc(category: DocCategory, name: string, section?: string): Promise<DocResult> {
-  const markdown = await fetchRobloxDoc(category, name);
+  let markdown: string;
+  try {
+    markdown = await fetchRobloxDoc(category, name);
+  } catch (error) {
+    if (!(error instanceof DocNotFoundError)) throw error;
+    try {
+      const recommendations = await recommendRobloxDocs(category, name);
+      return {
+        content: recommendationsMarkdown(category, name, recommendations),
+        truncated: false,
+        sections: [],
+        recommendations,
+      };
+    } catch {
+      // Preserve the precise direct-lookup error if the recommendation index
+      // is temporarily unavailable.
+      throw error;
+    }
+  }
   const sections = listSections(markdown);
 
   if (section) {

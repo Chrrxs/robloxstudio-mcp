@@ -63,6 +63,19 @@ restores the original plugin files.
 RSMCP_E2E_CLOSE_ALL_STUDIO=1 npm run test:e2e:auto-install
 ```
 
+## Lifecycle regressions: fast relaunch and edit startup logs
+
+`tests/studio-lifecycle-regressions.mjs` launches the same unpublished local
+place twice with a persisted anonymous instance ID. It force-closes the first
+Studio process, guarantees that the replacement receives an initial duplicate
+409, and verifies automatic takeover and edit-tool routing. A temporary repro
+plugin also emits errors before the MCP plugin installs its log listener so the
+test can verify current-launch history seeding and prior-launch exclusion.
+
+```bash
+RSMCP_E2E_CLOSE_ALL_STUDIO=1 npm run test:e2e:lifecycle
+```
+
 The E2E targets published `@latest` first. If `@latest` does not yet include the
 new auto-install behavior, it falls back to a local packed tarball and prints
 `artifactSource: local-pack`. It requires port `58741` to be free and no Studio

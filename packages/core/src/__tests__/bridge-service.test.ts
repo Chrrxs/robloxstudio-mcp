@@ -241,6 +241,41 @@ describe('BridgeService', () => {
       expect(dup.error.existing.role).toBe('edit');
     });
 
+    test('fast relaunch takes over an inactive predecessor and rejects its pending requests', async () => {
+      register(bridge, { pluginSessionId: 'old-session', instanceId: 'anon:relaunch', role: 'edit' });
+      const pending = bridge.sendRequest('/api/test', { generation: 'old' }, 'anon:relaunch', 'edit');
+
+      jest.advanceTimersByTime(3_001);
+      const relaunched = bridge.registerInstance({
+        pluginSessionId: 'new-session',
+        instanceId: 'anon:relaunch',
+        role: 'edit',
+      });
+
+      expect(relaunched.ok).toBe(true);
+      expect(bridge.getInstanceBySessionId('old-session')).toBeUndefined();
+      expect(bridge.getInstanceBySessionId('new-session')).toBeDefined();
+      expect(bridge.getPendingRequest('anon:relaunch', 'edit')).toBeNull();
+      await expect(pending).rejects.toThrow(/disconnected/);
+    });
+
+    test('recent polling prevents an active duplicate from being taken over', () => {
+      register(bridge, { pluginSessionId: 'active-session', instanceId: 'anon:active', role: 'edit' });
+      jest.advanceTimersByTime(2_500);
+      bridge.updateInstanceActivity('active-session');
+      jest.advanceTimersByTime(2_500);
+
+      const duplicate = bridge.registerInstance({
+        pluginSessionId: 'duplicate-session',
+        instanceId: 'anon:active',
+        role: 'edit',
+      });
+
+      expect(duplicate.ok).toBe(false);
+      expect(bridge.getInstanceBySessionId('active-session')).toBeDefined();
+      expect(bridge.getInstanceBySessionId('duplicate-session')).toBeUndefined();
+    });
+
     test('rejects duplicate explicit client role within the same instance_id', () => {
       register(bridge, { pluginSessionId: 'p1', instanceId: 'place:1', role: 'client' });
       const dup = bridge.registerInstance({

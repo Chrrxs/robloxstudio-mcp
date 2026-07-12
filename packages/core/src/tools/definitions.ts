@@ -2641,7 +2641,7 @@ part(0,2,0,2,1,1,"b")`,
   {
     name: 'get_roblox_docs',
     category: 'read',
-    description: 'Fetch official Roblox engine API documentation as markdown from create.roblox.com. Call this BEFORE writing or editing code that uses an engine class, enum, datatype, or Luau library you are not fully certain about (e.g. ProximityPrompt, Enum.KeyCode, CFrame, TweenService) — the page includes the description, properties, methods, events, and code samples. Results are cached, so repeat lookups are cheap. Very large pages are truncated with a section index; pass section (e.g. "Properties", "Methods", "Events") to read one section in full.',
+    description: 'Fetch official Roblox engine API documentation as markdown from create.roblox.com. Call this BEFORE writing or editing code that uses an engine class, enum, datatype, or Luau library you are not fully certain about (e.g. ProximityPrompt, Enum.KeyCode, CFrame, TweenService) — the page includes the description, properties, methods, events, and code samples. Unresolved names return ranked recommendations from the official engine index, including pages in other doc categories. Results are cached, so repeat lookups are cheap. Very large pages are truncated with a section index; pass section (e.g. "Properties", "Methods", "Events") to read one section in full.',
     inputSchema: {
       type: 'object',
       properties: {
