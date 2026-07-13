@@ -197,14 +197,27 @@ function processRequest(request: RequestPayload): unknown {
 }
 
 function sendResponse(conn: Connection, requestId: string, responseData: unknown) {
-	pcall(() => {
-		HttpService.RequestAsync({
-			Url: `${conn.serverUrl}/response`,
-			Method: "POST",
-			Headers: { "Content-Type": "application/json" },
-			Body: HttpService.JSONEncode({ requestId, response: responseData }),
+	const responseUrl = `${conn.serverUrl}/response`;
+	const [encodeOk, encoded] = pcall(() => HttpService.JSONEncode({ requestId, response: responseData }));
+	const body = encodeOk
+		? encoded
+		: HttpService.JSONEncode({
+			requestId,
+			error: `Plugin response serialization failed: ${tostring(encoded)}`,
 		});
-	});
+	if (!encodeOk) {
+		warn(`[robloxstudio-mcp] Failed to serialize response ${requestId}: ${tostring(encoded)}`);
+	}
+
+	const [requestOk, requestResult] = pcall(() => HttpService.RequestAsync({
+		Url: responseUrl,
+		Method: "POST",
+		Headers: { "Content-Type": "application/json" },
+		Body: body,
+	}));
+	if (!requestOk || !requestResult.Success) {
+		warn(`[robloxstudio-mcp] Failed to deliver response ${requestId}: ${HttpDiagnostics.formatRequestFailure(responseUrl, requestOk, requestResult)}`);
+	}
 }
 
 function getConnectionStatus(): string {

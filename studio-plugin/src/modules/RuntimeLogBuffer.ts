@@ -46,6 +46,37 @@ function nowSec(): number {
 	return DateTime.now().UnixTimestampMillis / 1000;
 }
 
+// Studio occasionally exposes binary-bearing Output messages through
+// LogService (for example, plugin hydration diagnostics containing raw CSG
+// data). HttpService:JSONEncode rejects those strings outright. Preserve all
+// valid UTF-8 verbatim and make only malformed bytes JSON-safe and visible.
+function escapeInvalidUtf8(msg: string): string {
+	const [valid] = utf8.len(msg);
+	// Roblox currently returns nil (not the false declared by @rbxts/types)
+	// when it encounters a malformed sequence. A numeric result is the only
+	// portable success discriminator across both representations.
+	if (typeIs(valid, "number")) return msg;
+
+	const parts: string[] = [];
+	let cursor = 1;
+	while (cursor <= msg.size()) {
+		const [suffixValid, invalidPosition] = utf8.len(msg, cursor);
+		if (typeIs(suffixValid, "number")) {
+			parts.push(string.sub(msg, cursor));
+			break;
+		}
+		if (!typeIs(invalidPosition, "number")) break;
+
+		if (invalidPosition > cursor) {
+			parts.push(string.sub(msg, cursor, invalidPosition - 1));
+		}
+		const [invalidByte] = string.byte(msg, invalidPosition);
+		parts.push(string.format("\\x%02X", invalidByte));
+		cursor = invalidPosition + 1;
+	}
+	return parts.join("");
+}
+
 function dropOldestUntilFits(incomingBytes: number): void {
 	while (
 		entries.size() > 0 &&
@@ -58,13 +89,14 @@ function dropOldestUntilFits(incomingBytes: number): void {
 }
 
 function pushEntry(msg: string, t: Enum.MessageType, ts = nowSec()): void {
-	const bytes = msg.size();
+	const safeMessage = escapeInvalidUtf8(msg);
+	const bytes = safeMessage.size();
 	dropOldestUntilFits(bytes);
 	entries.push({
 		seq: nextSeq,
 		ts,
 		level: levelTag(t),
-		message: msg,
+		message: safeMessage,
 	});
 	nextSeq += 1;
 	totalBytes += bytes;

@@ -82,14 +82,17 @@ function lifecyclePlaceXml() {
 `;
 }
 
-function reproPluginXml(marker) {
+function reproPluginXml(marker, invalidUtf8 = false) {
+  const messageExpression = invalidUtf8
+    ? `${JSON.stringify(marker)} .. string.char(0xA3, 0xB7, 0xC7)`
+    : JSON.stringify(marker);
   return `<?xml version="1.0" encoding="utf-8"?>
 <roblox version="4">
   <Item class="Script" referent="0">
     <Properties>
       <string name="Name">RSMCP_EditHistoryRepro</string>
       <token name="RunContext">0</token>
-      <string name="Source"><![CDATA[error(${JSON.stringify(marker)}, 0)]]></string>
+      <string name="Source"><![CDATA[error(${messageExpression}, 0)]]></string>
     </Properties>
   </Item>
 </roblox>
@@ -136,17 +139,18 @@ function matchingEditSessions(body) {
   );
 }
 
-async function assertStartupMarker(client, marker, expectedCount) {
+async function assertLogMarker(client, marker, expectedCount, expectedLevel = 'ERR') {
   const logs = await client.callTool('get_runtime_logs', {
     instance_id: INSTANCE_ID,
     target: 'edit',
     filter: marker,
-  });
+  }, 5_000);
   const matches = (logs.entries ?? []).filter((entry) => entry.message.includes(marker));
   assert(matches.length === expectedCount, `${marker} appears ${expectedCount} time(s) in edit startup history`);
   if (expectedCount > 0) {
-    assert(matches.every((entry) => entry.level === 'ERR'), `${marker} preserves error level`);
+    assert(matches.every((entry) => entry.level === expectedLevel), `${marker} preserves ${expectedLevel} level`);
   }
+  return matches;
 }
 
 async function main() {
@@ -166,12 +170,13 @@ async function main() {
   const priorReproPlugin = existsSync(reproPlugin) ? readFileSync(reproPlugin) : undefined;
   const markerA = `[MCP-EDIT-HISTORY-E2E-A-${Date.now()}]`;
   const markerB = `[MCP-EDIT-HISTORY-E2E-B-${Date.now()}]`;
+  const liveInvalidMarker = `[MCP-LIVE-INVALID-UTF8-${Date.now()}]`;
   let client;
   let keepOldSessionAlive;
 
   try {
     writeFileSync(placeFile, lifecyclePlaceXml());
-    writeFileSync(reproPlugin, reproPluginXml(markerA));
+    writeFileSync(reproPlugin, reproPluginXml(markerA, true));
 
     client = new McpClient('studio-lifecycle-regressions', {
       command: 'node',
@@ -188,7 +193,11 @@ async function main() {
     const firstSessions = matchingEditSessions(await serverInstances());
     assert(firstSessions.length === 1, 'first launch has one edit registration');
     const firstSessionId = firstSessions[0].pluginSessionId;
-    await assertStartupMarker(client, markerA, 1);
+    const startupInvalidEntries = await assertLogMarker(client, markerA, 1);
+    assert(
+      startupInvalidEntries[0].message.includes(`${markerA}\\xA3\\xB7\\xC7`),
+      'edit startup history escapes malformed UTF-8 bytes without dropping the log message',
+    );
 
     // Force termination prevents plugin.Unloading from reliably completing
     // /disconnect, reproducing the stale-registration fast-relaunch race.
@@ -231,8 +240,31 @@ async function main() {
     });
     assert(routed.success === true && routed.returnValue === 'relaunch-ok', 'an edit tool call routes through the relaunched Studio process');
 
-    await assertStartupMarker(client, markerB, 1);
-    await assertStartupMarker(client, markerA, 0);
+    await assertLogMarker(client, markerB, 1);
+    await assertLogMarker(client, markerA, 0);
+
+    console.log('\n=== live malformed UTF-8 logs remain JSON-safe ===');
+    const scheduled = await client.callTool('execute_luau', {
+      instance_id: INSTANCE_ID,
+      target: 'edit',
+      code: `task.delay(0.25, function() warn(${JSON.stringify(liveInvalidMarker)} .. string.char(0xA3, 0xB7, 0xC7)) end); return "scheduled"`,
+    });
+    assert(scheduled.success === true && scheduled.returnValue === 'scheduled', 'malformed live log is scheduled after execute_luau responds');
+    await delay(500);
+    const unfiltered = await client.callTool('get_runtime_logs', {
+      instance_id: INSTANCE_ID,
+      target: 'edit',
+      tail: 50,
+    }, 5_000);
+    assert(
+      unfiltered.entries?.some((entry) => entry.message.includes(`${liveInvalidMarker}\\xA3\\xB7\\xC7`)),
+      'original unfiltered tail=50 timeout reproduction returns the escaped malformed log',
+    );
+    const liveInvalidEntries = await assertLogMarker(client, liveInvalidMarker, 1, 'WARN');
+    assert(
+      liveInvalidEntries[0].message.includes(`${liveInvalidMarker}\\xA3\\xB7\\xC7`),
+      'live MessageOut capture escapes malformed UTF-8 bytes without dropping the log message',
+    );
     console.log('\n✅ Studio lifecycle regressions PASSED');
   } finally {
     if (keepOldSessionAlive) clearInterval(keepOldSessionAlive);
