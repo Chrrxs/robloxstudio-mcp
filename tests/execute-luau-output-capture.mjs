@@ -10,10 +10,12 @@
 // Regression test for the execute_luau output-capture bug fixed in v2.11.3.
 
 import { McpClient, runTest, assert, assertContains, startPlaytestAndWait, safeStopPlaytest } from './lib/mcp-client.mjs';
+import { setTimeout as delay } from 'node:timers/promises';
 
 const M1 = 'OUTPUT_PRINT_a1';
 const M2 = 'OUTPUT_WARN_b2';
 const M3 = 'OUTPUT_BASELINE_c3';
+const M4 = 'STRUCTURED_LOG_CONTEXT_d4';
 
 await runTest('execute_luau target=server captures print/warn output', async ({ track }) => {
   const client = track(new McpClient('A'));
@@ -53,6 +55,29 @@ await runTest('execute_luau target=server captures print/warn output', async ({ 
     const output3 = Array.isArray(r3.output) ? r3.output : [];
     assertContains(JSON.stringify(output3), M3,
       'edit baseline: print captured (sanity)');
+
+    // Case 4: LogService structured context survives the plugin buffer and
+    // MCP response as optional entry.data.
+    const r4 = await client.callTool('execute_luau', {
+      target: 'server',
+      code: `game:GetService("LogService"):Info("${M4}", { durationMilliseconds = 0.0037, moduleName = "MenuController", rank = 13 })\nreturn "done"`,
+    });
+    assert(r4.success === true, 'structured LogService output succeeds');
+    await delay(100);
+
+    const logs = await client.callTool('get_runtime_logs', {
+      target: 'server',
+      filter: M4,
+      tail: 10,
+    });
+    const structured = (logs.entries ?? []).find((entry) => entry.message.includes(M4));
+    assert(structured !== undefined, 'get_runtime_logs returns the structured log entry');
+    assert(structured.data?.durationMilliseconds === 0.0037,
+      'structured log data preserves durationMilliseconds');
+    assert(structured.data?.moduleName === 'MenuController',
+      'structured log data preserves moduleName');
+    assert(structured.data?.rank === 13,
+      'structured log data preserves rank');
   } finally {
     await safeStopPlaytest(client);
   }

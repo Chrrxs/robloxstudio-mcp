@@ -24,6 +24,7 @@ interface RuntimeLogEntry {
 	ts: number; // wall-clock seconds via DateTime, coherent across peers
 	level: LogLevel;
 	message: string;
+	data?: Record<string, unknown>;
 }
 
 const MAX_BYTES = 64 * 1024;
@@ -88,7 +89,12 @@ function dropOldestUntilFits(incomingBytes: number): void {
 	}
 }
 
-function pushEntry(msg: string, t: Enum.MessageType, ts = nowSec()): void {
+function pushEntry(
+	msg: string,
+	t: Enum.MessageType,
+	ts = nowSec(),
+	data?: Record<string, unknown>,
+): void {
 	const safeMessage = escapeInvalidUtf8(msg);
 	const bytes = safeMessage.size();
 	dropOldestUntilFits(bytes);
@@ -97,6 +103,7 @@ function pushEntry(msg: string, t: Enum.MessageType, ts = nowSec()): void {
 		ts,
 		level: levelTag(t),
 		message: safeMessage,
+		data,
 	});
 	nextSeq += 1;
 	totalBytes += bytes;
@@ -135,8 +142,8 @@ function install(): void {
 	// Seed from per-DataModel LogHistory so get_runtime_logs can still see them;
 	// edit history is bounded to the current Studio process above.
 	seedRuntimeHistory();
-	LogService.MessageOut.Connect((msg, t) => {
-		pushEntry(msg, t);
+	LogService.MessageOut.Connect((msg, t, context?: Record<string, unknown>) => {
+		pushEntry(msg, t, undefined, context);
 	});
 }
 

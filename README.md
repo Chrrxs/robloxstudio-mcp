@@ -11,7 +11,7 @@
 **Runtime debugging**
 - `eval_server_runtime` / `eval_client_runtime`: run Luau in the live game VM on the server or a specific client, sharing the same `require` cache as your scripts. Inspect `MatchService.activeMatches` mid-match.
 - `breakpoints`: log breakpoints that instrument live code without pausing the playtest.
-- `get_runtime_logs`: buffered log capture per peer (`edit`, `server`, `client-N`), including boot-time prints.
+- `get_runtime_logs`: buffered log capture per peer (`edit`, `server`, `client-N`), including boot-time prints and optional structured `data` on live `LogService` entries.
 
 **Playtest automation**
 - `solo_playtest` / `multiplayer_playtest`: start, inspect, and stop playtests, including multi-client sessions.

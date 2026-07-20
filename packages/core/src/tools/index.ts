@@ -2467,7 +2467,15 @@ export class RobloxStudioTools {
       nextSince?: number;
       error?: string;
     };
-    type Entry = { seq: number; ts: number; level: string; message: string; capturedBy?: string; peer?: string };
+    type Entry = {
+      seq: number;
+      ts: number;
+      level: string;
+      message: string;
+      data?: Record<string, unknown>;
+      capturedBy?: string;
+      peer?: string;
+    };
     const originPeerReliable = targets.length > 0
       ? await this._isMultiplayerTestRunning(targets[0].targetInstanceId)
       : false;
