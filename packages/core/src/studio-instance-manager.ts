@@ -12,6 +12,11 @@ import {
 
 export type StudioLaunchSource = 'baseplate' | 'local_file' | 'published_place' | 'place_revision';
 
+export interface StudioProcessEnvironmentPatch {
+  set?: Record<string, string>;
+  remove?: string[];
+}
+
 export interface StudioLaunchOptions {
   source: StudioLaunchSource;
   localPlaceFile?: string;
@@ -19,6 +24,8 @@ export interface StudioLaunchOptions {
   universeId?: number;
   placeVersion?: number;
   connectionTimeoutMs?: number;
+  studioExecutable?: string;
+  processEnvironment?: StudioProcessEnvironmentPatch;
 }
 
 export type StudioLaunchState = ManagedInstanceLifecycleState;
@@ -148,6 +155,73 @@ function powershellStringLiteral(value: string): string {
   return `'${value.replace(/'/g, "''")}'`;
 }
 
+const ENVIRONMENT_VARIABLE_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/u;
+
+export function parseStudioProcessEnvironmentPatch(value: unknown): StudioProcessEnvironmentPatch | undefined {
+  if (value === undefined) return undefined;
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error('process_environment must be an object when provided.');
+  }
+
+  const raw = value as Record<string, unknown>;
+  const unsupported = Object.keys(raw).filter((key) => key !== 'set' && key !== 'remove');
+  if (unsupported.length > 0) {
+    throw new Error(`process_environment contains unsupported field(s): ${unsupported.join(', ')}.`);
+  }
+
+  let set: Record<string, string> | undefined;
+  if (raw.set !== undefined) {
+    if (raw.set === null || typeof raw.set !== 'object' || Array.isArray(raw.set)) {
+      throw new Error('process_environment.set must be an object mapping names to string values.');
+    }
+    set = {};
+    for (const [name, setting] of Object.entries(raw.set as Record<string, unknown>)) {
+      if (!ENVIRONMENT_VARIABLE_NAME.test(name)) {
+        throw new Error(`Invalid process environment variable name "${name}".`);
+      }
+      if (typeof setting !== 'string') {
+        throw new Error(`process_environment.set.${name} must be a string.`);
+      }
+      if (setting.includes('\0')) {
+        throw new Error(`process_environment.set.${name} must not contain a null character.`);
+      }
+      set[name] = setting;
+    }
+  }
+
+  let remove: string[] | undefined;
+  if (raw.remove !== undefined) {
+    if (!Array.isArray(raw.remove) || raw.remove.some((name) => typeof name !== 'string')) {
+      throw new Error('process_environment.remove must be an array of environment variable names.');
+    }
+    remove = [...new Set(raw.remove as string[])];
+    for (const name of remove) {
+      if (!ENVIRONMENT_VARIABLE_NAME.test(name)) {
+        throw new Error(`Invalid process environment variable name "${name}".`);
+      }
+    }
+  }
+
+  return { set, remove };
+}
+
+function patchedProcessEnvironment(patch: StudioProcessEnvironmentPatch): NodeJS.ProcessEnv {
+  const environment = { ...process.env };
+  for (const name of patch.remove ?? []) delete environment[name];
+  for (const [name, value] of Object.entries(patch.set ?? {})) environment[name] = value;
+  return environment;
+}
+
+function powershellEnvironmentPatchStatements(patch: StudioProcessEnvironmentPatch): string[] {
+  const target = '[EnvironmentVariableTarget]::Process';
+  return [
+    ...(patch.remove ?? []).map((name) =>
+      `[Environment]::SetEnvironmentVariable(${powershellStringLiteral(name)}, $null, ${target})`),
+    ...Object.entries(patch.set ?? {}).map(([name, value]) =>
+      `[Environment]::SetEnvironmentVariable(${powershellStringLiteral(name)}, ${powershellStringLiteral(value)}, ${target})`),
+  ];
+}
+
 // Implements the quoting rules consumed by CommandLineToArgvW. PowerShell's
 // ProcessStartInfo.Arguments is a single command-line string, so paths with
 // spaces and trailing backslashes must be escaped before Studio receives them.
@@ -171,10 +245,16 @@ export function quoteWindowsCommandLineArg(value: string): string {
   return `${quoted}${'\\'.repeat(backslashes * 2)}"`;
 }
 
-export function buildWindowsStudioStartScript(exe: string, args: string[]): string {
+export function buildWindowsStudioStartScript(
+  exe: string,
+  args: string[],
+  processEnvironment?: StudioProcessEnvironmentPatch,
+): string {
+  const environmentPatch = parseStudioProcessEnvironmentPatch(processEnvironment);
   const windowsExe = toStudioLaunchArg(exe);
   const commandLine = args.map(quoteWindowsCommandLineArg).join(' ');
   return [
+    ...(environmentPatch ? powershellEnvironmentPatchStatements(environmentPatch) : []),
     '$psi = New-Object System.Diagnostics.ProcessStartInfo',
     `$psi.FileName = ${powershellStringLiteral(windowsExe)}`,
     `$psi.Arguments = ${powershellStringLiteral(commandLine)}`,
@@ -189,8 +269,12 @@ export function buildWindowsStudioStartScript(exe: string, args: string[]): stri
   ].join('; ');
 }
 
-function spawnWindowsStudioFromWsl(exe: string, args: string[]): StudioChildProcess {
-  const script = buildWindowsStudioStartScript(exe, args);
+function spawnWindowsStudioFromWsl(
+  exe: string,
+  args: string[],
+  processEnvironment?: StudioProcessEnvironmentPatch,
+): StudioChildProcess {
+  const script = buildWindowsStudioStartScript(exe, args, processEnvironment);
   const output = powershell(`${script}; [PSCustomObject]@{ pid = $studio.Id; started = $studio.StartTime.ToUniversalTime().ToFileTimeUtc().ToString() } | ConvertTo-Json -Compress`);
   const parsed = JSON.parse(output) as { pid?: unknown; started?: unknown };
   const nativePid = Number(parsed.pid);
@@ -563,22 +647,32 @@ export class StudioInstanceManager {
 
   async launch(options: StudioLaunchOptions): Promise<ManagedStudioInstance> {
     this.sweepRegistry();
+    const processEnvironment = parseStudioProcessEnvironmentPatch(options.processEnvironment);
+    if (
+      options.studioExecutable !== undefined &&
+      (typeof options.studioExecutable !== 'string' ||
+        options.studioExecutable.length === 0 ||
+        options.studioExecutable.includes('\0'))
+    ) {
+      throw new Error('studio_executable must be a non-empty string without null characters.');
+    }
     const preparedOptions = prepareStudioLaunchOptions(options);
     const bootId = this.getCurrentBootId();
     const before = new Set(this.listStudioProcesses().map((proc) => proc.Id));
-    const exe = this.processAdapter.resolveStudioExe?.() ?? resolveStudioExe();
+    const exe = preparedOptions.studioExecutable ?? this.processAdapter.resolveStudioExe?.() ?? resolveStudioExe();
     const args = buildStudioLaunchArgs(preparedOptions).map(toStudioLaunchArg);
     const spawnOptions: Parameters<typeof spawn>[2] = {
       cwd: isWsl() && existsSync('/mnt/c/Windows') ? '/mnt/c/Windows' : process.cwd(),
       detached: true,
       stdio: 'ignore',
+      ...(processEnvironment ? { env: patchedProcessEnvironment(processEnvironment) } : {}),
     };
     let proc: StudioChildProcess;
     try {
       if (this.processAdapter.spawnStudio) {
         proc = this.processAdapter.spawnStudio(exe, args, spawnOptions);
       } else if (isWsl()) {
-        proc = spawnWindowsStudioFromWsl(exe, args);
+        proc = spawnWindowsStudioFromWsl(exe, args, processEnvironment);
       } else {
         const child = spawn(exe, args, spawnOptions);
         proc = {

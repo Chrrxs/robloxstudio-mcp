@@ -3,7 +3,12 @@ import { BridgeService, RoutingFailure, type PublicPluginInstance } from '../bri
 import { runBuildExecutor } from './build-executor.js';
 import { OpenCloudClient } from '../opencloud-client.js';
 import { RobloxCookieClient } from '../roblox-cookie-client.js';
-import { StudioInstanceManager, type ManagedStudioInstance, type StudioLaunchSource } from '../studio-instance-manager.js';
+import {
+  parseStudioProcessEnvironmentPatch,
+  StudioInstanceManager,
+  type ManagedStudioInstance,
+  type StudioLaunchSource,
+} from '../studio-instance-manager.js';
 import { decodeImagePathToRgba, decodePngToRgba } from '../image-decode.js';
 import { DOC_CATEGORIES, getRobloxDoc, isDocCategory } from '../roblox-docs.js';
 import { findBuiltInStudioSkill, loadBuiltInStudioSkills } from '../studio-skills.js';
@@ -2959,6 +2964,7 @@ export class RobloxStudioTools {
         }
         return this._textResult({
           ...this._managedStatus(record),
+          close_status: closeResult.status,
           message: closeResult.status === 'already_closed'
             ? 'Studio instance was already closed.'
             : 'Studio instance closed.',
@@ -2976,6 +2982,7 @@ export class RobloxStudioTools {
             : undefined);
           return this._textResult({
             ...(closedRecord ? this._managedStatus(closedRecord) : { instance_id }),
+            close_status: managedClose.status,
             message: managedClose.status === 'already_closed'
               ? 'Studio instance was already closed.'
               : 'Studio instance closed.',
@@ -3002,6 +3009,7 @@ export class RobloxStudioTools {
         await this.bridge.unregisterInstanceIdEverywhere(instance_id);
         return this._textResult({
           instance_id,
+          close_status: 'closed',
           message: 'Studio instance closed.',
         });
       } else {
@@ -3026,6 +3034,7 @@ export class RobloxStudioTools {
       }
       return this._textResult({
         ...this._managedStatus(record),
+        close_status: closeResult.status,
         message: closeResult.status === 'already_closed'
           ? 'Studio instance was already closed.'
           : 'Studio instance closed.',
@@ -3050,6 +3059,14 @@ export class RobloxStudioTools {
       ? this._positiveInteger(request.place_version, 'place_version')
       : undefined;
     const localPlaceFile = typeof request.local_place_file === 'string' ? request.local_place_file : undefined;
+    let studioExecutable: string | undefined;
+    if (request.studio_executable !== undefined) {
+      if (typeof request.studio_executable !== 'string' || request.studio_executable.length === 0) {
+        throw new Error('studio_executable must be a non-empty string when provided.');
+      }
+      studioExecutable = request.studio_executable;
+    }
+    const processEnvironment = parseStudioProcessEnvironmentPatch(request.process_environment);
 
     if (launchSource === 'published_place' && placeId !== undefined && this._isLatestPublishedPlaceOpen(placeId)) {
       return this._textResult({
@@ -3072,6 +3089,8 @@ export class RobloxStudioTools {
       universeId,
       placeVersion,
       connectionTimeoutMs: timeoutMs,
+      studioExecutable,
+      processEnvironment,
     });
 
     if (!waitForConnection) {

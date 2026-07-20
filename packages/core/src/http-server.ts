@@ -230,6 +230,7 @@ export const TOOL_HANDLERS: Record<string, ToolHandler> = {
 
 export function createHttpServer(tools: RobloxStudioTools, bridge: BridgeService, allowedTools?: Set<string>, serverConfig?: StreamableHttpConfig, security?: HttpSecurityOptions) {
   const app = express();
+  const studioLifecycleCallable = !allowedTools || allowedTools.has('manage_instance');
   let mcpServerActive = false;
   let lastMCPActivity = 0;
   let mcpServerStartTime = 0;
@@ -334,8 +335,15 @@ export function createHttpServer(tools: RobloxStudioTools, bridge: BridgeService
     res.json({
       status: 'ok',
       service: 'robloxstudio-mcp',
+      serverName: serverConfig?.name ?? 'robloxstudio-mcp',
       version: serverConfig?.version,
       serverVersion: serverConfig?.version,
+      capabilities: studioLifecycleCallable ? {
+        studioLifecycle: {
+          protocolVersion: 1,
+          endpoint: '/mcp/manage_instance',
+        },
+      } : {},
       pluginConnected: instances.length > 0,
       instanceCount: instances.length,
       instances: publicInstances,

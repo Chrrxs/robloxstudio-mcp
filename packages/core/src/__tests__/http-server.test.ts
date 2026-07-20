@@ -35,9 +35,30 @@ describe('HTTP Server', () => {
       expect(response.body).toMatchObject({
         status: 'ok',
         service: 'robloxstudio-mcp',
+        serverName: 'robloxstudio-mcp',
+        capabilities: {
+          studioLifecycle: {
+            protocolVersion: 1,
+            endpoint: '/mcp/manage_instance',
+          },
+        },
         pluginConnected: false,
         mcpServerActive: false,
       });
+    });
+
+    test('advertises Studio lifecycle only when manage_instance is callable', async () => {
+      const inspectorApp = createHttpServer(
+        tools,
+        bridge,
+        new Set(['get_file_tree']),
+        { name: 'robloxstudio-mcp-inspector', version: '2.0.0', tools: [] },
+      );
+
+      const response = await request(inspectorApp).get('/health').expect(200);
+      expect(response.body.serverName).toBe('robloxstudio-mcp-inspector');
+      expect(response.body.capabilities.studioLifecycle).toBeUndefined();
+      await request(inspectorApp).post('/mcp/manage_instance').send({ action: 'status' }).expect(404);
     });
   });
 

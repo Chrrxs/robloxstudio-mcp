@@ -324,10 +324,27 @@ describe('Tool schema compatibility', () => {
       'page_token',
       'place_id',
       'place_version',
+      'process_environment',
       'source',
+      'studio_executable',
       'timeout_ms',
       'wait_for_connection',
     ].sort());
+    expect(props.studio_executable).toMatchObject({ type: 'string' });
+    expect(props.process_environment).toMatchObject({
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        set: {
+          type: 'object',
+          additionalProperties: { type: 'string' },
+        },
+        remove: {
+          type: 'array',
+          items: { type: 'string' },
+        },
+      },
+    });
     expect(props.universe_id).toBeUndefined();
     expect(schema.required).toEqual(['action']);
     expect(tool!.description).toContain('list_place_versions');

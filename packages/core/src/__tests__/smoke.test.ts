@@ -4,7 +4,7 @@ import { RobloxStudioTools } from '../tools/index.js';
 import { buildStudioLaunchArgs, buildWindowsStudioStartScript, cleanupManagedBaseplateFiles, quoteWindowsCommandLineArg, StudioInstanceManager, sweepStaleBaseplateFiles } from '../studio-instance-manager.js';
 import { ManagedInstanceRegistry } from '../managed-instance-registry.js';
 import request from 'supertest';
-import { spawnSync } from 'child_process';
+import { spawnSync, type SpawnOptions } from 'child_process';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
@@ -83,6 +83,33 @@ describe('Smoke', () => {
 
     expect(script).toContain('$psi.UseShellExecute = $true');
     expect(script).not.toContain('$psi.UseShellExecute = $false');
+  });
+
+  test('WSL Studio launch applies validated environment values as PowerShell data', () => {
+    const script = buildWindowsStudioStartScript(
+      'C:\\Roblox\\RobloxStudioBeta.exe',
+      ['--task', 'EditFile'],
+      {
+        set: {
+          STUDIO_LAUNCH_LOADER: "C:\\LaunchTools\\loader's; $env:SHOULD_NOT_RUN.dll",
+          STUDIO_LAUNCH_BUILD_VERSION: '0.0.0+build.123',
+        },
+        remove: ['STUDIO_LAUNCH_LOADED_BUILD_VERSION'],
+      },
+    );
+
+    expect(script).toContain(
+      "[Environment]::SetEnvironmentVariable('STUDIO_LAUNCH_LOADER', 'C:\\LaunchTools\\loader''s; $env:SHOULD_NOT_RUN.dll', [EnvironmentVariableTarget]::Process)",
+    );
+    expect(script).toContain(
+      "[Environment]::SetEnvironmentVariable('STUDIO_LAUNCH_LOADED_BUILD_VERSION', $null, [EnvironmentVariableTarget]::Process)",
+    );
+    expect(script.indexOf("'STUDIO_LAUNCH_LOADER'")).toBeLessThan(script.indexOf('$psi = New-Object'));
+    expect(script).toContain('$psi.UseShellExecute = $true');
+
+    expect(() => buildWindowsStudioStartScript('Studio.exe', [], {
+      set: { 'STUDIO_LAUNCH_LOADER; Remove-Item Env:PATH': 'loader.dll' },
+    })).toThrow(/Invalid process environment variable name/);
   });
 
   test('HTTP server starts and responds to health check', async () => {
@@ -210,6 +237,8 @@ describe('Smoke', () => {
       universeId: 456,
       placeVersion: 7,
       connectionTimeoutMs: 120000,
+      studioExecutable: undefined,
+      processEnvironment: undefined,
     });
   });
 
@@ -254,7 +283,126 @@ describe('Smoke', () => {
       universeId: undefined,
       placeVersion: undefined,
       connectionTimeoutMs: 120000,
+      studioExecutable: undefined,
+      processEnvironment: undefined,
     });
+  });
+
+  test('manage_instance threads exact executable and process environment into launch', async () => {
+    const bridge = new BridgeService();
+    const tools = new RobloxStudioTools(bridge);
+    const launch = jest.fn(async (options) => ({
+      ...options,
+      recordId: 'launch-custom',
+      nativeProcessId: 7003,
+      exe: options.studioExecutable,
+      args: [],
+      launchedAt: Date.now(),
+      state: 'launching',
+    }));
+    (tools as any).instanceManager = {
+      list: () => [],
+      launch,
+      refresh: (record: unknown) => record,
+    };
+
+    await tools.manageInstance({
+      action: 'launch',
+      source: 'local_file',
+      local_place_file: '/tmp/custom-launch-place.rbxl',
+      wait_for_connection: false,
+      studio_executable: 'C:\\Roblox\\version-custom\\RobloxStudioBeta.exe',
+      process_environment: {
+        set: {
+          STUDIO_LAUNCH_LOADER: 'C:\\LaunchTools\\studio_loader.dll',
+          STUDIO_LAUNCH_BUILD_VERSION: '0.0.0+build.123',
+        },
+        remove: ['STUDIO_LAUNCH_LOADED_BUILD_VERSION'],
+      },
+    });
+
+    expect(launch).toHaveBeenCalledWith(expect.objectContaining({
+      studioExecutable: 'C:\\Roblox\\version-custom\\RobloxStudioBeta.exe',
+      processEnvironment: {
+        set: {
+          STUDIO_LAUNCH_LOADER: 'C:\\LaunchTools\\studio_loader.dll',
+          STUDIO_LAUNCH_BUILD_VERSION: '0.0.0+build.123',
+        },
+        remove: ['STUDIO_LAUNCH_LOADED_BUILD_VERSION'],
+      },
+    }));
+
+    await expect(tools.manageInstance({
+      action: 'launch',
+      source: 'local_file',
+      local_place_file: '/tmp/custom-launch-place.rbxl',
+      process_environment: { remove: ['STUDIO_LAUNCH_LOADED_BUILD_VERSION; whoami'] },
+    })).rejects.toThrow(/Invalid process environment variable name/);
+  });
+
+  test('Studio launch uses the exact executable, patches only the child environment, and does not persist it', async () => {
+    const registryDir = fs.mkdtempSync(path.join(os.tmpdir(), 'robloxstudio-mcp-registry-'));
+    const exactExecutable = 'C:\\Roblox\\version-custom\\RobloxStudioBeta.exe';
+    const parentLoadedVersion = process.env.STUDIO_LAUNCH_LOADED_BUILD_VERSION;
+    const liveProcessIds = new Set<number>();
+    const resolveStudioExe = jest.fn(() => 'C:\\Roblox\\latest\\RobloxStudioBeta.exe');
+    let capturedSpawnOptions: SpawnOptions | undefined;
+    process.env.STUDIO_LAUNCH_LOADED_BUILD_VERSION = 'parent-value';
+
+    const processAdapter = {
+      currentBootId: () => 'boot-1',
+      resolveStudioExe,
+      spawnStudio: (_exe: string, _args: string[], options: SpawnOptions) => {
+        capturedSpawnOptions = options;
+        liveProcessIds.add(7655);
+        return { pid: 7655, nativePid: 7655, unref: () => {} };
+      },
+      listStudioProcesses: () => [...liveProcessIds].map((Id) => ({
+        Id,
+        Name: 'RobloxStudioBeta',
+        Path: exactExecutable,
+        MainWindowTitle: 'Custom Launch - Roblox Studio',
+      })),
+      stopProcess: (pid: number) => liveProcessIds.delete(pid),
+    };
+
+    try {
+      const manager = new StudioInstanceManager({ registryDir, processAdapter });
+      const record = await manager.launch({
+        source: 'local_file',
+        localPlaceFile: '/tmp/custom-launch-place.rbxl',
+        studioExecutable: exactExecutable,
+        processEnvironment: {
+          set: {
+            STUDIO_LAUNCH_LOADER: 'C:\\LaunchTools\\secret-loader.dll',
+            STUDIO_LAUNCH_BUILD_VERSION: '0.0.0+build.123',
+          },
+          remove: ['STUDIO_LAUNCH_LOADED_BUILD_VERSION'],
+        },
+      });
+
+      expect(resolveStudioExe).not.toHaveBeenCalled();
+      expect(record.exe).toBe(exactExecutable);
+      expect((capturedSpawnOptions?.env as NodeJS.ProcessEnv).STUDIO_LAUNCH_LOADER).toBe('C:\\LaunchTools\\secret-loader.dll');
+      expect((capturedSpawnOptions?.env as NodeJS.ProcessEnv).STUDIO_LAUNCH_BUILD_VERSION).toBe('0.0.0+build.123');
+      expect((capturedSpawnOptions?.env as NodeJS.ProcessEnv).STUDIO_LAUNCH_LOADED_BUILD_VERSION).toBeUndefined();
+      expect(process.env.STUDIO_LAUNCH_LOADED_BUILD_VERSION).toBe('parent-value');
+
+      const registryRecord = fs.readFileSync(
+        path.join(registryDir, `${record.recordId}.json`),
+        'utf8',
+      );
+      expect(registryRecord).toContain(exactExecutable.replace(/\\/g, '\\\\'));
+      expect(registryRecord).not.toContain('STUDIO_LAUNCH_LOADER');
+      expect(registryRecord).not.toContain('secret-loader.dll');
+      expect(registryRecord).not.toContain('processEnvironment');
+
+      manager.close(record);
+    } finally {
+      if (parentLoadedVersion === undefined) delete process.env.STUDIO_LAUNCH_LOADED_BUILD_VERSION;
+      else process.env.STUDIO_LAUNCH_LOADED_BUILD_VERSION = parentLoadedVersion;
+      fs.rmSync(registryDir, { recursive: true, force: true });
+    }
   });
 
   test('Studio launch stops its owned process if the initial registry write fails', async () => {
@@ -372,6 +520,7 @@ describe('Smoke', () => {
         launch_id: launched.launch_id,
         instance_id: 'anon:async',
         state: 'exited',
+        close_status: 'closed',
         message: 'Studio instance closed.',
       }));
       expect(stopped).toEqual([4321]);
@@ -438,7 +587,17 @@ describe('Smoke', () => {
         launch_id: launched.launch_id,
         state: 'failed',
         process_running: false,
+        close_status: 'closed',
         message: 'Studio instance closed.',
+      }));
+      const closedAgain = JSON.parse((await tools.manageInstance({
+        action: 'close',
+        launch_id: launched.launch_id,
+      })).content[0].text);
+      expect(closedAgain).toEqual(expect.objectContaining({
+        launch_id: launched.launch_id,
+        close_status: 'already_closed',
+        message: 'Studio instance was already closed.',
       }));
       expect(stopped).toEqual([5432]);
     } finally {
@@ -597,6 +756,7 @@ describe('Smoke', () => {
     const body = JSON.parse(result.content[0].text);
     expect(body).toEqual({
       instance_id: 'anon:external',
+      close_status: 'closed',
       message: 'Studio instance closed.',
     });
     expect(closeConnectedInstance).toHaveBeenCalledWith(expect.objectContaining({
@@ -765,6 +925,7 @@ describe('Smoke', () => {
       const first = await tools.manageInstance({ action: 'close', instance_id: 'anon:double-close' });
       expect(JSON.parse(first.content[0].text)).toEqual(expect.objectContaining({
         instance_id: 'anon:double-close',
+        close_status: 'closed',
         message: 'Studio instance closed.',
         state: 'exited',
         process_running: false,
@@ -773,6 +934,7 @@ describe('Smoke', () => {
       const second = await tools.manageInstance({ action: 'close', instance_id: 'anon:double-close' });
       expect(JSON.parse(second.content[0].text)).toEqual(expect.objectContaining({
         instance_id: 'anon:double-close',
+        close_status: 'already_closed',
         message: 'Studio instance was already closed.',
         state: 'exited',
         process_running: false,

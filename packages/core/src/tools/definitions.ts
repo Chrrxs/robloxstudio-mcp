@@ -1012,6 +1012,35 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
           type: 'number',
           description: 'For action="launch": max milliseconds for plugin connection (default 120000). The deadline also applies asynchronously when wait_for_connection=false.'
         },
+        studio_executable: {
+          type: 'string',
+          description: 'For action="launch": exact Roblox Studio executable to launch instead of auto-discovering a version.'
+        },
+        process_environment: {
+          type: 'object',
+          description: 'For action="launch": process-scoped environment patch applied only while creating Studio. Values are never retained in the managed-instance registry.',
+          properties: {
+            set: {
+              type: 'object',
+              description: 'Environment variables to set for the Studio process.',
+              propertyNames: {
+                pattern: '^[A-Za-z_][A-Za-z0-9_]*$'
+              },
+              additionalProperties: {
+                type: 'string'
+              }
+            },
+            remove: {
+              type: 'array',
+              description: 'Environment variables to remove from the Studio process environment.',
+              items: {
+                type: 'string',
+                pattern: '^[A-Za-z_][A-Za-z0-9_]*$'
+              }
+            }
+          },
+          additionalProperties: false
+        },
         max_page_size: {
           type: 'number',
           description: 'For action="list_place_versions": number of versions to return, clamped to 1-50 (default 10).'
