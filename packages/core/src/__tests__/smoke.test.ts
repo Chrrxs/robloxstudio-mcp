@@ -397,7 +397,7 @@ describe('Smoke', () => {
       expect(registryRecord).not.toContain('secret-loader.dll');
       expect(registryRecord).not.toContain('processEnvironment');
 
-      manager.close(record);
+      await manager.close(record);
     } finally {
       if (parentLoadedVersion === undefined) delete process.env.STUDIO_LAUNCH_LOADED_BUILD_VERSION;
       else process.env.STUDIO_LAUNCH_LOADED_BUILD_VERSION = parentLoadedVersion;
@@ -469,10 +469,31 @@ describe('Smoke', () => {
       },
     };
 
+    let releaseAssociation!: () => void;
+    let associationReleased = false;
+    const associationBlocked = new Promise<void>((resolve) => {
+      releaseAssociation = () => {
+        associationReleased = true;
+        resolve();
+      };
+    });
+
     try {
       const bridge = new BridgeService();
       const tools = new RobloxStudioTools(bridge);
-      (tools as any).instanceManager = new StudioInstanceManager({ registryDir, processAdapter });
+      const manager = new StudioInstanceManager({ registryDir, processAdapter });
+      const pendingLaunches = manager.pendingLaunches.bind(manager);
+      let associationStarted = false;
+      manager.pendingLaunches = async () => {
+        associationStarted = true;
+        await associationBlocked;
+        return pendingLaunches();
+      };
+      const getManagedInstance = manager.get.bind(manager);
+      manager.get = async (instanceId: string) => associationReleased
+        ? getManagedInstance(instanceId)
+        : undefined;
+      (tools as any).instanceManager = manager;
 
       const launched = JSON.parse((await tools.manageInstance({
         action: 'launch',
@@ -497,11 +518,15 @@ describe('Smoke', () => {
         placeName: 'place.rbxl',
         dataModelName: 'place.rbxl',
       });
+      await Promise.resolve();
+      expect(associationStarted).toBe(true);
 
-      const status = JSON.parse((await tools.manageInstance({
+      const statusRequest = tools.manageInstance({
         action: 'status',
         instance_id: 'anon:async',
-      })).content[0].text);
+      });
+      releaseAssociation();
+      const status = JSON.parse((await statusRequest).content[0].text);
       expect(status).toEqual(expect.objectContaining({
         launch_id: launched.launch_id,
         instance_id: 'anon:async',
@@ -525,6 +550,7 @@ describe('Smoke', () => {
       }));
       expect(stopped).toEqual([4321]);
     } finally {
+      releaseAssociation();
       fs.rmSync(registryDir, { recursive: true, force: true });
     }
   });
@@ -627,7 +653,12 @@ describe('Smoke', () => {
     try {
       const bridge = new BridgeService();
       const tools = new RobloxStudioTools(bridge);
-      (tools as any).instanceManager = new StudioInstanceManager({ registryDir, processAdapter });
+      (tools as any).instanceManager = new StudioInstanceManager({
+        registryDir,
+        processAdapter,
+        confirmedExitMisses: 1,
+        confirmedExitGraceMs: 0,
+      });
 
       const launched = JSON.parse((await tools.manageInstance({
         action: 'launch',
@@ -685,6 +716,292 @@ describe('Smoke', () => {
     }
   });
 
+  test('process observation errors preserve durable ownership and expose unknown liveness', async () => {
+    const registryDir = fs.mkdtempSync(path.join(os.tmpdir(), 'robloxstudio-mcp-registry-'));
+    const pid = 6611;
+    const startedAt = '100';
+    let spawned = false;
+    let observationFails = false;
+    let observedAt = 1000;
+    const processAdapter = {
+      currentBootId: () => 'boot-1',
+      resolveStudioExe: () => 'RobloxStudioBeta.exe',
+      spawnStudio: () => {
+        spawned = true;
+        return { pid, nativePid: pid, nativeStartedAt: startedAt, unref: () => {} };
+      },
+      observeStudioProcesses: () => observationFails
+        ? { status: 'error' as const, observedAt: ++observedAt, error: 'PowerShell unavailable' }
+        : {
+          status: 'ok' as const,
+          observedAt: ++observedAt,
+          processes: spawned ? [{
+            Id: pid,
+            Name: 'RobloxStudioBeta',
+            Path: 'RobloxStudioBeta.exe',
+            StartTimeUtcFileTime: startedAt,
+          }] : [],
+        },
+      stopProcess: () => { spawned = false; },
+    };
+
+    try {
+      const manager = new StudioInstanceManager({ registryDir, processAdapter });
+      const record = await manager.launch({ source: 'local_file', localPlaceFile: '/tmp/unknown.rbxl' });
+      await manager.attachInstanceId(record, 'anon:unknown');
+      observationFails = true;
+
+      await manager.refresh(record);
+      await manager.refresh(record);
+
+      expect(record).toEqual(expect.objectContaining({
+        instanceId: 'anon:unknown',
+        state: 'connected',
+        processObservationStatus: 'unknown',
+        lastProcessObservationError: 'PowerShell unavailable',
+        consecutiveConfirmedMisses: 0,
+      }));
+      expect(record.closedAt).toBeUndefined();
+      const persisted = JSON.parse(fs.readFileSync(path.join(registryDir, `${record.recordId}.json`), 'utf8'));
+      expect(persisted).toEqual(expect.objectContaining({
+        state: 'connected',
+        processObservationStatus: 'unknown',
+        lastProcessObservationError: 'PowerShell unavailable',
+      }));
+      expect(persisted.closedAt).toBeUndefined();
+    } finally {
+      fs.rmSync(registryDir, { recursive: true, force: true });
+    }
+  });
+
+  test('connected ownership survives one successful miss and closes only after confirmed absence', async () => {
+    const registryDir = fs.mkdtempSync(path.join(os.tmpdir(), 'robloxstudio-mcp-registry-'));
+    const pid = 6612;
+    let spawned = false;
+    let observedAt = 1000;
+    const processAdapter = {
+      currentBootId: () => 'boot-1',
+      resolveStudioExe: () => 'RobloxStudioBeta.exe',
+      spawnStudio: () => {
+        spawned = true;
+        return { pid, nativePid: pid, unref: () => {} };
+      },
+      observeStudioProcesses: () => ({
+        status: 'ok' as const,
+        observedAt,
+        processes: spawned ? [{ Id: pid, Name: 'RobloxStudioBeta', Path: 'RobloxStudioBeta.exe' }] : [],
+      }),
+      stopProcess: () => { spawned = false; },
+    };
+
+    try {
+      const manager = new StudioInstanceManager({
+        registryDir,
+        processAdapter,
+        confirmedExitMisses: 2,
+        confirmedExitGraceMs: 5000,
+      });
+      const record = await manager.launch({ source: 'local_file', localPlaceFile: '/tmp/grace.rbxl' });
+      observedAt = 1500;
+      await manager.attachInstanceId(record, 'anon:grace');
+      spawned = false;
+      observedAt = 2000;
+
+      await manager.refresh(record);
+      expect(record.closedAt).toBeUndefined();
+      expect(record.consecutiveConfirmedMisses).toBe(1);
+
+      observedAt = 8000;
+      await manager.refresh(record);
+      expect(record).toEqual(expect.objectContaining({
+        state: 'exited',
+        consecutiveConfirmedMisses: 2,
+        failureReason: 'Studio process exited.',
+      }));
+      expect(record.closedAt).toEqual(expect.any(Number));
+
+      spawned = true;
+      observedAt = 9000;
+      await manager.attachInstanceId(record, 'anon:grace');
+      expect(record).toEqual(expect.objectContaining({
+        state: 'connected',
+        processObservationStatus: 'running',
+        consecutiveConfirmedMisses: 0,
+      }));
+      expect(record.closedAt).toBeUndefined();
+      expect(record.exitedAt).toBeUndefined();
+    } finally {
+      fs.rmSync(registryDir, { recursive: true, force: true });
+    }
+  });
+
+  test('status refreshes ten managed records from one process snapshot', async () => {
+    const registryDir = fs.mkdtempSync(path.join(os.tmpdir(), 'robloxstudio-mcp-registry-'));
+    let nextPid = 6700;
+    let snapshotCalls = 0;
+    const live = new Map<number, string>();
+    const processAdapter = {
+      currentBootId: () => 'boot-1',
+      resolveStudioExe: () => 'RobloxStudioBeta.exe',
+      spawnStudio: () => {
+        const pid = ++nextPid;
+        const startedAt = String(pid * 100);
+        live.set(pid, startedAt);
+        return { pid, nativePid: pid, nativeStartedAt: startedAt, unref: () => {} };
+      },
+      observeStudioProcesses: () => {
+        snapshotCalls += 1;
+        return {
+          status: 'ok' as const,
+          observedAt: Date.now(),
+          processes: [...live].map(([Id, StartTimeUtcFileTime]) => ({
+            Id,
+            Name: 'RobloxStudioBeta',
+            Path: 'RobloxStudioBeta.exe',
+            StartTimeUtcFileTime,
+          })),
+        };
+      },
+      stopProcess: (pid: number) => { live.delete(pid); },
+    };
+
+    try {
+      const manager = new StudioInstanceManager({ registryDir, processAdapter });
+      for (let index = 0; index < 10; index += 1) {
+        await manager.launch({ source: 'local_file', localPlaceFile: `/tmp/snapshot-${index}.rbxl` });
+      }
+      snapshotCalls = 0;
+
+      expect(await manager.list()).toHaveLength(10);
+      expect(snapshotCalls).toBe(1);
+    } finally {
+      fs.rmSync(registryDir, { recursive: true, force: true });
+    }
+  });
+
+  test('health remains responsive while an asynchronous lifecycle adapter is pending', async () => {
+    const registryDir = fs.mkdtempSync(path.join(os.tmpdir(), 'robloxstudio-mcp-registry-'));
+    let releaseSpawn!: () => void;
+    let signalSpawnStarted!: () => void;
+    const spawnStarted = new Promise<void>((resolve) => { signalSpawnStarted = resolve; });
+    const spawnBlocked = new Promise<void>((resolve) => { releaseSpawn = resolve; });
+    let spawned = false;
+    const processAdapter = {
+      currentBootId: () => 'boot-1',
+      resolveStudioExe: () => 'RobloxStudioBeta.exe',
+      observeStudioProcesses: () => ({
+        status: 'ok' as const,
+        observedAt: Date.now(),
+        processes: spawned ? [{ Id: 6801, Name: 'RobloxStudioBeta', Path: 'RobloxStudioBeta.exe' }] : [],
+      }),
+      spawnStudio: async () => {
+        signalSpawnStarted();
+        await spawnBlocked;
+        spawned = true;
+        return { pid: 6801, nativePid: 6801, unref: () => {} };
+      },
+      stopProcess: () => { spawned = false; },
+    };
+    const bridge = new BridgeService();
+    const tools = new RobloxStudioTools(bridge);
+    const manager = new StudioInstanceManager({ registryDir, processAdapter });
+    (tools as any).instanceManager = manager;
+    const app = createHttpServer(tools, bridge, new Set(['manage_instance']));
+    const server = await new Promise<import('http').Server>((resolve, reject) => {
+      const listening = app.listen(0, '127.0.0.1', () => resolve(listening));
+      listening.once('error', reject);
+    });
+    const address = server.address();
+    if (!address || typeof address === 'string') throw new Error('Could not determine test server port.');
+    const baseUrl = `http://127.0.0.1:${address.port}`;
+
+    try {
+      const launch = fetch(`${baseUrl}/mcp/manage_instance`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          action: 'launch',
+          source: 'local_file',
+          local_place_file: '/tmp/health-pending.rbxl',
+          wait_for_connection: false,
+        }),
+      });
+      await spawnStarted;
+
+      const health = await fetch(`${baseUrl}/health`, { signal: AbortSignal.timeout(100) });
+      expect(health.status).toBe(200);
+
+      releaseSpawn();
+      expect((await launch).status).toBe(200);
+    } finally {
+      releaseSpawn();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+      fs.rmSync(registryDir, { recursive: true, force: true });
+    }
+  });
+
+  test('health remains responsive while registry lock acquisition is pending', async () => {
+    const registryDir = fs.mkdtempSync(path.join(os.tmpdir(), 'robloxstudio-mcp-registry-'));
+    fs.mkdirSync(path.join(registryDir, '.lock'));
+    const bridge = new BridgeService();
+    const tools = new RobloxStudioTools(bridge);
+    (tools as any).instanceManager = new StudioInstanceManager({
+      registryDir,
+      processAdapter: {
+        currentBootId: () => 'boot-1',
+        observeStudioProcesses: () => ({ status: 'ok', observedAt: Date.now(), processes: [] }),
+      },
+    });
+    const app = createHttpServer(tools, bridge, new Set(['manage_instance']));
+    const server = await new Promise<import('http').Server>((resolve, reject) => {
+      const listening = app.listen(0, '127.0.0.1', () => resolve(listening));
+      listening.once('error', reject);
+    });
+    const address = server.address();
+    if (!address || typeof address === 'string') throw new Error('Could not determine test server port.');
+    const baseUrl = `http://127.0.0.1:${address.port}`;
+
+    try {
+      const status = fetch(`${baseUrl}/mcp/manage_instance`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ action: 'status' }),
+      });
+      await new Promise((resolve) => setTimeout(resolve, 25));
+
+      const health = await fetch(`${baseUrl}/health`, { signal: AbortSignal.timeout(100) });
+      expect(health.status).toBe(200);
+
+      fs.rmSync(path.join(registryDir, '.lock'), { recursive: true, force: true });
+      expect((await status).status).toBe(200);
+    } finally {
+      fs.rmSync(path.join(registryDir, '.lock'), { recursive: true, force: true });
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+      fs.rmSync(registryDir, { recursive: true, force: true });
+    }
+  });
+
+  test('managed instance registry reclaims a fresh lock owned by a dead process', async () => {
+    const registryDir = fs.mkdtempSync(path.join(os.tmpdir(), 'robloxstudio-mcp-registry-'));
+    const lockDir = path.join(registryDir, '.lock');
+    fs.mkdirSync(lockDir);
+    fs.writeFileSync(path.join(lockDir, 'owner.json'), JSON.stringify({
+      pid: 2_147_483_647,
+      token: 'dead-owner',
+      createdAt: Date.now(),
+    }));
+
+    try {
+      const startedAt = Date.now();
+      await expect(new ManagedInstanceRegistry(registryDir).listOpen({
+        currentBootId: 'boot-1',
+      })).resolves.toEqual([]);
+      expect(Date.now() - startedAt).toBeLessThan(1000);
+    } finally {
+      fs.rmSync(registryDir, { recursive: true, force: true });
+    }
+  }, 10_000);
+
   test('managed close refuses a recycled native Studio pid with a different start time', async () => {
     const registryDir = fs.mkdtempSync(path.join(os.tmpdir(), 'robloxstudio-mcp-registry-'));
     let processStartedAt = '100';
@@ -708,12 +1025,12 @@ describe('Smoke', () => {
       const record = await manager.launch({ source: 'local_file', localPlaceFile: '/tmp/recycled.rbxl' });
       processStartedAt = '200';
 
-      expect(manager.closeByLaunchId(record.recordId as string)).toEqual(expect.objectContaining({
+      expect(await manager.closeByLaunchId(record.recordId as string)).toEqual(expect.objectContaining({
         status: 'already_closed',
         launchId: record.recordId,
       }));
       expect(stopped).toEqual([]);
-      expect(manager.getByLaunchId(record.recordId as string)).toEqual(expect.objectContaining({
+      expect(await manager.getByLaunchId(record.recordId as string)).toEqual(expect.objectContaining({
         state: 'exited',
         failureReason: 'Studio process identity changed; the retained PID was not reused.',
       }));
@@ -801,7 +1118,7 @@ describe('Smoke', () => {
     try {
       const launcher = new StudioInstanceManager({ registryDir, processAdapter });
       const record = await launcher.launch({ source: 'baseplate', localPlaceFile: placeFile });
-      launcher.attachInstanceId(record, 'anon:shared-baseplate');
+      await launcher.attachInstanceId(record, 'anon:shared-baseplate');
 
       const bridge = new BridgeService();
       const tools = new RobloxStudioTools(bridge);
@@ -859,7 +1176,7 @@ describe('Smoke', () => {
     try {
       const launcher = new StudioInstanceManager({ registryDir, processAdapter: launchAdapter });
       const record = await launcher.launch({ source: 'baseplate', localPlaceFile: placeFile });
-      launcher.attachInstanceId(record, 'anon:previous-boot');
+      await launcher.attachInstanceId(record, 'anon:previous-boot');
 
       const bridge = new BridgeService();
       const tools = new RobloxStudioTools(bridge);
@@ -916,7 +1233,7 @@ describe('Smoke', () => {
     try {
       const launcher = new StudioInstanceManager({ registryDir, processAdapter });
       const record = await launcher.launch({ source: 'baseplate', localPlaceFile: placeFile });
-      launcher.attachInstanceId(record, 'anon:double-close');
+      await launcher.attachInstanceId(record, 'anon:double-close');
 
       const bridge = new BridgeService();
       const tools = new RobloxStudioTools(bridge);
@@ -1054,12 +1371,17 @@ describe('Smoke', () => {
     try {
       const launcher = new StudioInstanceManager({ registryDir, processAdapter });
       const record = await launcher.launch({ source: 'baseplate', localPlaceFile: placeFile });
-      launcher.attachInstanceId(record, 'anon:stale-process');
+      await launcher.attachInstanceId(record, 'anon:stale-process');
       liveProcessIds.clear();
 
       const bridge = new BridgeService();
       const tools = new RobloxStudioTools(bridge);
-      (tools as any).instanceManager = new StudioInstanceManager({ registryDir, processAdapter });
+      (tools as any).instanceManager = new StudioInstanceManager({
+        registryDir,
+        processAdapter,
+        confirmedExitMisses: 1,
+        confirmedExitGraceMs: 0,
+      });
 
       const result = await tools.manageInstance({ action: 'status' });
       expect(JSON.parse(result.content[0].text)).toEqual({

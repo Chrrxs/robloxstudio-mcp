@@ -360,7 +360,7 @@ function discoverNamedFile(root: string, fileName: string, depth = 0): string[] 
   return matches;
 }
 
-export function resolveAssistantBundlePath(studioExe = resolveStudioExe()): string {
+export function resolveAssistantBundlePath(studioExe?: string): string {
   const override = process.env.ROBLOX_STUDIO_ASSISTANT_BUNDLE;
   if (override) {
     if (!existsSync(override)) {
@@ -369,7 +369,7 @@ export function resolveAssistantBundlePath(studioExe = resolveStudioExe()): stri
     return override;
   }
 
-  const exeDirectory = path.dirname(studioExe);
+  const exeDirectory = path.dirname(studioExe ?? resolveStudioExe());
   const roots = [
     path.join(exeDirectory, 'BuiltInStandalonePlugins'),
     path.resolve(exeDirectory, '..', 'Resources', 'BuiltInStandalonePlugins'),
