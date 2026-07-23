@@ -1952,6 +1952,31 @@ describe('Smoke', () => {
     }
   });
 
+  test('generate_model source image cookie upload uses the direct Image asset id', async () => {
+    const bridge = new BridgeService();
+    const tools = new RobloxStudioTools(bridge) as any;
+    tools.cookieClient = {
+      hasCookie: () => true,
+      uploadImage: jest.fn(async () => ({ assetId: 888 })),
+    };
+    tools.openCloudClient = { hasApiKey: () => false };
+
+    const imageId = await tools.uploadGenerateModelReferenceImage(
+      Buffer.from('not actually png'),
+      'place:test',
+    );
+
+    expect(imageId).toBe(888);
+    expect(tools.cookieClient.uploadImage).toHaveBeenCalledWith({
+      fileContent: expect.any(Buffer),
+      fileName: 'generate-model-reference.png',
+      displayName: 'Studio Assistant Source Image',
+      description: 'Studio Assistant Source Image',
+      userId: process.env.ROBLOX_CREATOR_USER_ID,
+      groupId: process.env.ROBLOX_CREATOR_GROUP_ID,
+    });
+  });
+
   test('get_script_source shows plugin truncation range and note', async () => {
     const bridge = new BridgeService();
     const tools = new RobloxStudioTools(bridge);

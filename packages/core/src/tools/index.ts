@@ -4685,15 +4685,15 @@ export class RobloxStudioTools {
     instance_id?: string,
   ): Promise<number> {
     if (this.cookieClient.hasCookie()) {
-      const result = await this.cookieClient.uploadDecal(
-        imageContent,
-        STUDIO_ASSISTANT_SOURCE_IMAGE_LABEL,
-        STUDIO_ASSISTANT_SOURCE_IMAGE_LABEL,
-      );
-      if (result.backingAssetId && result.backingAssetId > 0) {
-        return result.backingAssetId;
-      }
-      return this.resolveUploadedReferenceImageId(String(result.assetId), instance_id);
+      const result = await this.cookieClient.uploadImage({
+        fileContent: imageContent,
+        fileName: 'generate-model-reference.png',
+        displayName: STUDIO_ASSISTANT_SOURCE_IMAGE_LABEL,
+        description: STUDIO_ASSISTANT_SOURCE_IMAGE_LABEL,
+        userId: process.env.ROBLOX_CREATOR_USER_ID,
+        groupId: process.env.ROBLOX_CREATOR_GROUP_ID,
+      });
+      return result.assetId;
     }
 
     if (!this.openCloudClient.hasApiKey()) {
@@ -4749,9 +4749,18 @@ export class RobloxStudioTools {
 
     const fileContent = fs.readFileSync(filePath);
     const fileName = path.basename(filePath);
+    const resolvedGroupId = groupId || process.env.ROBLOX_CREATOR_GROUP_ID;
+    const resolvedUserId = userId || process.env.ROBLOX_CREATOR_USER_ID;
 
     if (assetType === 'Decal' && this.cookieClient.hasCookie()) {
-      const result = await this.cookieClient.uploadDecal(fileContent, displayName, description || '');
+      const result = await this.cookieClient.uploadImage({
+        fileContent,
+        fileName,
+        displayName,
+        description: description || '',
+        userId: resolvedUserId,
+        groupId: resolvedGroupId,
+      });
       return {
         content: [{
           type: 'text',
@@ -4760,9 +4769,9 @@ export class RobloxStudioTools {
             response: {
               assetId: String(result.assetId),
               displayName,
-              assetType,
-              decalId: String(result.assetId),
-              imageId: String(result.backingAssetId),
+              assetType: 'Image',
+              decalId: null,
+              imageId: String(result.assetId),
             },
           })
         }]
@@ -4777,9 +4786,6 @@ export class RobloxStudioTools {
         `No auth configured for ${assetType} upload. Set ROBLOX_OPEN_CLOUD_API_KEY (needs asset:write scope).${cookieHint}`
       );
     }
-
-    const resolvedGroupId = groupId || process.env.ROBLOX_CREATOR_GROUP_ID;
-    const resolvedUserId = userId || process.env.ROBLOX_CREATOR_USER_ID;
 
     if (!resolvedUserId && !resolvedGroupId) {
       throw new Error(
