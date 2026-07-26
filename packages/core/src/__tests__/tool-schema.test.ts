@@ -298,13 +298,15 @@ describe('Tool schema compatibility', () => {
     ]);
   });
 
-  test('manage_instance exposes launch, close, status, and place version discovery in one schema', () => {
+  test('manage_instance exposes launch authorization, lifecycle actions, and place version discovery in one schema', () => {
     const tool = TOOL_DEFINITIONS.find((t) => t.name === 'manage_instance');
     expect(tool).toBeTruthy();
     const schema = tool!.inputSchema as { properties?: Record<string, any>; required?: string[] };
     const props = schema.properties ?? {};
     expect((props.action as { enum?: string[] }).enum).toEqual([
       'launch',
+      'authorize',
+      'complete',
       'close',
       'status',
       'list_place_versions',
@@ -325,6 +327,7 @@ describe('Tool schema compatibility', () => {
       'place_id',
       'place_version',
       'process_environment',
+      'require_process_identity',
       'source',
       'studio_executable',
       'timeout_ms',

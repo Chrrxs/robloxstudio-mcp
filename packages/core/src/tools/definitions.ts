@@ -978,14 +978,14 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
   {
     name: 'manage_instance',
     category: 'write',
-    description: 'Launch, close, inspect, and find revisions for Studio instances. Every launch returns launch_id, native pid, source, and lifecycle state; status and close accept launch_id before the plugin connects and instance_id after association. Use action="launch" with source="baseplate" for a blank place, or source="local_file" with local_place_file for a local place; neither uses place_id. Use action="list_place_versions" with place_id to retrieve version numbers through Open Cloud asset versions, then action="launch" with source="place_revision", place_id, and place_version to open an older revision. action="launch" source="published_place" opens the latest published place and is blocked if that place_id is already connected; source="place_revision" is allowed because Studio opens explicit past revisions as anonymous local copies. Requires ROBLOX_OPEN_CLOUD_API_KEY with asset:read for list_place_versions.',
+    description: 'Launch, authorize, complete, close, inspect, and find revisions for Studio instances. Every launch returns launch_id, native pid, source, and lifecycle state; status and close accept launch_id before the plugin connects and instance_id after association. Use action="launch" with source="baseplate" for a blank place, or source="local_file" with local_place_file for a local place; neither uses place_id. A process-identity launch requires action="authorize" after injection is prepared, followed by action="complete" only after the injected runtime is independently attested. Use action="list_place_versions" with place_id to retrieve version numbers through Open Cloud asset versions, then action="launch" with source="place_revision", place_id, and place_version to open an older revision. action="launch" source="published_place" opens the latest published place and is blocked if that place_id is already connected; source="place_revision" is allowed because Studio opens explicit past revisions as anonymous local copies. Requires ROBLOX_OPEN_CLOUD_API_KEY with asset:read for list_place_versions.',
     inputSchema: {
       type: 'object',
       properties: {
         action: {
           type: 'string',
-          enum: ['launch', 'close', 'status', 'list_place_versions'],
-          description: 'Instance management action.'
+          enum: ['launch', 'authorize', 'complete', 'close', 'status', 'list_place_versions'],
+          description: 'Instance management action. authorize resumes a protocol-v3 launch after the caller has prepared process-scoped injection. complete releases broker process ownership after the caller independently attests that injection finished.'
         },
         source: {
           type: 'string',
@@ -1004,13 +1004,17 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
           type: 'number',
           description: 'Required for source="place_revision". Use action="list_place_versions" to discover available version numbers.'
         },
+        require_process_identity: {
+          type: 'boolean',
+          description: 'For action="launch": require an exact native PID and process creation time, return launch_id immediately, and retain broker ownership of the native process until action="complete" succeeds. The process remains suspended until action="authorize" begins injection. If identity capture, authorization, or ownership completion fails, the broker stops the launched process.'
+        },
         wait_for_connection: {
           type: 'boolean',
-          description: 'For action="launch": wait until the MCP plugin connects and return instance_id (default true). false returns launch_id immediately and continues association/failure tracking asynchronously.'
+          description: 'For action="launch": wait until the MCP plugin connects and return instance_id (default true). false returns launch_id immediately and continues association/failure tracking asynchronously. Ignored when require_process_identity=true, which always returns the suspended launch immediately.'
         },
         timeout_ms: {
           type: 'number',
-          description: 'For action="launch": max milliseconds for plugin connection (default 120000). The deadline also applies asynchronously when wait_for_connection=false.'
+          description: 'For action="launch": max milliseconds for plugin connection (default 120000). The deadline also applies asynchronously when wait_for_connection=false. It does not apply when require_process_identity=true; that protocol uses the broker ownership-completion lease through action="complete".'
         },
         studio_executable: {
           type: 'string',

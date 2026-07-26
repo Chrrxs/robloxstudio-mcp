@@ -28,6 +28,7 @@ export interface StudioLaunchOptions {
   connectionTimeoutMs?: number;
   studioExecutable?: string;
   processEnvironment?: StudioProcessEnvironmentPatch;
+  requireProcessIdentity?: boolean;
 }
 
 export type StudioLaunchState = ManagedInstanceLifecycleState;
@@ -57,7 +58,8 @@ export interface ManagedStudioInstance {
   ownerPid?: number;
   bootId?: string;
   deleteLocalPlaceFileOnClose?: boolean;
-  processObservationStatus?: 'running' | 'not_running' | 'unknown';
+  processAuthorizationState?: "pending" | "authorized" | "released";
+  processObservationStatus?: "running" | "not_running" | "unknown";
   lastProcessObservationAt?: number;
   lastSuccessfulProcessObservationAt?: number;
   lastProcessObservationError?: string;
@@ -95,14 +97,25 @@ type StudioChildProcess = {
   nativePid?: number;
   nativeStartedAt?: string;
   unref: () => void;
+  authorize?: () => unknown | Promise<unknown>;
+  release?: () => unknown | Promise<unknown>;
+  abort?: () => unknown | Promise<unknown>;
   onExit?: (listener: (code: number | null, signal: NodeJS.Signals | null) => void) => void;
   onError?: (listener: (error: Error) => void) => void;
 };
 
+type StudioLaunchControl = {
+  authorize: () => unknown | Promise<unknown>;
+  release: () => unknown | Promise<unknown>;
+  abort: () => unknown | Promise<unknown>;
+};
+
+const retainedLaunchControls = new Map<string, StudioLaunchControl>();
+
 export interface StudioProcessAdapter {
   observeStudioProcesses?: () => StudioProcessSnapshot | Promise<StudioProcessSnapshot>;
   listStudioProcesses?: () => StudioProcessInfo[] | Promise<StudioProcessInfo[]>;
-  stopProcess?: (processId: number) => unknown | Promise<unknown>;
+  stopProcess?: (processId: number, startedAt?: string) => unknown | Promise<unknown>;
   resolveStudioExe?: () => string | Promise<string>;
   spawnStudio?: (exe: string, args: string[], options: Parameters<typeof spawn>[2]) => StudioChildProcess | Promise<StudioChildProcess>;
   currentBootId?: () => string | Promise<string>;
@@ -115,6 +128,7 @@ export interface StudioInstanceManagerOptions {
   confirmedExitMisses?: number;
   confirmedExitGraceMs?: number;
   snapshotCacheMs?: number;
+  launchCompletionTimeoutMs?: number;
 }
 
 export type ManagedStudioCloseResult =
@@ -317,45 +331,603 @@ function buildWindowsStudioStartScriptFromConvertedExe(
   processEnvironment?: StudioProcessEnvironmentPatch,
 ): string {
   const environmentPatch = parseStudioProcessEnvironmentPatch(processEnvironment);
-  const commandLine = args.map(quoteWindowsCommandLineArg).join(' ');
+  const commandLine = [windowsExe, ...args].map(quoteWindowsCommandLineArg).join(' ');
   return [
     ...(environmentPatch ? powershellEnvironmentPatchStatements(environmentPatch) : []),
-    '$psi = New-Object System.Diagnostics.ProcessStartInfo',
-    `$psi.FileName = ${powershellStringLiteral(windowsExe)}`,
-    `$psi.Arguments = ${powershellStringLiteral(commandLine)}`,
-    // With UseShellExecute=false, Studio inherits the synchronous
-    // powershell.exe invocation's stdout/stderr pipe handles under WSL. Those
-    // handles keep the PowerShell invocation waiting until Studio exits even though
-    // PowerShell already printed the PID. Shell execution prevents that
-    // inheritance while Process.Start still returns the native Studio PID.
-    '$psi.UseShellExecute = $true',
-    '$studio = [System.Diagnostics.Process]::Start($psi)',
-    'if ($null -eq $studio) { throw "Roblox Studio process did not start." }',
+    `Add-Type -TypeDefinition @'
+using System;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+using System.Text;
+
+public sealed class McpSuspendedStudio : IDisposable
+{
+    private const uint CREATE_SUSPENDED = 0x00000004;
+    private const uint CREATE_BREAKAWAY_FROM_JOB = 0x01000000;
+    private const uint RESUME_FAILED = 0xFFFFFFFF;
+    private const uint JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000;
+    private const int JOB_OBJECT_EXTENDED_LIMIT_INFORMATION = 9;
+    private const uint WAIT_OBJECT_0 = 0x00000000;
+    private const uint WAIT_TIMEOUT = 0x00000102;
+    private const uint WAIT_FAILED = 0xFFFFFFFF;
+
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    private struct StartupInfo
+    {
+        public int cb;
+        public string lpReserved;
+        public string lpDesktop;
+        public string lpTitle;
+        public uint dwX;
+        public uint dwY;
+        public uint dwXSize;
+        public uint dwYSize;
+        public uint dwXCountChars;
+        public uint dwYCountChars;
+        public uint dwFillAttribute;
+        public uint dwFlags;
+        public short wShowWindow;
+        public short cbReserved2;
+        public IntPtr lpReserved2;
+        public IntPtr hStdInput;
+        public IntPtr hStdOutput;
+        public IntPtr hStdError;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct ProcessInformation
+    {
+        public IntPtr hProcess;
+        public IntPtr hThread;
+        public uint dwProcessId;
+        public uint dwThreadId;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct FileTime
+    {
+        public uint Low;
+        public uint High;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct BasicLimitInformation
+    {
+        public long PerProcessUserTimeLimit;
+        public long PerJobUserTimeLimit;
+        public uint LimitFlags;
+        public UIntPtr MinimumWorkingSetSize;
+        public UIntPtr MaximumWorkingSetSize;
+        public uint ActiveProcessLimit;
+        public UIntPtr Affinity;
+        public uint PriorityClass;
+        public uint SchedulingClass;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct IoCounters
+    {
+        public ulong ReadOperationCount;
+        public ulong WriteOperationCount;
+        public ulong OtherOperationCount;
+        public ulong ReadTransferCount;
+        public ulong WriteTransferCount;
+        public ulong OtherTransferCount;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct ExtendedLimitInformation
+    {
+        public BasicLimitInformation BasicLimitInformation;
+        public IoCounters IoInfo;
+        public UIntPtr ProcessMemoryLimit;
+        public UIntPtr JobMemoryLimit;
+        public UIntPtr PeakProcessMemoryUsed;
+        public UIntPtr PeakJobMemoryUsed;
+    }
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern bool CreateProcessW(
+        string applicationName,
+        StringBuilder commandLine,
+        IntPtr processAttributes,
+        IntPtr threadAttributes,
+        bool inheritHandles,
+        uint creationFlags,
+        IntPtr environment,
+        string currentDirectory,
+        ref StartupInfo startupInfo,
+        out ProcessInformation processInformation);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern IntPtr CreateJobObjectW(IntPtr jobAttributes, string name);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool SetInformationJobObject(
+        IntPtr job,
+        int informationClass,
+        IntPtr information,
+        uint informationLength);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool AssignProcessToJobObject(IntPtr job, IntPtr process);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool GetProcessTimes(
+        IntPtr process,
+        out FileTime creation,
+        out FileTime exit,
+        out FileTime kernel,
+        out FileTime user);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern uint ResumeThread(IntPtr thread);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool TerminateProcess(IntPtr process, uint exitCode);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern uint WaitForSingleObject(IntPtr handle, uint milliseconds);
+
+    [DllImport("kernel32.dll")]
+    private static extern bool CloseHandle(IntPtr handle);
+
+    private IntPtr process;
+    private IntPtr thread;
+
+    private IntPtr job;
+    public uint ProcessId { get; private set; }
+    public ulong StartedAtFileTime { get; private set; }
+
+    private McpSuspendedStudio(ProcessInformation processInformation, IntPtr jobHandle)
+    {
+        process = processInformation.hProcess;
+        thread = processInformation.hThread;
+        job = jobHandle;
+        ProcessId = processInformation.dwProcessId;
+        FileTime creation;
+        FileTime exit;
+        FileTime kernel;
+        FileTime user;
+        if (!GetProcessTimes(process, out creation, out exit, out kernel, out user))
+            throw new Win32Exception(Marshal.GetLastWin32Error(), "GetProcessTimes failed");
+        StartedAtFileTime = ((ulong)creation.High << 32) | creation.Low;
+    }
+
+    private static void ConfigureKillOnClose(IntPtr jobHandle, bool enabled)
+    {
+        var information = new ExtendedLimitInformation();
+        information.BasicLimitInformation.LimitFlags = enabled ? JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE : 0;
+        int length = Marshal.SizeOf(typeof(ExtendedLimitInformation));
+        IntPtr buffer = Marshal.AllocHGlobal(length);
+        try
+        {
+            Marshal.StructureToPtr(information, buffer, false);
+            if (!SetInformationJobObject(jobHandle, JOB_OBJECT_EXTENDED_LIMIT_INFORMATION, buffer, (uint)length))
+                throw new Win32Exception(Marshal.GetLastWin32Error(), "SetInformationJobObject failed");
+        }
+        finally
+        {
+            Marshal.FreeHGlobal(buffer);
+        }
+    }
+
+    private static void TerminateAndWait(IntPtr processHandle)
+    {
+        if (!TerminateProcess(processHandle, 1))
+        {
+            int error = Marshal.GetLastWin32Error();
+            if (error != 5)
+                throw new Win32Exception(error, "TerminateProcess failed");
+        }
+        uint wait = WaitForSingleObject(processHandle, 15000);
+        if (wait == WAIT_TIMEOUT)
+            throw new TimeoutException("Timed out waiting for the terminated Studio process");
+        if (wait == WAIT_FAILED)
+            throw new Win32Exception(Marshal.GetLastWin32Error(), "WaitForSingleObject failed");
+        if (wait != WAIT_OBJECT_0)
+            throw new InvalidOperationException("Unexpected Studio process wait result: " + wait);
+    }
+
+    public static McpSuspendedStudio Start(string application, string commandLine)
+    {
+        IntPtr jobHandle = CreateJobObjectW(IntPtr.Zero, null);
+        if (jobHandle == IntPtr.Zero)
+            throw new Win32Exception(Marshal.GetLastWin32Error(), "CreateJobObjectW failed");
+        try
+        {
+            ConfigureKillOnClose(jobHandle, true);
+            var startup = new StartupInfo();
+            startup.cb = Marshal.SizeOf(startup);
+            ProcessInformation created;
+            uint flags = CREATE_SUSPENDED | CREATE_BREAKAWAY_FROM_JOB;
+            bool started = CreateProcessW(application, new StringBuilder(commandLine), IntPtr.Zero, IntPtr.Zero, false, flags, IntPtr.Zero, null, ref startup, out created);
+            if (!started && Marshal.GetLastWin32Error() == 5)
+                started = CreateProcessW(application, new StringBuilder(commandLine), IntPtr.Zero, IntPtr.Zero, false, CREATE_SUSPENDED, IntPtr.Zero, null, ref startup, out created);
+            if (!started)
+                throw new Win32Exception(Marshal.GetLastWin32Error(), "CreateProcessW failed");
+            try
+            {
+                if (!AssignProcessToJobObject(jobHandle, created.hProcess))
+                    throw new Win32Exception(Marshal.GetLastWin32Error(), "AssignProcessToJobObject failed");
+                return new McpSuspendedStudio(created, jobHandle);
+            }
+            catch
+            {
+                try
+                {
+                    TerminateAndWait(created.hProcess);
+                }
+                finally
+                {
+                    CloseHandle(created.hThread);
+                    CloseHandle(created.hProcess);
+                }
+                throw;
+            }
+        }
+        catch
+        {
+            CloseHandle(jobHandle);
+            throw;
+        }
+    }
+
+    public void Resume()
+    {
+        if (thread == IntPtr.Zero)
+            throw new InvalidOperationException("Studio launch was already resumed or disposed");
+        if (ResumeThread(thread) == RESUME_FAILED)
+            throw new Win32Exception(Marshal.GetLastWin32Error(), "ResumeThread failed");
+        CloseHandle(thread);
+        thread = IntPtr.Zero;
+    }
+
+    public void Release()
+    {
+        if (thread != IntPtr.Zero)
+            throw new InvalidOperationException("Studio launch cannot be released before it is resumed");
+        if (job == IntPtr.Zero)
+            throw new InvalidOperationException("Studio launch was already released or disposed");
+        ConfigureKillOnClose(job, false);
+        CloseHandle(job);
+        job = IntPtr.Zero;
+    }
+
+    public void Abort()
+    {
+        if (process != IntPtr.Zero)
+            TerminateAndWait(process);
+    }
+
+    public void Dispose()
+    {
+        if (thread != IntPtr.Zero)
+        {
+            CloseHandle(thread);
+            thread = IntPtr.Zero;
+        }
+        if (job != IntPtr.Zero)
+        {
+            CloseHandle(job);
+            job = IntPtr.Zero;
+        }
+        if (process != IntPtr.Zero)
+        {
+            CloseHandle(process);
+            process = IntPtr.Zero;
+        }
+    }
+}
+'@`,
+    `$launch = [McpSuspendedStudio]::Start(${powershellStringLiteral(windowsExe)}, ${powershellStringLiteral(commandLine)})`,
+    'try {',
+    '[Console]::Out.WriteLine((ConvertTo-Json @{ pid = $launch.ProcessId; started = [string]$launch.StartedAtFileTime } -Compress)); [Console]::Out.Flush()',
+    '$accepted = $false',
+    '$command = [Console]::In.ReadLine()',
+    'if ($command -eq "MCP_STUDIO_LAUNCH_ACCEPT") {',
+    '$launch.Resume()',
+    '[Console]::Out.WriteLine("MCP_STUDIO_LAUNCH_RESUMED"); [Console]::Out.Flush()',
+    '$command = [Console]::In.ReadLine()',
+    'if ($command -eq "MCP_STUDIO_LAUNCH_COMPLETE") { $launch.Release(); $accepted = $true }',
+    'elseif ($command -eq "MCP_STUDIO_LAUNCH_ABORT") { $launch.Abort(); $accepted = $true }',
+    'else { throw "Resumed Studio launch was not completed or aborted." }',
+    '} elseif ($command -eq "MCP_STUDIO_LAUNCH_ABORT") { $launch.Abort(); $accepted = $true }',
+    'else { throw "Studio launch identity was not accepted." }',
+    '} finally {',
+    'try { if (-not $accepted) { $launch.Abort() } } finally { $launch.Dispose() }',
+    '}',
   ].join('; ');
 }
 
-async function spawnWindowsStudioFromWsl(
+export function buildWindowsStudioStopScript(processId: number, startedAt: string): string {
+  if (!Number.isSafeInteger(processId) || processId <= 0) throw new Error('processId must be a positive integer.');
+  if (!/^[1-9]\d*$/u.test(startedAt)) throw new Error('startedAt must be a positive FILETIME string.');
+  return [
+    `$processId = [int]${processId}`,
+    `$expectedStartedAt = [long]${startedAt}`,
+    '$studio = $null',
+    'try { $studio = [System.Diagnostics.Process]::GetProcessById($processId) } catch [System.ArgumentException] { return }',
+    'try {',
+    '$actualStartedAt = $studio.StartTime.ToUniversalTime().ToFileTimeUtc()',
+    'if ($actualStartedAt -ne $expectedStartedAt) { return }',
+    'if (-not $studio.HasExited) {',
+    'try { $studio.Kill() } catch { if (-not $studio.HasExited) { throw } }',
+    '$studio.WaitForExit()',
+    '}',
+    '} finally { if ($null -ne $studio) { $studio.Dispose() } }',
+  ].join('; ');
+}
+
+async function stopWindowsStudio(processId: number, startedAt: string): Promise<void> {
+  await powershellAsync(buildWindowsStudioStopScript(processId, startedAt));
+}
+
+async function spawnWindowsStudio(
   exe: string,
   args: string[],
   processEnvironment?: StudioProcessEnvironmentPatch,
 ): Promise<StudioChildProcess> {
   const windowsExe = await toStudioLaunchArgAsync(exe);
-  const script = buildWindowsStudioStartScriptFromConvertedExe(windowsExe, args, processEnvironment);
-  const output = await powershellAsync(`${script}; [PSCustomObject]@{ pid = $studio.Id; started = $studio.StartTime.ToUniversalTime().ToFileTimeUtc().ToString() } | ConvertTo-Json -Compress`);
-  const parsed = JSON.parse(output) as { pid?: unknown; started?: unknown };
-  const nativePid = Number(parsed.pid);
-  const nativeStartedAt = typeof parsed.started === 'string' && /^\d+$/u.test(parsed.started)
-    ? parsed.started
-    : undefined;
-  if (!Number.isSafeInteger(nativePid) || nativePid <= 0) {
-    throw new Error(`Could not determine the Windows Studio process id from: ${nativePid}`);
-  }
-  return {
-    pid: nativePid,
-    nativePid,
-    nativeStartedAt,
-    unref: () => {},
-  };
+  const script = buildWindowsStudioStartScriptFromConvertedExe(
+    windowsExe,
+    args,
+    processEnvironment,
+  );
+  const launcher = spawn("powershell.exe", ["-NoProfile", "-Command", script], {
+    cwd:
+      isWsl() && existsSync("/mnt/c/Windows")
+        ? "/mnt/c/Windows"
+        : process.cwd(),
+    stdio: ["pipe", "pipe", "pipe"],
+    windowsHide: true,
+  });
+  return new Promise<StudioChildProcess>((resolve, reject) => {
+    let stdout = "";
+    let controlOutput = "";
+    let stderr = "";
+    let identity: { pid: number; startedAt: string } | undefined;
+    let initialFailure: Error | undefined;
+    let identitySettled = false;
+    let controlState:
+      | "pending"
+      | "accepting"
+      | "resumed"
+      | "releasing"
+      | "released"
+      | "aborting" = "pending";
+    let resumeSettled = false;
+    let completeResume!: (error?: Error) => void;
+    const resumeAcknowledgment = new Promise<Error | undefined>((complete) => {
+      completeResume = complete;
+    });
+    const signalResume = (error?: Error): void => {
+      if (resumeSettled) return;
+      resumeSettled = true;
+      completeResume(error);
+    };
+    let completeLauncher!: (error?: Error) => void;
+    const launcherCompletion = new Promise<Error | undefined>((complete) => {
+      completeLauncher = complete;
+    });
+    const waitForLauncherCompletion = (
+      timeoutMessage: string,
+    ): Promise<Error | undefined> =>
+      new Promise<Error | undefined>((complete) => {
+        let settled = false;
+        const forceTimeout = setTimeout(() => {
+          if (settled) return;
+          settled = true;
+          const error = new Error(timeoutMessage);
+          launcher.kill("SIGKILL");
+          signalResume(error);
+          completeLauncher(error);
+          complete(error);
+        }, 10000);
+        void launcherCompletion.then((error: Error | undefined) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(forceTimeout);
+          complete(error);
+        });
+      });
+    const waitForResumeAcknowledgment = (): Promise<Error | undefined> =>
+      new Promise<Error | undefined>((complete) => {
+        const forceTimeout = setTimeout(() => {
+          const error = new Error(
+            "Timed out resuming the suspended Studio process.",
+          );
+          launcher.kill("SIGKILL");
+          signalResume(error);
+          completeLauncher(error);
+        }, 10000);
+        void resumeAcknowledgment.then((error) => {
+          clearTimeout(forceTimeout);
+          complete(error);
+        });
+      });
+    const throwWithExactCleanup = async (error: Error): Promise<never> => {
+      if (!identity) throw error;
+      try {
+        await stopWindowsStudio(identity.pid, identity.startedAt);
+      } catch (cleanupError) {
+        throw new Error(
+          `${error.message} Exact Studio cleanup also failed: ${
+            cleanupError instanceof Error
+              ? cleanupError.message
+              : String(cleanupError)
+          }`,
+        );
+      }
+      throw error;
+    };
+    const authorize = async (): Promise<void> => {
+      if (controlState === "resumed") return;
+      if (controlState !== "pending")
+        throw new Error(
+          `Studio launch cannot be authorized from ${controlState}.`,
+        );
+      controlState = "accepting";
+      launcher.stdin.write("MCP_STUDIO_LAUNCH_ACCEPT\n");
+      const error = await waitForResumeAcknowledgment();
+      if (error) await throwWithExactCleanup(error);
+      controlState = "resumed";
+    };
+    const release = async (): Promise<void> => {
+      if (controlState === "released") return;
+      if (controlState !== "resumed")
+        throw new Error(
+          `Studio launch cannot be released from ${controlState}.`,
+        );
+      controlState = "releasing";
+      launcher.stdin.end("MCP_STUDIO_LAUNCH_COMPLETE\n");
+      const error = await waitForLauncherCompletion(
+        "Timed out releasing the authorized Studio process.",
+      );
+      if (error) await throwWithExactCleanup(error);
+      controlState = "released";
+    };
+    const abort = async (): Promise<void> => {
+      if (controlState === "released") return;
+      if (controlState !== "aborting") {
+        controlState = "aborting";
+        launcher.stdin.end("MCP_STUDIO_LAUNCH_ABORT\n");
+      }
+      const error = await waitForLauncherCompletion(
+        "Timed out aborting the owned Studio process.",
+      );
+      if (error && identity) {
+        await stopWindowsStudio(identity.pid, identity.startedAt);
+      } else if (error) {
+        throw error;
+      }
+    };
+    const timeout = setTimeout(() => {
+      if (identitySettled) return;
+      identitySettled = true;
+      const failure = (initialFailure = new Error(
+        "Timed out while capturing the exact Studio process identity.",
+      ));
+      controlState = "aborting";
+      launcher.stdin.end("MCP_STUDIO_LAUNCH_ABORT\n");
+      void waitForLauncherCompletion(
+        "Timed out aborting the Studio identity launcher.",
+      ).then((completionError) => {
+        if (!identity) reject(completionError ?? failure);
+      });
+    }, 15000);
+
+    launcher.stdout.on("data", (chunk: Buffer) => {
+      if (identitySettled) {
+        controlOutput = (controlOutput + chunk.toString("utf8")).slice(-1024);
+        if (controlOutput.includes("MCP_STUDIO_LAUNCH_RESUMED")) signalResume();
+        return;
+      }
+      stdout += chunk.toString("utf8");
+      if (stdout.length > 1024 * 1024) {
+        const failure = (initialFailure = new Error(
+          "Studio launcher identity output exceeded 1 MiB.",
+        ));
+        identitySettled = true;
+        controlState = "aborting";
+        launcher.stdin.end("MCP_STUDIO_LAUNCH_ABORT\n");
+        void waitForLauncherCompletion(
+          "Timed out aborting the oversized Studio identity response.",
+        ).then((completionError) => {
+          if (!identity) reject(completionError ?? failure);
+        });
+        return;
+      }
+      const newline = stdout.indexOf("\n");
+      if (newline < 0) return;
+      identitySettled = true;
+      clearTimeout(timeout);
+      try {
+        const parsed = JSON.parse(stdout.slice(0, newline).trim()) as {
+          pid?: unknown;
+          started?: unknown;
+        };
+        const nativePid = Number(parsed.pid);
+        const nativeStartedAt =
+          typeof parsed.started === "string" &&
+          /^[1-9]\d*$/u.test(parsed.started)
+            ? parsed.started
+            : undefined;
+        if (
+          !Number.isSafeInteger(nativePid) ||
+          nativePid <= 0 ||
+          nativeStartedAt === undefined
+        ) {
+          throw new Error(
+            "PowerShell returned an invalid native Studio process identity.",
+          );
+        }
+        identity = { pid: nativePid, startedAt: nativeStartedAt };
+        resolve({
+          pid: nativePid,
+          nativePid,
+          nativeStartedAt,
+          unref: () => {},
+          authorize,
+          release,
+          abort,
+        });
+      } catch (error) {
+        const failure = (initialFailure =
+          error instanceof Error ? error : new Error(String(error)));
+        controlState = "aborting";
+        launcher.stdin.end("MCP_STUDIO_LAUNCH_ABORT\n");
+        void waitForLauncherCompletion(
+          "Timed out aborting the invalid Studio identity response.",
+        ).then((completionError) => {
+          if (!identity) reject(completionError ?? failure);
+        });
+      }
+    });
+    launcher.stdin.on("error", (error) => {
+      if (!initialFailure) initialFailure = error;
+    });
+    launcher.stderr.on("data", (chunk: Buffer) => {
+      if (stderr.length <= 1024 * 1024) stderr += chunk.toString("utf8");
+    });
+    launcher.once("error", (error) => {
+      clearTimeout(timeout);
+      signalResume(error);
+      completeLauncher(error);
+      if (!identity) reject(error);
+    });
+    launcher.once("exit", (code) => {
+      clearTimeout(timeout);
+      void (async () => {
+        if (code === 0 && identity && !initialFailure) {
+          if (!resumeSettled)
+            signalResume(
+              new Error("Studio launcher exited before resume acknowledgment."),
+            );
+          completeLauncher();
+          return;
+        }
+        let cleanupError: unknown;
+        if (identity) {
+          try {
+            await stopWindowsStudio(identity.pid, identity.startedAt);
+          } catch (error) {
+            cleanupError = error;
+          }
+        }
+        const detail =
+          initialFailure?.message ??
+          (stderr.trim() || `PowerShell launcher exited with code ${code}.`);
+        const cleanupDetail = cleanupError
+          ? ` Exact Studio cleanup also failed: ${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}`
+          : "";
+        const error = new Error(`${detail}${cleanupDetail}`);
+        signalResume(error);
+        completeLauncher(error);
+        if (!identity) reject(error);
+      })();
+    });
+  });
 }
 
 function resolveEntrypointDir(): string | undefined {
@@ -387,6 +959,7 @@ function resolveBaseplateTemplatePath(): string {
 
 const STALE_BASEPLATE_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 const BASEPLATE_TEMP_SWEEP_NAME = /^Baseplate-(\d+)-\d+\.rbxl(\.lock)?$/;
+const LAUNCH_COMPLETION_TIMEOUT_MS = 3 * 60 * 1000;
 
 function isProcessAlive(pid: number): boolean {
   try {
@@ -434,8 +1007,10 @@ function createBaseplatePlaceFile(): string {
 
 function isGeneratedBaseplatePlaceFile(file: string): boolean {
   const resolvedFile = path.resolve(file);
-  return path.dirname(resolvedFile) === path.resolve(BASEPLATE_TEMP_DIR) &&
-    BASEPLATE_TEMP_NAME.test(path.basename(resolvedFile));
+  return (
+    path.dirname(resolvedFile) === path.resolve(BASEPLATE_TEMP_DIR) &&
+    BASEPLATE_TEMP_NAME.test(path.basename(resolvedFile))
+  );
 }
 
 export function cleanupManagedBaseplateFiles(record: Pick<ManagedStudioInstance, 'source' | 'localPlaceFile'>): void {
@@ -693,11 +1268,14 @@ export class StudioInstanceManager {
   private managedByInstanceId = new Map<string, ManagedStudioInstance>();
   private pending = new Set<ManagedStudioInstance>();
   private connectionTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  private launchCompletionTimers = new Map<string, NodeJS.Timeout>();
+  private launchControls = retainedLaunchControls;
   private readonly registry: ManagedInstanceRegistry;
   private readonly processAdapter: StudioProcessAdapter;
   private readonly confirmedExitMisses: number;
   private readonly confirmedExitGraceMs: number;
   private readonly snapshotCacheMs: number;
+  private readonly launchCompletionTimeoutMs: number;
   private coordinatorTimer?: ReturnType<typeof setInterval>;
   private coordinatorRefresh?: Promise<void>;
   private cachedSnapshot?: StudioProcessSnapshot;
@@ -710,6 +1288,7 @@ export class StudioInstanceManager {
     this.confirmedExitMisses = options.confirmedExitMisses ?? 2;
     this.confirmedExitGraceMs = options.confirmedExitGraceMs ?? 5000;
     this.snapshotCacheMs = options.snapshotCacheMs ?? 0;
+    this.launchCompletionTimeoutMs = options.launchCompletionTimeoutMs ?? LAUNCH_COMPLETION_TIMEOUT_MS;
   }
 
   async list(): Promise<ManagedStudioInstance[]> {
@@ -753,6 +1332,91 @@ export class StudioInstanceManager {
     return registryRecord ? this.refresh(this.fromRegistryRecord(registryRecord), snapshot) : undefined;
   }
 
+  peekByLaunchId(launchId: string): ManagedStudioInstance | undefined {
+    return [...this.managedByInstanceId.values(), ...this.pending].find(
+      (record) => record.recordId === launchId,
+    );
+  }
+
+  async authorizeByLaunchId(launchId: string): Promise<ManagedStudioInstance> {
+    const record = this.peekByLaunchId(launchId);
+    if (!record)
+      throw new Error(
+        `Launch ${launchId} is not retained by this broker process.`,
+      );
+    if (
+      record.closedAt !== undefined ||
+      record.state === "failed" ||
+      record.state === "exited"
+    ) {
+      throw new Error(
+        `Launch ${launchId} is no longer eligible for process authorization.`,
+      );
+    }
+    if (record.processAuthorizationState === "authorized") return record;
+    const control = this.launchControls.get(launchId);
+    if (record.processAuthorizationState !== "pending" || !control) {
+      throw new Error(
+        `Launch ${launchId} has no retained process authorization handle.`,
+      );
+    }
+    try {
+      this.armLaunchCompletionTimer(record);
+      await control.authorize();
+      record.processAuthorizationState = "authorized";
+      await this.persist(record);
+      this.armLaunchCompletionTimer(record);
+      return record;
+    } catch (error) {
+      record.processAuthorizationState = "pending";
+      const detail = error instanceof Error ? error.message : String(error);
+      await this.markFailed(
+        record,
+        `Studio process authorization failed: ${detail}`,
+      );
+      throw error;
+    }
+  }
+
+  async completeByLaunchId(launchId: string): Promise<ManagedStudioInstance> {
+    const record = this.peekByLaunchId(launchId);
+    if (!record)
+      throw new Error(
+        `Launch ${launchId} is not retained by this broker process.`,
+      );
+    if (
+      record.closedAt !== undefined ||
+      record.state === "failed" ||
+      record.state === "exited"
+    ) {
+      throw new Error(
+        `Launch ${launchId} is no longer eligible for ownership release.`,
+      );
+    }
+    if (record.processAuthorizationState === "released") return record;
+    const control = this.launchControls.get(launchId);
+    if (record.processAuthorizationState !== "authorized" || !control) {
+      throw new Error(
+        `Launch ${launchId} has no authorized ownership handle to release.`,
+      );
+    }
+    try {
+      this.clearLaunchCompletionTimer(record);
+      await control.release();
+      record.processAuthorizationState = "released";
+      this.launchControls.delete(launchId);
+      await this.persist(record);
+      return record;
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      await this.markFailed(
+        record,
+        `Studio process ownership release failed: ${detail}`,
+      );
+      throw error;
+    }
+  }
+
   async pendingLaunches(): Promise<ManagedStudioInstance[]> {
     const now = Date.now();
     const bootId = await this.getCurrentBootId();
@@ -783,31 +1447,61 @@ export class StudioInstanceManager {
   }
 
   async markFailed(record: ManagedStudioInstance, reason: string): Promise<ManagedStudioInstance> {
-    if (record.closedAt !== undefined || record.state !== 'launching') return record;
+    if (
+      record.closedAt !== undefined ||
+      record.state === 'failed' ||
+      record.state === 'exited'
+    ) return record;
     record.state = 'failed';
     record.failedAt = Date.now();
     record.failureReason = reason;
     this.clearConnectionTimer(record);
+    this.clearLaunchCompletionTimer(record);
+    const control = record.recordId
+      ? this.launchControls.get(record.recordId)
+      : undefined;
+    if (record.processAuthorizationState !== 'released' && control) {
+      try {
+        await control.abort();
+        const exitedAt = Date.now();
+        record.exitedAt = exitedAt;
+        record.closedAt = exitedAt;
+        record.processObservationStatus = 'not_running';
+        record.lastProcessObservationAt = exitedAt;
+        record.lastSuccessfulProcessObservationAt = exitedAt;
+        this.cleanupManagedRecord(record);
+        this.markClosedInMemory(record);
+      } catch (error) {
+        record.failureReason += ` Exact suspended-process cleanup also failed: ${
+          error instanceof Error ? error.message : String(error)
+        }`;
+      }
+    }
     await this.persist(record);
     return record;
   }
 
-  async refresh(record: ManagedStudioInstance, providedSnapshot?: StudioProcessSnapshot): Promise<ManagedStudioInstance> {
+  async refresh(
+    record: ManagedStudioInstance,
+    providedSnapshot?: StudioProcessSnapshot,
+  ): Promise<ManagedStudioInstance> {
     if (record.closedAt !== undefined) return record;
-    const snapshot = providedSnapshot ?? await this.getProcessSnapshot();
-    await this.applyProcessObservation(record, this.observeRecord(record, snapshot));
+    const snapshot = providedSnapshot ?? (await this.getProcessSnapshot());
+    await this.applyProcessObservation(
+      record,
+      this.observeRecord(record, snapshot),
+    );
     if (record.closedAt !== undefined) return record;
 
     if (
-      record.state === 'launching' &&
+      record.state === "launching" &&
       record.connectionDeadlineAt !== undefined &&
       Date.now() >= record.connectionDeadlineAt
     ) {
-      record.state = 'failed';
-      record.failedAt = Date.now();
-      record.failureReason = 'Studio launched, but the MCP plugin did not connect before timeout.';
-      this.clearConnectionTimer(record);
-      await this.persist(record);
+      return this.markFailed(
+        record,
+        "Studio launched, but the MCP plugin did not connect before timeout.",
+      );
     }
     return record;
   }
@@ -836,6 +1530,16 @@ export class StudioInstanceManager {
     ) {
       throw new Error('studio_executable must be a non-empty string without null characters.');
     }
+    if (
+      options.requireProcessIdentity &&
+      !this.processAdapter.spawnStudio &&
+      process.platform !== 'win32' &&
+      !isWsl()
+    ) {
+      throw new Error(
+        'require_process_identity is supported only by the identity-retaining Windows launcher or a custom process adapter.',
+      );
+    }
     const preparedOptions = prepareStudioLaunchOptions(options);
     const bootId = await this.getCurrentBootId();
     const before = new Set(initialSnapshot.status === 'ok' ? initialSnapshot.processes.map((proc) => proc.Id) : []);
@@ -852,8 +1556,8 @@ export class StudioInstanceManager {
     try {
       if (this.processAdapter.spawnStudio) {
         proc = await this.processAdapter.spawnStudio(exe, args, spawnOptions);
-      } else if (isWsl()) {
-        proc = await spawnWindowsStudioFromWsl(exe, args, processEnvironment);
+      } else if (process.platform === 'win32' || isWsl()) {
+        proc = await spawnWindowsStudio(exe, args, processEnvironment);
       } else {
         const child = spawn(exe, args, spawnOptions);
         proc = {
@@ -867,6 +1571,50 @@ export class StudioInstanceManager {
     } catch (error) {
       cleanupManagedBaseplateFiles({ source: preparedOptions.source, localPlaceFile: preparedOptions.localPlaceFile });
       throw error;
+    }
+
+    if (
+      options.requireProcessIdentity &&
+      (!Number.isSafeInteger(proc.nativePid) ||
+        (proc.nativePid ?? 0) <= 0 ||
+        proc.nativeStartedAt === undefined ||
+        !/^[1-9]\d*$/u.test(proc.nativeStartedAt) ||
+        !proc.authorize ||
+        !proc.release ||
+        !proc.abort)
+    ) {
+      const reason = 'Studio launcher did not return an exact creation identity and suspended-process control handles.';
+      let abortError: unknown;
+      try {
+        if (proc.abort) {
+          await proc.abort();
+        } else if (proc.nativePid && proc.nativeStartedAt) {
+          await this.closeProcess(proc.nativePid, proc.nativeStartedAt);
+        } else {
+          throw new Error('the process adapter did not retain an abort handle or exact process identity');
+        }
+      } catch (error) {
+        abortError = error;
+      }
+      cleanupManagedBaseplateFiles({ source: preparedOptions.source, localPlaceFile: preparedOptions.localPlaceFile });
+      const abortDetail = abortError
+        ? ` Exact child cleanup also failed: ${abortError instanceof Error ? abortError.message : String(abortError)}`
+        : ' The owned process was stopped.';
+      throw new Error(`${reason}${abortDetail}`);
+    }
+
+    if (!options.requireProcessIdentity && proc.authorize) {
+      try {
+        await proc.authorize();
+        await proc.release?.();
+      } catch (error) {
+        try {
+          await proc.abort?.();
+        } finally {
+          cleanupManagedBaseplateFiles({ source: preparedOptions.source, localPlaceFile: preparedOptions.localPlaceFile });
+        }
+        throw error;
+      }
     }
 
     const launchedAt = Date.now();
@@ -883,11 +1631,16 @@ export class StudioInstanceManager {
       placeVersion: preparedOptions.placeVersion,
       localPlaceFile: preparedOptions.localPlaceFile,
       launchedAt,
-      connectionDeadlineAt: launchedAt + (options.connectionTimeoutMs ?? 120000),
+      connectionDeadlineAt: options.requireProcessIdentity
+        ? undefined
+        : launchedAt + (options.connectionTimeoutMs ?? 120000),
       state: 'launching',
       ownerPid: process.pid,
       bootId,
       deleteLocalPlaceFileOnClose: options.source === 'baseplate',
+      processAuthorizationState: options.requireProcessIdentity && proc.authorize && proc.release
+        ? 'pending'
+        : 'released',
       processObservationStatus: 'running',
       lastProcessObservationAt: launchedAt,
       lastSuccessfulProcessObservationAt: launchedAt,
@@ -899,16 +1652,32 @@ export class StudioInstanceManager {
       // Studio exists, callers must always have a durable launch_id with which
       // to inspect or close it.
       await this.persist(record);
+      if (
+        record.recordId &&
+        record.processAuthorizationState === 'pending' &&
+        proc.authorize &&
+        proc.release &&
+        proc.abort
+      ) {
+        this.launchControls.set(record.recordId, {
+          authorize: proc.authorize,
+          release: proc.release,
+          abort: proc.abort,
+        });
+        this.armLaunchCompletionTimer(record);
+      }
     } catch (error) {
       this.pending.delete(record);
       const processId = record.nativeProcessId ?? record.spawnPid;
       let stopError: unknown;
-      if (processId) {
-        try {
-          await this.closeProcess(processId);
-        } catch (caught) {
-          stopError = caught;
+      try {
+        if (proc.abort) {
+          await proc.abort();
+        } else if (processId) {
+          await this.closeProcess(processId, record.nativeProcessStartedAt);
         }
+      } catch (caught) {
+        stopError = caught;
       }
       cleanupManagedBaseplateFiles(record);
       const detail = error instanceof Error ? error.message : String(error);
@@ -1009,72 +1778,121 @@ export class StudioInstanceManager {
     return this.close(this.fromRegistryRecord(registryRecord));
   }
 
-  async close(record: ManagedStudioInstance): Promise<ManagedStudioCloseResult> {
+  async close(
+    record: ManagedStudioInstance,
+  ): Promise<ManagedStudioCloseResult> {
     if (record.closedAt !== undefined) {
-      return { status: 'already_closed', launchId: record.recordId, instanceId: record.instanceId };
+      return {
+        status: "already_closed",
+        launchId: record.recordId,
+        instanceId: record.instanceId,
+      };
     }
     const processId = record.nativeProcessId ?? record.spawnPid;
     if (!processId) {
-      throw new Error(`Cannot close ${record.instanceId ?? 'Studio launch'} because its process id was not detected.`);
+      throw new Error(
+        `Cannot close ${record.instanceId ?? "Studio launch"} because its process id was not detected.`,
+      );
+    }
+    const control = record.recordId
+      ? this.launchControls.get(record.recordId)
+      : undefined;
+    if (record.processAuthorizationState !== "released" && control) {
+      await control.abort();
+      const closedAt = Date.now();
+      record.closedAt = closedAt;
+      record.exitedAt = closedAt;
+      if (record.state !== "failed") record.state = "exited";
+      record.processObservationStatus = "not_running";
+      record.lastProcessObservationAt = closedAt;
+      record.lastSuccessfulProcessObservationAt = closedAt;
+      record.lastProcessObservationError = undefined;
+      this.cleanupManagedRecord(record);
+      this.markClosedInMemory(record);
+      await this.persist(record);
+      return {
+        status: "closed",
+        launchId: record.recordId,
+        instanceId: record.instanceId,
+      };
     }
 
     const snapshot = await this.getProcessSnapshot(true);
     const observation = this.observeRecord(record, snapshot);
-    if (observation.status === 'unknown') {
+    if (observation.status === "unknown") {
       await this.applyProcessObservation(record, observation);
-      throw new Error(`Cannot verify the managed Studio process because process observation failed: ${observation.error}`);
+      throw new Error(
+        `Cannot verify the managed Studio process because process observation failed: ${observation.error}`,
+      );
     }
-    if (observation.status === 'not_running') {
-      this.cleanupManagedRecord(record);
+    if (observation.status === "not_running") {
       await this.markProcessExited(
         record,
         undefined,
-        observation.reason === 'identity_mismatch'
-          ? 'Studio process identity changed; the retained PID was not reused.'
+        observation.reason === "identity_mismatch"
+          ? "Studio process identity changed; the retained PID was not reused."
           : record.failureReason,
       );
       await this.registry.logEvent({
-        event: 'registry_close_already_stopped',
+        event: "registry_close_already_stopped",
         recordId: record.recordId,
         instanceId: record.instanceId,
         source: record.source,
-        reason: observation.reason === 'identity_mismatch' ? 'identity_mismatch' : 'pid_not_running',
-        action: 'marked_closed_and_cleaned_baseplate',
+        reason:
+          observation.reason === "identity_mismatch"
+            ? "identity_mismatch"
+            : "pid_not_running",
+        action: "marked_closed_and_cleaned_baseplate",
       });
-      return { status: 'already_closed', launchId: record.recordId, instanceId: record.instanceId };
+      return {
+        status: "already_closed",
+        launchId: record.recordId,
+        instanceId: record.instanceId,
+      };
     }
 
     try {
-      await this.closeProcess(processId);
+      await this.closeProcess(processId, record.nativeProcessStartedAt);
     } catch (error) {
       const retry = await this.getProcessSnapshot(true);
       const retryObservation = this.observeRecord(record, retry);
-      if (retryObservation.status === 'running' || retryObservation.status === 'unknown') throw error;
+      if (
+        retryObservation.status === "running" ||
+        retryObservation.status === "unknown"
+      )
+        throw error;
       await this.registry.logEvent({
-        event: 'registry_close_already_stopped',
+        event: "registry_close_already_stopped",
         recordId: record.recordId,
         instanceId: record.instanceId,
         source: record.source,
-        reason: 'stop_raced_with_exit',
-        action: 'marked_closed_and_cleaned_baseplate',
+        reason: "stop_raced_with_exit",
+        action: "marked_closed_and_cleaned_baseplate",
       });
-      this.cleanupManagedRecord(record);
       await this.markProcessExited(record, undefined, record.failureReason);
-      return { status: 'already_closed', launchId: record.recordId, instanceId: record.instanceId };
+      return {
+        status: "already_closed",
+        launchId: record.recordId,
+        instanceId: record.instanceId,
+      };
     }
 
     const closedAt = Date.now();
     record.closedAt = closedAt;
     record.exitedAt = record.exitedAt ?? closedAt;
-    if (record.state !== 'failed') record.state = 'exited';
-    record.processObservationStatus = 'not_running';
+    if (record.state !== "failed") record.state = "exited";
+    record.processObservationStatus = "not_running";
     record.lastProcessObservationAt = closedAt;
     record.lastSuccessfulProcessObservationAt = closedAt;
     record.lastProcessObservationError = undefined;
     this.cleanupManagedRecord(record);
     this.markClosedInMemory(record);
     await this.persist(record);
-    return { status: 'closed', launchId: record.recordId, instanceId: record.instanceId };
+    return {
+      status: "closed",
+      launchId: record.recordId,
+      instanceId: record.instanceId,
+    };
   }
 
   async closeConnectedInstance(instance: ConnectedStudioInstance): Promise<void> {
@@ -1086,22 +1904,30 @@ export class StudioInstanceManager {
     if (!process) {
       throw new Error(`Could not find a Studio process for connected instance "${instance.instanceId}".`);
     }
-    await this.closeProcess(process.Id);
+    await this.closeProcess(process.Id, process.StartTimeUtcFileTime);
   }
 
-  private async closeProcess(processId: number): Promise<void> {
+  private async closeProcess(
+    processId: number,
+    startedAt?: string,
+  ): Promise<void> {
     if (this.processAdapter.stopProcess) {
-      await this.processAdapter.stopProcess(processId);
+      await this.processAdapter.stopProcess(processId, startedAt);
       return;
     }
 
-    if (process.platform === 'win32' || isWsl()) {
-      await powershellAsync(`Stop-Process -Id ${Math.trunc(processId)} -Force -ErrorAction Stop`);
+    if (process.platform === "win32" || isWsl()) {
+      if (startedAt === undefined) {
+        throw new Error(
+          "Cannot stop a Windows Studio process without its creation-time identity.",
+        );
+      }
+      await stopWindowsStudio(processId, startedAt);
     } else {
       try {
-        process.kill(processId, 'SIGTERM');
+        process.kill(processId, "SIGTERM");
       } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error;
+        if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
       }
     }
   }
@@ -1175,18 +2001,75 @@ export class StudioInstanceManager {
       : currentBootIdAsync();
   }
 
-  private async registrySweepOptions(snapshot: StudioProcessSnapshot): Promise<RegistrySweepOptions> {
+  private async registrySweepOptions(
+    snapshot: StudioProcessSnapshot,
+  ): Promise<RegistrySweepOptions> {
     return {
       currentBootId: await this.getCurrentBootId(),
-      observeProcess: (record) => this.observeRecord(this.fromRegistryRecord(record), snapshot),
-      cleanupRecord: (record) => this.cleanupManagedRecord(record),
+      observeProcess: (record) =>
+        this.observeRecord(this.fromRegistryRecord(record), snapshot),
+      cleanupRecord: (record) => {
+        if (
+          record.processAuthorizationState !== "released" &&
+          this.launchControls.has(record.recordId)
+        )
+          return;
+        this.cleanupManagedRecord(record);
+      },
       confirmedExitMisses: this.confirmedExitMisses,
       confirmedExitGraceMs: this.confirmedExitGraceMs,
     };
   }
 
   private async sweepRegistry(snapshot: StudioProcessSnapshot): Promise<void> {
-    await this.registry.sweep(await this.registrySweepOptions(snapshot));
+    const sweepOptions = await this.registrySweepOptions(snapshot);
+    await this.registry.sweep(sweepOptions);
+    const persisted = await this.registry.listOpenUnchecked();
+    for (const registryRecord of persisted) {
+      const ownerPid = registryRecord.ownerPid;
+      if (
+        registryRecord.processAuthorizationState === "released" ||
+        this.launchControls.has(registryRecord.recordId) ||
+        registryRecord.bootId !== sweepOptions.currentBootId ||
+        ownerPid === undefined ||
+        (ownerPid !== process.pid && isProcessAlive(ownerPid))
+      ) {
+        continue;
+      }
+      const record = this.fromRegistryRecord(registryRecord);
+      if (this.observeRecord(record, snapshot).status !== "running") continue;
+      const processId = record.nativeProcessId ?? record.spawnPid;
+      if (!processId || !record.nativeProcessStartedAt) {
+        record.state = "failed";
+        record.failedAt = Date.now();
+        record.failureReason =
+          "Orphaned unreleased Studio launch has no exact process identity for cleanup.";
+        await this.persist(record);
+        continue;
+      }
+      try {
+        await this.closeProcess(processId, record.nativeProcessStartedAt);
+        const closedAt = Date.now();
+        record.state = "failed";
+        record.failedAt = closedAt;
+        record.failureReason =
+          "Orphaned unreleased Studio launch was stopped after its broker owner exited.";
+        record.exitedAt = closedAt;
+        record.closedAt = closedAt;
+        record.processObservationStatus = "not_running";
+        record.lastProcessObservationAt = closedAt;
+        record.lastSuccessfulProcessObservationAt = closedAt;
+        this.cleanupManagedRecord(record);
+        await this.persist(record);
+      } catch (error) {
+        record.state = "failed";
+        record.failedAt = Date.now();
+        record.failureReason = `Failed to stop orphaned unreleased Studio launch: ${
+          error instanceof Error ? error.message : String(error)
+        }`;
+        await this.persist(record);
+      }
+    }
   }
 
   private observeRecord(record: ManagedStudioInstance, snapshot: StudioProcessSnapshot): ManagedProcessObservation {
@@ -1229,9 +2112,18 @@ export class StudioInstanceManager {
     return false;
   }
 
-  private cleanupManagedRecord(record: { source: string; localPlaceFile?: string }) {
-    if (record.source !== 'baseplate') return;
-    cleanupManagedBaseplateFiles({ source: 'baseplate', localPlaceFile: record.localPlaceFile });
+  private cleanupManagedRecord(record: {
+    recordId?: string;
+    source: string;
+    localPlaceFile?: string;
+  }) {
+    if (record.recordId) this.launchControls.delete(record.recordId);
+    if (record.recordId) this.clearLaunchCompletionTimer(record);
+    if (record.source !== "baseplate") return;
+    cleanupManagedBaseplateFiles({
+      source: "baseplate",
+      localPlaceFile: record.localPlaceFile,
+    });
   }
 
   private markClosedInMemory(record: ManagedStudioInstance) {
@@ -1239,6 +2131,30 @@ export class StudioInstanceManager {
     if (record.instanceId) this.managedByInstanceId.delete(record.instanceId);
     this.pending.delete(record);
     this.clearConnectionTimer(record);
+    this.clearLaunchCompletionTimer(record);
+  }
+
+  private armLaunchCompletionTimer(record: ManagedStudioInstance) {
+    if (!record.recordId) return;
+    this.clearLaunchCompletionTimer(record);
+    const timeout = setTimeout(() => {
+      this.runInBackground(
+        'aborting an uncompleted Studio launch',
+        this.markFailed(
+          record,
+          'Carbon did not complete Studio launch ownership transfer before timeout.',
+        ),
+      );
+    }, this.launchCompletionTimeoutMs);
+    if (typeof timeout === 'object' && 'unref' in timeout) timeout.unref();
+    this.launchCompletionTimers.set(record.recordId, timeout);
+  }
+
+  private clearLaunchCompletionTimer(record: { recordId?: string }) {
+    if (!record.recordId) return;
+    const timer = this.launchCompletionTimers.get(record.recordId);
+    clearTimeout(timer);
+    this.launchCompletionTimers.delete(record.recordId);
   }
 
   private async markProcessExited(
@@ -1247,16 +2163,35 @@ export class StudioInstanceManager {
     reason?: string,
   ): Promise<ManagedStudioInstance> {
     if (record.closedAt !== undefined) return record;
+    const control = record.recordId
+      ? this.launchControls.get(record.recordId)
+      : undefined;
+    let controlFailure: string | undefined;
+    if (record.processAuthorizationState !== "released" && control) {
+      try {
+        await control.abort();
+      } catch (error) {
+        controlFailure = error instanceof Error ? error.message : String(error);
+      }
+    }
     const exitedAt = Date.now();
     record.exitedAt = exitedAt;
     record.closedAt = exitedAt;
-    if (record.state !== 'failed') record.state = 'exited';
-    record.processObservationStatus = 'not_running';
+    if (record.state !== "failed") record.state = "exited";
+    record.processObservationStatus = "not_running";
     record.lastProcessObservationAt = exitedAt;
     record.lastSuccessfulProcessObservationAt = exitedAt;
     record.lastProcessObservationError = undefined;
     if (exitCode !== undefined) record.exitCode = exitCode;
     if (reason) record.failureReason = reason;
+    if (controlFailure) {
+      record.failureReason = [
+        record.failureReason,
+        `Launch ownership cleanup failed: ${controlFailure}`,
+      ]
+        .filter(Boolean)
+        .join(" ");
+    }
     this.cleanupManagedRecord(record);
     this.markClosedInMemory(record);
     await this.persist(record);
@@ -1430,6 +2365,7 @@ export class StudioInstanceManager {
       ownerPid: record.ownerPid,
       bootId: record.bootId,
       processObservationStatus: record.processObservationStatus,
+      processAuthorizationState: record.processAuthorizationState,
       lastProcessObservationAt: record.lastProcessObservationAt,
       lastSuccessfulProcessObservationAt: record.lastSuccessfulProcessObservationAt,
       lastProcessObservationError: record.lastProcessObservationError,
@@ -1438,8 +2374,16 @@ export class StudioInstanceManager {
     };
   }
 
-  private fromRegistryRecord(record: ManagedInstanceRegistryRecord): ManagedStudioInstance {
-    const state = record.state ?? (record.closedAt !== undefined ? 'exited' : record.instanceId ? 'connected' : 'launching');
+  private fromRegistryRecord(
+    record: ManagedInstanceRegistryRecord,
+  ): ManagedStudioInstance {
+    const state =
+      record.state ??
+      (record.closedAt !== undefined
+        ? "exited"
+        : record.instanceId
+          ? "connected"
+          : "launching");
     return {
       recordId: record.recordId,
       source: record.source as StudioLaunchSource,
@@ -1454,7 +2398,11 @@ export class StudioInstanceManager {
       placeVersion: record.placeVersion,
       localPlaceFile: record.localPlaceFile,
       launchedAt: record.launchedAt,
-      connectionDeadlineAt: record.connectionDeadlineAt ?? (state === 'launching' ? record.launchedAt + 120000 : undefined),
+      connectionDeadlineAt:
+        record.connectionDeadlineAt ??
+        (state === "launching" && record.processAuthorizationState === undefined
+          ? record.launchedAt + 120000
+          : undefined),
       state,
       connectedAt: record.attachedAt,
       failedAt: record.failedAt,
@@ -1466,8 +2414,10 @@ export class StudioInstanceManager {
       bootId: record.bootId,
       deleteLocalPlaceFileOnClose: record.deleteLocalPlaceFileOnClose,
       processObservationStatus: record.processObservationStatus,
+      processAuthorizationState: record.processAuthorizationState ?? "released",
       lastProcessObservationAt: record.lastProcessObservationAt,
-      lastSuccessfulProcessObservationAt: record.lastSuccessfulProcessObservationAt,
+      lastSuccessfulProcessObservationAt:
+        record.lastSuccessfulProcessObservationAt,
       lastProcessObservationError: record.lastProcessObservationError,
       consecutiveConfirmedMisses: record.consecutiveConfirmedMisses,
       firstConfirmedMissAt: record.firstConfirmedMissAt,

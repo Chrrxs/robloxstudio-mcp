@@ -2864,6 +2864,9 @@ export class RobloxStudioTools {
       managed: true,
       state: record.state,
       pid: record.nativeProcessId ?? record.spawnPid,
+      process_started_at_file_time: record.nativeProcessStartedAt,
+      process_authorized: record.processAuthorizationState !== 'pending',
+      process_ownership_released: record.processAuthorizationState === 'released',
       process_running: record.closedAt !== undefined || record.exitedAt !== undefined
         ? false
         : record.processObservationStatus === 'running'
@@ -2911,11 +2914,13 @@ export class RobloxStudioTools {
 
     if (
       action !== 'launch' &&
+      action !== 'authorize' &&
+      action !== 'complete' &&
       action !== 'close' &&
       action !== 'status' &&
       action !== 'list_place_versions'
     ) {
-      throw new Error('manage_instance requires action=launch|close|status|list_place_versions');
+      throw new Error('manage_instance requires action=launch|authorize|complete|close|status|list_place_versions');
     }
 
     if (action === 'list_place_versions') {
@@ -2941,8 +2946,20 @@ export class RobloxStudioTools {
       return this._textResult(body);
     }
 
-    if (action === 'status' || action === 'close') {
+    if (action === 'close' || action === 'status') {
       await this.managedConnectionAssociations;
+    }
+
+    if (action === 'authorize') {
+      if (!launch_id) throw new Error('manage_instance action=authorize requires launch_id.');
+      const record = await this.instanceManager.authorizeByLaunchId(launch_id);
+      return this._textResult(this._managedStatus(record));
+    }
+
+    if (action === 'complete') {
+      if (!launch_id) throw new Error('manage_instance action=complete requires launch_id.');
+      const record = await this.instanceManager.completeByLaunchId(launch_id);
+      return this._textResult(this._managedStatus(record));
     }
 
     if (action === 'status') {
@@ -3110,7 +3127,11 @@ export class RobloxStudioTools {
     const universeId = launchSource === 'published_place' || launchSource === 'place_revision'
       ? await this._deriveUniverseId(placeId as number)
       : undefined;
-    const waitForConnection = request.wait_for_connection !== false;
+    if (request.require_process_identity !== undefined && typeof request.require_process_identity !== 'boolean') {
+      throw new Error('require_process_identity must be a boolean when provided.');
+    }
+    const requireProcessIdentity = request.require_process_identity === true;
+    const waitForConnection = !requireProcessIdentity && request.wait_for_connection !== false;
     const timeoutMs = this._optionalPositiveInteger(request.timeout_ms, 'timeout_ms') ?? 120000;
     const beforeKeys = new Set(this.bridge.getPublicInstances().map((instance) => this._publicInstanceKey(instance)));
 
@@ -3123,6 +3144,7 @@ export class RobloxStudioTools {
       connectionTimeoutMs: timeoutMs,
       studioExecutable,
       processEnvironment,
+      ...(requireProcessIdentity ? { requireProcessIdentity: true } : {}),
     });
 
     if (!waitForConnection) {
