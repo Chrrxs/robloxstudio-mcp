@@ -1189,7 +1189,8 @@ export class RobloxStudioTools {
     if (typeof state !== 'object' || state === null || Array.isArray(state)) {
       return state;
     }
-    const { devices: _devices, ...rest } = state as Record<string, unknown>;
+    const rest = { ...(state as Record<string, unknown>) };
+    delete rest.devices;
     return rest;
   }
 
@@ -2336,7 +2337,8 @@ export class RobloxStudioTools {
         entrySummaries.push(entrySummary);
 
         try {
-          const { label: _label, ...settings } = entry;
+          const settings = { ...entry };
+          delete settings.label;
           const applied = await this._executeDeviceSimulatorOperation(
             resolved.instanceId,
             resolved.role,

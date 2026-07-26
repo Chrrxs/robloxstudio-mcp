@@ -446,17 +446,17 @@ describe('Tool schema compatibility', () => {
       'duration_ms',
       'filter',
       'focus',
-	      'frame_window',
-	      'include_comparison_index',
-	      'include_gpu',
-	      'include_idle',
-	      'instance_id',
-	      'max_comparison_rows',
-	      'max_events',
-	      'max_groups',
-	      'max_related_timers',
-	      'max_timers',
-	      'max_timers_per_group',
+      'frame_window',
+      'include_comparison_index',
+      'include_gpu',
+      'include_idle',
+      'instance_id',
+      'max_comparison_rows',
+      'max_events',
+      'max_groups',
+      'max_related_timers',
+      'max_timers',
+      'max_timers_per_group',
       'min_total_us',
       'output_path',
       'summary_output_path',
@@ -467,10 +467,10 @@ describe('Tool schema compatibility', () => {
     expect(tool!.description).toContain('LibMP');
     expect(tool!.description).toContain('baseline_comparison');
     expect(tool!.description).toContain('summary_output_path');
-	    expect(tool!.description).toContain('inclusive_us');
-	    expect(tool!.description).toContain('top_threads');
-	    expect(tool!.description).toContain('top_call_edges');
-	    expect(tool!.description).toContain('comparison_index');
+    expect(tool!.description).toContain('inclusive_us');
+    expect(tool!.description).toContain('top_threads');
+    expect(tool!.description).toContain('top_call_edges');
+    expect(tool!.description).toContain('comparison_index');
     expect(tool!.description).toContain('top_groups');
     expect(tool!.description).toContain('microseconds');
     expect(tool!.description).toContain('do not sum rows');
@@ -488,12 +488,12 @@ describe('Tool schema compatibility', () => {
     expect((props.max_groups as { default?: number; minimum?: number; maximum?: number }).default).toBe(20);
     expect((props.max_groups as { default?: number; minimum?: number; maximum?: number }).minimum).toBe(1);
     expect((props.max_groups as { default?: number; minimum?: number; maximum?: number }).maximum).toBe(100);
-	    expect((props.max_timers_per_group as { default?: number; minimum?: number; maximum?: number }).default).toBe(5);
-	    expect((props.max_timers_per_group as { default?: number; minimum?: number; maximum?: number }).minimum).toBe(0);
-	    expect((props.max_timers_per_group as { default?: number; minimum?: number; maximum?: number }).maximum).toBe(20);
-	    expect((props.max_related_timers as { default?: number; minimum?: number; maximum?: number }).default).toBe(3);
-	    expect((props.max_related_timers as { default?: number; minimum?: number; maximum?: number }).minimum).toBe(0);
-	    expect((props.max_related_timers as { default?: number; minimum?: number; maximum?: number }).maximum).toBe(10);
+    expect((props.max_timers_per_group as { default?: number; minimum?: number; maximum?: number }).default).toBe(5);
+    expect((props.max_timers_per_group as { default?: number; minimum?: number; maximum?: number }).minimum).toBe(0);
+    expect((props.max_timers_per_group as { default?: number; minimum?: number; maximum?: number }).maximum).toBe(20);
+    expect((props.max_related_timers as { default?: number; minimum?: number; maximum?: number }).default).toBe(3);
+    expect((props.max_related_timers as { default?: number; minimum?: number; maximum?: number }).minimum).toBe(0);
+    expect((props.max_related_timers as { default?: number; minimum?: number; maximum?: number }).maximum).toBe(10);
     expect((props.max_events as { default?: number; minimum?: number; maximum?: number }).default).toBe(250000);
     expect((props.max_events as { default?: number; minimum?: number; maximum?: number }).minimum).toBe(10000);
     expect((props.max_events as { default?: number; minimum?: number; maximum?: number }).maximum).toBe(1000000);
