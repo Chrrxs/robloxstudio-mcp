@@ -340,7 +340,7 @@ export function createHttpServer(tools: RobloxStudioTools, bridge: BridgeService
       serverVersion: serverConfig?.version,
       capabilities: studioLifecycleCallable ? {
         studioLifecycle: {
-          protocolVersion: 1,
+          protocolVersion: 3,
           endpoint: '/mcp/manage_instance',
         },
       } : {},

@@ -12,6 +12,7 @@ const TERMINAL_RECORD_RETENTION_MS = 24 * 60 * 60 * 1000;
 const DEFAULT_CONFIRMED_EXIT_MISSES = 2;
 const DEFAULT_CONFIRMED_EXIT_GRACE_MS = 5000;
 const activeLockTokens = new Set<string>();
+const activeLockPaths = new Set<string>();
 
 export type ManagedInstanceLifecycleState = 'launching' | 'connected' | 'exited' | 'failed';
 
@@ -42,6 +43,7 @@ export interface ManagedInstanceRegistryRecord {
   ownerPid?: number;
   bootId: string;
   processObservationStatus?: 'running' | 'not_running' | 'unknown';
+  processAuthorizationState?: 'pending' | 'authorized' | 'released';
   lastProcessObservationAt?: number;
   lastSuccessfulProcessObservationAt?: number;
   lastProcessObservationError?: string;
@@ -226,6 +228,7 @@ export class ManagedInstanceRegistry {
       try {
         await fs.mkdir(lockDir);
         activeLockTokens.add(owner.token);
+        activeLockPaths.add(lockDir);
         try {
           await fs.writeFile(path.join(lockDir, 'owner.json'), `${JSON.stringify(owner)}\n`, {
             encoding: 'utf8',
@@ -233,6 +236,7 @@ export class ManagedInstanceRegistry {
           });
         } catch (error) {
           activeLockTokens.delete(owner.token);
+          activeLockPaths.delete(lockDir);
           await fs.rm(lockDir, { recursive: true, force: true });
           throw error;
         }
@@ -251,6 +255,7 @@ export class ManagedInstanceRegistry {
               : undefined;
           if (ownerIsActive === false || (
             currentOwner === undefined &&
+            !activeLockPaths.has(lockDir) &&
             Date.now() - stat.mtimeMs > LOCK_STALE_MS
           )) {
             await fs.rm(lockDir, { recursive: true, force: true });
@@ -280,6 +285,7 @@ export class ManagedInstanceRegistry {
         // The lock was already reclaimed or removed.
       } finally {
         activeLockTokens.delete(owner.token);
+        activeLockPaths.delete(lockDir);
       }
     }
   }

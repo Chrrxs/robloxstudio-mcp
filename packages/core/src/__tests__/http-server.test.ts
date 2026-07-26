@@ -38,7 +38,7 @@ describe('HTTP Server', () => {
         serverName: 'robloxstudio-mcp',
         capabilities: {
           studioLifecycle: {
-            protocolVersion: 1,
+            protocolVersion: 3,
             endpoint: '/mcp/manage_instance',
           },
         },
