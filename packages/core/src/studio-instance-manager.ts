@@ -637,7 +637,7 @@ public sealed class McpSuspendedStudio : IDisposable
     '} finally {',
     'try { if (-not $accepted) { $launch.Abort() } } finally { $launch.Dispose() }',
     '}',
-  ].join('; ');
+  ].join('\n');
 }
 
 export function buildWindowsStudioStopScript(processId: number, startedAt: string): string {

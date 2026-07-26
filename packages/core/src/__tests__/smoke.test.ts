@@ -94,6 +94,10 @@ describe('Smoke', () => {
     expect(script).toContain(
       'elseif ($command -eq "MCP_STUDIO_LAUNCH_ABORT") { $launch.Abort(); $accepted = $true }',
     );
+    expect(script).toContain(
+      'if ($command -eq "MCP_STUDIO_LAUNCH_COMPLETE") { $launch.Release(); $accepted = $true }\n' +
+      'elseif ($command -eq "MCP_STUDIO_LAUNCH_ABORT") { $launch.Abort(); $accepted = $true }',
+    );
     expect(script).toContain('TerminateAndWait(created.hProcess)');
     expect(script).toContain('TerminateAndWait(process)');
     expect(script).toContain('WaitForSingleObject(processHandle, 15000)');
