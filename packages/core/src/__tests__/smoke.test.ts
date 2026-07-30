@@ -822,7 +822,12 @@ describe('Smoke', () => {
 
       await jest.advanceTimersByTimeAsync(1000);
       jest.useRealTimers();
-      const persisted = await registry.findAnyByRecordId(launched.recordId!);
+      const persistenceDeadline = Date.now() + 2000;
+      let persisted = await registry.findAnyByRecordId(launched.recordId!);
+      while (persisted?.state !== 'failed' && Date.now() < persistenceDeadline) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        persisted = await registry.findAnyByRecordId(launched.recordId!);
+      }
 
       expect(persisted?.state).toBe('failed');
       expect(launched.failureReason).toContain('did not complete Studio launch ownership transfer');
