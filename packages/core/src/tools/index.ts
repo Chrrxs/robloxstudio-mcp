@@ -1,7 +1,11 @@
 import { StudioHttpClient } from './studio-client.js';
 import { BridgeService, RoutingFailure, type PublicPluginInstance } from '../bridge-service.js';
 import { runBuildExecutor } from './build-executor.js';
-import { OpenCloudClient } from '../opencloud-client.js';
+import {
+  OpenCloudClient,
+  type AssetSearchParams,
+  type CreatorStoreSearchCategory,
+} from '../opencloud-client.js';
 import { RobloxCookieClient } from '../roblox-cookie-client.js';
 import {
   parseStudioProcessEnvironmentPatch,
@@ -69,6 +73,37 @@ const MAX_INLINE_IMAGE_BYTES = 6_000_000;
 const MAX_DEVICE_MATRIX_ENTRIES = 6;
 const MAX_NETWORK_PACKET_LOSS_PERCENT = 0.5;
 const STUDIO_ASSISTANT_SOURCE_IMAGE_LABEL = 'Studio Assistant Source Image';
+const CREATOR_STORE_EFFECT_SEARCH_TERMS = [
+  'particle effect',
+  'VFX',
+  'explosion',
+  'smoke',
+  'aura',
+  'beam',
+  'trail',
+  'impact effect',
+] as const;
+const CREATOR_STORE_SEARCH_TYPES = new Set<string>([
+  'Audio',
+  'Model',
+  'Decal',
+  'Plugin',
+  'MeshPart',
+  'Video',
+  'FontFamily',
+  'Image',
+  'Particle',
+  'VFX',
+]);
+const CREATOR_STORE_SORT_CATEGORIES = new Set<string>([
+  'Relevance',
+  'Trending',
+  'Top',
+  'AudioDuration',
+  'CreateTime',
+  'UpdatedTime',
+  'Ratings',
+]);
 const MULTIPLAYER_FORCE_REQUIRED_MESSAGE =
   'StudioTestService multiplayer stop is currently disabled because StudioTestService:EndTest is broken for this flow. ' +
   'Pass force=true only if you understand you must manually close the multiplayer test windows afterward.';
@@ -84,6 +119,50 @@ function multiplayerStopDisabledBody(): Record<string, unknown> {
     reason: 'StudioTestService:EndTest does not reliably end StudioTestService multiplayer sessions from MCP right now.',
     manualCleanupRequired: true,
     recoveryHint: 'Close the Roblox Studio multiplayer test windows manually.',
+  };
+}
+
+function normalizeCreatorStoreSearch(
+  assetType: string,
+  query?: string,
+): {
+  requestedAssetType: string;
+  searchCategoryType: CreatorStoreSearchCategory;
+  effectiveQuery?: string;
+  suggestedEffectQueries?: readonly string[];
+} {
+  if (!CREATOR_STORE_SEARCH_TYPES.has(assetType)) {
+    throw new Error(
+      `search_assets assetType must be one of: ${Array.from(CREATOR_STORE_SEARCH_TYPES).join(', ')}`,
+    );
+  }
+
+  const trimmedQuery = query?.trim() || undefined;
+  if (assetType === 'Image') {
+    return {
+      requestedAssetType: assetType,
+      searchCategoryType: 'Decal',
+      effectiveQuery: trimmedQuery,
+    };
+  }
+
+  if (assetType === 'Particle' || assetType === 'VFX') {
+    const suffix = assetType === 'Particle' ? 'particle effect' : 'VFX';
+    const alreadyEffectSpecific = trimmedQuery !== undefined && /\b(?:particle|vfx|effect)\b/i.test(trimmedQuery);
+    return {
+      requestedAssetType: assetType,
+      searchCategoryType: 'Model',
+      effectiveQuery: trimmedQuery
+        ? alreadyEffectSpecific ? trimmedQuery : `${trimmedQuery} ${suffix}`
+        : suffix,
+      suggestedEffectQueries: CREATOR_STORE_EFFECT_SEARCH_TERMS,
+    };
+  }
+
+  return {
+    requestedAssetType: assetType,
+    searchCategoryType: assetType as CreatorStoreSearchCategory,
+    effectiveQuery: trimmedQuery,
   };
 }
 
@@ -4394,27 +4473,52 @@ export class RobloxStudioTools {
     sortBy?: string,
     verifiedCreatorsOnly?: boolean
   ) {
-    if (!this.openCloudClient.hasApiKey()) {
-      return {
-        content: [{
-          type: 'text',
-          text: JSON.stringify({ error: 'ROBLOX_OPEN_CLOUD_API_KEY environment variable is not set. Set it to use Creator Store asset tools.' })
-        }]
-      };
+    const normalized = normalizeCreatorStoreSearch(assetType, query);
+    if (maxResults !== undefined && (!Number.isInteger(maxResults) || maxResults < 1 || maxResults > 100)) {
+      throw new Error('search_assets maxResults must be an integer from 1 to 100');
+    }
+    if (sortBy !== undefined && !CREATOR_STORE_SORT_CATEGORIES.has(sortBy)) {
+      throw new Error(
+        `search_assets sortBy must be one of: ${Array.from(CREATOR_STORE_SORT_CATEGORIES).join(', ')}`,
+      );
     }
 
     const response = await this.openCloudClient.searchAssets({
-      searchCategoryType: assetType as any,
-      query,
+      searchCategoryType: normalized.searchCategoryType,
+      query: normalized.effectiveQuery,
       maxPageSize: maxResults,
-      sortCategory: sortBy as any,
+      sortCategory: sortBy as AssetSearchParams['sortCategory'],
       includeOnlyVerifiedCreators: verifiedCreatorsOnly,
+    });
+
+    const assetIds = response.creatorStoreAssets
+      .map((entry) => entry.asset?.id)
+      .filter((id): id is number => typeof id === 'number' && Number.isFinite(id));
+    const thumbnailUrls = await this.openCloudClient.getAssetThumbnails(assetIds);
+    const creatorStoreAssets = response.creatorStoreAssets.map((entry) => {
+      const assetId = entry.asset?.id;
+      const thumbnailUrl = assetId === undefined ? undefined : thumbnailUrls.get(assetId);
+      return thumbnailUrl ? { ...entry, thumbnailUrl } : entry;
     });
 
     return {
       content: [{
         type: 'text',
-        text: JSON.stringify(response)
+        text: JSON.stringify({
+          ...response,
+          creatorStoreAssets,
+          search: {
+            requestedAssetType: normalized.requestedAssetType,
+            searchCategoryType: normalized.searchCategoryType,
+            effectiveQuery: normalized.effectiveQuery,
+            suggestedEffectQueries: normalized.suggestedEffectQueries,
+          },
+          insertionSecurity: {
+            policy: 'All Creator Store insertions strip every LuaSourceContainer and PackageLink at unlimited depth before parenting.',
+            verifiedCreatorsOnlyIsNotASecurityBoundary: true,
+            previewBeforeInsertRecommended: true,
+          },
+        })
       }]
     };
   }
@@ -4422,24 +4526,6 @@ export class RobloxStudioTools {
   async getAssetDetails(assetId: number) {
     if (!assetId) {
       throw new Error('Asset ID is required for get_asset_details');
-    }
-
-    if (this.cookieClient.hasCookie() && !this.openCloudClient.hasApiKey()) {
-      const results = await this.cookieClient.getAssetDetails([assetId]);
-      const asset = results[0];
-      if (!asset) {
-        return { content: [{ type: 'text', text: JSON.stringify({ error: 'Asset not found or not owned by authenticated user' }) }] };
-      }
-      return { content: [{ type: 'text', text: JSON.stringify(asset) }] };
-    }
-
-    if (!this.openCloudClient.hasApiKey()) {
-      return {
-        content: [{
-          type: 'text',
-          text: JSON.stringify({ error: 'No auth configured. Set ROBLOSECURITY or ROBLOX_OPEN_CLOUD_API_KEY env var.' })
-        }]
-      };
     }
 
     const response = await this.openCloudClient.getAssetDetails(assetId);
@@ -4455,15 +4541,6 @@ export class RobloxStudioTools {
     if (!assetId) {
       throw new Error('Asset ID is required for get_asset_thumbnail');
     }
-    if (!this.openCloudClient.hasApiKey()) {
-      return {
-        content: [{
-          type: 'text',
-          text: JSON.stringify({ error: 'ROBLOX_OPEN_CLOUD_API_KEY environment variable is not set. Set it to use Creator Store asset tools.' })
-        }]
-      };
-    }
-
     const result = await this.openCloudClient.getAssetThumbnail(assetId, size as any);
     if (!result) {
       return {

@@ -380,7 +380,7 @@ function pollForRequests() {
 			const warningKey = `${State.CURRENT_VERSION}:${serverVersion}`;
 			if (lastVersionMismatchWarningKey !== warningKey) {
 				lastVersionMismatchWarningKey = warningKey;
-				warn(`[robloxstudio-mcp] Version mismatch: Studio plugin v${State.CURRENT_VERSION} / MCP v${serverVersion}. Run npx -y @chrrxs/robloxstudio-mcp@latest --auto-install-plugin and restart Studio.`);
+				warn(`[robloxstudio-mcp] Version mismatch: Studio plugin v${State.CURRENT_VERSION} / MCP v${serverVersion}. Run npx -y github:Akramle/robloxstudio-mcp --auto-install-plugin and restart Studio.`);
 			}
 			UI.showBanner("version-mismatch", `Plugin v${State.CURRENT_VERSION} / MCP v${serverVersion} mismatch`);
 		} else if (hasVersionMismatch) {
