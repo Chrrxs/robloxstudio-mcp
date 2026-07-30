@@ -35,7 +35,8 @@ type RawImageCaptureResponse = {
 
 type ToolContent =
   | { type: 'text'; text: string }
-  | { type: 'image'; data: string; mimeType: string };
+  | { type: 'image'; data: string; mimeType: string }
+  | { type: 'audio'; data: string; mimeType: string };
 
 type EncodedViewportCapture = {
   success: true;
@@ -70,19 +71,17 @@ type GenerateModelImage =
   { kind: 'asset'; asset_id: number };
 
 const MAX_INLINE_IMAGE_BYTES = 6_000_000;
+const DEFAULT_ASSET_AUDIO_PREVIEWS = 3;
+const MAX_ASSET_AUDIO_PREVIEWS = 5;
+const MAX_INLINE_AUDIO_PREVIEW_BYTES = 3_000_000;
+const MAX_INLINE_AUDIO_PREVIEW_TOTAL_BYTES = 6_000_000;
+const DEFAULT_ASSET_PREVIEW_DEPTH = 4;
+const MAX_ASSET_PREVIEW_HIERARCHY_NODES = 100;
+const MAX_SEARCH_ASSET_DESCRIPTION_LENGTH = 240;
+const ROBLOX_CREATOR_USER_ID = 1;
 const MAX_DEVICE_MATRIX_ENTRIES = 6;
 const MAX_NETWORK_PACKET_LOSS_PERCENT = 0.5;
 const STUDIO_ASSISTANT_SOURCE_IMAGE_LABEL = 'Studio Assistant Source Image';
-const CREATOR_STORE_EFFECT_SEARCH_TERMS = [
-  'particle effect',
-  'VFX',
-  'explosion',
-  'smoke',
-  'aura',
-  'beam',
-  'trail',
-  'impact effect',
-] as const;
 const CREATOR_STORE_SEARCH_TYPES = new Set<string>([
   'Audio',
   'Model',
@@ -129,7 +128,6 @@ function normalizeCreatorStoreSearch(
   requestedAssetType: string;
   searchCategoryType: CreatorStoreSearchCategory;
   effectiveQuery?: string;
-  suggestedEffectQueries?: readonly string[];
 } {
   if (!CREATOR_STORE_SEARCH_TYPES.has(assetType)) {
     throw new Error(
@@ -155,7 +153,6 @@ function normalizeCreatorStoreSearch(
       effectiveQuery: trimmedQuery
         ? alreadyEffectSpecific ? trimmedQuery : `${trimmedQuery} ${suffix}`
         : suffix,
-      suggestedEffectQueries: CREATOR_STORE_EFFECT_SEARCH_TERMS,
     };
   }
 
@@ -164,6 +161,12 @@ function normalizeCreatorStoreSearch(
     searchCategoryType: assetType as CreatorStoreSearchCategory,
     effectiveQuery: trimmedQuery,
   };
+}
+
+function normalizeSearchAssetDescription(description: string | undefined): string {
+  const normalized = description?.replace(/\s+/g, ' ').trim() ?? '';
+  if (normalized.length <= MAX_SEARCH_ASSET_DESCRIPTION_LENGTH) return normalized;
+  return `${normalized.slice(0, MAX_SEARCH_ASSET_DESCRIPTION_LENGTH - 1).trimEnd()}…`;
 }
 
 // Encodes the raw RGBA capture into the requested image format.
@@ -214,9 +217,114 @@ function numberField(row: Record<string, unknown> | undefined, key: string): num
   return typeof value === 'number' && Number.isFinite(value) ? value : 0;
 }
 
+function optionalNumberField(
+  row: Record<string, unknown> | undefined,
+  key: string,
+): number | undefined {
+  const value = row?.[key];
+  return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+}
+
 function stringField(row: Record<string, unknown> | undefined, key: string): string {
   const value = row?.[key];
   return typeof value === 'string' && value !== '' ? value : '';
+}
+
+function robloxAssetIdFromContentId(value: unknown): number | undefined {
+  if (typeof value === 'number' && Number.isSafeInteger(value) && value > 0) {
+    return value;
+  }
+  if (typeof value !== 'string') return undefined;
+
+  const trimmed = value.trim();
+  const direct = /^(?:rbxassetid:\/\/)?(\d+)$/.exec(trimmed);
+  const query = /[?&]id=(\d+)(?:&|$)/i.exec(trimmed);
+  const rawId = direct?.[1] ?? query?.[1];
+  if (!rawId) return undefined;
+
+  const parsed = Number(rawId);
+  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : undefined;
+}
+
+function compactPreviewHierarchy(value: unknown): {
+  hierarchy: Record<string, unknown>[];
+  truncated: boolean;
+} {
+  let remaining = MAX_ASSET_PREVIEW_HIERARCHY_NODES;
+  let truncated = false;
+
+  const compactNode = (row: Record<string, unknown>): Record<string, unknown> | undefined => {
+    if (remaining <= 0) {
+      truncated = true;
+      return undefined;
+    }
+    remaining--;
+
+    const node: Record<string, unknown> = {
+      name: stringField(row, 'name'),
+      className: stringField(row, 'className'),
+    };
+    const properties = asRecord(row.properties);
+    if (properties && Object.keys(properties).length > 0) {
+      node.properties = properties;
+    }
+
+    const children = asRows(row.children);
+    if (children.length > 0) {
+      const compactedChildren: Record<string, unknown>[] = [];
+      for (const child of children) {
+        const compacted = compactNode(child);
+        if (!compacted) break;
+        compactedChildren.push(compacted);
+      }
+      if (compactedChildren.length > 0) {
+        node.children = compactedChildren;
+      }
+      if (compactedChildren.length < children.length) {
+        node.childCount = children.length;
+        node.truncated = true;
+        truncated = true;
+      }
+    } else if (row.truncated === true) {
+      node.truncated = true;
+      const childCount = numberField(row, 'childCount');
+      if (childCount > 0) node.childCount = childCount;
+    }
+    return node;
+  };
+
+  const hierarchy: Record<string, unknown>[] = [];
+  for (const root of asRows(value)) {
+    const compacted = compactNode(root);
+    if (!compacted) break;
+    hierarchy.push(compacted);
+  }
+  return { hierarchy, truncated };
+}
+
+function compactSoundReference(sound: Record<string, unknown>): Record<string, unknown> {
+  const compact: Record<string, unknown> = {
+    name: stringField(sound, 'name'),
+    className: stringField(sound, 'className'),
+  };
+  const path = stringField(sound, 'path');
+  if (path) compact.path = path;
+  const assetId = robloxAssetIdFromContentId(
+    sound.assetId ?? sound.soundId ?? sound.asset,
+  );
+  if (assetId !== undefined) compact.assetId = assetId;
+
+  const volume = optionalNumberField(sound, 'volume');
+  if (volume !== undefined && volume !== 1) compact.volume = volume;
+  const playbackSpeed = optionalNumberField(sound, 'playbackSpeed');
+  if (playbackSpeed !== undefined && playbackSpeed !== 1) {
+    compact.playbackSpeed = playbackSpeed;
+  }
+  const timeLength = optionalNumberField(sound, 'timeLength');
+  if (timeLength !== undefined && timeLength > 0) compact.duration = timeLength;
+  if (sound.looped === true) compact.looped = true;
+  if (sound.autoPlay === true) compact.autoPlay = true;
+  return compact;
 }
 
 function microProfilerDurationMs(body: Record<string, unknown> | undefined): number {
@@ -4475,7 +4583,7 @@ export class RobloxStudioTools {
     query?: string,
     maxResults?: number,
     sortBy?: string,
-    verifiedCreatorsOnly?: boolean
+    robloxCreatedOnly?: boolean
   ) {
     const normalized = normalizeCreatorStoreSearch(assetType, query);
     if (maxResults !== undefined && (!Number.isInteger(maxResults) || maxResults < 1 || maxResults > 100)) {
@@ -4492,36 +4600,37 @@ export class RobloxStudioTools {
       query: normalized.effectiveQuery,
       maxPageSize: maxResults,
       sortCategory: sortBy as AssetSearchParams['sortCategory'],
-      includeOnlyVerifiedCreators: verifiedCreatorsOnly,
+      ...(robloxCreatedOnly ? { userId: ROBLOX_CREATOR_USER_ID } : {}),
     });
 
-    const assetIds = response.creatorStoreAssets
-      .map((entry) => entry.asset?.id)
-      .filter((id): id is number => typeof id === 'number' && Number.isFinite(id));
-    const thumbnailUrls = await this.openCloudClient.getAssetThumbnails(assetIds);
-    const creatorStoreAssets = response.creatorStoreAssets.map((entry) => {
-      const assetId = entry.asset?.id;
-      const thumbnailUrl = assetId === undefined ? undefined : thumbnailUrls.get(assetId);
-      return thumbnailUrl ? { ...entry, thumbnailUrl } : entry;
+    const results = response.creatorStoreAssets.flatMap((entry) => {
+      const asset = entry.asset;
+      if (!asset || !Number.isSafeInteger(asset.id) || asset.id <= 0) return [];
+      const result: Record<string, unknown> = {
+        assetId: asset.id,
+        name: asset.name,
+        description: normalizeSearchAssetDescription(asset.description),
+      };
+      if (
+        typeof asset.durationSeconds === 'number'
+        && Number.isFinite(asset.durationSeconds)
+      ) {
+        result.duration = asset.durationSeconds;
+      }
+      return [result];
     });
 
     return {
       content: [{
         type: 'text',
         text: JSON.stringify({
-          ...response,
-          creatorStoreAssets,
-          search: {
-            requestedAssetType: normalized.requestedAssetType,
-            searchCategoryType: normalized.searchCategoryType,
-            effectiveQuery: normalized.effectiveQuery,
-            suggestedEffectQueries: normalized.suggestedEffectQueries,
-          },
-          insertionSecurity: {
-            policy: 'All Creator Store insertions strip every LuaSourceContainer and PackageLink at unlimited depth before parenting.',
-            verifiedCreatorsOnlyIsNotASecurityBoundary: true,
-            previewBeforeInsertRecommended: true,
-          },
+          assetType: normalized.requestedAssetType,
+          query: normalized.effectiveQuery ?? '',
+          ...(normalized.searchCategoryType !== normalized.requestedAssetType
+            ? { searchedAs: normalized.searchCategoryType }
+            : {}),
+          totalResults: response.totalResults,
+          results,
         })
       }]
     };
@@ -4714,20 +4823,193 @@ export class RobloxStudioTools {
     };
   }
 
-  async previewAsset(assetId: number, includeProperties?: boolean, maxDepth?: number, instance_id?: string) {
+  async previewAsset(
+    assetId: number,
+    includeProperties?: boolean,
+    maxDepth?: number,
+    instance_id?: string,
+    includeAudio = true,
+    maxAudioPreviews = DEFAULT_ASSET_AUDIO_PREVIEWS,
+  ) {
     if (!assetId) {
       throw new Error('Asset ID is required for preview_asset');
     }
+    if (
+      !Number.isSafeInteger(maxAudioPreviews)
+      || maxAudioPreviews < 1
+      || maxAudioPreviews > MAX_ASSET_AUDIO_PREVIEWS
+    ) {
+      throw new Error(
+        `maxAudioPreviews must be an integer between 1 and ${MAX_ASSET_AUDIO_PREVIEWS}.`,
+      );
+    }
     const response = await this._callSingle('/api/preview-asset', {
       assetId,
-      includeProperties: includeProperties ?? true,
-      maxDepth: maxDepth ?? 10
+      includeProperties: includeProperties ?? false,
+      maxDepth: maxDepth ?? DEFAULT_ASSET_PREVIEW_DEPTH,
     }, undefined, instance_id);
+
+    const responseRecord = asRecord(response);
+    if (!responseRecord) {
+      return {
+        content: [{
+          type: 'text',
+          text: JSON.stringify({ assetId, error: 'Studio returned an invalid asset preview response.' }),
+        }],
+      };
+    }
+    const previewError = stringField(responseRecord, 'error');
+    if (previewError) {
+      return {
+        content: [{
+          type: 'text',
+          text: JSON.stringify({ assetId, error: previewError }),
+        }],
+      };
+    }
+
+    const soundRows = asRows(responseRecord.sounds);
+    const soundsByAssetId = new Map<number, Record<string, unknown>[]>();
+    for (const sound of soundRows) {
+      const soundAssetId = robloxAssetIdFromContentId(
+        sound.assetId ?? sound.soundId ?? sound.asset,
+      );
+      if (soundAssetId === undefined) continue;
+      const rows = soundsByAssetId.get(soundAssetId) ?? [];
+      rows.push(sound);
+      soundsByAssetId.set(soundAssetId, rows);
+    }
+
+    let directAudioAsset = false;
+    if (includeAudio && soundsByAssetId.size === 0) {
+      try {
+        const details = await this.openCloudClient.getAssetDetails(assetId);
+        const detailsRecord = asRecord(details);
+        const assetRecord = asRecord(detailsRecord?.asset);
+        if (assetRecord?.assetTypeId === 3) {
+          directAudioAsset = true;
+          soundsByAssetId.set(assetId, []);
+        }
+      } catch {
+        // Structural preview remains useful when public metadata is unavailable.
+      }
+    }
+
+    const audioContent: ToolContent[] = [];
+    const audioPreviews: Record<string, unknown>[] = [];
+    let totalBytes = 0;
+    let attempted = 0;
+    for (const [soundAssetId, sources] of soundsByAssetId) {
+      const isDirectAsset = directAudioAsset && soundAssetId === assetId;
+      if (!includeAudio) {
+        continue;
+      }
+      if (attempted >= maxAudioPreviews) {
+        audioPreviews.push({
+          assetId: soundAssetId,
+          status: 'skipped_limit',
+          ...(sources.length > 0 ? { references: sources.length } : {}),
+          ...(isDirectAsset ? { direct: true } : {}),
+        });
+        continue;
+      }
+
+      const remainingBytes = MAX_INLINE_AUDIO_PREVIEW_TOTAL_BYTES - totalBytes;
+      if (remainingBytes <= 0) {
+        audioPreviews.push({
+          assetId: soundAssetId,
+          status: 'skipped_total_size_limit',
+          ...(sources.length > 0 ? { references: sources.length } : {}),
+          ...(isDirectAsset ? { direct: true } : {}),
+        });
+        continue;
+      }
+
+      attempted++;
+      try {
+        const downloaded = await this.openCloudClient.downloadAudioAssetContent(
+          soundAssetId,
+          Math.min(MAX_INLINE_AUDIO_PREVIEW_BYTES, remainingBytes),
+        );
+        totalBytes += downloaded.data.length;
+        audioPreviews.push({
+          assetId: soundAssetId,
+          status: 'included',
+          ...(sources.length > 0 ? { references: sources.length } : {}),
+          ...(isDirectAsset ? { direct: true } : {}),
+          mimeType: downloaded.mimeType,
+          bytes: downloaded.data.length,
+          contentIndex: audioContent.length + 1,
+        });
+        audioContent.push({
+          type: 'audio',
+          data: downloaded.data.toString('base64'),
+          mimeType: downloaded.mimeType,
+        });
+      } catch (error) {
+        audioPreviews.push({
+          assetId: soundAssetId,
+          status: 'unavailable',
+          ...(sources.length > 0 ? { references: sources.length } : {}),
+          ...(isDirectAsset ? { direct: true } : {}),
+          error: errorMessage(error),
+        });
+      }
+    }
+
+    const summary = asRecord(responseRecord.summary);
+    const capabilities = [
+      ['hasAnimations', 'animations'],
+      ['hasSounds', 'sounds'],
+      ['hasParticles', 'particles'],
+      ['hasVfx', 'vfx'],
+      ['hasDecalsOrTextures', 'decalsOrTextures'],
+      ['hasMeshes', 'meshes'],
+      ['hasLights', 'lights'],
+      ['hasAttachments', 'attachments'],
+    ]
+      .filter(([field]) => summary?.[field] === true)
+      .map(([, label]) => label);
+    const classes = asRecord(summary?.classCounts);
+    const compactHierarchy = compactPreviewHierarchy(responseRecord.hierarchy);
+    const compactBody: Record<string, unknown> = {
+      success: true,
+      assetId,
+      totalInstances: numberField(summary, 'totalInstances'),
+      ...(classes && Object.keys(classes).length > 0 ? { classes } : {}),
+      ...(capabilities.length > 0 ? { capabilities } : {}),
+      security: {
+        scanDepth: 'unlimited',
+        scripts: numberField(summary, 'scriptCount'),
+        packageLinks: numberField(summary, 'packageLinkCount'),
+      },
+      ...(compactHierarchy.hierarchy.length > 0
+        ? { hierarchy: compactHierarchy.hierarchy }
+        : {}),
+      ...(compactHierarchy.truncated ? { hierarchyTruncated: true } : {}),
+      ...(soundRows.length > 0
+        ? { sounds: soundRows.map(compactSoundReference) }
+        : {}),
+      ...(directAudioAsset ? { directAudioAsset: true } : {}),
+      ...(includeAudio
+        ? {
+          audio: {
+            returned: audioContent.length,
+            bytes: totalBytes,
+            ...(audioPreviews.length > 0 ? { items: audioPreviews } : {}),
+          },
+        }
+        : {}),
+    };
+
     return {
-      content: [{
-        type: 'text',
-        text: JSON.stringify(response)
-      }]
+      content: [
+        {
+          type: 'text',
+          text: JSON.stringify(compactBody),
+        },
+        ...audioContent,
+      ],
     };
   }
 

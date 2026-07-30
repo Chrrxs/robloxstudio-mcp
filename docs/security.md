@@ -24,6 +24,19 @@ contents, or asset reputation. Visual instances such as particles, beams,
 trails, attachments, decals, textures, meshes, lights, sounds, fire, smoke,
 and sparkles are preserved.
 
+`preview_asset` records `Sound` and `AudioPlayer` content IDs and playback
+metadata during the same unparented scan. It also recognizes a requested
+Creator Store Audio asset from public metadata when Studio represents it as an
+empty wrapper Model. When inline audio is enabled, the MCP server—not the Studio
+plugin—uses `ROBLOX_OPEN_CLOUD_API_KEY` with `asset:read` permission to request
+the direct Audio asset or each unique nested sound from Roblox's asset-delivery
+API. It accepts only HTTPS download locations on `rbxcdn.com` or the exact
+Roblox-owned legacy host `contentdelivery.roblox.com`, validates MP3, OGG, WAV,
+or FLAC file signatures, returns at most five audio items, and enforces both
+per-file and aggregate byte limits. Bytes remain in memory and are not written
+to disk. Download failures never weaken insertion sanitization or prevent the
+structural preview from returning.
+
 ## Version mismatch behavior
 
 If the Studio plugin and MCP server versions differ, the plugin stays connected but shows a yellow warning banner. `get_connected_instances`, `/health`, and `/status` also report `pluginVersion`, `serverVersion`, and `versionMismatch`.
@@ -40,3 +53,4 @@ For multiple open Studio places, connect each plugin to the same MCP server URL.
 | `ROBLOX_STUDIO_AUTH_TOKEN` | *(auto-generated file)* | Explicit shared secret; overrides the token file. |
 | `ROBLOX_STUDIO_NO_AUTH` | *(unset)* | Set to `1` to disable token auth (not recommended). |
 | `ROBLOX_STUDIO_ALLOWED_ORIGINS` | *(none)* | Comma-separated browser origins allowed to call the API cross-origin. |
+| `ROBLOX_OPEN_CLOUD_API_KEY` | *(none)* | Roblox Open Cloud key. `preview_asset` needs `asset:read` permission to return inline audio; inaccessible sounds remain metadata-only. |

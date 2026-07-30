@@ -161,8 +161,8 @@ function insertAsset(requestData: Record<string, unknown>) {
 
 function previewAsset(requestData: Record<string, unknown>) {
 	const assetId = requestData.assetId as number;
-	const includeProperties = (requestData.includeProperties as boolean) ?? true;
-	const maxDepth = (requestData.maxDepth as number) ?? 10;
+	const includeProperties = (requestData.includeProperties as boolean) ?? false;
+	const maxDepth = (requestData.maxDepth as number) ?? 4;
 
 	if (!assetId) {
 		return { error: "assetId is required" };
@@ -197,6 +197,8 @@ function previewAsset(requestData: Record<string, unknown>) {
 	let hasMeshes = false;
 	let hasLights = false;
 	let hasAttachments = false;
+	const soundReferences: Record<string, unknown>[] = [];
+	const uniqueSoundContentIds = new Set<string>();
 
 	function recordSummary(instance: Instance) {
 		totalInstances++;
@@ -204,7 +206,43 @@ function previewAsset(requestData: Record<string, unknown>) {
 		classCounts[className] = (classCounts[className] ?? 0) + 1;
 
 		if (className === "Animation" || className === "AnimationController" || className === "Animator") hasAnimations = true;
-		if (instance.IsA("Sound")) hasSounds = true;
+		if (instance.IsA("Sound")) {
+			hasSounds = true;
+			const sound = instance as Sound;
+			const soundId = sound.SoundId;
+			if (soundId !== "") uniqueSoundContentIds.add(soundId);
+			soundReferences.push({
+				path: sound.GetFullName(),
+				name: sound.Name,
+				className,
+				soundId,
+				volume: sound.Volume,
+				playbackSpeed: sound.PlaybackSpeed,
+				looped: sound.Looped,
+				isLoaded: sound.IsLoaded,
+				timeLength: sound.TimeLength,
+				rollOffMode: tostring(sound.RollOffMode),
+				rollOffMinDistance: sound.RollOffMinDistance,
+				rollOffMaxDistance: sound.RollOffMaxDistance,
+			});
+		} else if (instance.IsA("AudioPlayer")) {
+			hasSounds = true;
+			const audioPlayer = instance as AudioPlayer;
+			const soundId = tostring(audioPlayer.Asset);
+			if (soundId !== "") uniqueSoundContentIds.add(soundId);
+			soundReferences.push({
+				path: audioPlayer.GetFullName(),
+				name: audioPlayer.Name,
+				className,
+				soundId,
+				volume: audioPlayer.Volume,
+				playbackSpeed: audioPlayer.PlaybackSpeed,
+				looped: audioPlayer.Looping,
+				autoPlay: audioPlayer.AutoPlay,
+				isLoaded: audioPlayer.IsReady,
+				timeLength: audioPlayer.TimeLength,
+			});
+		}
 		if (
 			instance.IsA("ParticleEmitter") ||
 			className === "Fire" ||
@@ -267,6 +305,8 @@ function previewAsset(requestData: Record<string, unknown>) {
 
 			if (instance.IsA("Sound")) {
 				props.soundId = (instance as Sound).SoundId;
+			} else if (instance.IsA("AudioPlayer")) {
+				props.soundId = tostring((instance as AudioPlayer).Asset);
 			}
 
 			// Only include props if there are any
@@ -309,6 +349,7 @@ function previewAsset(requestData: Record<string, unknown>) {
 			success: true,
 			assetId,
 			hierarchy: hierarchyRoots,
+			sounds: soundReferences,
 			summary: {
 				totalInstances,
 				classCounts,
@@ -318,6 +359,8 @@ function previewAsset(requestData: Record<string, unknown>) {
 				packageLinkCount: forbiddenScan.packageLinks.size(),
 				hasAnimations,
 				hasSounds,
+				soundCount: soundReferences.size(),
+				uniqueSoundContentIdCount: uniqueSoundContentIds.size(),
 				hasParticles,
 				hasVfx,
 				hasDecalsOrTextures,

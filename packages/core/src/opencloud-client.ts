@@ -21,7 +21,6 @@ export interface AssetSearchParams {
   maxPageSize?: number;
   sortDirection?: 'None' | 'Ascending' | 'Descending';
   sortCategory?: 'Relevance' | 'Trending' | 'Top' | 'AudioDuration' | 'CreateTime' | 'UpdatedTime' | 'Ratings';
-  includeOnlyVerifiedCreators?: boolean;
   userId?: number;
   groupId?: number;
 }
@@ -48,6 +47,7 @@ export interface AssetInfo {
   name: string;
   description?: string;
   assetTypeId?: number;
+  durationSeconds?: number;
   createTime?: string;
   updateTime?: string;
   categoryPath?: string;
@@ -133,6 +133,47 @@ export interface AssetVersionsResponse {
   nextPageToken?: string;
 }
 
+export interface DownloadedAudioAsset {
+  data: Buffer;
+  mimeType: 'audio/mpeg' | 'audio/ogg' | 'audio/wav' | 'audio/flac';
+}
+
+type AssetDeliveryResponse = {
+  location?: string;
+  errors?: Array<{
+    code?: number;
+    message?: string;
+  }>;
+};
+
+function detectAudioMimeType(
+  data: Buffer,
+): DownloadedAudioAsset['mimeType'] | undefined {
+  if (data.length >= 4 && data.subarray(0, 4).toString('ascii') === 'OggS') {
+    return 'audio/ogg';
+  }
+  if (data.length >= 4 && data.subarray(0, 4).toString('ascii') === 'fLaC') {
+    return 'audio/flac';
+  }
+  if (
+    data.length >= 12
+    && data.subarray(0, 4).toString('ascii') === 'RIFF'
+    && data.subarray(8, 12).toString('ascii') === 'WAVE'
+  ) {
+    return 'audio/wav';
+  }
+  if (
+    data.length >= 3
+    && (
+      data.subarray(0, 3).toString('ascii') === 'ID3'
+      || (data[0] === 0xff && (data[1] & 0xe0) === 0xe0)
+    )
+  ) {
+    return 'audio/mpeg';
+  }
+  return undefined;
+}
+
 export class OpenCloudClient {
   private apiKey: string;
   private baseUrl: string;
@@ -181,7 +222,7 @@ export class OpenCloudClient {
       const headers: Record<string, string> = {
         'Content-Type': 'application/json',
       };
-      if (this.apiKey) {
+      if (authRequired && this.apiKey) {
         headers['x-api-key'] = this.apiKey;
       }
 
@@ -239,7 +280,6 @@ export class OpenCloudClient {
         maxPageSize: params.maxPageSize || 25,
         sortDirection: params.sortDirection,
         sortCategory: params.sortCategory,
-        includeOnlyVerifiedCreators: params.includeOnlyVerifiedCreators,
         userId: params.userId,
         groupId: params.groupId,
       },
@@ -324,6 +364,112 @@ export class OpenCloudClient {
     }
 
     return result;
+  }
+
+  async downloadAudioAssetContent(
+    assetId: number,
+    maxBytes: number,
+  ): Promise<DownloadedAudioAsset> {
+    if (!this.apiKey) {
+      throw new Error(
+        'Open Cloud API key not configured. Set ROBLOX_OPEN_CLOUD_API_KEY with asset:read permission to download audio previews.',
+      );
+    }
+    if (!Number.isSafeInteger(assetId) || assetId <= 0) {
+      throw new Error('Audio asset ID must be a positive integer.');
+    }
+    if (!Number.isSafeInteger(maxBytes) || maxBytes <= 0) {
+      throw new Error('Audio preview byte limit must be a positive integer.');
+    }
+
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), this.timeout);
+
+    try {
+      const deliveryResponse = await fetch(
+        `${this.baseUrl}/asset-delivery-api/v1/assetId/${assetId}`,
+        {
+          headers: {
+            'x-api-key': this.apiKey,
+          },
+          signal: controller.signal,
+        },
+      );
+      if (!deliveryResponse.ok) {
+        throw new Error(
+          `Roblox asset delivery request failed (${deliveryResponse.status}).`,
+        );
+      }
+
+      const delivery = await deliveryResponse.json() as AssetDeliveryResponse;
+      if (!delivery.location) {
+        const detail = delivery.errors
+          ?.map((entry) => entry.message)
+          .filter((message): message is string => !!message)
+          .join('; ');
+        throw new Error(detail || 'Roblox asset delivery returned no download location.');
+      }
+
+      const location = new URL(delivery.location);
+      if (
+        location.protocol !== 'https:'
+        || !(
+          location.hostname === 'contentdelivery.roblox.com'
+          || location.hostname === 'rbxcdn.com'
+          || location.hostname.endsWith('.rbxcdn.com')
+        )
+      ) {
+        throw new Error('Roblox asset delivery returned an untrusted download location.');
+      }
+
+      const contentResponse = await fetch(location, {
+        signal: controller.signal,
+      });
+      if (!contentResponse.ok) {
+        throw new Error(
+          `Roblox audio download failed (${contentResponse.status}).`,
+        );
+      }
+
+      const declaredLength = Number(contentResponse.headers.get('content-length'));
+      if (Number.isFinite(declaredLength) && declaredLength > maxBytes) {
+        throw new Error(`Audio asset exceeds the ${maxBytes}-byte preview limit.`);
+      }
+      if (!contentResponse.body) {
+        throw new Error('Roblox audio download returned an empty body.');
+      }
+
+      const chunks: Buffer[] = [];
+      let totalBytes = 0;
+      const reader = contentResponse.body.getReader();
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        totalBytes += value.byteLength;
+        if (totalBytes > maxBytes) {
+          await reader.cancel();
+          throw new Error(`Audio asset exceeds the ${maxBytes}-byte preview limit.`);
+        }
+        chunks.push(Buffer.from(value));
+      }
+
+      const data = Buffer.concat(chunks, totalBytes);
+      if (data.length === 0) {
+        throw new Error('Roblox audio download returned no bytes.');
+      }
+      const mimeType = detectAudioMimeType(data);
+      if (!mimeType) {
+        throw new Error('Downloaded asset is not a supported MP3, OGG, WAV, or FLAC audio file.');
+      }
+      return { data, mimeType };
+    } catch (error) {
+      if (error instanceof Error && error.name === 'AbortError') {
+        throw new Error('Audio preview download timed out.');
+      }
+      throw error;
+    } finally {
+      clearTimeout(timeoutId);
+    }
   }
 
   async createAsset(

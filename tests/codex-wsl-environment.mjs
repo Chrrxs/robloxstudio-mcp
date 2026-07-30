@@ -10,6 +10,11 @@ import { setTimeout as delay } from 'node:timers/promises';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const wrapper = path.join(repoRoot, 'scripts', 'codex-robloxstudio-mcp.sh');
+const wrapperSource = await readFile(wrapper, 'utf8');
+
+assert.match(wrapperSource, /ROBLOXSTUDIO_MCP_ENV_FILE/);
+assert.match(wrapperSource, /\.codex\/\.env/);
+assert.match(wrapperSource, /set -a/);
 
 async function isWslKernel() {
   if (process.platform !== 'linux') return false;
@@ -74,12 +79,35 @@ async function stopProcessGroup(child) {
   }
 }
 
+async function envFileDefines(filePath, name) {
+  try {
+    const source = await readFile(filePath, 'utf8');
+    return new RegExp(`^(?:export\\s+)?${name}=`, 'm').test(source);
+  } catch {
+    return false;
+  }
+}
+
+async function processHasEnvironmentVariable(pid, name) {
+  const environmentBytes = await readFile(`/proc/${pid}/environ`);
+  return environmentBytes
+    .toString('utf8')
+    .split('\0')
+    .some((entry) => entry.startsWith(`${name}=`));
+}
+
 if (!(await isWslKernel())) {
   console.log('SKIP codex-wsl-environment: host kernel is not WSL');
   process.exit(0);
 }
 
 const port = await reservePort();
+const canonicalEnvFile = process.env.ROBLOXSTUDIO_MCP_ENV_FILE
+  ?? path.join(process.env.HOME ?? '', '.codex', '.env');
+const expectsCanonicalOpenCloudKey = await envFileDefines(
+  canonicalEnvFile,
+  'ROBLOX_OPEN_CLOUD_API_KEY',
+);
 const environment = {
   ...process.env,
   ROBLOX_STUDIO_PORT: String(port),
@@ -90,6 +118,7 @@ const environment = {
 };
 delete environment.WSL_INTEROP;
 delete environment.WSL_DISTRO_NAME;
+delete environment.ROBLOX_OPEN_CLOUD_API_KEY;
 
 const child = spawn(wrapper, [], {
   cwd: repoRoot,
@@ -122,6 +151,15 @@ try {
     health.capabilities?.studioLifecycle?.windowsInteropAvailable,
     true,
   );
+  if (expectsCanonicalOpenCloudKey) {
+    assert.equal(
+      await processHasEnvironmentVariable(
+        child.pid,
+        'ROBLOX_OPEN_CLOUD_API_KEY',
+      ),
+      true,
+    );
+  }
   console.log('PASS codex-wsl-environment');
 } finally {
   child.stdin.end();

@@ -4,6 +4,17 @@ set -euo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 DEV_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd -P)"
 
+# Asphalt and the Strain publishing tools treat this as the canonical Roblox
+# credential file. Load it here as well because Codex Desktop can start MCP
+# servers without the login-shell environment that sources ~/.profile.
+CANONICAL_ENV_FILE="${ROBLOXSTUDIO_MCP_ENV_FILE:-${HOME}/.codex/.env}"
+if [[ -f "${CANONICAL_ENV_FILE}" ]]; then
+	set -a
+	# shellcheck source=/dev/null
+	. "${CANONICAL_ENV_FILE}"
+	set +a
+fi
+
 prepend_path_if_exists() {
 	local dir="$1"
 	if [[ -d "${dir}" ]]; then

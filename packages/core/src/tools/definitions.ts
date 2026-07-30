@@ -2038,7 +2038,7 @@ part(0,2,0,2,1,1,"b")`,
   {
     name: 'search_assets',
     category: 'read',
-    description: 'Search the public Creator Store for decals, images, models, particles, VFX, and other supported asset types without requiring Roblox credentials. Image searches use the Decal category; Particle and VFX searches use Creator Store models and automatically make the query effect-specific. Results include thumbnail URLs when available; call get_asset_thumbnail for an inline visual preview and preview_asset for a full, unlimited-depth safety/capability summary before insert_asset. Creator verification is only a search filter and is never treated as a security boundary.',
+    description: 'Search the public Creator Store without requiring Roblox credentials. Returns compact normalized rows with assetId, name, a normalized description excerpt, and audio duration in seconds when available. Searches include all creators by default; set robloxCreatedOnly to restrict results to assets created by Roblox. Image searches use Decals; Particle and VFX searches use effect-focused Models. Call get_asset_details only for a shortlisted asset that needs full catalog metadata, get_asset_thumbnail for an inline visual, and preview_asset before insertion. Every inserted asset is sanitized without regard to its creator.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -2062,9 +2062,10 @@ part(0,2,0,2,1,1,"b")`,
           enum: ['Relevance', 'Trending', 'Top', 'AudioDuration', 'CreateTime', 'UpdatedTime', 'Ratings'],
           description: 'Sort order (default: Relevance)'
         },
-        verifiedCreatorsOnly: {
+        robloxCreatedOnly: {
           type: 'boolean',
-          description: 'Only show assets from verified creators (default: false). This is a relevance filter, not a safety control; insertion always sanitizes every asset.'
+          default: false,
+          description: 'Only show assets created by the Roblox account (default: false). All creators are searched when false; insertion sanitizes every asset regardless of creator.'
         }
       },
       required: ['assetType']
@@ -2073,7 +2074,7 @@ part(0,2,0,2,1,1,"b")`,
   {
     name: 'get_asset_details',
     category: 'read',
-    description: 'Get public Creator Store metadata for a specific asset without requiring Roblox credentials.',
+    description: 'Get full public Creator Store metadata for one shortlisted asset without requiring Roblox credentials. Prefer search_assets for compact discovery.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -2215,7 +2216,7 @@ part(0,2,0,2,1,1,"b")`,
   {
     name: 'preview_asset',
     category: 'read',
-    description: 'Preview a Creator Store asset without inserting it. Public third-party assets require "Allow Loading Third Party Assets" in Studio under Game Settings > Security. The asset remains unparented, receives an unlimited-depth security/capability scan, returns a depth-limited display hierarchy plus counts for scripts, PackageLinks, particles, VFX, decals/textures, meshes, lights, attachments, and sounds, then is destroyed. Imported script source is never read or returned. Use get_asset_thumbnail for an inline visual preview.',
+    description: 'Preview a Creator Store asset without inserting it. Public third-party assets require "Allow Loading Third Party Assets" in Studio security settings. The asset stays unparented, receives an unlimited-depth security/capability scan, and is destroyed. Output is compact: normalized capabilities and sound references, explicit script/PackageLink counts, and a hierarchy capped at 100 display nodes. Detailed instance properties are opt-in. Direct Creator Store Audio IDs and accessible nested sounds return temporary inline audio by default. Imported script source is never read or returned.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -2225,11 +2226,25 @@ part(0,2,0,2,1,1,"b")`,
         },
         includeProperties: {
           type: 'boolean',
-          description: 'Include detailed properties for each instance (default: true)'
+          default: false,
+          description: 'Include detailed properties for displayed hierarchy nodes (default: false).'
         },
         maxDepth: {
           type: 'number',
-          description: 'Maximum depth of the returned display tree (default: 10). The script/PackageLink security scan always traverses every descendant with no depth limit.'
+          default: 4,
+          description: 'Maximum display-tree depth (default: 4). The display is also capped at 100 nodes; the security scan always traverses every descendant.'
+        },
+        includeAudio: {
+          type: 'boolean',
+          default: true,
+          description: 'Return temporary inline MCP audio for a direct Creator Store Audio asset and accessible Sound or AudioPlayer references (default: true). Set false to return metadata without downloading audio. Downloads require ROBLOX_OPEN_CLOUD_API_KEY with asset:read permission and are never persisted to disk.'
+        },
+        maxAudioPreviews: {
+          type: 'number',
+          minimum: 1,
+          maximum: 5,
+          default: 3,
+          description: 'Maximum unique sound assets to return as inline audio (default: 3, maximum: 5). Each file and the combined response are subject to fixed byte limits.'
         },
         instance_id: {
           type: 'string',

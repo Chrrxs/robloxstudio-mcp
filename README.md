@@ -92,10 +92,27 @@ Search public decals, images, models, particles, and VFX with `search_assets`
 without configuring a Roblox API key. `Image`
 searches use the Creator Store Decal category; `Particle` and `VFX` searches use
 models and effect-focused terms such as `particle effect`, `explosion`, `smoke`,
-`aura`, `beam`, `trail`, and `impact effect`. Results include thumbnail URLs
-when Roblox provides them. Use `get_asset_thumbnail` for an inline image and
-`preview_asset` for an unparented hierarchy, visual-capability summary, and
+`aura`, `beam`, `trail`, and `impact effect`. Search output is deliberately
+compact and normalized, with an asset ID, name, description excerpt, and audio
+duration when available. Results include all creators by default; pass
+`robloxCreatedOnly: true` to restrict discovery to assets created by Roblox.
+Call `get_asset_details` only for shortlisted assets that need full metadata.
+Use `get_asset_thumbnail` for an inline image and
+`preview_asset` for a bounded unparented hierarchy, capability summary, and
 unlimited-depth security scan.
+Asset previews also inventory every `Sound` and
+`AudioPlayer` with playback metadata. Direct Creator Store Audio IDs are
+previewed even when Studio loads them as an empty wrapper Model. By default,
+the MCP server returns the requested Audio asset or up to three unique
+accessible nested sounds as temporary inline audio so an agent can listen
+before insertion; set `includeAudio: false` for metadata only.
+
+Inline audio preview requires `ROBLOX_OPEN_CLOUD_API_KEY` with `asset:read`
+permission. Audio is fetched through Roblox's authenticated asset-delivery
+endpoint, validated as MP3, OGG, WAV, or FLAC, bounded per file and per tool
+response, and kept in memory rather than written to disk. Inaccessible or
+oversized sounds are reported in the text result without failing the hierarchy
+preview.
 
 To preview or insert a public third-party asset, enable
 **Allow Loading Third Party Assets** in Studio under
