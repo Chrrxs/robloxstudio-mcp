@@ -21,6 +21,7 @@
     "lint": "eslint packages/*/src/**/*.ts",
     "typecheck": "tsc --noEmit -p packages/core/tsconfig.json",
     "test": "npm test -w packages/core",
+    "test:codex-wrapper": "node tests/codex-wsl-environment.mjs",
     "test:e2e:auto-install": "node tests/auto-install-plugin-e2e.mjs",
     "test:e2e:lifecycle": "node tests/studio-lifecycle-regressions.mjs",
     "test:studio:tools": "node tests/studio-tooling-smoke.mjs",

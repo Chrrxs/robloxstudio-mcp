@@ -14,6 +14,7 @@ import type { RegisterInstanceResult } from './bridge-service.js';
 import type { ToolDefinition } from './tools/definitions.js';
 import { registerResourceHandlers } from './mcp-compat.js';
 import { tokensMatch } from './auth.js';
+import { StudioLaunchPreDispatchError } from './studio-instance-manager.js';
 
 export interface HttpSecurityOptions {
   /** When set, tool-invoking endpoints require this token. */
@@ -231,6 +232,9 @@ export const TOOL_HANDLERS: Record<string, ToolHandler> = {
 export function createHttpServer(tools: RobloxStudioTools, bridge: BridgeService, allowedTools?: Set<string>, serverConfig?: StreamableHttpConfig, security?: HttpSecurityOptions) {
   const app = express();
   const studioLifecycleCallable = !allowedTools || allowedTools.has('manage_instance');
+  const studioLifecycleCapabilities = studioLifecycleCallable
+    ? tools.getStudioLifecycleCapabilities()
+    : undefined;
   let mcpServerActive = false;
   let lastMCPActivity = 0;
   let mcpServerStartTime = 0;
@@ -342,6 +346,9 @@ export function createHttpServer(tools: RobloxStudioTools, bridge: BridgeService
         studioLifecycle: {
           protocolVersion: 3,
           endpoint: '/mcp/manage_instance',
+          hostPlatform: studioLifecycleCapabilities?.hostPlatform,
+          windowsInteropAvailable: studioLifecycleCapabilities?.windowsInteropAvailable,
+          processIdentity: studioLifecycleCapabilities?.processIdentity,
         },
       } : {},
       pluginConnected: instances.length > 0,
@@ -647,6 +654,15 @@ export function createHttpServer(tools: RobloxStudioTools, bridge: BridgeService
           try {
             return await handler(tools, args || {});
           } catch (error) {
+            if (error instanceof StudioLaunchPreDispatchError) {
+              return {
+                content: [{
+                  type: 'text',
+                  text: JSON.stringify(error.toResponseBody()),
+                }],
+                isError: true,
+              };
+            }
             if (error instanceof RoutingFailure) {
               // Surface routing errors as structured tool-call results with
               // the full instance list embedded so the LLM can recover by
@@ -723,6 +739,10 @@ export function createHttpServer(tools: RobloxStudioTools, bridge: BridgeService
         const result = await handler(tools, req.body);
         res.json(result);
       } catch (error) {
+        if (error instanceof StudioLaunchPreDispatchError) {
+          res.status(error.statusCode).json(error.toResponseBody());
+          return;
+        }
         if (error instanceof RoutingFailure) {
           res.status(400).json({
             error: error.routingError.code,

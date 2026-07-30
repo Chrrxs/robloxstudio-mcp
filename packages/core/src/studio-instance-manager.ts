@@ -11,6 +11,12 @@ import {
   type ManagedInstanceRegistryRecord,
   type RegistrySweepOptions,
 } from './managed-instance-registry.js';
+import {
+  getStudioPlatformCapabilities,
+  type StudioHostPlatform,
+  type StudioPlatformCapabilities,
+  type StudioProcessIdentityLauncher,
+} from './studio-platform.js';
 
 export type StudioLaunchSource = 'baseplate' | 'local_file' | 'published_place' | 'place_revision';
 
@@ -125,10 +131,69 @@ export interface StudioInstanceManagerOptions {
   registryDir?: string;
   registry?: ManagedInstanceRegistry;
   processAdapter?: StudioProcessAdapter;
+  platformCapabilities?: StudioPlatformCapabilities;
+  windowsStudioLauncher?: (
+    exe: string,
+    args: string[],
+    processEnvironment?: StudioProcessEnvironmentPatch,
+  ) => StudioChildProcess | Promise<StudioChildProcess>;
   confirmedExitMisses?: number;
   confirmedExitGraceMs?: number;
   snapshotCacheMs?: number;
   launchCompletionTimeoutMs?: number;
+}
+
+export type StudioLifecycleLauncher =
+  | StudioProcessIdentityLauncher
+  | 'custom-adapter';
+
+export interface StudioLifecycleCapabilities {
+  hostPlatform: StudioHostPlatform;
+  windowsInteropAvailable: boolean;
+  processIdentity: {
+    supported: boolean;
+    launcher: StudioLifecycleLauncher;
+    reason?: string;
+  };
+}
+
+export interface StudioLaunchPreDispatchErrorBody {
+  error: 'process_identity_unavailable';
+  message: string;
+  launch_stage: 'pre_spawn';
+  process_created: false;
+  safe_to_fallback: true;
+  launcher: StudioLifecycleLauncher;
+  remediation: string;
+}
+
+export class StudioLaunchPreDispatchError extends Error {
+  readonly code = 'process_identity_unavailable';
+  readonly statusCode = 409;
+  readonly launchStage = 'pre_spawn';
+  readonly processCreated = false;
+  readonly safeToFallback = true;
+
+  constructor(readonly capabilities: StudioLifecycleCapabilities) {
+    super(
+      'require_process_identity is supported only by the identity-retaining Windows launcher or a custom process adapter.',
+    );
+    this.name = 'StudioLaunchPreDispatchError';
+  }
+
+  toResponseBody(): StudioLaunchPreDispatchErrorBody {
+    return {
+      error: this.code,
+      message: this.message,
+      launch_stage: this.launchStage,
+      process_created: this.processCreated,
+      safe_to_fallback: this.safeToFallback,
+      launcher: this.capabilities.processIdentity.launcher,
+      remediation:
+        this.capabilities.processIdentity.reason ??
+        'Start the broker through the supported Codex wrapper on Windows or WSL, or configure a custom process adapter.',
+    };
+  }
 }
 
 export type ManagedStudioCloseResult =
@@ -158,13 +223,7 @@ async function runAsync(command: string, args: string[], options: Record<string,
 }
 
 export function isWsl(): boolean {
-  if (process.platform !== 'linux') return false;
-  if (!process.env.WSL_INTEROP && !process.env.WSL_DISTRO_NAME) return false;
-  try {
-    return /microsoft|wsl/i.test(readFileSync('/proc/version', 'utf8'));
-  } catch {
-    return false;
-  }
+  return getStudioPlatformCapabilities().isWsl;
 }
 
 function powershell(script: string): string {
@@ -1272,6 +1331,10 @@ export class StudioInstanceManager {
   private launchControls = retainedLaunchControls;
   private readonly registry: ManagedInstanceRegistry;
   private readonly processAdapter: StudioProcessAdapter;
+  private readonly platformCapabilities?: StudioPlatformCapabilities;
+  private readonly windowsStudioLauncher: NonNullable<
+    StudioInstanceManagerOptions['windowsStudioLauncher']
+  >;
   private readonly confirmedExitMisses: number;
   private readonly confirmedExitGraceMs: number;
   private readonly snapshotCacheMs: number;
@@ -1285,10 +1348,31 @@ export class StudioInstanceManager {
   constructor(options: StudioInstanceManagerOptions = {}) {
     this.registry = options.registry ?? new ManagedInstanceRegistry(options.registryDir);
     this.processAdapter = options.processAdapter ?? {};
+    this.platformCapabilities = options.platformCapabilities;
+    this.windowsStudioLauncher = options.windowsStudioLauncher ?? spawnWindowsStudio;
     this.confirmedExitMisses = options.confirmedExitMisses ?? 2;
     this.confirmedExitGraceMs = options.confirmedExitGraceMs ?? 5000;
     this.snapshotCacheMs = options.snapshotCacheMs ?? 0;
     this.launchCompletionTimeoutMs = options.launchCompletionTimeoutMs ?? LAUNCH_COMPLETION_TIMEOUT_MS;
+  }
+
+  getLifecycleCapabilities(): StudioLifecycleCapabilities {
+    const platform = this.platformCapabilities ?? getStudioPlatformCapabilities();
+    if (this.processAdapter.spawnStudio) {
+      return {
+        hostPlatform: platform.hostPlatform,
+        windowsInteropAvailable: platform.windowsInteropAvailable,
+        processIdentity: {
+          supported: true,
+          launcher: 'custom-adapter',
+        },
+      };
+    }
+    return {
+      hostPlatform: platform.hostPlatform,
+      windowsInteropAvailable: platform.windowsInteropAvailable,
+      processIdentity: { ...platform.processIdentity },
+    };
   }
 
   async list(): Promise<ManagedStudioInstance[]> {
@@ -1530,15 +1614,9 @@ export class StudioInstanceManager {
     ) {
       throw new Error('studio_executable must be a non-empty string without null characters.');
     }
-    if (
-      options.requireProcessIdentity &&
-      !this.processAdapter.spawnStudio &&
-      process.platform !== 'win32' &&
-      !isWsl()
-    ) {
-      throw new Error(
-        'require_process_identity is supported only by the identity-retaining Windows launcher or a custom process adapter.',
-      );
+    const lifecycleCapabilities = this.getLifecycleCapabilities();
+    if (options.requireProcessIdentity && !lifecycleCapabilities.processIdentity.supported) {
+      throw new StudioLaunchPreDispatchError(lifecycleCapabilities);
     }
     const preparedOptions = prepareStudioLaunchOptions(options);
     const bootId = await this.getCurrentBootId();
@@ -1556,8 +1634,11 @@ export class StudioInstanceManager {
     try {
       if (this.processAdapter.spawnStudio) {
         proc = await this.processAdapter.spawnStudio(exe, args, spawnOptions);
-      } else if (process.platform === 'win32' || isWsl()) {
-        proc = await spawnWindowsStudio(exe, args, processEnvironment);
+      } else if (
+        lifecycleCapabilities.processIdentity.launcher === 'windows-retained' ||
+        lifecycleCapabilities.processIdentity.launcher === 'wsl-windows-retained'
+      ) {
+        proc = await this.windowsStudioLauncher(exe, args, processEnvironment);
       } else {
         const child = spawn(exe, args, spawnOptions);
         proc = {

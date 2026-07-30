@@ -3,6 +3,11 @@ import { TOOL_HANDLERS, createHttpServer } from '../http-server.js';
 import { RobloxStudioTools } from '../tools/index.js';
 import { BridgeService } from '../bridge-service.js';
 import { Application } from 'express';
+import { StudioInstanceManager } from '../studio-instance-manager.js';
+import { detectStudioPlatform } from '../studio-platform.js';
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
 
 const READY_BODY = {
   pluginSessionId: 'session-1',
@@ -59,6 +64,74 @@ describe('HTTP Server', () => {
       expect(response.body.serverName).toBe('robloxstudio-mcp-inspector');
       expect(response.body.capabilities.studioLifecycle).toBeUndefined();
       await request(inspectorApp).post('/mcp/manage_instance').send({ action: 'status' }).expect(404);
+    });
+
+    test('advertises the live process-identity launcher capability', async () => {
+      const response = await request(app).get('/health').expect(200);
+      expect(response.body.capabilities.studioLifecycle).toMatchObject({
+        hostPlatform: expect.any(String),
+        windowsInteropAvailable: expect.any(Boolean),
+        processIdentity: {
+          supported: expect.any(Boolean),
+          launcher: expect.any(String),
+        },
+      });
+    });
+
+    test('returns a structured guaranteed pre-spawn rejection when process identity is unavailable', async () => {
+      const registryDir = fs.mkdtempSync(path.join(os.tmpdir(), 'robloxstudio-mcp-registry-'));
+      const unsupportedTools = new RobloxStudioTools(bridge);
+      Object.defineProperty(unsupportedTools, 'instanceManager', {
+        value: new StudioInstanceManager({
+          registryDir,
+          platformCapabilities: detectStudioPlatform({
+            platform: 'linux',
+            kernelVersion: 'Linux version 6.8.0-generic',
+            windowsInteropAvailable: false,
+          }),
+          processAdapter: {
+            currentBootId: () => 'boot-1',
+            observeStudioProcesses: () => ({
+              status: 'ok',
+              observedAt: Date.now(),
+              processes: [],
+            }),
+          },
+        }),
+      });
+      const unsupportedApp = createHttpServer(
+        unsupportedTools,
+        bridge,
+        new Set(['manage_instance']),
+      );
+
+      try {
+        const health = await request(unsupportedApp).get('/health').expect(200);
+        expect(health.body.capabilities.studioLifecycle.processIdentity).toMatchObject({
+          supported: false,
+          launcher: 'unavailable',
+        });
+
+        const response = await request(unsupportedApp)
+          .post('/mcp/manage_instance')
+          .send({
+            action: 'launch',
+            source: 'baseplate',
+            require_process_identity: true,
+          })
+          .expect(409);
+        expect(response.body).toEqual(expect.objectContaining({
+          error: 'process_identity_unavailable',
+          launch_stage: 'pre_spawn',
+          process_created: false,
+          safe_to_fallback: true,
+          launcher: 'unavailable',
+          message: expect.stringContaining('require_process_identity'),
+          remediation: expect.any(String),
+        }));
+      } finally {
+        fs.rmSync(registryDir, { recursive: true, force: true });
+      }
     });
   });
 

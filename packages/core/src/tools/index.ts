@@ -794,6 +794,10 @@ export class RobloxStudioTools {
     });
   }
 
+  getStudioLifecycleCapabilities() {
+    return this.instanceManager.getLifecycleCapabilities();
+  }
+
   private _textResult(body: Record<string, unknown>) {
     return { content: [{ type: 'text', text: JSON.stringify(body) }] };
   }

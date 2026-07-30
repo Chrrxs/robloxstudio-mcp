@@ -1,7 +1,8 @@
-import { existsSync, readFileSync, unlinkSync } from 'fs';
+import { existsSync, unlinkSync } from 'fs';
 import { execSync } from 'child_process';
 import { join } from 'path';
 import { homedir } from 'os';
+import { getStudioPlatformCapabilities } from './studio-platform.js';
 
 // Shared helpers for the per-package install-plugin.ts in
 // @chrrxs/robloxstudio-mcp and @chrrxs/robloxstudio-mcp-inspector. Bundled
@@ -9,13 +10,7 @@ import { homedir } from 'os';
 // both packages on the next publish.
 
 export function isWSL(): boolean {
-  if (process.platform !== 'linux') return false;
-  try {
-    const v = readFileSync('/proc/version', 'utf8');
-    return /microsoft|wsl/i.test(v);
-  } catch {
-    return false;
-  }
+  return getStudioPlatformCapabilities().isWsl;
 }
 
 function getWindowsUserPluginsDir(): string | null {

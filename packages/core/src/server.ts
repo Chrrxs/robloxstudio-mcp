@@ -15,6 +15,7 @@ import { BridgeService, RoutingFailure } from './bridge-service.js';
 import { ProxyBridgeService } from './proxy-bridge-service.js';
 import type { ToolDefinition } from './tools/definitions.js';
 import { registerResourceHandlers } from './mcp-compat.js';
+import { StudioLaunchPreDispatchError } from './studio-instance-manager.js';
 
 export interface ServerConfig {
   name: string;
@@ -78,6 +79,15 @@ export class RobloxStudioMCPServer {
       try {
         return await handler(this.tools, args ?? {});
       } catch (error) {
+        if (error instanceof StudioLaunchPreDispatchError) {
+          return {
+            content: [{
+              type: 'text',
+              text: JSON.stringify(error.toResponseBody()),
+            }],
+            isError: true,
+          };
+        }
         if (error instanceof RoutingFailure) {
           // Surface routing errors as structured tool-call results with
           // the full instance list embedded so the LLM can recover by

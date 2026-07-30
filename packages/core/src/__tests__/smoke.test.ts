@@ -1,7 +1,8 @@
 import { BridgeService } from '../bridge-service.js';
 import { createHttpServer } from '../http-server.js';
 import { RobloxStudioTools } from '../tools/index.js';
-import { buildStudioLaunchArgs, buildWindowsStudioStartScript, buildWindowsStudioStopScript, cleanupManagedBaseplateFiles, quoteWindowsCommandLineArg, StudioInstanceManager, sweepStaleBaseplateFiles } from '../studio-instance-manager.js';
+import { buildStudioLaunchArgs, buildWindowsStudioStartScript, buildWindowsStudioStopScript, cleanupManagedBaseplateFiles, isWsl, quoteWindowsCommandLineArg, StudioInstanceManager, sweepStaleBaseplateFiles } from '../studio-instance-manager.js';
+import { detectStudioPlatform } from '../studio-platform.js';
 import { ManagedInstanceRegistry } from '../managed-instance-registry.js';
 import request from 'supertest';
 import { spawnSync, type SpawnOptions } from 'child_process';
@@ -47,6 +48,92 @@ function readRegistryEvents(registryDir: string): Record<string, unknown>[] {
 }
 
 describe('Smoke', () => {
+  test('sanitized Codex environment still detects a WSL host with working Windows interop', () => {
+    const kernelVersion = process.platform === 'linux' && fs.existsSync('/proc/version')
+      ? fs.readFileSync('/proc/version', 'utf8')
+      : '';
+    if (!/microsoft|wsl/i.test(kernelVersion)) return;
+
+    const previousInterop = process.env.WSL_INTEROP;
+    const previousDistroName = process.env.WSL_DISTRO_NAME;
+    delete process.env.WSL_INTEROP;
+    delete process.env.WSL_DISTRO_NAME;
+    try {
+      expect(isWsl()).toBe(true);
+    } finally {
+      if (previousInterop === undefined) delete process.env.WSL_INTEROP;
+      else process.env.WSL_INTEROP = previousInterop;
+      if (previousDistroName === undefined) delete process.env.WSL_DISTRO_NAME;
+      else process.env.WSL_DISTRO_NAME = previousDistroName;
+    }
+  });
+
+  test('sanitized WSL capability selects the retained Windows launcher boundary', async () => {
+    const registryDir = fs.mkdtempSync(path.join(os.tmpdir(), 'robloxstudio-mcp-registry-'));
+    const platformCapabilities = detectStudioPlatform({
+      platform: 'linux',
+      kernelVersion: 'Linux version 6.6.87.2-microsoft-standard-WSL2',
+      windowsInteropAvailable: true,
+    });
+    let launcherCalls = 0;
+    let abortCalls = 0;
+
+    try {
+      const manager = new StudioInstanceManager({
+        registryDir,
+        platformCapabilities,
+        processAdapter: {
+          currentBootId: () => 'boot-1',
+          observeStudioProcesses: () => ({
+            status: 'ok',
+            observedAt: Date.now(),
+            processes: [],
+          }),
+          resolveStudioExe: () => 'C:\\Roblox\\RobloxStudioBeta.exe',
+        },
+        windowsStudioLauncher: () => {
+          launcherCalls += 1;
+          return {
+            pid: 9001,
+            nativePid: 7101,
+            nativeStartedAt: '133700123499',
+            unref: () => {},
+            authorize: () => {},
+            release: () => {},
+            abort: () => {
+              abortCalls += 1;
+            },
+          };
+        },
+      });
+
+      expect(manager.getLifecycleCapabilities()).toMatchObject({
+        hostPlatform: 'wsl',
+        processIdentity: {
+          supported: true,
+          launcher: 'wsl-windows-retained',
+        },
+      });
+
+      const record = await manager.launch({
+        source: 'local_file',
+        localPlaceFile: '/tmp/sanitized-codex-wsl.rbxl',
+        requireProcessIdentity: true,
+      });
+      expect(launcherCalls).toBe(1);
+      expect(record).toMatchObject({
+        nativeProcessId: 7101,
+        nativeProcessStartedAt: '133700123499',
+        processAuthorizationState: 'pending',
+      });
+
+      await manager.close(record);
+      expect(abortCalls).toBe(1);
+    } finally {
+      fs.rmSync(registryDir, { recursive: true, force: true });
+    }
+  });
+
   test('source does not force playtest shutdown with brittle fallbacks', () => {
     const cwd = process.cwd();
     const repoRoot = fs.existsSync(path.join(cwd, 'studio-plugin')) ? cwd : path.resolve(cwd, '../..');

@@ -26,6 +26,47 @@ export TMP="${TMPDIR}"
 export TEMP="${TMPDIR}"
 mkdir -p "${TMPDIR}"
 
+verify_wsl_windows_interop() {
+	if [[ "$(uname -s)" != "Linux" ]] || ! grep -Eqi 'microsoft|wsl' /proc/version 2>/dev/null; then
+		return
+	fi
+
+	local powershell_command="powershell.exe"
+	if ! command -v "${powershell_command}" >/dev/null 2>&1; then
+		powershell_command="/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe"
+	fi
+	if [[ ! -x "${powershell_command}" ]] && ! command -v "${powershell_command}" >/dev/null 2>&1; then
+		echo "robloxstudio-mcp: WSL kernel detected, but powershell.exe is unavailable. Enable WSL Windows interop or add Windows PowerShell to PATH." >&2
+		exit 78
+	fi
+
+	local probe_cwd="${DEV_ROOT}"
+	if [[ -d "/mnt/c/Windows" ]]; then
+		probe_cwd="/mnt/c/Windows"
+	fi
+	local probe_output
+	if ! probe_output="$(
+		cd "${probe_cwd}"
+		timeout --signal=KILL 5s "${powershell_command}" \
+			-NoProfile \
+			-NonInteractive \
+			-Command "[Console]::Write('ROBLOXSTUDIO_MCP_WINDOWS_INTEROP_OK')" \
+			</dev/null \
+			2>/dev/null
+	)"; then
+		echo "robloxstudio-mcp: WSL kernel detected, but this Codex-launched process cannot execute Windows programs. Enable WSL interop or forward WSL_INTEROP and WSL_DISTRO_NAME in the Codex MCP environment, then restart the broker." >&2
+		exit 78
+	fi
+	if [[ "${probe_output}" != "ROBLOXSTUDIO_MCP_WINDOWS_INTEROP_OK" ]]; then
+		echo "robloxstudio-mcp: Windows interop returned an unexpected probe result; refusing to advertise Studio lifecycle support." >&2
+		exit 78
+	fi
+
+	export ROBLOXSTUDIO_MCP_WSL_INTEROP_VERIFIED=1
+}
+
+verify_wsl_windows_interop
+
 export NVM_DIR="${NVM_DIR:-${HOME}/.nvm}"
 if [[ -s "${NVM_DIR}/nvm.sh" ]]; then
 	# shellcheck source=/dev/null
@@ -40,6 +81,13 @@ if [[ "${ROBLOXSTUDIO_MCP_USE_PUBLISHED:-}" == "1" ]]; then
 fi
 
 cd "${DEV_ROOT}"
-npm run build -w packages/core >&2
-npm run build:plugin >&2
-exec ./node_modules/.bin/tsx packages/robloxstudio-mcp/src/index.ts --auto-install-plugin
+if [[ "${ROBLOXSTUDIO_MCP_SKIP_BUILD:-}" != "1" ]]; then
+	npm run build -w packages/core >&2
+	npm run build:plugin >&2
+fi
+
+server_args=()
+if [[ "${ROBLOXSTUDIO_MCP_SKIP_AUTO_INSTALL_PLUGIN:-}" != "1" ]]; then
+	server_args+=(--auto-install-plugin)
+fi
+exec ./node_modules/.bin/tsx packages/robloxstudio-mcp/src/index.ts "${server_args[@]}"

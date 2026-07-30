@@ -31,6 +31,15 @@ node tests/proxy-mode-peer-fanout.mjs
 node tests/execute-luau-output-capture.mjs
 ```
 
+The Codex/WSL environment regression is non-destructive and does not launch
+Studio. It starts the real source wrapper with `WSL_INTEROP` and
+`WSL_DISTRO_NAME` removed, then verifies the broker's live lifecycle capability:
+
+```bash
+npm run build
+npm run test:codex-wrapper
+```
+
 Each test prints `✅ PASSED` or `❌ FAILED` plus the failing assertion. On
 failure the test's MCP subprocess stderr tail is dumped for context.
 
@@ -95,6 +104,7 @@ node scripts/studio-lifecycle.mjs wait-connected --variant main --version <expec
 
 | File | What it checks |
 |---|---|
+| `codex-wsl-environment.mjs` | The supported Codex wrapper validates Windows interop and advertises the retained process-identity launcher from a sanitized WSL environment without launching Studio |
 | `eval-bridge-error-preservation.mjs` | `eval_server_runtime` / `eval_client_runtime` surface actual user errors instead of Roblox's generic `"Requested module experienced an error while loading"` wrapper for explicit errors, nil derefs, parser errors, and nested `require()` module-load failures |
 | `eval-context-routing.mjs` | `execute_luau target=server/client-N` runs in plugin context on the selected peer, while `eval_server_runtime` / `eval_client_runtime` run through the server Script and client LocalScript eval bridges |
 | `runtime-bridge-lifecycle.mjs` | Runtime eval bridges are created inside play DataModels, stay out of edit mode, and work for managed and manually-started playtests; direct multiplayer coverage is temporarily skipped |
