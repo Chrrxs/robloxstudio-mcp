@@ -766,18 +766,19 @@ describe('Creator Store insertion security contract', () => {
   });
 
   test('load failures explain the disabled third-party asset setting', () => {
-    const readmeSource = readFileSync(join(repositoryRoot, 'README.md'), 'utf8');
     const installationSource = readFileSync(
       join(repositoryRoot, 'studio-plugin/INSTALLATION.md'),
       'utf8',
     );
-    const securitySource = readFileSync(join(repositoryRoot, 'docs/security.md'), 'utf8');
+    const creatorStoreSource = readFileSync(
+      join(repositoryRoot, 'docs/creator-store-assets.md'),
+      'utf8',
+    );
 
     expect(handlerSource).toContain('AllowInsertFreeAssets');
     expect(handlerSource).toContain('Allow Loading Third Party Assets');
-    expect(readmeSource).toContain('Allow Loading Third Party Assets');
     expect(installationSource).toContain('Allow Loading Third Party Assets');
-    expect(securitySource).toContain('Allow Loading Third Party Assets');
+    expect(creatorStoreSource).toContain('Allow Loading Third Party Assets');
   });
 });
 

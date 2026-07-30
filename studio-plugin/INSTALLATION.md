@@ -42,19 +42,19 @@ Complete your AI assistant integration with this easy-to-install Studio plugin. 
 
 ## Setup & Configuration
 
-### 1. Enable HTTP Requests (Required)
-**Game Settings** > **Security** > **"Allow HTTP Requests"**
+### Optional: Allow third-party Creator Store assets
 
-To preview or insert public Creator Store assets that you do not own, also
-enable **"Allow Loading Third Party Assets"** on the same Security page.
+To preview or insert public Creator Store assets that you do not own, enable
+**"Allow Loading Third Party Assets"** under
+**Game Settings** > **Security**.
 Roblox disables this setting by default.
 
-### 2. Activate the Plugin
+### 1. Activate the Plugin
 **Plugins toolbar** > Click **"MCP Server"** button
 - **Green status** = Connected and ready
 - **Red status** = Disconnected (normal until MCP server runs)
 
-### 3. Install MCP Server
+### 2. Install MCP Server
 Choose your AI assistant:
 
 **For Claude Code:**
@@ -116,10 +116,6 @@ If you encounter issues, you may need to run it through `cmd`. Update your confi
 - Restart Roblox Studio completely
 - Check Output window for error messages
 
-### "HTTP 403 Forbidden" Errors
-- Enable "Allow HTTP Requests" in Game Settings > Security
-- Verify MCP server is running (status should show connected)
-
 ### Plugin Shows "Disconnected"
 - **Normal behavior** when MCP server isn't running
 - Click "MCP Server" button to activate
@@ -132,10 +128,18 @@ If you encounter issues, you may need to run it through `cmd`. Update your confi
 
 ## Security & Privacy
 
-- **Local-only**: All communication stays on your machine
-- **No external servers**: Plugin only talks to localhost
-- **Read-only access**: Plugin extracts data but never modifies your place
-- **No data collection**: Your projects remain private
+- **Local bridge by default**: The plugin connects to `http://localhost:58741`
+  unless you explicitly configure another server URL.
+- **Explicit tool access**: The full plugin can modify a place when a write tool
+  is called. Install the Inspector edition when you need read-only access.
+- **Provider boundary**: Tool results pass through your configured MCP client.
+  Your AI provider's data-handling policy applies to content sent by that
+  client.
+
+See the repository's
+[configuration guide](../docs/configuration.md) for HTTP bridge authentication
+and network settings. Report suspected vulnerabilities through the
+[security policy](../SECURITY.md), not a public issue.
 
 ## Advanced Usage
 
