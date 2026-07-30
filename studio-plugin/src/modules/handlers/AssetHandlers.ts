@@ -14,10 +14,23 @@ const Selection = game.GetService("Selection");
 const { getInstancePath, getInstanceByPath } = Utils;
 const { beginRecording, finishRecording } = Recording;
 
+const THIRD_PARTY_ASSET_SETTING_HINT =
+	'\nTo load public Creator Store assets that you do not own, enable "Allow Loading Third Party Assets" in Game Settings > Security.';
+
 function destroyImportedRoot(root: Instance) {
 	pcall(() => {
 		root.Destroy();
 	});
+}
+
+function formatAssetLoadFailure(assetId: number, loadError: unknown): string {
+	const [settingReadable, allowInsertFreeAssets] = pcall(() => {
+		return (AssetService as unknown as { AllowInsertFreeAssets: boolean }).AllowInsertFreeAssets;
+	});
+	const settingHint = settingReadable && allowInsertFreeAssets === true
+		? ""
+		: THIRD_PARTY_ASSET_SETTING_HINT;
+	return `Failed to load asset ${assetId}: ${tostring(loadError)}${settingHint}`;
 }
 
 const sanitizationOperations: AssetSanitizationOperations = {
@@ -55,7 +68,13 @@ function insertAsset(requestData: Record<string, unknown>) {
 	let wrapperModel: Instance | undefined;
 	const insertedInstances: Instance[] = [];
 	const [insertSuccess, insertResult] = pcall(() => {
-		const loadedWrapper = (AssetService as unknown as { LoadAssetAsync(id: number): Instance }).LoadAssetAsync(assetId);
+		const [loadSuccess, loadResult] = pcall(() => {
+			return (AssetService as unknown as { LoadAssetAsync(id: number): Instance }).LoadAssetAsync(assetId);
+		});
+		if (!loadSuccess || !loadResult) {
+			error(formatAssetLoadFailure(assetId, loadResult), 0);
+		}
+		const loadedWrapper = loadResult as Instance;
 		wrapperModel = loadedWrapper;
 
 		const sanitization = sanitizeLoadedAsset(loadedWrapper, sanitizationOperations);
@@ -154,7 +173,7 @@ function previewAsset(requestData: Record<string, unknown>) {
 	});
 
 	if (!loadSuccess || !wrapperModel) {
-		return { error: `Failed to load asset ${assetId}: ${tostring(wrapperModel)}` };
+		return { error: formatAssetLoadFailure(assetId, wrapperModel) };
 	}
 
 	// Previewed assets never enter the DataModel.

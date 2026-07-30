@@ -3,19 +3,10 @@
   "version": "2.23.0",
   "private": true,
   "type": "module",
-  "bin": {
-    "robloxstudio-mcp": "packages/robloxstudio-mcp/dist/index.js"
-  },
-  "files": [
-    "packages/robloxstudio-mcp/dist/**/*",
-    "packages/robloxstudio-mcp/package.json",
-    "studio-plugin/MCPPlugin.rbxmx"
-  ],
   "workspaces": [
     "packages/*"
   ],
   "scripts": {
-    "prepare": "npm --prefix studio-plugin ci --ignore-scripts && npm run build -w packages/core && npm run build -w packages/robloxstudio-mcp && npm run build:plugin",
     "build": "npm run build -w packages/core && npm run build -w packages/robloxstudio-mcp && npm run build -w packages/robloxstudio-mcp-inspector",
     "compile:plugin": "npm --prefix studio-plugin run build",
     "build:plugin": "npm run compile:plugin && node scripts/build-plugin.mjs",
@@ -48,11 +39,6 @@
     "typescript": "^5.3.2"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.27.1",
-    "acorn": "^8.11.0",
-    "express": "^4.18.2",
-    "node-fetch": "^3.3.2",
-    "uuid": "^9.0.1",
-    "ws": "^8.14.2"
+    "@modelcontextprotocol/sdk": "^1.27.1"
   }
 }

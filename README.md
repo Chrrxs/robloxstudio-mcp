@@ -2,7 +2,7 @@
 
 **Debug your game while it runs.** The most capable Roblox Studio MCP server: live game-VM eval, log breakpoints, profiler captures, and full playtest automation, built for agent-driven development from Claude, Cursor, Codex, or Gemini.
 
-[![Install from GitHub](https://img.shields.io/badge/install-GitHub-181717?logo=github)](https://github.com/Akramle/robloxstudio-mcp)
+[![NPM Version](https://img.shields.io/npm/v/@chrrxs/robloxstudio-mcp)](https://www.npmjs.com/package/@chrrxs/robloxstudio-mcp)
 
 ## The tools that matter
 
@@ -37,18 +37,18 @@
 
 ```bash
 # Claude Code
-claude mcp add robloxstudio -- npx -y github:Akramle/robloxstudio-mcp --auto-install-plugin
+claude mcp add robloxstudio -- npx -y @chrrxs/robloxstudio-mcp@latest --auto-install-plugin
 
 # Codex CLI
-codex mcp add robloxstudio -- npx -y github:Akramle/robloxstudio-mcp --auto-install-plugin
+codex mcp add robloxstudio -- npx -y @chrrxs/robloxstudio-mcp@latest --auto-install-plugin
 
 # Gemini CLI
-gemini mcp add robloxstudio npx --trust -- -y github:Akramle/robloxstudio-mcp --auto-install-plugin
+gemini mcp add robloxstudio npx --trust -- -y @chrrxs/robloxstudio-mcp@latest --auto-install-plugin
 ```
 
 3. Fully close and reopen Studio after the plugin is first installed or updated. The plugin shows **Connected** when ready.
 
-Multiple open places connect to the same server; call `get_connected_instances` and pass `instance_id` to route tool calls. Custom Plugins folder: set `MCP_PLUGINS_DIR`. Manual plugin install: `npx -y github:Akramle/robloxstudio-mcp --install-plugin`.
+Multiple open places connect to the same server; call `get_connected_instances` and pass `instance_id` to route tool calls. Custom Plugins folder: set `MCP_PLUGINS_DIR`. Manual plugin install: `npx -y @chrrxs/robloxstudio-mcp@latest --install-plugin`.
 
 <details>
 <summary>Other MCP clients (Claude Desktop, Cursor, etc.)</summary>
@@ -58,7 +58,7 @@ Multiple open places connect to the same server; call `get_connected_instances` 
   "mcpServers": {
     "robloxstudio-mcp": {
       "command": "npx",
-      "args": ["-y", "github:Akramle/robloxstudio-mcp", "--auto-install-plugin"]
+      "args": ["-y", "@chrrxs/robloxstudio-mcp@latest", "--auto-install-plugin"]
     }
   }
 }
@@ -70,7 +70,7 @@ On Windows, wrap with `cmd /c` if `npx` doesn't resolve:
   "mcpServers": {
     "robloxstudio-mcp": {
       "command": "cmd",
-      "args": ["/c", "npx", "-y", "github:Akramle/robloxstudio-mcp", "--auto-install-plugin"]
+      "args": ["/c", "npx", "-y", "@chrrxs/robloxstudio-mcp@latest", "--auto-install-plugin"]
     }
   }
 }
@@ -96,6 +96,12 @@ models and effect-focused terms such as `particle effect`, `explosion`, `smoke`,
 when Roblox provides them. Use `get_asset_thumbnail` for an inline image and
 `preview_asset` for an unparented hierarchy, visual-capability summary, and
 unlimited-depth security scan.
+
+To preview or insert a public third-party asset, enable
+**Allow Loading Third Party Assets** in Studio under
+**Game Settings → Security**. Roblox disables this setting by default; assets
+owned by the experience creator and assets owned by Roblox continue to work
+without it.
 
 `insert_asset` is fail-closed. The loaded asset remains unparented while every
 `LuaSourceContainer` (including `Script`, `LocalScript`, `ModuleScript`, and
@@ -127,4 +133,4 @@ claude mcp add robloxstudio-inspector -- npx -y @chrrxs/robloxstudio-mcp-inspect
 <!-- VERSION_LINE -->
 **v2.23.0**
 
-[Report Issues](https://github.com/Akramle/robloxstudio-mcp/issues) · MIT Licensed · Based on [boshyxd/robloxstudio-mcp](https://github.com/boshyxd/robloxstudio-mcp) v2.7.0
+[Report Issues](https://github.com/chrrxs/robloxstudio-mcp/issues) · MIT Licensed · Based on [boshyxd/robloxstudio-mcp](https://github.com/boshyxd/robloxstudio-mcp) v2.7.0

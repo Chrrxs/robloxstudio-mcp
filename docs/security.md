@@ -4,6 +4,11 @@ The bridge binds to `127.0.0.1` and refuses cross-origin browser requests by def
 
 ## Creator Store imports
 
+Loading public third-party assets requires **Allow Loading Third Party Assets**
+in Studio under **Game Settings → Security**. Roblox disables this setting by
+default. When it is disabled, preview and insertion load failures include a
+targeted setup hint.
+
 `insert_asset` treats every Creator Store asset as untrusted. `AssetService`
 loads the asset into an unparented wrapper, and the plugin uses an
 unlimited-depth `GetDescendants()` scan to destroy every

@@ -28,11 +28,11 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/Akramle/robloxstudio-mcp.git"
+    "url": "git+https://github.com/chrrxs/robloxstudio-mcp.git"
   },
-  "homepage": "https://github.com/Akramle/robloxstudio-mcp#readme",
+  "homepage": "https://github.com/chrrxs/robloxstudio-mcp#readme",
   "bugs": {
-    "url": "https://github.com/Akramle/robloxstudio-mcp/issues"
+    "url": "https://github.com/chrrxs/robloxstudio-mcp/issues"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.27.1",

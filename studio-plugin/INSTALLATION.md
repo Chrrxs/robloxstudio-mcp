@@ -15,7 +15,7 @@ Complete your AI assistant integration with this easy-to-install Studio plugin. 
 ### Method 2: Direct Download
 1. **Download the plugin:**
    - **GitHub Release**: [Download MCPPlugin.rbxmx](https://github.com/chrrxs/robloxstudio-mcp/releases/latest/download/MCPPlugin.rbxmx)
-   - **CLI installer**: `npx -y github:Akramle/robloxstudio-mcp --install-plugin`
+   - **CLI installer**: `npx -y @chrrxs/robloxstudio-mcp@latest --install-plugin`
    - This is the official Roblox plugin format
 
 2. **Install to plugins folder:**
@@ -45,6 +45,10 @@ Complete your AI assistant integration with this easy-to-install Studio plugin. 
 ### 1. Enable HTTP Requests (Required)
 **Game Settings** > **Security** > **"Allow HTTP Requests"**
 
+To preview or insert public Creator Store assets that you do not own, also
+enable **"Allow Loading Third Party Assets"** on the same Security page.
+Roblox disables this setting by default.
+
 ### 2. Activate the Plugin
 **Plugins toolbar** > Click **"MCP Server"** button
 - **Green status** = Connected and ready
@@ -55,12 +59,12 @@ Choose your AI assistant:
 
 **For Claude Code:**
 ```bash
-claude mcp add robloxstudio -- npx -y github:Akramle/robloxstudio-mcp --auto-install-plugin
+claude mcp add robloxstudio -- npx -y @chrrxs/robloxstudio-mcp@latest --auto-install-plugin
 ```
 
 **For Codex CLI:**
 ```bash
-codex mcp add robloxstudio -- npx -y github:Akramle/robloxstudio-mcp --auto-install-plugin
+codex mcp add robloxstudio -- npx -y @chrrxs/robloxstudio-mcp@latest --auto-install-plugin
 ```
 
 **For Claude Desktop/Others:**
@@ -69,7 +73,7 @@ codex mcp add robloxstudio -- npx -y github:Akramle/robloxstudio-mcp --auto-inst
   "mcpServers": {
     "robloxstudio-mcp": {
       "command": "npx",
-      "args": ["-y", "github:Akramle/robloxstudio-mcp", "--auto-install-plugin"]
+      "args": ["-y", "@chrrxs/robloxstudio-mcp@latest", "--auto-install-plugin"]
     }
   }
 }
@@ -88,7 +92,7 @@ If you encounter issues, you may need to run it through `cmd`. Update your confi
   "mcpServers": {
     "robloxstudio-mcp": {
       "command": "cmd",
-      "args": ["/c", "npx", "-y", "github:Akramle/robloxstudio-mcp", "--auto-install-plugin"]
+      "args": ["/c", "npx", "-y", "@chrrxs/robloxstudio-mcp@latest", "--auto-install-plugin"]
     }
   }
 }

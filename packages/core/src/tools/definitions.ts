@@ -2108,7 +2108,7 @@ part(0,2,0,2,1,1,"b")`,
   {
     name: 'insert_asset',
     category: 'write',
-    description: 'Securely insert a Creator Store asset into Studio. The loaded asset is forced to remain unparented while every descendant at unlimited depth is scanned. Every LuaSourceContainer (including Script, LocalScript, ModuleScript, and future subclasses) and every PackageLink is destroyed without inspecting or exposing source. A second unlimited-depth scan must find zero forbidden instances before any content is parented; otherwise the entire loaded asset is destroyed and nothing is inserted. Names, Unicode, nesting depth, creator verification, contents, and reputation never affect this policy. Legitimate visual objects such as ParticleEmitter, Beam, Trail, Attachment, Decal, Texture, meshes, lights, sounds, Fire, Smoke, and Sparkles are preserved. Optionally set position.',
+    description: 'Securely insert a Creator Store asset into Studio. Public third-party assets require "Allow Loading Third Party Assets" in Studio under Game Settings > Security. The loaded asset is forced to remain unparented while every descendant at unlimited depth is scanned. Every LuaSourceContainer (including Script, LocalScript, ModuleScript, and future subclasses) and every PackageLink is destroyed without inspecting or exposing source. A second unlimited-depth scan must find zero forbidden instances before any content is parented; otherwise the entire loaded asset is destroyed and nothing is inserted. Names, Unicode, nesting depth, creator verification, contents, and reputation never affect this policy. Legitimate visual objects such as ParticleEmitter, Beam, Trail, Attachment, Decal, Texture, meshes, lights, sounds, Fire, Smoke, and Sparkles are preserved. Optionally set position.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -2215,7 +2215,7 @@ part(0,2,0,2,1,1,"b")`,
   {
     name: 'preview_asset',
     category: 'read',
-    description: 'Preview a Creator Store asset without inserting it. The asset remains unparented, receives an unlimited-depth security/capability scan, returns a depth-limited display hierarchy plus counts for scripts, PackageLinks, particles, VFX, decals/textures, meshes, lights, attachments, and sounds, then is destroyed. Imported script source is never read or returned. Use get_asset_thumbnail for an inline visual preview.',
+    description: 'Preview a Creator Store asset without inserting it. Public third-party assets require "Allow Loading Third Party Assets" in Studio under Game Settings > Security. The asset remains unparented, receives an unlimited-depth security/capability scan, returns a depth-limited display hierarchy plus counts for scripts, PackageLinks, particles, VFX, decals/textures, meshes, lights, attachments, and sounds, then is destroyed. Imported script source is never read or returned. Use get_asset_thumbnail for an inline visual preview.',
     inputSchema: {
       type: 'object',
       properties: {

@@ -305,4 +305,49 @@ describe('Creator Store insertion security contract', () => {
     expect(handlerSource).not.toMatch(/LuaSourceContainer[\s\S]{0,300}\.Source\b/);
     expect(handlerSource).toContain('scriptSourceExposed: false');
   });
+
+  test('load failures explain the disabled third-party asset setting', () => {
+    const readmeSource = readFileSync(join(repositoryRoot, 'README.md'), 'utf8');
+    const installationSource = readFileSync(
+      join(repositoryRoot, 'studio-plugin/INSTALLATION.md'),
+      'utf8',
+    );
+    const securitySource = readFileSync(join(repositoryRoot, 'docs/security.md'), 'utf8');
+
+    expect(handlerSource).toContain('AllowInsertFreeAssets');
+    expect(handlerSource).toContain('Allow Loading Third Party Assets');
+    expect(readmeSource).toContain('Allow Loading Third Party Assets');
+    expect(installationSource).toContain('Allow Loading Third Party Assets');
+    expect(securitySource).toContain('Allow Loading Third Party Assets');
+  });
+});
+
+describe('distribution metadata security contract', () => {
+  const cwd = process.cwd();
+  const repositoryRoot = existsSync(join(cwd, 'studio-plugin')) ? cwd : resolve(cwd, '../..');
+  const rootPackage = JSON.parse(
+    readFileSync(join(repositoryRoot, 'package.json'), 'utf8'),
+  ) as { scripts?: Record<string, string> };
+  const distributionSources = [
+    'README.md',
+    'studio-plugin/INSTALLATION.md',
+    'studio-plugin/src/modules/Communication.ts',
+    'packages/robloxstudio-mcp/package.json',
+    'packages/robloxstudio-mcp-inspector/package.json',
+  ].map((relativePath) => readFileSync(join(repositoryRoot, relativePath), 'utf8'));
+
+  test('installation instructions and package metadata point only to the upstream project', () => {
+    const combinedSources = distributionSources.join('\n');
+
+    expect(combinedSources).not.toContain('Akramle');
+    expect(combinedSources).not.toContain('github:Akramle');
+    expect(combinedSources).toContain('@chrrxs/robloxstudio-mcp@latest');
+    expect(combinedSources).toContain('github.com/chrrxs/robloxstudio-mcp');
+  });
+
+  test('ordinary package lifecycle hooks cannot install or remove Studio plugins', () => {
+    expect(rootPackage.scripts?.prepare).toBeUndefined();
+    expect(rootPackage.scripts?.prepack).toBeUndefined();
+    expect(rootPackage.scripts?.postinstall).toBeUndefined();
+  });
 });
