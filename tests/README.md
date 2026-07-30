@@ -43,6 +43,17 @@ npm run test:codex-wrapper
 Each test prints `✅ PASSED` or `❌ FAILED` plus the failing assertion. On
 failure the test's MCP subprocess stderr tail is dumped for context.
 
+## Creator Store sanitizer unit test
+
+The Creator Store import sanitizer has a separate Node-side behavioral suite
+that does not require Studio. It covers 2,048-level nesting, Unicode and
+zero-width names, `LuaSourceContainer`, `PackageLink`, preserved visual
+instances, and fail-closed second-scan behavior:
+
+```bash
+npm run test:asset-security
+```
+
 ## Release smoke: regular Studio tools
 
 `tests/studio-tooling-smoke.mjs` is a destructive release smoke test for the

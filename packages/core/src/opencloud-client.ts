@@ -4,8 +4,17 @@ export interface OpenCloudConfig {
   timeout?: number;
 }
 
+export type CreatorStoreSearchCategory =
+  | 'Audio'
+  | 'Model'
+  | 'Decal'
+  | 'Plugin'
+  | 'MeshPart'
+  | 'Video'
+  | 'FontFamily';
+
 export interface AssetSearchParams {
-  searchCategoryType: 'Audio' | 'Model' | 'Decal' | 'Plugin' | 'MeshPart' | 'Video' | 'FontFamily';
+  searchCategoryType: CreatorStoreSearchCategory;
   query?: string;
   pageToken?: string;
   pageNumber?: number;
@@ -145,15 +154,16 @@ export class OpenCloudClient {
       method?: string;
       params?: Record<string, string | number | boolean | undefined>;
       body?: unknown;
+      authRequired?: boolean;
     } = {}
   ): Promise<T> {
-    if (!this.apiKey) {
+    const { method = 'GET', params, body, authRequired = true } = options;
+
+    if (authRequired && !this.apiKey) {
       throw new Error(
         'Open Cloud API key not configured. Set ROBLOX_OPEN_CLOUD_API_KEY environment variable.'
       );
     }
-
-    const { method = 'GET', params, body } = options;
 
     const url = new URL(`${this.baseUrl}${endpoint}`);
     if (params) {
@@ -168,12 +178,16 @@ export class OpenCloudClient {
     const timeoutId = setTimeout(() => controller.abort(), this.timeout);
 
     try {
+      const headers: Record<string, string> = {
+        'Content-Type': 'application/json',
+      };
+      if (this.apiKey) {
+        headers['x-api-key'] = this.apiKey;
+      }
+
       const response = await fetch(url.toString(), {
         method,
-        headers: {
-          'x-api-key': this.apiKey,
-          'Content-Type': 'application/json',
-        },
+        headers,
         body: body ? JSON.stringify(body) : undefined,
         signal: controller.signal,
       });
@@ -216,6 +230,7 @@ export class OpenCloudClient {
 
   async searchAssets(params: AssetSearchParams): Promise<AssetSearchResponse> {
     return this.request<AssetSearchResponse>('/toolbox-service/v2/assets:search', {
+      authRequired: false,
       params: {
         searchCategoryType: params.searchCategoryType,
         query: params.query,
@@ -232,7 +247,9 @@ export class OpenCloudClient {
   }
 
   async getAssetDetails(assetId: number): Promise<CreatorStoreAsset> {
-    return this.request<CreatorStoreAsset>(`/toolbox-service/v2/assets/${assetId}`);
+    return this.request<CreatorStoreAsset>(`/toolbox-service/v2/assets/${assetId}`, {
+      authRequired: false,
+    });
   }
 
   async listAssetVersions(

@@ -2038,22 +2038,24 @@ part(0,2,0,2,1,1,"b")`,
   {
     name: 'search_assets',
     category: 'read',
-    description: 'Search the Creator Store (Roblox marketplace) for assets by type and keywords. Requires ROBLOX_OPEN_CLOUD_API_KEY env var (no cookie auth for this endpoint).',
+    description: 'Search the public Creator Store for decals, images, models, particles, VFX, and other supported asset types without requiring Roblox credentials. Image searches use the Decal category; Particle and VFX searches use Creator Store models and automatically make the query effect-specific. Results include thumbnail URLs when available; call get_asset_thumbnail for an inline visual preview and preview_asset for a full, unlimited-depth safety/capability summary before insert_asset. Creator verification is only a search filter and is never treated as a security boundary.',
     inputSchema: {
       type: 'object',
       properties: {
         assetType: {
           type: 'string',
-          enum: ['Audio', 'Model', 'Decal', 'Plugin', 'MeshPart', 'Video', 'FontFamily'],
-          description: 'Type of asset to search for'
+          enum: ['Audio', 'Model', 'Decal', 'Image', 'Particle', 'VFX', 'Plugin', 'MeshPart', 'Video', 'FontFamily'],
+          description: 'Type of asset to search for. Image maps to Decal. Particle and VFX map to Creator Store Model searches.'
         },
         query: {
           type: 'string',
-          description: 'Search keywords'
+          description: 'Search keywords. For particles/VFX, useful terms include particle effect, VFX, explosion, smoke, aura, beam, trail, and impact effect. Particle/VFX searches append an effect-specific suffix when needed.'
         },
         maxResults: {
           type: 'number',
-          description: 'Max results to return (default: 25)'
+          minimum: 1,
+          maximum: 100,
+          description: 'Max results to return (default: 25, maximum: 100)'
         },
         sortBy: {
           type: 'string',
@@ -2062,7 +2064,7 @@ part(0,2,0,2,1,1,"b")`,
         },
         verifiedCreatorsOnly: {
           type: 'boolean',
-          description: 'Only show assets from verified creators (default: false)'
+          description: 'Only show assets from verified creators (default: false). This is a relevance filter, not a safety control; insertion always sanitizes every asset.'
         }
       },
       required: ['assetType']
@@ -2071,7 +2073,7 @@ part(0,2,0,2,1,1,"b")`,
   {
     name: 'get_asset_details',
     category: 'read',
-    description: 'Get detailed marketplace metadata for a specific asset. Uses ROBLOX_OPEN_CLOUD_API_KEY or falls back to ROBLOSECURITY cookie (own assets only).',
+    description: 'Get public Creator Store metadata for a specific asset without requiring Roblox credentials.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -2086,7 +2088,7 @@ part(0,2,0,2,1,1,"b")`,
   {
     name: 'get_asset_thumbnail',
     category: 'read',
-    description: 'Get the thumbnail image for an asset as base64 PNG, suitable for vision LLMs. Thumbnails API is public but asset validation uses ROBLOX_OPEN_CLOUD_API_KEY.',
+    description: 'Get the public thumbnail image for an asset as base64 PNG, suitable for vision LLMs. No Roblox credentials are required.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -2106,7 +2108,7 @@ part(0,2,0,2,1,1,"b")`,
   {
     name: 'insert_asset',
     category: 'write',
-    description: 'Insert a Roblox asset into Studio by loading it via AssetService and parenting it to a target location. Optionally set position.',
+    description: 'Securely insert a Creator Store asset into Studio. The loaded asset is forced to remain unparented while every descendant at unlimited depth is scanned. Every LuaSourceContainer (including Script, LocalScript, ModuleScript, and future subclasses) and every PackageLink is destroyed without inspecting or exposing source. A second unlimited-depth scan must find zero forbidden instances before any content is parented; otherwise the entire loaded asset is destroyed and nothing is inserted. Names, Unicode, nesting depth, creator verification, contents, and reputation never affect this policy. Legitimate visual objects such as ParticleEmitter, Beam, Trail, Attachment, Decal, Texture, meshes, lights, sounds, Fire, Smoke, and Sparkles are preserved. Optionally set position.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -2213,7 +2215,7 @@ part(0,2,0,2,1,1,"b")`,
   {
     name: 'preview_asset',
     category: 'read',
-    description: 'Preview a Roblox asset without permanently inserting it. Loads the asset, builds a hierarchy tree with properties and summary stats, then destroys it. Useful for inspecting asset contents before insertion.',
+    description: 'Preview a Creator Store asset without inserting it. The asset remains unparented, receives an unlimited-depth security/capability scan, returns a depth-limited display hierarchy plus counts for scripts, PackageLinks, particles, VFX, decals/textures, meshes, lights, attachments, and sounds, then is destroyed. Imported script source is never read or returned. Use get_asset_thumbnail for an inline visual preview.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -2227,7 +2229,7 @@ part(0,2,0,2,1,1,"b")`,
         },
         maxDepth: {
           type: 'number',
-          description: 'Max hierarchy traversal depth (default: 10)'
+          description: 'Maximum depth of the returned display tree (default: 10). The script/PackageLink security scan always traverses every descendant with no depth limit.'
         },
         instance_id: {
           type: 'string',

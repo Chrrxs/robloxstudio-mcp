@@ -2,6 +2,23 @@
 
 The bridge binds to `127.0.0.1` and refuses cross-origin browser requests by default. Tool-invoking HTTP endpoints (`/mcp`, `/mcp/<tool>`, `/proxy`, `/instances`) require a shared-secret token, auto-generated on first run at `~/.robloxstudio-mcp/auth-token` (mode 0600). The stdio MCP transport (the normal `claude mcp add` path) is unaffected; HTTP MCP clients must send the token as `X-MCP-Auth: <token>` or `Authorization: Bearer <token>`. Plugin-facing endpoints (`/ready`, `/poll`, `/response`, `/disconnect`) stay tokenless — Studio plugins can't read local files, and those routes only register/poll and cannot invoke tools. `generate_build` code runs in a restricted AST interpreter with no access to Node globals, `Function`, or prototype chains.
 
+## Creator Store imports
+
+`insert_asset` treats every Creator Store asset as untrusted. `AssetService`
+loads the asset into an unparented wrapper, and the plugin uses an
+unlimited-depth `GetDescendants()` scan to destroy every
+`LuaSourceContainer`—including `Script`, `LocalScript`, `ModuleScript`, and any
+future subclass—and every `PackageLink`. It does not inspect or return script
+source.
+
+The plugin performs a second unlimited-depth scan before parenting any
+remaining content. If a script or `PackageLink` survives, the complete loaded
+asset is destroyed and nothing is inserted. This policy never depends on
+instance names, Unicode, hierarchy depth, creator verification, source
+contents, or asset reputation. Visual instances such as particles, beams,
+trails, attachments, decals, textures, meshes, lights, sounds, fire, smoke,
+and sparkles are preserved.
+
 ## Version mismatch behavior
 
 If the Studio plugin and MCP server versions differ, the plugin stays connected but shows a yellow warning banner. `get_connected_instances`, `/health`, and `/status` also report `pluginVersion`, `serverVersion`, and `versionMismatch`.
