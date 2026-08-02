@@ -111,6 +111,6 @@ claude mcp add robloxstudio-inspector -- npx -y @chrrxs/robloxstudio-mcp-inspect
 ---
 
 <!-- VERSION_LINE -->
-**v2.23.0**
+**v2.23.1**
 
 [Report Issues](https://github.com/chrrxs/robloxstudio-mcp/issues) · MIT Licensed · Based on [boshyxd/robloxstudio-mcp](https://github.com/boshyxd/robloxstudio-mcp) v2.7.0

@@ -20,13 +20,8 @@ const TESTS = [
   'proxy-mode-peer-fanout.mjs',
   'execute-luau-output-capture.mjs',
   'simulation-state-lifecycle.mjs',
-];
-
-const SKIPPED_TESTS = [
-  {
-    file: 'multiplayer-test-lifecycle.mjs',
-    reason: 'temporarily skipped: known Roblox StudioTestService multiplayer regression',
-  },
+  'multiplayer-add-player-end-regression.mjs',
+  'multiplayer-test-lifecycle.mjs',
 ];
 
 // Studio takes a few seconds to fully tear down a play DM after StudioTestService:EndTest.
@@ -52,9 +47,6 @@ console.log('\n========== SUMMARY ==========');
 for (const r of results) {
   console.log(`  ${r.code === 0 ? '✅ PASS' : '❌ FAIL'}  ${r.file}`);
 }
-for (const skipped of SKIPPED_TESTS) {
-  console.log(`  SKIP     ${skipped.file} (${skipped.reason})`);
-}
 const failed = results.filter((r) => r.code !== 0).length;
-console.log(`\n${results.length - failed}/${results.length} passed, ${SKIPPED_TESTS.length} skipped.`);
+console.log(`\n${results.length - failed}/${results.length} passed.`);
 process.exit(failed === 0 ? 0 : 1);

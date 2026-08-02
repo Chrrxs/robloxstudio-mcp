@@ -4,8 +4,6 @@
 import { McpClient, runTest, assert, assertContains, waitForEditPeer } from './lib/mcp-client.mjs';
 
 console.log('\n=== multiplayer_test lifecycle controls clients explicitly ===');
-console.log('SKIPPED: known Roblox StudioTestService multiplayer regression');
-process.exit(0);
 
 const MARKER = `MULTI_TEST_${Date.now()}`;
 

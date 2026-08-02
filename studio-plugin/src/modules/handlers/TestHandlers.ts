@@ -322,13 +322,20 @@ function multiplayerTestLeaveClient(_requestData: Record<string, unknown>) {
 	};
 }
 
-function multiplayerTestEnd(_requestData: Record<string, unknown>) {
+function multiplayerTestEnd(requestData: Record<string, unknown>) {
+	if (!RunService.IsRunning() || !RunService.IsServer()) {
+		return { error: "multiplayer_test_end must be called on the running server peer. Route with target=server." };
+	}
+
+	const value = requestData.value !== undefined ? requestData.value : "ended_by_mcp";
+	const [ok, result] = pcall(() => StudioTestService.EndTest(value));
+	if (!ok) {
+		return { error: tostring(result) };
+	}
 	return {
-		success: false,
-		error: "multiplayer_stop_disabled",
-		message: "Multiplayer playtest stop/end is disabled because StudioTestService:EndTest is currently broken for this flow. Manually close the Studio multiplayer test windows instead.",
-		reason: "StudioTestService:EndTest does not reliably end StudioTestService multiplayer sessions from MCP right now.",
-		manualCleanupRequired: true,
+		success: true,
+		message: "Multiplayer Studio test end requested.",
+		value,
 	};
 }
 

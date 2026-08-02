@@ -1373,7 +1373,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
   {
     name: 'multiplayer_playtest',
     category: 'write',
-    description: 'Start or inspect a StudioTestService multiplayer playtest. Use action="start" with numPlayers and force=true only when you accept that MCP cannot stop it and you must manually close the multiplayer test windows afterward. action="status" inspects state, action="add_players" adds players, and action="leave_client" removes one client. action="end" is disabled for now and returns the StudioTestService:EndTest broken-API reason. Returns brief lifecycle status only; read script output with get_runtime_logs.',
+    description: 'Start, inspect, add players to, remove a client from, or end a StudioTestService multiplayer playtest. Use action="start" with numPlayers, action="status", action="add_players" with numPlayers, action="leave_client" with target="client-N", or action="end". Returns brief lifecycle status only; read script output with get_runtime_logs.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -1394,15 +1394,11 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
           description: 'For action="start": JSON-compatible table passed to StudioTestService:GetTestArgs() on server and clients.'
         },
         value: {
-          description: 'Ignored while action="end" is disabled.'
-        },
-        force: {
-          type: 'boolean',
-          description: 'Required for action="start". Pass true only if you understand StudioTestService:EndTest is broken in this flow and you will manually close the multiplayer test windows.'
+          description: 'For action="end": JSON-compatible value returned to the edit-side ExecuteMultiplayerTestAsync call.'
         },
         timeout: {
           type: 'number',
-          description: 'Max seconds to wait for start peer detection or action completion. Defaults to 30.'
+          description: 'Max seconds to wait for action completion. Defaults to 30.'
         },
         instance_id: {
           type: 'string',
@@ -2757,7 +2753,7 @@ export const DEPRECATED_TOOL_DEFINITIONS: ToolDefinition[] = [
   {
     name: 'multiplayer_test_start',
     category: 'write',
-    description: 'Deprecated. Use multiplayer_playtest with action="start" instead. Starts a StudioTestService multiplayer test only when force=true acknowledges that MCP cannot stop it and the test windows must be closed manually.',
+    description: 'Deprecated. Use multiplayer_playtest with action="start" instead. Starts a StudioTestService multiplayer test.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -2768,10 +2764,6 @@ export const DEPRECATED_TOOL_DEFINITIONS: ToolDefinition[] = [
         testArgs: {
           description: 'JSON-compatible table passed to StudioTestService:GetTestArgs() on server and clients.'
         },
-        force: {
-          type: 'boolean',
-          description: 'Required. Pass true only if you understand StudioTestService:EndTest is broken in this flow and you will manually close the multiplayer test windows.'
-        },
         timeout: {
           type: 'number',
           description: 'Max seconds to wait for server + clients to register (default 30).'
@@ -2781,7 +2773,7 @@ export const DEPRECATED_TOOL_DEFINITIONS: ToolDefinition[] = [
           description: 'Which connected Studio place to target. Required when multiple places are connected; omit when one. Use get_connected_instances to list available IDs.'
         }
       },
-      required: ['numPlayers', 'force']
+      required: ['numPlayers']
     }
   },
   {
@@ -2846,16 +2838,16 @@ export const DEPRECATED_TOOL_DEFINITIONS: ToolDefinition[] = [
   {
     name: 'multiplayer_test_end',
     category: 'write',
-    description: 'Deprecated. Multiplayer StudioTestService stop/end is disabled for now because StudioTestService:EndTest is broken in this flow. This tool returns a disabled error and does not call EndTest.',
+    description: 'Deprecated. Use multiplayer_playtest with action="end" instead. Ends a running StudioTestService multiplayer test.',
     inputSchema: {
       type: 'object',
       properties: {
         value: {
-          description: 'Ignored while multiplayer stop/end is disabled.'
+          description: 'JSON-compatible value returned to the edit-side ExecuteMultiplayerTestAsync call.'
         },
         timeout: {
           type: 'number',
-          description: 'Ignored while multiplayer stop/end is disabled.'
+          description: 'Max seconds to wait for runtime peers to disconnect (default 30).'
         },
         instance_id: {
           type: 'string',

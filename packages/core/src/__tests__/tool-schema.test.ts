@@ -54,7 +54,7 @@ describe('Tool schema compatibility', () => {
 
     const multiplayerProps = (TOOL_DEFINITIONS.find(tool => tool.name === 'multiplayer_playtest')!.inputSchema as { properties?: Record<string, any>; required?: string[] }).properties ?? {};
     expect((multiplayerProps.action as { enum?: string[] }).enum).toEqual(['start', 'status', 'add_players', 'leave_client', 'end']);
-    expect(multiplayerProps.force).toMatchObject({ type: 'boolean' });
+    expect(Object.keys(multiplayerProps).sort()).toEqual(['action', 'instance_id', 'numPlayers', 'target', 'testArgs', 'timeout', 'value']);
     expect((TOOL_DEFINITIONS.find(tool => tool.name === 'multiplayer_playtest')!.inputSchema as { required?: string[] }).required).toEqual(['action']);
 
     for (const name of [
@@ -72,7 +72,7 @@ describe('Tool schema compatibility', () => {
     }
 
     const deprecatedStartProps = (DEPRECATED_TOOL_DEFINITIONS.find(tool => tool.name === 'multiplayer_test_start')!.inputSchema as { properties?: Record<string, any> }).properties ?? {};
-    expect(deprecatedStartProps.force).toMatchObject({ type: 'boolean' });
+    expect(Object.keys(deprecatedStartProps).sort()).toEqual(['instance_id', 'numPlayers', 'testArgs', 'timeout']);
   });
 
   test('grep_scripts exposes one explicit pattern-mode switch', () => {
