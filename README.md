@@ -1,5 +1,7 @@
 # Roblox Studio MCP
 
+[![MCP Toplist](https://mcptoplist.com/badge/pulsemcp%2Fchrrxs-roblox-studio.svg)](https://mcptoplist.com/server/pulsemcp%2Fchrrxs-roblox-studio)
+
 Connects MCP clients to Roblox Studio's edit context and live server/client
 VMs. Agents can modify places, run Luau inside active playtests with the same
 module state as game scripts, automate solo and multiplayer sessions, and
