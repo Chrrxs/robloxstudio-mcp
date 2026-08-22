@@ -82,10 +82,14 @@ const IDEMPOTENT_WRITE_TOOLS = new Set([
   'set_script_source',
 ]);
 const OPEN_WORLD_TOOLS = new Set([
+  'eval_client_runtime',
+  'eval_server_runtime',
+  'execute_luau',
   'generate_model',
   'get_asset_details',
   'get_asset_thumbnail',
   'get_roblox_docs',
+  'insert_asset',
   'preview_asset',
   'search_assets',
   'upload_asset',
