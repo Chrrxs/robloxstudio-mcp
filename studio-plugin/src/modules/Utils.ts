@@ -224,10 +224,67 @@ function readScriptSource(instance: LuaSourceContainer): string {
 		}
 		return undefined;
 	});
-	if (ok && result) {
+	if (ok && result !== undefined) {
 		return result;
 	}
-	return (instance as unknown as { Source: string }).Source;
+	// @rbxts/types does not expose PluginSecurity Source reads.
+	const readableScript = instance as unknown as { Source: string };
+	return readableScript.Source;
+}
+
+interface ApplyScriptSourceResult {
+	success: boolean;
+	method: "UpdateSourceAsync" | "direct";
+	error?: string;
+}
+
+/**
+ * Writes newSource to instance and verifies the live editor text before
+ * reporting success. expectedSource turns line-based edits into a
+ * compare-and-set operation: if the document changes while
+ * UpdateSourceAsync yields or before the direct fallback runs, the write is
+ * rejected instead of overwriting the newer draft.
+ */
+function applyScriptSource(
+	instance: LuaSourceContainer,
+	newSource: string,
+	expectedSource?: string,
+): ApplyScriptSourceResult {
+	const [updateSuccess, updateResult] = pcall(() => {
+		ScriptEditorService.UpdateSourceAsync(instance, (currentSource: string) => {
+			if (expectedSource !== undefined && currentSource !== expectedSource) {
+				error("Script source changed while the edit was being applied; read the script again and retry");
+			}
+			return newSource;
+		});
+		if (readScriptSource(instance) !== newSource) {
+			error("UpdateSourceAsync completed without updating the live script source");
+		}
+	});
+	if (updateSuccess) {
+		return { success: true, method: "UpdateSourceAsync" };
+	}
+
+	const [directSuccess, directResult] = pcall(() => {
+		if (expectedSource !== undefined && readScriptSource(instance) !== expectedSource) {
+			error("Script source changed before direct assignment; read the script again and retry");
+		}
+		// @rbxts/types does not expose PluginSecurity Source writes.
+		const writableScript = instance as unknown as { Source: string };
+		writableScript.Source = newSource;
+		if (readScriptSource(instance) !== newSource) {
+			error("Direct assignment completed without updating the live script source");
+		}
+	});
+	if (directSuccess) {
+		return { success: true, method: "direct" };
+	}
+
+	return {
+		success: false,
+		method: "direct",
+		error: `UpdateSourceAsync failed: ${updateResult}. Direct assignment failed: ${directResult}`,
+	};
 }
 
 function convertPropertyValue(instance: Instance, propertyName: string, propertyValue: unknown): unknown {
@@ -463,6 +520,7 @@ export = {
 	splitLines,
 	joinLines,
 	readScriptSource,
+	applyScriptSource,
 	convertPropertyValue,
 	evaluateFormula,
 	compareVersions,
