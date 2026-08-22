@@ -167,6 +167,14 @@ describe('MCP v2 tool runtime', () => {
       idempotentHint: false,
       openWorldHint: false,
     });
+    for (const openWorldTool of [
+      'execute_luau',
+      'eval_server_runtime',
+      'eval_client_runtime',
+      'insert_asset',
+    ]) {
+      expect(byName.get(openWorldTool)?.annotations.openWorldHint).toBe(true);
+    }
     expect(byName.get('edit_script_lines')?.annotations.idempotentHint).toBe(false);
     expect(byName.get('find_and_replace_in_scripts')?.annotations.idempotentHint).toBe(false);
   });

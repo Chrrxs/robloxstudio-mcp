@@ -134,6 +134,10 @@ async function runEditModeToolSmoke(client, instanceId) {
     'get_instance_properties',
     'set_script_source',
     'get_script_source',
+    'edit_script_lines',
+    'insert_script_lines',
+    'delete_script_lines',
+    'find_and_replace_in_scripts',
     'get_attributes',
     'get_selection',
     'execute_luau',
@@ -154,6 +158,7 @@ async function runEditModeToolSmoke(client, instanceId) {
   const folderPath = 'game.Workspace.__RSMCP_ToolingSmoke';
   const partPath = `${folderPath}.SmokePart`;
   const scriptPath = `${folderPath}.SmokeScript`;
+  const nestedScriptPath = `${scriptPath}.NestedModule`;
   const setup = await client.callTool('execute_luau', {
     target: 'edit',
     instance_id: instanceId,
@@ -175,6 +180,10 @@ local script = Instance.new("Script")
 script.Name = "SmokeScript"
 script.Enabled = false
 script.Parent = folder
+local nested = Instance.new("ModuleScript")
+nested.Name = "NestedModule"
+nested.Source = 'return "NESTED_OLD"'
+nested.Parent = script
 return true
 `,
   });
@@ -222,6 +231,106 @@ return true
     });
     assertContains(source.source, 'return value + 1', 'get_script_source returns edited source');
 
+    const openedDraft = await client.callTool('execute_luau', {
+      target: 'edit',
+      instance_id: instanceId,
+      code: `
+local script = workspace.__RSMCP_ToolingSmoke.SmokeScript
+local editor = game:GetService("ScriptEditorService")
+local opened, openError = editor:OpenScriptDocumentAsync(script)
+if not opened then error(openError) end
+local document = editor:FindScriptDocument(script)
+if not document then error("ScriptDocument did not open") end
+local lineCount = document:GetLineCount()
+local lastLine = document:GetLine(lineCount)
+local edited, editError = document:EditTextAsync("", 1, 1, lineCount, #lastLine + 1)
+if not edited then error(editError) end
+return document:GetText()
+`,
+    });
+    assert(openedDraft.success === true, 'execute_luau opens and empties a live ScriptDocument');
+    assert(String(openedDraft.returnValue) === '', 'open ScriptDocument exposes its empty live draft');
+
+    const draftSource = await client.callTool('get_script_source', {
+      instancePath: scriptPath,
+      line_range: '1',
+      instance_id: instanceId,
+    });
+    assert(draftSource.source === '1: ',
+      `get_script_source preserves an empty live editor draft (${JSON.stringify(draftSource)})`);
+
+    const restoredDraft = await client.callTool('set_script_source', {
+      instancePath: scriptPath,
+      source: 'local value = 40\nreturn value + 1\n',
+      instance_id: instanceId,
+    });
+    assert(restoredDraft.success === true, 'set_script_source restores an empty live editor draft');
+
+    const editedLines = await client.callTool('edit_script_lines', {
+      instancePath: scriptPath,
+      old_string: 'local value = 40',
+      new_string: 'local value = 41',
+      line_range: '1',
+      instance_id: instanceId,
+    });
+    assert(editedLines.success === true, 'edit_script_lines verifies its open-document write');
+
+    const insertedLines = await client.callTool('insert_script_lines', {
+      instancePath: scriptPath,
+      afterLine: 1,
+      newContent: 'local bonus = 1',
+      instance_id: instanceId,
+    });
+    assert(insertedLines.success === true, 'insert_script_lines verifies its open-document write');
+
+    const editedReturn = await client.callTool('edit_script_lines', {
+      instancePath: scriptPath,
+      old_string: 'return value + 1',
+      new_string: 'return value + bonus',
+      line_range: '3',
+      instance_id: instanceId,
+    });
+    assert(editedReturn.success === true, 'edit_script_lines updates inserted line positions');
+
+    const deletedLines = await client.callTool('delete_script_lines', {
+      instancePath: scriptPath,
+      line_range: '2',
+      instance_id: instanceId,
+    });
+    assert(deletedLines.success === true, 'delete_script_lines verifies its open-document write');
+
+    const replacedDraft = await client.callTool('find_and_replace_in_scripts', {
+      pattern: 'bonus',
+      replacement: '1',
+      path: scriptPath,
+      classFilter: 'Script',
+      instance_id: instanceId,
+    });
+    assert(replacedDraft.success === true && replacedDraft.scriptsModified === 1 && replacedDraft.scriptsFailed === 0,
+      `find_and_replace_in_scripts verifies its open-document write (${JSON.stringify(replacedDraft)})`);
+
+    const replacedNested = await client.callTool('find_and_replace_in_scripts', {
+      pattern: 'NESTED_OLD',
+      replacement: 'NESTED_NEW',
+      path: scriptPath,
+      classFilter: 'ModuleScript',
+      instance_id: instanceId,
+    });
+    assert(replacedNested.success === true && replacedNested.scriptsModified === 1,
+      `find_and_replace_in_scripts traverses children of a filtered parent script (${JSON.stringify(replacedNested)})`);
+
+    const finalSource = await client.callTool('get_script_source', {
+      instancePath: scriptPath,
+      instance_id: instanceId,
+    });
+    assertContains(finalSource.source, 'return value + 1', 'line mutation sequence lands in the live draft');
+
+    const nestedSource = await client.callTool('get_script_source', {
+      instancePath: nestedScriptPath,
+      instance_id: instanceId,
+    });
+    assertContains(nestedSource.source, 'NESTED_NEW', 'nested script replacement lands');
+
     const exec = await client.callTool('execute_luau', {
       target: 'edit',
       instance_id: instanceId,
@@ -237,7 +346,14 @@ return true
       target: 'edit',
       instance_id: instanceId,
       code: `local folder = workspace:FindFirstChild("__RSMCP_ToolingSmoke")
-if folder then folder:Destroy() end
+if folder then
+  local script = folder:FindFirstChild("SmokeScript")
+  if script then
+    local document = game:GetService("ScriptEditorService"):FindScriptDocument(script)
+    if document then document:CloseAsync() end
+  end
+  folder:Destroy()
+end
 return true`,
     });
     assert(deleted.success === true, 'execute_luau cleans up smoke folder');
