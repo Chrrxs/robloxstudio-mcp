@@ -1,18 +1,11 @@
 import express from 'express';
 import http from 'http';
-import { Server } from '@modelcontextprotocol/sdk/server/index.js';
-import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
-import {
-  CallToolRequestSchema,
-  ErrorCode,
-  ListToolsRequestSchema,
-  McpError,
-} from '@modelcontextprotocol/sdk/types.js';
+import { toNodeHandler } from '@modelcontextprotocol/node';
 import { RobloxStudioTools } from './tools/index.js';
 import { BridgeService, RoutingFailure, toPublic } from './bridge-service.js';
 import type { RegisterInstanceResult } from './bridge-service.js';
 import type { ToolDefinition } from './tools/definitions.js';
-import { registerResourceHandlers } from './mcp-compat.js';
+import { createToolHttpHandler, normalizeToolResult, publicToolErrorBody } from './mcp-runtime.js';
 import { tokensMatch } from './auth.js';
 import { StudioLaunchPreDispatchError } from './studio-instance-manager.js';
 
@@ -91,25 +84,11 @@ function requiredClosedLineRange(body: any, toolName: string): { startLine: numb
 export const TOOL_HANDLERS: Record<string, ToolHandler> = {
   get_roblox_skills: (tools, body) => tools.getRobloxSkills(body.action, body.name),
   get_roblox_docs: (tools, body) => tools.getRobloxDocs(body.name, body.doc_type, body.section),
-  get_file_tree: (tools, body) => tools.getFileTree(body.path, body.instance_id),
-  search_files: (tools, body) => tools.searchFiles(body.query, body.searchType, body.instance_id),
   get_place_info: (tools, body) => tools.getPlaceInfo(body.instance_id),
-  get_services: (tools, body) => tools.getServices(body.serviceName, body.instance_id),
   search_objects: (tools, body) => tools.searchObjects(body.query, body.searchType, body.propertyName, body.instance_id),
   get_instance_properties: (tools, body) => tools.getInstanceProperties(body.instancePath, body.excludeSource, body.instance_id),
-  get_instance_children: (tools, body) => tools.getInstanceChildren(body.instancePath, body.instance_id),
-  search_by_property: (tools, body) => tools.searchByProperty(body.propertyName, body.propertyValue, body.instance_id),
-  get_class_info: (tools, body) => tools.getClassInfo(body.className, body.instance_id),
   get_project_structure: (tools, body) => tools.getProjectStructure(body.path, body.maxDepth, body.scriptsOnly, body.instance_id),
-  set_property: (tools, body) => tools.setProperty(body.instancePath, body.propertyName, body.propertyValue, body.instance_id),
   set_properties: (tools, body) => tools.setProperties(body.instancePath, body.properties, body.instance_id),
-  mass_set_property: (tools, body) => tools.massSetProperty(body.paths, body.propertyName, body.propertyValue, body.instance_id),
-  mass_get_property: (tools, body) => tools.massGetProperty(body.paths, body.propertyName, body.instance_id),
-  create_object: (tools, body) => tools.createObject(body.className, body.parent, body.name, body.properties, body.instance_id),
-  mass_create_objects: (tools, body) => tools.massCreateObjects(body.objects, body.instance_id),
-  delete_object: (tools, body) => tools.deleteObject(body.instancePath, body.instance_id),
-  smart_duplicate: (tools, body) => tools.smartDuplicate(body.instancePath, body.count, body.options, body.instance_id),
-  mass_duplicate: (tools, body) => tools.massDuplicate(body.duplications, body.instance_id),
   grep_scripts: (tools, body) => tools.grepScripts(body.pattern, {
     caseSensitive: body.caseSensitive,
     usePattern: body.usePattern,
@@ -131,13 +110,7 @@ export const TOOL_HANDLERS: Record<string, ToolHandler> = {
     const { startLine, endLine } = requiredClosedLineRange(body, 'delete_script_lines');
     return tools.deleteScriptLines(body.instancePath, startLine, endLine, body.instance_id);
   },
-  set_attribute: (tools, body) => tools.setAttribute(body.instancePath, body.attributeName, body.attributeValue, body.valueType, body.instance_id),
   get_attributes: (tools, body) => tools.getAttributes(body.instancePath, body.instance_id),
-  delete_attribute: (tools, body) => tools.deleteAttribute(body.instancePath, body.attributeName, body.instance_id),
-  get_tags: (tools, body) => tools.getTags(body.instancePath, body.instance_id),
-  add_tag: (tools, body) => tools.addTag(body.instancePath, body.tagName, body.instance_id),
-  remove_tag: (tools, body) => tools.removeTag(body.instancePath, body.tagName, body.instance_id),
-  get_tagged: (tools, body) => tools.getTagged(body.tagName, body.instance_id),
   get_selection: (tools, body) => tools.getSelection(body.instance_id),
   execute_luau: (tools, body) => tools.executeLuau(body.code, body.target, body.instance_id),
   eval_server_runtime: (tools, body) => tools.evalServerRuntime(body.code, body.instance_id),
@@ -150,14 +123,7 @@ export const TOOL_HANDLERS: Record<string, ToolHandler> = {
   capture_device_matrix: (tools, body) => tools.captureDeviceMatrix(body.entries, body.target, body.format, body.quality, body.settleSeconds, body.restoreAfter, body.instance_id),
   manage_instance: (tools, body) => tools.manageInstance(body),
   solo_playtest: (tools, body) => tools.soloPlaytest(body.action, body.mode, body.timeout, body.instance_id),
-  start_playtest: (tools, body) => tools.startPlaytest(body.mode, body.numPlayers, body.instance_id),
-  stop_playtest: (tools, body) => tools.stopPlaytest(body.instance_id),
   multiplayer_playtest: (tools, body) => tools.multiplayerPlaytest(body.action, body.numPlayers, body.target, body.testArgs, body.value, body.timeout, body.instance_id),
-  multiplayer_test_start: (tools, body) => tools.multiplayerTestStart(body.numPlayers, body.testArgs, body.timeout, body.instance_id),
-  multiplayer_test_state: (tools, body) => tools.multiplayerTestState(body.instance_id),
-  multiplayer_test_add_players: (tools, body) => tools.multiplayerTestAddPlayers(body.numPlayers, body.timeout, body.instance_id),
-  multiplayer_test_leave_client: (tools, body) => tools.multiplayerTestLeaveClient(body.target, body.timeout, body.instance_id),
-  multiplayer_test_end: (tools, body) => tools.multiplayerTestEnd(body.value, body.timeout, body.instance_id),
   get_runtime_logs: (tools, body) => tools.getRuntimeLogs(body.target, body.since, body.tail, body.filter, body.instance_id),
   capture_script_profiler: (tools, body) => tools.captureScriptProfiler(body.target, {
     duration_ms: body.duration_ms,
@@ -191,16 +157,6 @@ export const TOOL_HANDLERS: Record<string, ToolHandler> = {
   }, body.instance_id),
   breakpoints: (tools, body) => tools.breakpoints(body.action, body, body.target, body.instance_id),
   get_connected_instances: (tools) => tools.getConnectedInstances(),
-  export_build: (tools, body) => tools.exportBuild(body.instancePath, body.outputId, body.style, body.instance_id),
-  create_build: (tools, body) => tools.createBuild(body.id, body.style, body.palette, body.parts, body.bounds),
-  generate_build: (tools, body) => tools.generateBuild(body.id, body.style, body.palette, body.code, body.seed),
-  import_build: (tools, body) => tools.importBuild(body.buildData, body.targetPath, body.position, body.instance_id),
-  list_library: (tools, body) => tools.listLibrary(body.style),
-  search_materials: (tools, body) => tools.searchMaterials(body.query, body.maxResults, body.instance_id),
-  get_build: (tools, body) => tools.getBuild(body.id),
-  import_scene: (tools, body) => tools.importScene(body.sceneData, body.targetPath, body.instance_id),
-  undo: (tools, body) => tools.undo(body.instance_id),
-  redo: (tools, body) => tools.redo(body.instance_id),
   search_assets: (tools, body) => tools.searchAssets(body.assetType, body.query, body.maxResults, body.sortBy, body.robloxCreatedOnly),
   get_asset_details: (tools, body) => tools.getAssetDetails(body.assetId),
   get_asset_thumbnail: (tools, body) => tools.getAssetThumbnail(body.assetId, body.size),
@@ -215,10 +171,6 @@ export const TOOL_HANDLERS: Record<string, ToolHandler> = {
     body.maxAudioPreviews,
   ),
   upload_asset: (tools, body) => tools.uploadAsset(body.filePath, body.assetType, body.displayName, body.description, body.userId, body.groupId),
-  clone_object: (tools, body) => tools.cloneObject(body.instancePath, body.targetParentPath, body.instance_id),
-  get_descendants: (tools, body) => tools.getDescendants(body.instancePath, body.maxDepth, body.classFilter, body.instance_id),
-  compare_instances: (tools, body) => tools.compareInstances(body.instancePathA, body.instancePathB, body.instance_id),
-  bulk_set_attributes: (tools, body) => tools.bulkSetAttributes(body.instancePath, body.attributes, body.instance_id),
   capture_screenshot: (tools, body) => tools.captureScreenshot(body.instance_id, body.format, body.quality),
   simulate_mouse_input: (tools, body) => tools.simulateMouseInput(body.action, body.x, body.y, body.button, body.scrollDirection, body.target, body.instance_id),
   simulate_keyboard_input: (tools, body) => tools.simulateKeyboardInput(body.keyCode, body.action, body.duration, body.text, body.target, body.instance_id),
@@ -298,7 +250,7 @@ export function createHttpServer(tools: RobloxStudioTools, bridge: BridgeService
     res.setHeader('Access-Control-Allow-Origin', origin);
     res.setHeader('Vary', 'Origin');
     res.setHeader('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-MCP-Auth, Mcp-Protocol-Version');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-MCP-Auth, Mcp-Protocol-Version, Mcp-Method, Mcp-Name');
     if (req.method === 'OPTIONS') {
       res.status(204).end();
       return;
@@ -624,111 +576,26 @@ export function createHttpServer(tools: RobloxStudioTools, bridge: BridgeService
   });
 
 
-  // Streamable HTTP MCP transport
-  if (serverConfig) {
-    const filteredTools = serverConfig.tools.filter(t => !allowedTools || allowedTools.has(t.name));
-
-    app.post('/mcp', async (req, res) => {
-      try {
-        trackMCPActivity();
-
-        const server = new Server(
-          { name: serverConfig.name, version: serverConfig.version },
-          { capabilities: { tools: {} } }
-        );
-
-        registerResourceHandlers(server);
-
-        server.setRequestHandler(ListToolsRequestSchema, async () => ({
-          tools: filteredTools.map(t => ({
-            name: t.name,
-            description: t.description,
-            inputSchema: t.inputSchema,
-          })),
-        }));
-
-        server.setRequestHandler(CallToolRequestSchema, async (request) => {
-          const { name, arguments: args } = request.params;
-
-          if (allowedTools && !allowedTools.has(name)) {
-            throw new McpError(ErrorCode.MethodNotFound, `Unknown tool: ${name}`);
-          }
+  // One v2 protocol boundary serves modern 2026-07-28 requests and the
+  // stateless 2025 compatibility path from the same tool factory.
+  const mcpHandler = serverConfig
+    ? createToolHttpHandler({
+        config: serverConfig,
+        getTools: () => tools,
+        allowedTools,
+        invoke: async (currentTools, name, args) => {
           const handler = TOOL_HANDLERS[name];
-          if (!handler) {
-            throw new McpError(ErrorCode.MethodNotFound, `Unknown tool: ${name}`);
-          }
+          if (!handler) throw new Error(`Unknown tool: ${name}`);
+          return handler(currentTools, args);
+        },
+      })
+    : undefined;
+  const nodeMcpHandler = mcpHandler ? toNodeHandler(mcpHandler) : undefined;
 
-          try {
-            return await handler(tools, args || {});
-          } catch (error) {
-            if (error instanceof StudioLaunchPreDispatchError) {
-              return {
-                content: [{
-                  type: 'text',
-                  text: JSON.stringify(error.toResponseBody()),
-                }],
-                isError: true,
-              };
-            }
-            if (error instanceof RoutingFailure) {
-              // Surface routing errors as structured tool-call results with
-              // the full instance list embedded so the LLM can recover by
-              // picking an instance_id from data.instances — no need for a
-              // separate get_connected_instances round-trip.
-              return {
-                content: [{
-                  type: 'text',
-                  text: JSON.stringify({
-                    error: error.routingError.code,
-                    message: error.routingError.message,
-                    data: error.routingError.data,
-                  }),
-                }],
-                isError: true,
-              };
-            }
-            if (error instanceof McpError) throw error;
-            throw new McpError(
-              ErrorCode.InternalError,
-              `Tool execution failed: ${error instanceof Error ? error.message : String(error)}`
-            );
-          }
-        });
-
-        const transport = new StreamableHTTPServerTransport({
-          sessionIdGenerator: undefined,
-        });
-        await server.connect(transport);
-        await transport.handleRequest(req, res, req.body);
-        res.on('close', () => {
-          transport.close();
-          server.close();
-        });
-      } catch (error) {
-        if (!res.headersSent) {
-          res.status(500).json({
-            jsonrpc: '2.0',
-            error: { code: -32603, message: 'Internal server error' },
-            id: null,
-          });
-        }
-      }
-    });
-
-    app.get('/mcp', (req, res) => {
-      res.writeHead(405).end(JSON.stringify({
-        jsonrpc: '2.0',
-        error: { code: -32000, message: 'Method not allowed.' },
-        id: null,
-      }));
-    });
-
-    app.delete('/mcp', (req, res) => {
-      res.writeHead(405).end(JSON.stringify({
-        jsonrpc: '2.0',
-        error: { code: -32000, message: 'Method not allowed.' },
-        id: null,
-      }));
+  if (nodeMcpHandler) {
+    app.all('/mcp', async (req, res) => {
+      trackMCPActivity();
+      await nodeMcpHandler(req, res, req.body);
     });
   }
 
@@ -743,22 +610,17 @@ export function createHttpServer(tools: RobloxStudioTools, bridge: BridgeService
 
     app.post(`/mcp/${toolName}`, async (req, res) => {
       try {
-        const result = await handler(tools, req.body);
-        res.json(result);
+        const result = normalizeToolResult(await handler(tools, req.body), 'modern');
+        if (result.structuredContent && result.content.length === 0) {
+          res.json(result.structuredContent);
+        } else {
+          res.json(result);
+        }
       } catch (error) {
-        if (error instanceof StudioLaunchPreDispatchError) {
-          res.status(error.statusCode).json(error.toResponseBody());
-          return;
-        }
-        if (error instanceof RoutingFailure) {
-          res.status(400).json({
-            error: error.routingError.code,
-            message: error.routingError.message,
-            data: error.routingError.data,
-          });
-          return;
-        }
-        res.status(500).json({ error: error instanceof Error ? error.message : 'Unknown error' });
+        const status = error instanceof StudioLaunchPreDispatchError
+          ? error.statusCode
+          : error instanceof RoutingFailure ? 400 : 500;
+        res.status(status).json(publicToolErrorBody(toolName, error));
       }
     });
   }
@@ -768,6 +630,7 @@ export function createHttpServer(tools: RobloxStudioTools, bridge: BridgeService
   (app as any).setMCPServerActive = setMCPServerActive;
   (app as any).isMCPServerActive = isMCPServerActive;
   (app as any).trackMCPActivity = trackMCPActivity;
+  (app as any).closeMcpHandler = () => mcpHandler?.close();
 
   return app;
 }

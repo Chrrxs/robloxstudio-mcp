@@ -68,13 +68,21 @@ async function waitForEditInstance(client, expectedVersion, instanceId, timeoutM
     try {
       const connected = await client.callTool('get_connected_instances', {});
       const instances = connected.instances ?? [];
-      const edit = instances.find((inst) => inst.role === 'edit' && inst.instanceId === instanceId);
+      const edit = instances.find((inst) => inst.id === instanceId && inst.roles?.includes('edit'));
       if (edit) {
-        assert(edit.pluginVariant === 'main', 'regular tooling loaded the main plugin');
-        assert(edit.pluginVersion === expectedVersion, `Studio plugin version is v${expectedVersion}`);
-        assert(edit.serverVersion === expectedVersion, `MCP server version is v${expectedVersion}`);
-        assert(edit.versionMismatch === false, 'regular tooling has no version mismatch');
-        return edit;
+        const statusResponse = await fetch('http://127.0.0.1:58741/status');
+        const status = await statusResponse.json();
+        const peer = status.instances?.find((inst) => inst.role === 'edit' && inst.instanceId === instanceId);
+        if (!peer) {
+          last = { connected, status };
+          await delay(1000);
+          continue;
+        }
+        assert(peer.pluginVariant === 'main', 'regular tooling loaded the main plugin');
+        assert(peer.pluginVersion === expectedVersion, `Studio plugin version is v${expectedVersion}`);
+        assert(peer.serverVersion === expectedVersion, `MCP server version is v${expectedVersion}`);
+        assert(peer.versionMismatch === false, 'regular tooling has no version mismatch');
+        return { ...edit, instanceId: edit.id };
       }
       last = connected;
     } catch (err) {
@@ -121,119 +129,98 @@ async function runEditModeToolSmoke(client, instanceId) {
   const names = new Set((listed.tools ?? []).map((tool) => tool.name));
   for (const tool of [
     'get_place_info',
-    'get_file_tree',
-    'create_object',
-    'set_property',
+    'get_project_structure',
+    'set_properties',
     'get_instance_properties',
     'set_script_source',
     'get_script_source',
-    'set_attribute',
-    'add_tag',
+    'get_attributes',
+    'get_selection',
     'execute_luau',
-    'delete_object',
   ]) {
     assert(names.has(tool), `tools/list exposes ${tool}`);
+  }
+  for (const removed of ['get_services', 'create_object', 'set_property', 'set_attribute', 'add_tag', 'delete_object']) {
+    assert(!names.has(removed), `tools/list omits removed ${removed}`);
   }
 
   const place = await client.callTool('get_place_info', { instance_id: instanceId });
   assertNoError(place, 'get_place_info succeeds');
   assert(place.workspace?.className === 'Workspace', 'get_place_info returns workspace metadata');
 
-  const tree = await client.callTool('get_file_tree', { path: 'game.Workspace', instance_id: instanceId });
-  assertNoError(tree, 'get_file_tree succeeds');
-  assert(tree.tree?.className === 'Workspace', 'get_file_tree returns Workspace tree');
+  const tree = await client.callTool('get_project_structure', { path: 'game.Workspace', maxDepth: 2, instance_id: instanceId });
+  assertNoError(tree, 'get_project_structure succeeds');
 
-  const services = await client.callTool('get_services', { serviceName: 'ServerScriptService', instance_id: instanceId });
-  assertNoError(services, 'get_services succeeds');
-  assert(services.service?.className === 'ServerScriptService', 'get_services returns requested service');
-
-  const folder = await client.callTool('create_object', {
-    className: 'Folder',
-    parent: 'game.Workspace',
-    name: '__RSMCP_ToolingSmoke',
+  const folderPath = 'game.Workspace.__RSMCP_ToolingSmoke';
+  const partPath = `${folderPath}.SmokePart`;
+  const scriptPath = `${folderPath}.SmokeScript`;
+  const setup = await client.callTool('execute_luau', {
+    target: 'edit',
     instance_id: instanceId,
+    code: `
+local old = workspace:FindFirstChild("__RSMCP_ToolingSmoke")
+if old then old:Destroy() end
+local folder = Instance.new("Folder")
+folder.Name = "__RSMCP_ToolingSmoke"
+folder.Parent = workspace
+local part = Instance.new("Part")
+part.Name = "SmokePart"
+part.Anchored = true
+part.Size = Vector3.new(4, 1, 2)
+part.Position = Vector3.new(0, 5, 0)
+part:SetAttribute("SmokeAttr", "ok")
+game:GetService("CollectionService"):AddTag(part, "RSMCPToolingSmoke")
+part.Parent = folder
+local script = Instance.new("Script")
+script.Name = "SmokeScript"
+script.Enabled = false
+script.Parent = folder
+return true
+`,
   });
-  assert(folder.success === true, 'create_object creates smoke folder');
+  assert(setup.success === true && String(setup.returnValue) === 'true', 'execute_luau creates smoke fixtures');
 
   try {
-    const part = await client.callTool('create_object', {
-      className: 'Part',
-      parent: folder.instancePath,
-      name: 'SmokePart',
-      properties: {
-        Anchored: true,
-        Size: { _type: 'Vector3', X: 4, Y: 1, Z: 2 },
-        Position: { _type: 'Vector3', X: 0, Y: 5, Z: 0 },
-      },
+    const setProp = await client.callTool('set_properties', {
+      instancePath: partPath,
+      properties: { Transparency: 0.25 },
       instance_id: instanceId,
     });
-    assert(part.success === true, 'create_object creates smoke part');
-
-    const setProp = await client.callTool('set_property', {
-      instancePath: part.instancePath,
-      propertyName: 'Transparency',
-      propertyValue: 0.25,
-      instance_id: instanceId,
-    });
-    assert(setProp.success === true, 'set_property updates smoke part');
+    assert(setProp.summary?.failed === 0, 'set_properties updates smoke part');
 
     const props = await client.callTool('get_instance_properties', {
-      instancePath: part.instancePath,
+      instancePath: partPath,
       instance_id: instanceId,
     });
     assertNoError(props, 'get_instance_properties succeeds');
     assert(props.properties?.Name === 'SmokePart', 'get_instance_properties returns updated object');
 
-    const attr = await client.callTool('set_attribute', {
-      instancePath: part.instancePath,
-      attributeName: 'SmokeAttr',
-      attributeValue: 'ok',
-      instance_id: instanceId,
-    });
-    assert(attr.success === true, 'set_attribute updates smoke part');
-
     const attrs = await client.callTool('get_attributes', {
-      instancePath: part.instancePath,
+      instancePath: partPath,
       instance_id: instanceId,
     });
     assert(attrs.attributes?.SmokeAttr?.value === 'ok', 'get_attributes returns smoke attribute');
 
-    const tag = await client.callTool('add_tag', {
-      instancePath: part.instancePath,
-      tagName: 'RSMCPToolingSmoke',
+    const tag = await client.callTool('execute_luau', {
+      target: 'edit',
       instance_id: instanceId,
+      code: 'return game:GetService("CollectionService"):HasTag(workspace.__RSMCP_ToolingSmoke.SmokePart, "RSMCPToolingSmoke")',
     });
-    assert(tag.success === true, 'add_tag tags smoke part');
-
-    const tagged = await client.callTool('get_tagged', {
-      tagName: 'RSMCPToolingSmoke',
-      instance_id: instanceId,
-    });
-    assert(JSON.stringify(tagged).includes('SmokePart'), 'get_tagged returns smoke part');
-
-    const script = await client.callTool('create_object', {
-      className: 'Script',
-      parent: folder.instancePath,
-      name: 'SmokeScript',
-      properties: { Enabled: false },
-      instance_id: instanceId,
-    });
-    assert(script.success === true, 'create_object creates smoke script');
+    assert(tag.success === true && String(tag.returnValue) === 'true', 'execute_luau handles project-specific tag work');
 
     const setSource = await client.callTool('set_script_source', {
-      instancePath: script.instancePath,
+      instancePath: scriptPath,
       source: 'local value = 41\nreturn value + 1\n',
       instance_id: instanceId,
     });
     assert(setSource.success === true, 'set_script_source updates smoke script');
 
     const source = await client.callTool('get_script_source', {
-      instancePath: script.instancePath,
-      startLine: 1,
-      endLine: 2,
+      instancePath: scriptPath,
+      line_range: '1-2',
       instance_id: instanceId,
     });
-    assertContains(source, 'return value + 1', 'get_script_source returns edited source');
+    assertContains(source.source, 'return value + 1', 'get_script_source returns edited source');
 
     const exec = await client.callTool('execute_luau', {
       target: 'edit',
@@ -246,11 +233,14 @@ async function runEditModeToolSmoke(client, instanceId) {
     const selection = await client.callTool('get_selection', { instance_id: instanceId });
     assertNoError(selection, 'get_selection succeeds');
   } finally {
-    const deleted = await client.callTool('delete_object', {
-      instancePath: folder.instancePath,
+    const deleted = await client.callTool('execute_luau', {
+      target: 'edit',
       instance_id: instanceId,
+      code: `local folder = workspace:FindFirstChild("__RSMCP_ToolingSmoke")
+if folder then folder:Destroy() end
+return true`,
     });
-    assert(deleted.success === true || deleted.error?.includes('not found'), 'delete_object cleans up smoke folder');
+    assert(deleted.success === true, 'execute_luau cleans up smoke folder');
   }
 }
 

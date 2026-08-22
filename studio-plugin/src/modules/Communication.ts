@@ -5,11 +5,9 @@ import UI from "./UI";
 import { cleanupLegacyEditBridges } from "./EvalBridges";
 import QueryHandlers from "./handlers/QueryHandlers";
 import PropertyHandlers from "./handlers/PropertyHandlers";
-import InstanceHandlers from "./handlers/InstanceHandlers";
 import ScriptHandlers from "./handlers/ScriptHandlers";
 import MetadataHandlers from "./handlers/MetadataHandlers";
 import TestHandlers from "./handlers/TestHandlers";
-import BuildHandlers from "./handlers/BuildHandlers";
 import AssetHandlers from "./handlers/AssetHandlers";
 import CaptureHandlers from "./handlers/CaptureHandlers";
 import InputHandlers from "./handlers/InputHandlers";
@@ -100,32 +98,17 @@ type Handler = (data: Record<string, unknown>) => unknown;
 
 const routeMap: Record<string, Handler> = {
 
-	"/api/file-tree": QueryHandlers.getFileTree,
-	"/api/search-files": QueryHandlers.searchFiles,
-	"/api/place-info": QueryHandlers.getPlaceInfo,
-	"/api/services": QueryHandlers.getServices,
-	"/api/search-objects": QueryHandlers.searchObjects,
-	"/api/instance-properties": QueryHandlers.getInstanceProperties,
-	"/api/instance-children": QueryHandlers.getInstanceChildren,
-	"/api/search-by-property": QueryHandlers.searchByProperty,
-	"/api/class-info": QueryHandlers.getClassInfo,
-	"/api/project-structure": QueryHandlers.getProjectStructure,
-	"/api/grep-scripts": QueryHandlers.grepScripts,
-	"/api/get-descendants": QueryHandlers.getDescendants,
-	"/api/compare-instances": QueryHandlers.compareInstances,
+    "/api/file-tree": QueryHandlers.getFileTree,
+    "/api/search-files": QueryHandlers.searchFiles,
+    "/api/place-info": QueryHandlers.getPlaceInfo,
+    "/api/search-objects": QueryHandlers.searchObjects,
+    "/api/instance-properties": QueryHandlers.getInstanceProperties,
+    "/api/search-by-property": QueryHandlers.searchByProperty,
+    "/api/class-info": QueryHandlers.getClassInfo,
+    "/api/project-structure": QueryHandlers.getProjectStructure,
+    "/api/grep-scripts": QueryHandlers.grepScripts,
 
-	"/api/set-property": PropertyHandlers.setProperty,
-	"/api/set-properties": PropertyHandlers.setProperties,
-	"/api/mass-set-property": PropertyHandlers.massSetProperty,
-	"/api/mass-get-property": PropertyHandlers.massGetProperty,
-	"/api/create-object": InstanceHandlers.createObject,
-	"/api/mass-create-objects": InstanceHandlers.massCreateObjects,
-	// Back-compat alias: pre-2.7.0 servers split this endpoint when properties were present.
-	"/api/mass-create-objects-with-properties": InstanceHandlers.massCreateObjects,
-	"/api/delete-object": InstanceHandlers.deleteObject,
-	"/api/smart-duplicate": InstanceHandlers.smartDuplicate,
-	"/api/mass-duplicate": InstanceHandlers.massDuplicate,
-	"/api/clone-object": InstanceHandlers.cloneObject,
+    "/api/set-properties": PropertyHandlers.setProperties,
 
 	"/api/get-script-source": ScriptHandlers.getScriptSource,
 	"/api/set-script-source": ScriptHandlers.setScriptSource,
@@ -133,19 +116,10 @@ const routeMap: Record<string, Handler> = {
 	"/api/insert-script-lines": ScriptHandlers.insertScriptLines,
 	"/api/delete-script-lines": ScriptHandlers.deleteScriptLines,
 
-	"/api/set-attribute": MetadataHandlers.setAttribute,
-	"/api/get-attributes": MetadataHandlers.getAttributes,
-	"/api/delete-attribute": MetadataHandlers.deleteAttribute,
-	"/api/get-tags": MetadataHandlers.getTags,
-	"/api/add-tag": MetadataHandlers.addTag,
-	"/api/remove-tag": MetadataHandlers.removeTag,
-	"/api/get-tagged": MetadataHandlers.getTagged,
-	"/api/get-selection": MetadataHandlers.getSelection,
-	"/api/execute-luau": MetadataHandlers.executeLuau,
-	"/api/eval-runtime": EvalRuntimeHandlers.evalRuntime,
-	"/api/undo": MetadataHandlers.undo,
-	"/api/redo": MetadataHandlers.redo,
-	"/api/bulk-set-attributes": MetadataHandlers.bulkSetAttributes,
+    "/api/get-attributes": MetadataHandlers.getAttributes,
+    "/api/get-selection": MetadataHandlers.getSelection,
+    "/api/execute-luau": MetadataHandlers.executeLuau,
+    "/api/eval-runtime": EvalRuntimeHandlers.evalRuntime,
 
 	"/api/start-playtest": TestHandlers.startPlaytest,
 	"/api/stop-playtest": TestHandlers.stopPlaytest,
@@ -155,12 +129,7 @@ const routeMap: Record<string, Handler> = {
 	"/api/multiplayer-test-leave-client": TestHandlers.multiplayerTestLeaveClient,
 	"/api/multiplayer-test-end": TestHandlers.multiplayerTestEnd,
 
-	"/api/export-build": BuildHandlers.exportBuild,
-	"/api/import-build": BuildHandlers.importBuild,
-	"/api/import-scene": BuildHandlers.importScene,
-	"/api/search-materials": BuildHandlers.searchMaterials,
-
-	"/api/insert-asset": AssetHandlers.insertAsset,
+    "/api/insert-asset": AssetHandlers.insertAsset,
 	"/api/preview-asset": AssetHandlers.previewAsset,
 
 	"/api/capture-screenshot": CaptureHandlers.captureScreenshot,

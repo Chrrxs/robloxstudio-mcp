@@ -1,31 +1,21 @@
-import { Server } from '@modelcontextprotocol/sdk/server/index.js';
-import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
-import {
-  CallToolRequestSchema,
-  ErrorCode,
-  ListToolsRequestSchema,
-  McpError,
-} from '@modelcontextprotocol/sdk/types.js';
+import { serveStdio } from '@modelcontextprotocol/server/stdio';
 import http from 'http';
 import { createHttpServer, listenWithRetry, TOOL_HANDLERS } from './http-server.js';
 import type { HttpSecurityOptions } from './http-server.js';
 import { resolveAuthToken } from './auth.js';
 import { RobloxStudioTools } from './tools/index.js';
-import { BridgeService, RoutingFailure } from './bridge-service.js';
+import { BridgeService } from './bridge-service.js';
 import { ProxyBridgeService } from './proxy-bridge-service.js';
 import type { ToolDefinition } from './tools/definitions.js';
-import { registerResourceHandlers } from './mcp-compat.js';
-import { StudioLaunchPreDispatchError } from './studio-instance-manager.js';
+import { createToolServer } from './mcp-runtime.js';
 
 export interface ServerConfig {
   name: string;
   version: string;
   tools: ToolDefinition[];
-  callableTools?: ToolDefinition[];
 }
 
 export class RobloxStudioMCPServer {
-  private server: Server;
   private tools: RobloxStudioTools;
   private bridge: BridgeService;
   private allowedToolNames: Set<string>;
@@ -33,85 +23,10 @@ export class RobloxStudioMCPServer {
 
   constructor(config: ServerConfig) {
     this.config = config;
-    this.allowedToolNames = new Set((config.callableTools ?? config.tools).map(t => t.name));
-
-    this.server = new Server(
-      {
-        name: config.name,
-        version: config.version,
-      },
-      {
-        capabilities: {
-          tools: {},
-        },
-      }
-    );
+    this.allowedToolNames = new Set(config.tools.map(t => t.name));
 
     this.bridge = new BridgeService();
     this.tools = new RobloxStudioTools(this.bridge);
-    registerResourceHandlers(this.server);
-    this.setupToolHandlers();
-  }
-
-  private setupToolHandlers() {
-    this.server.setRequestHandler(ListToolsRequestSchema, async () => {
-      return {
-        tools: this.config.tools.map(t => ({
-          name: t.name,
-          description: t.description,
-          inputSchema: t.inputSchema,
-        })),
-      };
-    });
-
-    this.server.setRequestHandler(CallToolRequestSchema, async (request) => {
-      const { name, arguments: args } = request.params;
-
-      if (!this.allowedToolNames.has(name)) {
-        throw new McpError(ErrorCode.MethodNotFound, `Unknown tool: ${name}`);
-      }
-
-      const handler = TOOL_HANDLERS[name];
-      if (!handler) {
-        throw new McpError(ErrorCode.MethodNotFound, `Unknown tool: ${name}`);
-      }
-
-      try {
-        return await handler(this.tools, args ?? {});
-      } catch (error) {
-        if (error instanceof StudioLaunchPreDispatchError) {
-          return {
-            content: [{
-              type: 'text',
-              text: JSON.stringify(error.toResponseBody()),
-            }],
-            isError: true,
-          };
-        }
-        if (error instanceof RoutingFailure) {
-          // Surface routing errors as structured tool-call results with
-          // the full instance list embedded so the LLM can recover by
-          // picking an instance_id from data.instances — no need for a
-          // separate get_connected_instances round-trip.
-          return {
-            content: [{
-              type: 'text',
-              text: JSON.stringify({
-                error: error.routingError.code,
-                message: error.routingError.message,
-                data: error.routingError.data,
-              }),
-            }],
-            isError: true,
-          };
-        }
-        if (error instanceof McpError) throw error;
-        throw new McpError(
-          ErrorCode.InternalError,
-          `Tool execution failed: ${error instanceof Error ? error.message : String(error)}`
-        );
-      }
-    });
   }
 
   async run() {
@@ -230,9 +145,22 @@ export class RobloxStudioMCPServer {
       }
     }
 
-    // Start stdio MCP transport
-    const transport = new StdioServerTransport();
-    await this.server.connect(transport);
+    // The v2 entry negotiates 2026-07-28 while retaining one factory-backed
+    // compatibility path for 2025 clients.
+    const stdioHandle = serveStdio(
+      (context) => createToolServer({
+        config: this.config,
+        getTools: () => this.tools,
+        allowedTools: this.allowedToolNames,
+        era: context.era,
+        invoke: async (tools, name, args) => {
+          const handler = TOOL_HANDLERS[name];
+          if (!handler) throw new Error(`Unknown tool: ${name}`);
+          return handler(tools, args);
+        },
+      }),
+      { onerror: (error) => console.error('[mcp:stdio]', error) },
+    );
     console.error(`${this.config.name} v${this.config.version} running on stdio`);
 
     if (primaryApp) {
@@ -278,7 +206,11 @@ export class RobloxStudioMCPServer {
       if (this.bridge instanceof ProxyBridgeService) {
         this.bridge.stop();
       }
-      await this.server.close().catch(() => {});
+      await stdioHandle.close().catch(() => {});
+      await Promise.all([
+        (primaryApp as any)?.closeMcpHandler?.(),
+        (legacyApp as any)?.closeMcpHandler?.(),
+      ]).catch(() => {});
       if (httpHandle) httpHandle.close();
       if (legacyHandle) legacyHandle.close();
       process.exit(0);

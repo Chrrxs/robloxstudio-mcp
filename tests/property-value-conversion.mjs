@@ -12,10 +12,19 @@ function findResult(response, property) {
     : undefined;
 }
 
-async function deleteIfPresent(client, instancePath, instanceId) {
-  if (!instancePath) return;
+async function cleanupProbes(client, instanceId) {
   try {
-    await client.callTool('delete_object', { instancePath, instance_id: instanceId });
+    await client.callTool('execute_luau', {
+      target: 'edit',
+      instance_id: instanceId,
+      code: `
+local gui = game:GetService("StarterGui"):FindFirstChild("__RSMCP_Vector2Conversion")
+if gui then gui:Destroy() end
+local part = workspace:FindFirstChild("__RSMCP_Vector3Conversion")
+if part then part:Destroy() end
+return true
+`,
+    });
   } catch {
     // Best-effort cleanup; the test verdict should come from the assertion.
   }
@@ -28,7 +37,7 @@ async function waitForEditInstance(client, instanceId, timeoutMs = 30000) {
     try {
       const connected = await client.callTool('get_connected_instances', {});
       const instances = connected.instances ?? [];
-      const edit = instances.find((inst) => inst.role === 'edit' && inst.instanceId === instanceId);
+      const edit = instances.find((inst) => inst.id === instanceId && inst.roles?.includes('edit'));
       if (edit) return edit;
       last = connected;
     } catch (err) {
@@ -59,29 +68,37 @@ await runTest('property value conversion honors destination property types', asy
   assert(typeof instanceId === 'string' && instanceId.length > 0, 'edit instance is available');
   await waitForEditInstance(client, instanceId);
 
-  let screenGuiPath;
-  let partPath;
+  const screenGuiPath = 'game.StarterGui.__RSMCP_Vector2Conversion';
+  const labelPath = `${screenGuiPath}.AnchorPointProbe`;
+  const partPath = 'game.Workspace.__RSMCP_Vector3Conversion';
 
   try {
-    const screenGui = await client.callTool('create_object', {
-      className: 'ScreenGui',
-      parent: 'game.StarterGui',
-      name: '__RSMCP_Vector2Conversion',
+    const setup = await client.callTool('execute_luau', {
+      target: 'edit',
       instance_id: instanceId,
-    });
-    assert(screenGui.success === true, 'created Vector2 conversion ScreenGui');
-    screenGuiPath = screenGui.instancePath;
+      code: `
+local starterGui = game:GetService("StarterGui")
+local oldGui = starterGui:FindFirstChild("__RSMCP_Vector2Conversion")
+if oldGui then oldGui:Destroy() end
+local oldPart = workspace:FindFirstChild("__RSMCP_Vector3Conversion")
+if oldPart then oldPart:Destroy() end
 
-    const label = await client.callTool('create_object', {
-      className: 'TextLabel',
-      parent: screenGui.instancePath,
-      name: 'AnchorPointProbe',
-      instance_id: instanceId,
+local screenGui = Instance.new("ScreenGui")
+screenGui.Name = "__RSMCP_Vector2Conversion"
+screenGui.Parent = starterGui
+local label = Instance.new("TextLabel")
+label.Name = "AnchorPointProbe"
+label.Parent = screenGui
+local part = Instance.new("Part")
+part.Name = "__RSMCP_Vector3Conversion"
+part.Parent = workspace
+return true
+`,
     });
-    assert(label.success === true, 'created AnchorPoint probe label');
+    assert(setup.success === true && String(setup.returnValue) === 'true', 'execute_luau creates conversion probes');
 
     const anchorSet = await client.callTool('set_properties', {
-      instancePath: label.instancePath,
+      instancePath: labelPath,
       properties: { AnchorPoint: { X: 0.5, Y: 0.5 } },
       instance_id: instanceId,
     });
@@ -89,17 +106,8 @@ await runTest('property value conversion honors destination property types', asy
     assert(anchorSet.summary?.failed === 0 && anchorResult?.success === true,
       'set_properties accepts {X,Y} for Vector2 properties');
 
-    const part = await client.callTool('create_object', {
-      className: 'Part',
-      parent: 'game.Workspace',
-      name: '__RSMCP_Vector3Conversion',
-      instance_id: instanceId,
-    });
-    assert(part.success === true, 'created Vector3 conversion part');
-    partPath = part.instancePath;
-
     const positionSet = await client.callTool('set_properties', {
-      instancePath: part.instancePath,
+      instancePath: partPath,
       properties: { Position: { X: 1, Y: 2, Z: 3 } },
       instance_id: instanceId,
     });
@@ -107,8 +115,7 @@ await runTest('property value conversion honors destination property types', asy
     assert(positionSet.summary?.failed === 0 && positionResult?.success === true,
       'set_properties preserves {X,Y,Z} for Vector3 properties');
   } finally {
-    await deleteIfPresent(client, screenGuiPath, instanceId);
-    await deleteIfPresent(client, partPath, instanceId);
+    await cleanupProbes(client, instanceId);
     if (launchedInstanceId) {
       await client.callTool('manage_instance', {
         action: 'close',

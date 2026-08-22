@@ -7,6 +7,18 @@ collect per-peer logs, screenshots, and profiler data.
 
 [![NPM Version](https://img.shields.io/npm/v/@chrrxs/robloxstudio-mcp)](https://www.npmjs.com/package/@chrrxs/robloxstudio-mcp)
 
+## 3.0
+
+Version 3.0 uses MCP SDK v2 and negotiates the 2026-07-28 protocol while retaining
+the 2025 compatibility path. Tool calls now return JSON through
+`structuredContent` with output schemas; JSON text is emitted only for legacy
+clients. The catalog is 55.5% smaller by a character-based token estimate, includes
+read-only/destructive/idempotent/open-world annotations, and contains only
+canonical tools. Tool descriptions now cover selection, input schemas cover
+arguments, and shared workflows are advertised once through server instructions.
+Detailed guidance is available at `robloxstudio://tool-guides`. Node.js 20 or newer
+is required.
+
 ## Tool overview
 
 **Runtime debugging**
@@ -28,7 +40,7 @@ collect per-peer logs, screenshots, and profiler data.
 **Editing**
 
 - `execute_luau`: run Luau in Studio's edit context and return its output.
-- `mass_set_property`, `bulk_set_attributes`, `find_and_replace_in_scripts`: update properties, attributes, or script text in bulk.
+- `set_properties` and `find_and_replace_in_scripts`: update one instance's properties or script text efficiently; use `execute_luau` for project-specific bulk edits.
 - `capture_screenshot` and input tools: capture the viewport and send mouse or keyboard input.
 
 **Creator Store asset workflow**
@@ -61,7 +73,7 @@ gemini mcp add robloxstudio npx --trust -- -y @chrrxs/robloxstudio-mcp@latest --
 
 2. Fully close and reopen Studio after the plugin is first installed or updated. The plugin shows **Connected** when ready.
 
-Multiple open places connect to the same server; call `get_connected_instances` and pass `instance_id` to route tool calls. Custom Plugins folder: set `MCP_PLUGINS_DIR`. Manual plugin install: `npx -y @chrrxs/robloxstudio-mcp@latest --install-plugin`.
+Multiple open places connect to the same server; call `get_connected_instances` and pass a returned row's `id` as `instance_id` to route tool calls. Custom Plugins folder: set `MCP_PLUGINS_DIR`. Manual plugin install: `npx -y @chrrxs/robloxstudio-mcp@latest --install-plugin`.
 
 <details>
 <summary>Other MCP clients (Claude Desktop, Cursor, etc.)</summary>
@@ -90,11 +102,11 @@ On Windows, wrap with `cmd /c` if `npx` doesn't resolve:
 ```
 </details>
 
-## Inspector edition (read-only)
+## Inspector edition (DataModel read-only)
 
 [![NPM Version](https://img.shields.io/npm/v/@chrrxs/robloxstudio-mcp-inspector)](https://www.npmjs.com/package/@chrrxs/robloxstudio-mcp-inspector)
 
-39 read-only tools: no writes, no script edits. Safe for browsing, code review, and debugging without risk of accidental changes. Install only one variant at a time (the installers remove the other automatically):
+24 Studio-safe inspection tools: no DataModel or script edits. Export and profiler tools can still write files only to explicit local paths. Install only one variant at a time (the installers remove the other automatically):
 
 ```bash
 claude mcp add robloxstudio-inspector -- npx -y @chrrxs/robloxstudio-mcp-inspector@latest --auto-install-plugin
@@ -106,11 +118,12 @@ claude mcp add robloxstudio-inspector -- npx -y @chrrxs/robloxstudio-mcp-inspect
 - [Creator Store asset workflow](docs/creator-store-assets.md)
 - [Report a security vulnerability](SECURITY.md)
 - [Building from source](docs/building-from-source.md)
-- [Deprecated tool names](docs/deprecated-api.md)
+- [3.0 tool removals and replacements](docs/deprecated-api.md)
+- [Token-efficiency contract and budget](docs/token-efficiency.md)
 
 ---
 
 <!-- VERSION_LINE -->
-**v2.23.1**
+**v3.0.0**
 
 [Report Issues](https://github.com/chrrxs/robloxstudio-mcp/issues) · MIT Licensed · Based on [boshyxd/robloxstudio-mcp](https://github.com/boshyxd/robloxstudio-mcp) v2.7.0

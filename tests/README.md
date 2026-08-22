@@ -94,11 +94,12 @@ test can verify current-launch history seeding and prior-launch exclusion.
 RSMCP_E2E_CLOSE_ALL_STUDIO=1 npm run test:e2e:lifecycle
 ```
 
-The E2E targets published `@latest` first. If `@latest` does not yet include the
-new auto-install behavior, it falls back to a local packed tarball and prints
-`artifactSource: local-pack`. It requires port `58741` to be free and no Studio
-windows to be open before it starts. The environment variable is still required
-as an explicit opt-in for launching and closing Studio.
+The E2E defaults to freshly built local packed tarballs and prints
+`artifactSource: local-pack`, so unpublished changes are what reach Studio.
+Set `RSMCP_E2E_ARTIFACT_SOURCE=latest` to test the published release instead.
+It requires port `58741` to be free and no Studio windows to be open before it
+starts. The close-all environment variable is still required as an explicit
+opt-in for launching and closing Studio.
 
 Studio lifecycle helpers are available directly:
 

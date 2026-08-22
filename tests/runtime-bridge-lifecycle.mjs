@@ -5,12 +5,19 @@
 import { setTimeout as delay } from 'node:timers/promises';
 import { McpClient, runTest, assert, startPlaytestAndWait, safeStopPlaytest } from './lib/mcp-client.mjs';
 
+function routedRoles(connected) {
+  const instanceId = process.env.MCP_INSTANCE_ID;
+  return (connected.instances ?? [])
+    .filter((instance) => !instanceId || instance.id === instanceId || instance.instanceId === instanceId)
+    .flatMap((instance) => instance.roles ?? (instance.role ? [instance.role] : []));
+}
+
 async function waitForRoles(client, requiredRoles, { timeoutSec = 30, pollMs = 500 } = {}) {
   const deadline = Date.now() + timeoutSec * 1000;
   let last;
   while (Date.now() < deadline) {
     const connected = await client.callTool('get_connected_instances', {});
-    const roles = (connected.instances ?? []).map((inst) => inst.role);
+    const roles = routedRoles(connected);
     last = roles;
     if (requiredRoles.every((role) => roles.includes(role))) return roles;
     await delay(pollMs);
@@ -23,7 +30,7 @@ async function waitForNoRuntime(client, { timeoutSec = 30, pollMs = 500 } = {}) 
   let last;
   while (Date.now() < deadline) {
     const connected = await client.callTool('get_connected_instances', {});
-    const roles = (connected.instances ?? []).map((inst) => inst.role);
+    const roles = routedRoles(connected);
     last = roles;
     if (!roles.some((role) => role === 'server' || role.startsWith('client-'))) return roles;
     await delay(pollMs);

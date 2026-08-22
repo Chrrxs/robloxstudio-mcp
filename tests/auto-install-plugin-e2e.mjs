@@ -33,6 +33,7 @@ const VARIANTS = {
 const SERVER_ENV = {
   ROBLOX_STUDIO_PROXY_PROMOTION_INTERVAL_MS: '600000',
 };
+const ARTIFACT_SOURCE = process.env.RSMCP_E2E_ARTIFACT_SOURCE ?? 'local';
 
 let localBuildDone = false;
 
@@ -272,20 +273,17 @@ async function selectLocalArtifact(def, tmpRoot, reason) {
 }
 
 async function selectArtifact(def, tmpRoot, { forceLocal = false } = {}) {
-  if (forceLocal) {
-    return selectLocalArtifact(def, tmpRoot, 'paired with local main artifact');
+  if (forceLocal || ARTIFACT_SOURCE === 'local') {
+    const reason = forceLocal ? 'paired with local main artifact' : 'local is the default';
+    return selectLocalArtifact(def, tmpRoot, reason);
   }
-  try {
-    const latest = await packLatest(def, tmpRoot);
-    assertArtifactSupportsVersionMetadata(latest);
-    if (def.variant === 'main') assertArtifactIncludesTool(latest, 'manage_instance');
-    await smokeAutoInstall(latest, tmpRoot);
-    console.log(`artifactSource(${def.variant}): latest v${latest.version}`);
-    return latest;
-  } catch (err) {
-    console.warn(`artifactSource(${def.variant}): latest unavailable, falling back to local-pack (${err.message})`);
-    return selectLocalArtifact(def, tmpRoot);
-  }
+
+  const latest = await packLatest(def, tmpRoot);
+  assertArtifactSupportsVersionMetadata(latest);
+  if (def.variant === 'main') assertArtifactIncludesTool(latest, 'manage_instance');
+  await smokeAutoInstall(latest, tmpRoot);
+  console.log(`artifactSource(${def.variant}): latest v${latest.version}`);
+  return latest;
 }
 
 async function waitForEditInstance(client, expected, instanceId, timeoutMs = 120000) {
@@ -295,13 +293,21 @@ async function waitForEditInstance(client, expected, instanceId, timeoutMs = 120
     try {
       const connected = await client.callTool('get_connected_instances', {});
       const instances = connected.instances ?? [];
-      const edit = instances.find((inst) => inst.role === 'edit' && inst.instanceId === instanceId);
-      if (edit) {
+      const place = instances.find((inst) => inst.id === instanceId && inst.roles?.includes('edit'));
+      if (place) {
+        const statusResponse = await fetch('http://127.0.0.1:58741/status');
+        const status = await statusResponse.json();
+        const edit = status.instances?.find((inst) => inst.role === 'edit' && inst.instanceId === instanceId);
+        if (!edit) {
+          last = { connected, status };
+          await delay(1000);
+          continue;
+        }
         assert(edit.pluginVariant === expected.variant, `Studio loaded ${expected.variant} plugin variant`);
         assert(edit.pluginVersion === expected.version, `Studio plugin version is v${expected.version}`);
         assert(edit.serverVersion === expected.serverVersion, `MCP server version is v${expected.serverVersion}`);
         assert(edit.versionMismatch === expected.versionMismatch, `versionMismatch is ${expected.versionMismatch}`);
-        return edit;
+        return { ...place, instanceId: place.id };
       }
       last = connected;
     } catch (err) {
@@ -364,14 +370,14 @@ async function assertToolSurface(client, artifact, instanceId) {
   const names = new Set((tools.tools ?? []).map((tool) => tool.name));
   if (artifact.variant === 'inspector') {
     assert(!names.has('execute_luau'), 'inspector does not expose execute_luau');
-    assert(!names.has('set_property'), 'inspector does not expose write tools');
+    assert(!names.has('set_properties'), 'inspector does not expose write tools');
     await client.callTool('get_place_info', { instance_id: instanceId });
     assert(true, 'inspector read tool succeeds');
     return;
   }
 
   await client.callTool('get_place_info', { instance_id: instanceId });
-  await client.callTool('get_file_tree', { path: 'game.Workspace', instance_id: instanceId });
+  await client.callTool('get_project_structure', { path: 'game.Workspace', maxDepth: 2, instance_id: instanceId });
   const exec = await client.callTool('execute_luau', {
     target: 'edit',
     instance_id: instanceId,
@@ -515,6 +521,9 @@ async function runMismatchCase(artifact, managerArtifact, pluginsDir) {
 async function main() {
   if (process.env.RSMCP_E2E_CLOSE_ALL_STUDIO !== '1') {
     throw new Error('This E2E launches and closes managed Roblox Studio instances. Set RSMCP_E2E_CLOSE_ALL_STUDIO=1 to run it.');
+  }
+  if (ARTIFACT_SOURCE !== 'local' && ARTIFACT_SOURCE !== 'latest') {
+    throw new Error('RSMCP_E2E_ARTIFACT_SOURCE must be "local" or "latest".');
   }
   if (await isPortOpen(58741)) {
     throw new Error('Port 58741 is already occupied. Stop existing MCP servers before running this E2E.');

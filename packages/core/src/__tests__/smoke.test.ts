@@ -162,6 +162,59 @@ describe('Smoke', () => {
     expect(bridge.getPendingRequest('place:nope', 'edit')).toBeNull();
   });
 
+  test('get_connected_instances returns one compact routing row per place', async () => {
+    const bridge = new BridgeService();
+    const tools = new RobloxStudioTools(bridge);
+
+    bridge.registerInstance({
+      pluginSessionId: 'place-one-edit',
+      instanceId: 'place:1',
+      role: 'edit',
+      placeId: 1,
+      placeName: 'Place One',
+      dataModelName: 'PlaceOneEdit',
+      isRunning: false,
+    });
+    bridge.registerInstance({
+      pluginSessionId: 'place-one-server',
+      instanceId: 'place:1',
+      role: 'server',
+      placeId: 1,
+      placeName: 'Place One',
+      dataModelName: 'PlaceOneServer',
+      isRunning: true,
+    });
+    bridge.registerInstance({
+      pluginSessionId: 'place-one-client',
+      instanceId: 'place:1',
+      role: 'client',
+      placeId: 1,
+      placeName: 'Place One',
+      dataModelName: 'PlaceOneClient',
+      isRunning: true,
+    });
+    bridge.registerInstance({
+      pluginSessionId: 'place-two-edit',
+      instanceId: 'anon:2',
+      role: 'edit',
+      placeId: 0,
+      placeName: '',
+      dataModelName: 'Untitled Place',
+      isRunning: false,
+    });
+
+    const result = await tools.getConnectedInstances();
+    const payload = JSON.parse((result.content[0] as { type: 'text'; text: string }).text);
+
+    expect(payload).toEqual({
+      instances: [
+        { id: 'place:1', name: 'Place One', roles: ['edit', 'server', 'client-1'] },
+        { id: 'anon:2', name: 'Untitled Place', roles: ['edit'] },
+      ],
+    });
+    expect(Object.keys(payload.instances[0]).sort()).toEqual(['id', 'name', 'roles']);
+  });
+
   test('WSL Studio launch does not inherit the synchronous PowerShell pipes', () => {
     const script = buildWindowsStudioStartScript(
       'C:\\Roblox\\RobloxStudioBeta.exe',
@@ -2570,7 +2623,7 @@ describe('Smoke', () => {
     });
   });
 
-  test('get_script_source shows plugin truncation range and note', async () => {
+  test('get_script_source returns structured truncation metadata', async () => {
     const bridge = new BridgeService();
     const tools = new RobloxStudioTools(bridge);
     bridge.registerInstance(READY);
@@ -2592,10 +2645,17 @@ describe('Smoke', () => {
     });
 
     const result = await resultPromise;
-    const text = result.content[0].text;
-    expect(text).toContain('Lines:    1700 total (showing 1-300)');
-    expect(text).toContain('Note:     Truncated to first 300 lines; use line_range to read more.');
-    expect(text).not.toContain('Truncated to first 1000 lines');
+    const body = JSON.parse(result.content[0].text);
+    expect(body).toMatchObject({
+      path: 'game.ServerScriptService.Manager',
+      className: 'Script',
+      lineCount: 1700,
+      startLine: 1,
+      endLine: 300,
+      truncated: true,
+      note: 'Truncated to first 300 lines; use line_range to read more.',
+      source: '1  print("start")\n300 print("still here")',
+    });
   });
 
   test('start_playtest reports already running when runtime peers are connected', async () => {

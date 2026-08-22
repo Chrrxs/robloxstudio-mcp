@@ -8,9 +8,9 @@ async function pickInstanceId(client) {
   if (process.env.MCP_INSTANCE_ID) return process.env.MCP_INSTANCE_ID;
   await waitForEditPeer(client);
   const connected = await client.callTool('get_connected_instances', {});
-  const edit = (connected.instances ?? []).find((instance) => instance.role === 'edit');
+  const edit = (connected.instances ?? []).find((instance) => instance.roles?.includes('edit'));
   if (!edit) throw new Error(`No edit Studio instance connected: ${JSON.stringify(connected)}`);
-  return edit.instanceId;
+  return edit.id;
 }
 
 await runTest('multiplayer ends after adding a player', async ({ track }) => {

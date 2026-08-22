@@ -50,8 +50,8 @@ await runTest('canonical instance paths resolve across tools', async ({ track })
   await waitForEditPeer(client);
 
   const instances = await client.callTool('get_connected_instances', {});
-  const edit = instances.instances?.find((i) => i.role === 'edit');
-  const instanceId = edit?.instanceId;
+  const edit = instances.instances?.find((i) => i.roles?.includes('edit'));
+  const instanceId = edit?.id;
   assert(typeof instanceId === 'string' && instanceId.length > 0, 'edit instance is connected');
 
   let originalServerScriptServiceName;
@@ -70,43 +70,63 @@ await runTest('canonical instance paths resolve across tools', async ({ track })
 
   const rootName = `__RSMCP_PathResolution_${Date.now()}`;
   const rootPath = childPath('game.ServerScriptService', rootName);
-  let root;
+  const segments = [
+    '.dot',
+    'Name With Spaces',
+    'A.B.C',
+    'quote"child',
+    '[bracket]',
+    'slash\\child',
+    'tab\tchild',
+    'line\nchild',
+    'end',
+  ];
+  const dotFolderPath = childPath(rootPath, '.dir');
+  const legacyScriptPath = childPath(dotFolderPath, 'ReproScript');
+  let fixturesCreated = false;
   let breakpointWasSet = false;
 
   try {
-    root = await client.callTool('create_object', {
-      className: 'Folder',
-      parent: 'game.ServerScriptService',
-      name: rootName,
+    const setup = await client.callTool('execute_luau', {
+      target: 'edit',
       instance_id: instanceId,
+      code: `
+local service = game:GetService("ServerScriptService")
+local rootName = ${JSON.stringify(rootName)}
+local old = service:FindFirstChild(rootName)
+if old then old:Destroy() end
+local root = Instance.new("Folder")
+root.Name = rootName
+root.Parent = service
+local current = root
+for _, name in ipairs({ ${segments.map((segment) => JSON.stringify(segment)).join(', ')} }) do
+    local folder = Instance.new("Folder")
+    folder.Name = name
+    folder.Parent = current
+    current = folder
+end
+local script = Instance.new("Script")
+script.Name = "Script.With Spaces"
+script.Enabled = false
+script.Parent = current
+for _, name in ipairs({ "[bracket]", "Danger", "[\\\"Danger\\\"]", ".dir" }) do
+    local folder = Instance.new("Folder")
+    folder.Name = name
+    folder.Parent = root
+end
+local legacyScript = Instance.new("Script")
+legacyScript.Name = "ReproScript"
+legacyScript.Enabled = false
+legacyScript.Parent = root:FindFirstChild(".dir")
+return true
+`,
     });
-    assert(root.success === true, 'created path-resolution root folder');
-    assert(root.instancePath === rootPath, 'root folder path is canonical even when service is renamed');
+    assert(setup.success === true && String(setup.returnValue) === 'true', 'execute_luau creates path-resolution fixtures');
+    fixturesCreated = true;
 
-    const segments = [
-      '.dot',
-      'Name With Spaces',
-      'A.B.C',
-      'quote"child',
-      '[bracket]',
-      'slash\\child',
-      'tab\tchild',
-      'line\nchild',
-      'end',
-    ];
-
-    let currentPath = root.instancePath;
+    let currentPath = rootPath;
     for (const segment of segments) {
       const expectedPath = childPath(currentPath, segment);
-      const created = await client.callTool('create_object', {
-        className: 'Folder',
-        parent: currentPath,
-        name: segment,
-        instance_id: instanceId,
-      });
-      assert(created.success === true, `created folder segment ${JSON.stringify(segment)}`);
-      assert(created.instancePath === expectedPath, `emitted canonical path for ${JSON.stringify(segment)}`);
-
       const props = await client.callTool('get_instance_properties', {
         instancePath: expectedPath,
         excludeSource: true,
@@ -119,15 +139,6 @@ await runTest('canonical instance paths resolve across tools', async ({ track })
 
     const scriptName = 'Script.With Spaces';
     const scriptPath = childPath(currentPath, scriptName);
-    const script = await client.callTool('create_object', {
-      className: 'Script',
-      parent: currentPath,
-      name: scriptName,
-      properties: { Enabled: false },
-      instance_id: instanceId,
-    });
-    assert(script.success === true, 'created script under canonical weird-name hierarchy');
-    assert(script.instancePath === scriptPath, 'script path is canonical');
 
     const sourceText = 'local value = 41\nreturn value + 1\n';
     const setSource = await client.callTool('set_script_source', {
@@ -139,21 +150,13 @@ await runTest('canonical instance paths resolve across tools', async ({ track })
 
     const source = await client.callTool('get_script_source', {
       instancePath: scriptPath,
-      startLine: 1,
-      endLine: 2,
+      line_range: '1-2',
       instance_id: instanceId,
     });
-    assertContains(source, 'return value + 1', 'get_script_source accepts canonical path');
-
-    const children = await client.callTool('get_instance_children', {
-      instancePath: currentPath,
-      instance_id: instanceId,
-    });
-    assertNoError(children, 'get_instance_children accepts canonical path');
-    assert(children.children?.some((child) => child.path === scriptPath), 'get_instance_children emits reusable canonical child path');
+    assertContains(source.source, 'return value + 1', 'get_script_source accepts canonical path');
 
     const project = await client.callTool('get_project_structure', {
-      path: root.instancePath,
+      path: rootPath,
       maxDepth: 20,
       scriptsOnly: false,
       instance_id: instanceId,
@@ -161,69 +164,23 @@ await runTest('canonical instance paths resolve across tools', async ({ track })
     assertNoError(project, 'get_project_structure accepts canonical path');
     assert(containsPath(project, scriptPath), 'get_project_structure emits canonical descendant path');
 
-    const tree = await client.callTool('get_file_tree', {
-      path: root.instancePath,
-      instance_id: instanceId,
-    });
-    assertNoError(tree, 'get_file_tree accepts canonical path');
-    assert(containsPath(tree, scriptPath), 'get_file_tree emits canonical descendant path');
-
-    const literalBracket = await client.callTool('create_object', {
-      className: 'Folder',
-      parent: root.instancePath,
-      name: '[bracket]',
-      instance_id: instanceId,
-    });
-    assert(literalBracket.success === true, 'created literal bracket legacy folder');
     const literalBracketLegacy = await client.callTool('get_instance_properties', {
-      instancePath: `${root.instancePath}.[bracket]`,
+      instancePath: `${rootPath}.[bracket]`,
       excludeSource: true,
       instance_id: instanceId,
     });
     assertNoError(literalBracketLegacy, 'legacy literal bracket path resolves');
     assert(literalBracketLegacy.properties?.Name === '[bracket]', 'legacy literal bracket path targets literal bracket name');
 
-    const danger = await client.callTool('create_object', {
-      className: 'Folder',
-      parent: root.instancePath,
-      name: 'Danger',
-      instance_id: instanceId,
-    });
-    assert(danger.success === true, 'created control sibling for quoted legacy bracket path');
-    const quotedLiteral = await client.callTool('create_object', {
-      className: 'Folder',
-      parent: root.instancePath,
-      name: '["Danger"]',
-      instance_id: instanceId,
-    });
-    assert(quotedLiteral.success === true, 'created quoted literal legacy bracket folder');
     const quotedLiteralLegacy = await client.callTool('get_instance_properties', {
-      instancePath: `${root.instancePath}.["Danger"]`,
+      instancePath: `${rootPath}.["Danger"]`,
       excludeSource: true,
       instance_id: instanceId,
     });
     assertNoError(quotedLiteralLegacy, 'legacy quoted literal bracket path resolves');
     assert(quotedLiteralLegacy.properties?.Name === '["Danger"]', 'legacy quoted literal bracket path does not retarget sibling Danger');
 
-    const dotFolder = await client.callTool('create_object', {
-      className: 'Folder',
-      parent: root.instancePath,
-      name: '.dir',
-      instance_id: instanceId,
-    });
-    assert(dotFolder.success === true, 'created dot-prefixed compatibility folder');
-    assert(dotFolder.instancePath === childPath(root.instancePath, '.dir'), 'dot-prefixed folder path is canonical bracket path');
-
-    const legacyScript = await client.callTool('create_object', {
-      className: 'Script',
-      parent: dotFolder.instancePath,
-      name: 'ReproScript',
-      properties: { Enabled: false },
-      instance_id: instanceId,
-    });
-    assert(legacyScript.success === true, 'created legacy-path script');
-
-    const legacyPath = `${root.instancePath}..dir.ReproScript`;
+    const legacyPath = `${rootPath}..dir.ReproScript`;
     const legacySourceSet = await client.callTool('set_script_source', {
       instancePath: legacyPath,
       source: '-- line one\nprint("legacy path works")\n',
@@ -232,17 +189,16 @@ await runTest('canonical instance paths resolve across tools', async ({ track })
     assert(legacySourceSet.success === true, 'set_script_source accepts legacy ..dir path');
 
     const legacySource = await client.callTool('get_script_source', {
-      instancePath: legacyScript.instancePath,
-      startLine: 1,
-      endLine: 2,
+      instancePath: legacyScriptPath,
+      line_range: '1-2',
       instance_id: instanceId,
     });
-    assertContains(legacySource, 'legacy path works', 'canonical path reads source written through legacy path');
+    assertContains(legacySource.source, 'legacy path works', 'canonical path reads source written through legacy path');
 
     const breakpoint = await client.callTool('breakpoints', {
       action: 'set',
       target: 'edit',
-      script_path: legacyScript.instancePath,
+      script_path: legacyScriptPath,
       line: 2,
       enabled: true,
       continue_execution: true,
@@ -260,17 +216,20 @@ await runTest('canonical instance paths resolve across tools', async ({ track })
       await client.callTool('breakpoints', {
         action: 'remove',
         target: 'edit',
-        script_path: root?.instancePath ? childPath(childPath(root.instancePath, '.dir'), 'ReproScript') : '',
+        script_path: legacyScriptPath,
         line: 2,
         instance_id: instanceId,
       }).catch(() => {});
     }
-    if (root?.instancePath) {
-      const deleted = await client.callTool('delete_object', {
-        instancePath: root.instancePath,
+    if (fixturesCreated) {
+      const deleted = await client.callTool('execute_luau', {
+        target: 'edit',
         instance_id: instanceId,
+        code: `local root = game:GetService("ServerScriptService"):FindFirstChild(${JSON.stringify(rootName)})
+if root then root:Destroy() end
+return true`,
       });
-      assert(deleted.success === true || deleted.error?.includes('not found'), 'cleaned up path-resolution root folder');
+      assert(deleted.success === true, 'execute_luau cleans up path-resolution root folder');
     }
     if (originalServerScriptServiceName !== undefined) {
       await client.callTool('execute_luau', {

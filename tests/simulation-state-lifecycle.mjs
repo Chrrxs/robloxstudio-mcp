@@ -61,10 +61,10 @@ await runTest('simulation state tools reset network and device simulator determi
     const connected = await client.callTool('get_connected_instances', {});
     const expectedInstanceId = process.env.MCP_INSTANCE_ID;
     const edit = (connected.instances ?? connected).find((inst) =>
-      inst.role === 'edit' && (expectedInstanceId === undefined || inst.instanceId === expectedInstanceId)
+      inst.roles?.includes('edit') && (expectedInstanceId === undefined || inst.id === expectedInstanceId)
     );
     assert(!!edit, 'edit peer is connected');
-    instanceId = edit.instanceId;
+    instanceId = edit.id;
 
     const listed = await client.rpc('tools/list', {});
     const names = new Set((listed.tools ?? []).map((tool) => tool.name));
@@ -133,7 +133,7 @@ await runTest('simulation state tools reset network and device simulator determi
         overrides: { InboundNetworkLossPercent: 0.5001 },
         instance_id: instanceId,
       }),
-      'cannot exceed 0.5',
+      'must be <= 0.5',
       'packet-loss over engine limit',
     );
 

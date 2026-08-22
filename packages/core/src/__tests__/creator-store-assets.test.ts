@@ -1,6 +1,7 @@
 import { existsSync, readFileSync } from 'fs';
 import { join, resolve } from 'path';
 import { BridgeService } from '../bridge-service.js';
+import { TOOL_GUIDE_MARKDOWN } from '../mcp-compat.js';
 import { OpenCloudClient } from '../opencloud-client.js';
 import { RobloxStudioTools } from '../tools/index.js';
 import { TOOL_DEFINITIONS } from '../tools/definitions.js';
@@ -324,12 +325,12 @@ describe('Creator Store asset search', () => {
     expect(searchAssets).not.toHaveBeenCalled();
   });
 
-  test('tool schemas describe aliases, unlimited scans, and fail-closed insertion', () => {
+  test('tool schemas encode aliases and defaults while the guide explains safe insertion', () => {
     const search = TOOL_DEFINITIONS.find((tool) => tool.name === 'search_assets');
     const preview = TOOL_DEFINITIONS.find((tool) => tool.name === 'preview_asset');
     const insert = TOOL_DEFINITIONS.find((tool) => tool.name === 'insert_asset');
     const searchProps = (search?.inputSchema as {
-      properties?: Record<string, { enum?: string[] }>;
+      properties?: Record<string, { type?: string; enum?: string[]; default?: unknown; description?: string }>;
     }).properties ?? {};
     const previewProps = (preview?.inputSchema as {
       properties?: Record<string, {
@@ -347,13 +348,10 @@ describe('Creator Store asset search', () => {
       'Particle',
       'VFX',
     ]));
-    expect(search?.description).toContain('all creators by default');
+    expect(searchProps.assetType.description).toContain('Image maps to Decal');
     expect(searchProps).toHaveProperty('robloxCreatedOnly');
+    expect(searchProps.robloxCreatedOnly).toMatchObject({ type: 'boolean', default: false });
     expect(searchProps).not.toHaveProperty('verifiedCreatorsOnly');
-    expect(search?.description).toContain('without requiring Roblox credentials');
-    expect(preview?.description).toContain('unlimited-depth');
-    expect(preview?.description).toContain('script source is never read or returned');
-    expect(preview?.description).toContain('temporary inline audio');
     expect(previewProps.includeAudio).toMatchObject({
       type: 'boolean',
       default: true,
@@ -372,9 +370,12 @@ describe('Creator Store asset search', () => {
       minimum: 1,
       maximum: 5,
     });
-    expect(insert?.description).toContain('Every LuaSourceContainer');
-    expect(insert?.description).toContain('every PackageLink');
-    expect(insert?.description).toContain('second unlimited-depth scan');
+    expect(search?.description).toMatch(/^Use /);
+    expect(preview?.description).toMatch(/^Use /);
+    expect(insert?.description).toMatch(/^Use /);
+    expect(TOOL_GUIDE_MARKDOWN).toContain('scans the complete hierarchy without returning script source');
+    expect(TOOL_GUIDE_MARKDOWN).toContain('removes every LuaSourceContainer and PackageLink');
+    expect(TOOL_GUIDE_MARKDOWN).toContain('then scans again before insertion');
   });
 
   test('preview and secure insertion use the existing Studio bridge endpoints', async () => {

@@ -1,4 +1,4 @@
-import { RobloxStudioMCPServer, getAllCallableTools, getAllTools } from '@chrrxs/robloxstudio-mcp-core';
+import { RobloxStudioMCPServer, getAllTools } from '@chrrxs/robloxstudio-mcp-core';
 import { createRequire } from 'module';
 
 if (process.argv.includes('--install-plugin')) {
@@ -40,7 +40,6 @@ if (process.argv.includes('--install-plugin')) {
     name: 'robloxstudio-mcp',
     version: VERSION,
     tools: getAllTools(),
-    callableTools: getAllCallableTools(),
   });
 
   server.run().catch((error) => {

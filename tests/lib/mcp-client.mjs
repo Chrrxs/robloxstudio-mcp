@@ -23,8 +23,6 @@ export const BASE_PORT = 58741;
 
 const ROUTED_TOOLS = new Set([
   'solo_playtest',
-  'start_playtest',
-  'stop_playtest',
   'execute_luau',
   'eval_server_runtime',
   'eval_client_runtime',
@@ -37,11 +35,6 @@ const ROUTED_TOOLS = new Set([
   'get_runtime_logs',
   'get_memory_breakdown',
   'multiplayer_playtest',
-  'multiplayer_test_start',
-  'multiplayer_test_state',
-  'multiplayer_test_add_players',
-  'multiplayer_test_leave_client',
-  'multiplayer_test_end',
   'capture_screenshot',
   'capture_micro_profiler',
   'generate_model',
@@ -223,7 +216,12 @@ async function getInstanceList(client) {
     const inst = await client.callTool('get_connected_instances', {});
     const list = inst.instances ?? inst;
     if (!Array.isArray(list)) return [];
-    return process.env.MCP_INSTANCE_ID ? list.filter((i) => i.instanceId === process.env.MCP_INSTANCE_ID) : list;
+    const peers = list.flatMap((place) => Array.isArray(place.roles)
+      ? place.roles.map((role) => ({ instanceId: place.id, role }))
+      : [{ instanceId: place.instanceId ?? place.id, role: place.role }]);
+    return process.env.MCP_INSTANCE_ID
+      ? peers.filter((peer) => peer.instanceId === process.env.MCP_INSTANCE_ID)
+      : peers;
   } catch {
     return [];
   }

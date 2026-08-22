@@ -5,7 +5,7 @@ import { join } from 'path';
 export default defineConfig({
   entry: ['src/index.ts'],
   format: ['esm'],
-  target: 'node18',
+  target: 'node20',
   bundle: true,
   splitting: false,
   clean: true,

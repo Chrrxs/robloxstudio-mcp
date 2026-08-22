@@ -123,47 +123,6 @@ function getPlaceInfo(_requestData: Record<string, unknown>) {
 	};
 }
 
-function getServices(requestData: Record<string, unknown>) {
-	const serviceName = requestData.serviceName as string | undefined;
-
-	if (serviceName) {
-		const [ok, service] = pcall(() => game.GetService(serviceName as keyof Services));
-		if (ok && service) {
-			return {
-				service: {
-					name: service.Name,
-					className: service.ClassName,
-					path: getInstancePath(service as Instance),
-					childCount: (service as Instance).GetChildren().size(),
-				},
-			};
-		} else {
-			return { error: `Service not found: ${serviceName}` };
-		}
-	} else {
-		const services: { name: string; className: string; path: string; childCount: number }[] = [];
-		const commonServices = [
-			"Workspace", "Players", "StarterGui", "StarterPack", "StarterPlayer",
-			"ReplicatedStorage", "ServerStorage", "ServerScriptService",
-			"HttpService", "TeleportService", "DataStoreService",
-		];
-
-		for (const svcName of commonServices) {
-			const [ok, service] = pcall(() => game.GetService(svcName as keyof Services));
-			if (ok && service) {
-				services.push({
-					name: service.Name,
-					className: service.ClassName,
-					path: getInstancePath(service as Instance),
-					childCount: (service as Instance).GetChildren().size(),
-				});
-			}
-		}
-
-		return { services };
-	}
-}
-
 function searchObjects(requestData: Record<string, unknown>) {
 	const query = requestData.query as string;
 	const searchType = (requestData.searchType as string) ?? "name";
@@ -314,31 +273,6 @@ function getInstanceProperties(requestData: Record<string, unknown>) {
 	} else {
 		return { error: `Failed to get properties: ${result}` };
 	}
-}
-
-function getInstanceChildren(requestData: Record<string, unknown>) {
-	const instancePath = requestData.instancePath as string;
-	if (!instancePath) return { error: "Instance path is required" };
-
-	const instance = getInstanceByPath(instancePath);
-	if (!instance) return { error: `Instance not found: ${instancePath}` };
-
-	const children: { name: string; className: string; path: string; hasChildren: boolean; hasSource: boolean; enabled?: boolean }[] = [];
-	for (const child of instance.GetChildren()) {
-		const entry: { name: string; className: string; path: string; hasChildren: boolean; hasSource: boolean; enabled?: boolean } = {
-			name: child.Name,
-			className: child.ClassName,
-			path: getInstancePath(child),
-			hasChildren: child.GetChildren().size() > 0,
-			hasSource: child.IsA("LuaSourceContainer"),
-		};
-		if (child.IsA("BaseScript")) {
-			entry.enabled = child.Enabled;
-		}
-		children.push(entry);
-	}
-
-	return { instancePath, children, count: children.size() };
 }
 
 function searchByProperty(requestData: Record<string, unknown>) {
@@ -769,106 +703,14 @@ function grepScripts(requestData: Record<string, unknown>) {
 	};
 }
 
-function getDescendants(requestData: Record<string, unknown>) {
-	const instancePath = requestData.instancePath as string;
-	if (!instancePath) return { error: "Instance path is required" };
-
-	const maxDepth = (requestData.maxDepth as number) ?? 10;
-	const classFilter = requestData.classFilter as string | undefined;
-
-	const instance = getInstanceByPath(instancePath);
-	if (!instance) return { error: `Instance not found: ${instancePath}` };
-
-	const descendants: { name: string; className: string; path: string; depth: number }[] = [];
-
-	function collect(inst: Instance, depth: number) {
-		if (depth > maxDepth) return;
-		for (const child of inst.GetChildren()) {
-			if (classFilter && !child.IsA(classFilter as keyof Instances)) continue;
-			descendants.push({
-				name: child.Name,
-				className: child.ClassName,
-				path: getInstancePath(child),
-				depth,
-			});
-			collect(child, depth + 1);
-		}
-	}
-
-	collect(instance, 1);
-
-	return { instancePath, descendants, count: descendants.size(), maxDepth };
-}
-
-function compareInstances(requestData: Record<string, unknown>) {
-	const instancePathA = requestData.instancePathA as string;
-	const instancePathB = requestData.instancePathB as string;
-
-	if (!instancePathA || !instancePathB) {
-		return { error: "Both instancePathA and instancePathB are required" };
-	}
-
-	const instA = getInstanceByPath(instancePathA);
-	if (!instA) return { error: `Instance not found: ${instancePathA}` };
-
-	const instB = getInstanceByPath(instancePathB);
-	if (!instB) return { error: `Instance not found: ${instancePathB}` };
-
-	const commonProps = [
-		"Name", "ClassName",
-		"Size", "Position", "Rotation", "CFrame", "Anchored", "CanCollide",
-		"Transparency", "BrickColor", "Material", "Color", "Text", "TextColor3",
-		"BackgroundColor3", "Image", "ImageColor3", "Visible", "Active", "ZIndex",
-		"BorderSizePixel", "BackgroundTransparency", "ImageTransparency",
-		"TextTransparency", "Value", "Enabled", "Brightness", "Range", "Shadows",
-	];
-
-	const matching: Record<string, string> = {};
-	const differing: Record<string, { a: string; b: string }> = {};
-	const onlyA: string[] = [];
-	const onlyB: string[] = [];
-
-	for (const prop of commonProps) {
-		const [okA, valA] = pcall(() => tostring((instA as unknown as Record<string, unknown>)[prop]));
-		const [okB, valB] = pcall(() => tostring((instB as unknown as Record<string, unknown>)[prop]));
-
-		if (okA && okB) {
-			if (valA === valB) {
-				matching[prop] = valA as string;
-			} else {
-				differing[prop] = { a: valA as string, b: valB as string };
-			}
-		} else if (okA) {
-			onlyA.push(prop);
-		} else if (okB) {
-			onlyB.push(prop);
-		}
-	}
-
-	return {
-		instancePathA,
-		instancePathB,
-		classNameA: instA.ClassName,
-		classNameB: instB.ClassName,
-		matching,
-		differing,
-		onlyA,
-		onlyB,
-	};
-}
-
 export = {
-	getFileTree,
-	searchFiles,
-	getPlaceInfo,
-	getServices,
-	searchObjects,
-	getInstanceProperties,
-	getInstanceChildren,
-	searchByProperty,
-	getClassInfo,
-	getProjectStructure,
-	grepScripts,
-	getDescendants,
-	compareInstances,
+    getFileTree,
+    searchFiles,
+    getPlaceInfo,
+    searchObjects,
+    getInstanceProperties,
+    searchByProperty,
+    getClassInfo,
+    getProjectStructure,
+    grepScripts,
 };

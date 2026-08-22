@@ -56,7 +56,7 @@ describe('HTTP Server', () => {
       const inspectorApp = createHttpServer(
         tools,
         bridge,
-        new Set(['get_file_tree']),
+        new Set(['get_place_info']),
         { name: 'robloxstudio-mcp-inspector', version: '2.0.0', tools: [] },
       );
 
@@ -227,10 +227,9 @@ describe('HTTP Server', () => {
       expect(deleteScriptLines).not.toHaveBeenCalled();
     });
 
-    test('multiplayer handlers forward only supported start arguments', async () => {
+    test('multiplayer handler forwards only supported start arguments', async () => {
       const multiplayerPlaytest = jest.fn(async () => ({ content: [] }));
-      const multiplayerTestStart = jest.fn(async () => ({ content: [] }));
-      const fakeTools = { multiplayerPlaytest, multiplayerTestStart } as unknown as RobloxStudioTools;
+      const fakeTools = { multiplayerPlaytest } as unknown as RobloxStudioTools;
 
       await TOOL_HANDLERS.multiplayer_playtest(fakeTools, {
         action: 'start',
@@ -239,13 +238,6 @@ describe('HTTP Server', () => {
         instance_id: 'place:test',
       });
       expect(multiplayerPlaytest).toHaveBeenLastCalledWith('start', 2, undefined, undefined, undefined, 5, 'place:test');
-
-      await TOOL_HANDLERS.multiplayer_test_start(fakeTools, {
-        numPlayers: 2,
-        timeout: 5,
-        instance_id: 'place:test',
-      });
-      expect(multiplayerTestStart).toHaveBeenLastCalledWith(2, undefined, 5, 'place:test');
     });
 
     test('grep_scripts uses only usePattern for pattern mode', async () => {

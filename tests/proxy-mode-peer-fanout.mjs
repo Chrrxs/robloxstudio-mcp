@@ -59,7 +59,7 @@ await runTest('proxy-mode subprocess fans out to peers via primary', async ({ tr
 
     // Case 2: get_connected_instances should not be empty when peers exist
     const instances = await proxy.callTool('get_connected_instances', {});
-    // Response shape: { instances: [{role, ...}], ... } or similar
+    // Compact response shape: { instances: [{ id, name, roles }] }
     const instList = instances.instances ?? instances;
     assert(Array.isArray(instList) && instList.length > 0,
       `get_connected_instances reports >=1 peer (got: ${Array.isArray(instList) ? instList.length : 'non-array'})`);

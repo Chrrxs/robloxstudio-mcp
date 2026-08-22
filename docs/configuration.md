@@ -27,22 +27,20 @@ Setting `ROBLOX_STUDIO_HOST` to a non-loopback address exposes the bridge to
 other machines. Only do this on a trusted network, retain token authentication,
 and treat the token as a secret.
 
-Code passed to `generate_build` runs in a restricted AST interpreter without
-access to Node globals, `Function`, or prototype chains.
-
 ## Multiple connected places
 
 Connect every open Studio place to the same MCP server URL. The server tracks
-each connection; call `get_connected_instances` and pass the returned
-`instance_id` to route a tool call to a specific game. Per-place port tabs such
-as `58742` are not the supported routing model.
+each connection; call `get_connected_instances` to receive compact
+`{ id, name, roles }` rows, then pass a row's `id` as `instance_id` to route a
+tool call to that game. Per-place port tabs such as `58742` are not the
+supported routing model.
 
 ## Version mismatch behavior
 
 If the Studio plugin and MCP server versions differ, the plugin remains
-connected and displays a yellow warning banner. `get_connected_instances`,
-`/health`, and `/status` also report `pluginVersion`, `serverVersion`, and
-`versionMismatch`.
+connected and displays a yellow warning banner. `/health` and `/status` also
+report version mismatch details; MCP tool results omit this internal diagnostic
+metadata.
 
 Restart the MCP server with `--auto-install-plugin`, then fully close and reopen
 Studio to load the matching plugin.
