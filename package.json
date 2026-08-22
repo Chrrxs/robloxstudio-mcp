@@ -36,6 +36,7 @@
   "devDependencies": {
     "@typescript-eslint/eslint-plugin": "^7.0.0",
     "@typescript-eslint/parser": "^7.0.0",
+    "esbuild": "0.27.2",
     "eslint": "^8.57.0",
     "tsup": "^8.0.0",
     "tsx": "^4.6.0",

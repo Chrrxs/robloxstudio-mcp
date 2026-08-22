@@ -8,8 +8,8 @@ console.log('\n=== multiplayer_test lifecycle controls clients explicitly ===');
 const MARKER = `MULTI_TEST_${Date.now()}`;
 
 async function pickInstanceId(client) {
-  if (process.env.MCP_INSTANCE_ID) return process.env.MCP_INSTANCE_ID;
   await waitForEditPeer(client);
+  if (process.env.MCP_INSTANCE_ID) return process.env.MCP_INSTANCE_ID;
   const connected = await client.callTool('get_connected_instances', {});
   const instances = connected.instances ?? [];
   const edit = instances.find((i) => i.roles?.includes('edit'));
