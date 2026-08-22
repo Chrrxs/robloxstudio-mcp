@@ -1754,6 +1754,45 @@ export class RobloxStudioTools {
     };
   }
 
+  async setSelection(paths: string[], mode: string | undefined, instance_id?: string) {
+    if (!Array.isArray(paths)) {
+      throw new Error('set_selection requires paths (array of instance paths; empty array clears the selection)');
+    }
+    const selectionMode = mode || 'set';
+    if (!['set', 'add', 'remove'].includes(selectionMode)) {
+      throw new Error(`set_selection mode must be "set", "add" or "remove" (got: ${selectionMode})`);
+    }
+    const response = await this._callSingle('/api/set-selection', { paths, mode: selectionMode }, undefined, instance_id);
+    return {
+      content: [
+        {
+          type: 'text',
+          text: JSON.stringify(response)
+        }
+      ]
+    };
+  }
+
+  async focusViewport(instancePath: string, from?: unknown, padding?: number, angleY?: number, instance_id?: string) {
+    if (!instancePath) {
+      throw new Error('focus_viewport requires path (the instance to frame)');
+    }
+    const response = await this._callSingle('/api/focus-viewport', {
+      path: instancePath,
+      from,
+      padding,
+      angleY,
+    }, undefined, instance_id);
+    return {
+      content: [
+        {
+          type: 'text',
+          text: JSON.stringify(response)
+        }
+      ]
+    };
+  }
+
   async executeLuau(code: string, target?: string, instance_id?: string) {
     if (!code) {
       throw new Error('Code is required for execute_luau');

@@ -112,6 +112,8 @@ export const TOOL_HANDLERS: Record<string, ToolHandler> = {
   },
   get_attributes: (tools, body) => tools.getAttributes(body.instancePath, body.instance_id),
   get_selection: (tools, body) => tools.getSelection(body.instance_id),
+  set_selection: (tools, body) => tools.setSelection(body.paths, body.mode, body.instance_id),
+  focus_viewport: (tools, body) => tools.focusViewport(body.path, body.from, body.padding, body.angleY, body.instance_id),
   execute_luau: (tools, body) => tools.executeLuau(body.code, body.target, body.instance_id),
   eval_server_runtime: (tools, body) => tools.evalServerRuntime(body.code, body.instance_id),
   eval_client_runtime: (tools, body) => tools.evalClientRuntime(body.code, body.target, body.instance_id),

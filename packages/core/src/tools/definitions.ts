@@ -296,6 +296,62 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
       }
     }
   },
+  {
+    name: 'set_selection',
+    category: 'write',
+    description: 'Set which objects are highlighted in the Studio editor. Select what you just built or changed: it shows the user the result, and puts the instance under Studio\'s own move and scale handles. Pairs with capture_screenshot — select, then screenshot, so the shot shows what changed. mode="set" replaces the selection (default), "add" extends it, "remove" shrinks it; an empty paths array with mode="set" clears the selection.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        paths: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Instance paths to select, e.g. ["game.Workspace.House.Door"]. Empty array + mode="set" clears.'
+        },
+        mode: {
+          type: 'string',
+          enum: ['set', 'add', 'remove'],
+          description: '"set" replaces the whole selection (default), "add" extends it, "remove" deselects just these.'
+        },
+        instance_id: {
+          type: 'string',
+          description: 'Which connected Studio place to target. Required when multiple places are connected; omit when one. Use get_connected_instances to list available IDs.'
+        }
+      },
+      required: ['paths']
+    }
+  },
+  {
+    name: 'focus_viewport',
+    category: 'write',
+    description: 'Aim the Studio camera at an instance and frame it so the whole thing is on screen. This is what makes capture_screenshot worth having: a picture of wherever the camera happened to be answers nothing, while a picture of the thing you just built answers "does it look right". Workflow: build or change something, focus_viewport it, capture_screenshot. The framing distance is computed from the instance\'s bounding size and the camera\'s field of view, so a doorway and a whole map both fill a similar share of the frame. Use from to pick the viewing direction (a compass angle in degrees: 0 looks from +X toward origin, 90 from +Z), padding to zoom tighter (<1) or wider (>1). Works in Edit mode and during playtests on the running client viewport.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        path: {
+          type: 'string',
+          description: 'The instance to look at: a part, model, or folder containing them.'
+        },
+        from: {
+          type: 'number',
+          description: 'Optional compass angle in degrees for where to view from. Omit to keep a sensible default angle.'
+        },
+        padding: {
+          type: 'number',
+          description: 'Optional framing tightness: 1 fills the frame (default), <1 crops closer, >1 pulls back.'
+        },
+        angleY: {
+          type: 'number',
+          description: 'Optional elevation in degrees above horizontal (default ~20, clamped to avoid gimbal flip at the poles).'
+        },
+        instance_id: {
+          type: 'string',
+          description: 'Which connected Studio place to target. Required when multiple places are connected; omit when one. Use get_connected_instances to list available IDs.'
+        }
+      },
+      required: ['path']
+    }
+  },
 
   // === Luau Execution ===
   {

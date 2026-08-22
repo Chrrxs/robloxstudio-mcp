@@ -189,6 +189,8 @@ describe('Tool schema compatibility', () => {
       delete_script_lines: 'deleteScriptLines',
       get_attributes: 'getAttributes',
       get_selection: 'getSelection',
+      set_selection: 'setSelection',
+      focus_viewport: 'focusViewport',
       execute_luau: 'executeLuau',
       eval_server_runtime: 'evalServerRuntime',
       eval_client_runtime: 'evalClientRuntime',

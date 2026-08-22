@@ -116,10 +116,12 @@ const routeMap: Record<string, Handler> = {
 	"/api/insert-script-lines": ScriptHandlers.insertScriptLines,
 	"/api/delete-script-lines": ScriptHandlers.deleteScriptLines,
 
-    "/api/get-attributes": MetadataHandlers.getAttributes,
-    "/api/get-selection": MetadataHandlers.getSelection,
-    "/api/execute-luau": MetadataHandlers.executeLuau,
-    "/api/eval-runtime": EvalRuntimeHandlers.evalRuntime,
+	"/api/get-attributes": MetadataHandlers.getAttributes,
+	"/api/get-selection": MetadataHandlers.getSelection,
+	"/api/set-selection": MetadataHandlers.setSelection,
+	"/api/focus-viewport": MetadataHandlers.focusViewport,
+	"/api/execute-luau": MetadataHandlers.executeLuau,
+	"/api/eval-runtime": EvalRuntimeHandlers.evalRuntime,
 
 	"/api/start-playtest": TestHandlers.startPlaytest,
 	"/api/stop-playtest": TestHandlers.stopPlaytest,
