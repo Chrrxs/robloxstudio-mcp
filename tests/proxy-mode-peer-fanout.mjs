@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // In multi-session deployments, every MCP subprocess past the first runs
-// in proxy mode (forwarding to localhost:58741). Tools that enumerate
+// in proxy mode (forwarding to the suite's shared port). Tools that enumerate
 // capture/peer data — get_runtime_logs target=all, get_connected_instances,
 // get_memory_breakdown target=all — must return the primary's actual connected
 // data, not the proxy's own empty instances Map. ProxyBridgeService caches
@@ -12,8 +12,8 @@
 // zero values), meaning the aggregator didn't even attempt to query any
 // capture buffer.
 //
-// The test starts a control subprocess first so a primary exists on 58741,
-// then starts a second subprocess which must proxy through that primary.
+// The test starts a control subprocess first so a primary exists on the suite
+// port, then starts a second subprocess which must proxy through that primary.
 
 import { McpClient, runTest, assert, assertContains, startPlaytestAndWait, safeStopPlaytest, waitForEditPeer } from './lib/mcp-client.mjs';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -32,7 +32,7 @@ await runTest('proxy-mode subprocess fans out to peers via primary', async ({ tr
 
   // Confirm setup: this subprocess MUST be in proxy mode for the test to
   // actually exercise the bug. If it's primary, the bug doesn't trigger.
-  assert(proxy.isProxy(), 'spawned subprocess is in proxy mode (primary exists on 58741)');
+  assert(proxy.isProxy(), 'spawned subprocess is in proxy mode (suite primary exists)');
   assert(!proxy.isPrimary(), 'spawned subprocess is NOT a fake primary');
 
   await startPlaytestAndWait(proxy);

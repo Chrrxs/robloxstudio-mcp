@@ -1,14 +1,15 @@
 #!/usr/bin/env node
 
-import { spawn } from 'node:child_process';
 import { createConnection } from 'node:net';
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
-import { McpClient, DIST, REPO_ROOT, assert, assertContains } from './lib/mcp-client.mjs';
+import { BASE_PORT, McpClient, DIST, REPO_ROOT, assert, assertContains } from './lib/mcp-client.mjs';
+import { windowsPortIsAvailable } from './lib/test-port.mjs';
 import {
-  listStudioProcesses,
-  resolvePluginsDir,
+  closeStudioProcess,
+  configureStudioDirectoryIsolation,
+  createIsolatedStudioDirectory,
 } from '../scripts/studio-lifecycle.mjs';
 
 const SERVER_ENV = {
@@ -40,26 +41,6 @@ async function waitPortClosed(port, timeoutMs = 10000) {
   throw new Error(`Port ${port} remained open after server shutdown`);
 }
 
-function backupPluginFiles(pluginsDir) {
-  mkdirSync(pluginsDir, { recursive: true });
-  const backups = new Map();
-  for (const asset of ['MCPPlugin.rbxmx', 'MCPInspectorPlugin.rbxmx']) {
-    const file = path.join(pluginsDir, asset);
-    backups.set(asset, existsSync(file) ? readFileSync(file) : null);
-  }
-  return backups;
-}
-
-function restorePluginFiles(pluginsDir, backups) {
-  for (const [asset, contents] of backups.entries()) {
-    const file = path.join(pluginsDir, asset);
-    if (contents === null) {
-      rmSync(file, { force: true });
-    } else {
-      writeFileSync(file, contents);
-    }
-  }
-}
 
 async function waitForEditInstance(client, expectedVersion, instanceId, timeoutMs = 120000) {
   const deadline = Date.now() + timeoutMs;
@@ -70,7 +51,7 @@ async function waitForEditInstance(client, expectedVersion, instanceId, timeoutM
       const instances = connected.instances ?? [];
       const edit = instances.find((inst) => inst.id === instanceId && inst.roles?.includes('edit'));
       if (edit) {
-        const statusResponse = await fetch('http://127.0.0.1:58741/status');
+        const statusResponse = await fetch(`http://127.0.0.1:${BASE_PORT}/status`);
         const status = await statusResponse.json();
         const peer = status.instances?.find((inst) => inst.role === 'edit' && inst.instanceId === instanceId);
         if (!peer) {
@@ -93,29 +74,93 @@ async function waitForEditInstance(client, expectedVersion, instanceId, timeoutM
   throw new Error(`No edit instance ${instanceId} connected within ${timeoutMs}ms. Last: ${JSON.stringify(last)}`);
 }
 
-async function launchManagedPlace(client) {
+async function launchManagedPlace(client, workingDirectory) {
+  await configureStudioDirectoryIsolation({ requireStudioClosed: false });
   const launched = await client.callTool('manage_instance', {
     action: 'launch',
     source: 'baseplate',
+    require_process_identity: true,
+    studio_working_directory: workingDirectory,
     timeout_ms: 120000,
   });
-  assert(!!launched.instance_id, `manage_instance launched Studio (${JSON.stringify(launched)})`);
-  return launched.instance_id;
+  assert(!!launched.launch_id, `manage_instance returned launch ownership (${JSON.stringify(launched)})`);
+  assert(
+    Number.isSafeInteger(launched.pid) &&
+      launched.pid > 0 &&
+      typeof launched.process_started_at_file_time === 'string',
+    `manage_instance returned exact Studio process identity (${JSON.stringify(launched)})`,
+  );
+
+  try {
+    const authorized = await client.callTool('manage_instance', {
+      action: 'authorize',
+      launch_id: launched.launch_id,
+    });
+    assert(authorized.process_authorized === true, `manage_instance authorized launch ${launched.launch_id}`);
+    const completed = await client.callTool('manage_instance', {
+      action: 'complete',
+      launch_id: launched.launch_id,
+    });
+    assert(
+      completed.process_ownership_released === true,
+      `manage_instance released launch ${launched.launch_id}`,
+    );
+
+    const deadline = Date.now() + 120000;
+    let status;
+    while (Date.now() < deadline) {
+      status = await client.callTool('manage_instance', {
+        action: 'status',
+        launch_id: launched.launch_id,
+      });
+      if (
+        status.connected === true &&
+        typeof status.instance_id === 'string' &&
+        status.instance_id &&
+        Array.isArray(status.roles) &&
+        status.roles.includes('edit')
+      ) {
+        return { ...launched, instance_id: status.instance_id };
+      }
+      if (status.state === 'failed' || status.state === 'exited') {
+        throw new Error(
+          `Managed Studio launch ${launched.launch_id} entered ${status.state}: ` +
+          `${status.failure_reason ?? 'Studio did not connect'}`,
+        );
+      }
+      await delay(250);
+    }
+    throw new Error(
+      `Managed Studio launch ${launched.launch_id} did not connect within 120000ms: ${JSON.stringify(status)}`,
+    );
+  } catch (error) {
+    try {
+      await closeStudioProcess({
+        processId: launched.pid,
+        startedAtFileTime: launched.process_started_at_file_time,
+      });
+    } catch (identityError) {
+      throw new AggregateError(
+        [error, identityError],
+        `Studio launch ${launched.launch_id} failed and exact cleanup also failed`,
+        { cause: error },
+      );
+    }
+    throw error;
+  }
 }
 
-async function closeManagedInstance(client, instanceId) {
-  if (!instanceId) return;
+async function closeManagedInstance(client, launch) {
+  if (!launch) return;
   const closed = await client.callTool('manage_instance', {
     action: 'close',
-    instance_id: instanceId,
+    launch_id: launch.launch_id,
   });
-  assert(!closed.error, `manage_instance closed Studio instance ${instanceId}`);
-  const deadline = Date.now() + 30000;
-  while (Date.now() < deadline) {
-    if (listStudioProcesses().length === 0) return;
-    await delay(500);
-  }
-  throw new Error(`Studio processes remain after manage_instance close: ${JSON.stringify(listStudioProcesses())}`);
+  assert(!closed.error, `manage_instance closed Studio launch ${launch.launch_id}`);
+  assert(
+    closed.close_status === 'closed' || closed.close_status === 'already_closed',
+    `manage_instance confirmed Studio launch ${launch.launch_id} stopped`,
+  );
 }
 
 function assertNoError(value, message) {
@@ -360,72 +405,110 @@ return true`,
   }
 }
 
-function runLiveRegressionSuite(instanceId) {
-  console.log('\n=== existing live Studio regression suite ===');
-  return new Promise((resolve, reject) => {
-    const proc = spawn('node', ['tests/run-all.mjs'], {
-      cwd: REPO_ROOT,
-      env: { ...process.env, ...SERVER_ENV, MCP_INSTANCE_ID: instanceId },
-      stdio: 'inherit',
-    });
-    proc.on('exit', (code) => {
-      if (code === 0) resolve();
-      else reject(new Error(`tests/run-all.mjs exited with ${code ?? 1}`));
-    });
-  });
-}
 
 async function main() {
-  if (process.env.RSMCP_E2E_CLOSE_ALL_STUDIO !== '1') {
-    throw new Error('This smoke test launches and closes a managed Roblox Studio instance. Set RSMCP_E2E_CLOSE_ALL_STUDIO=1 to run it.');
-  }
-  if (await isPortOpen(58741)) {
-    throw new Error('Port 58741 is already occupied. Stop existing MCP servers before running this smoke test.');
-  }
-  const existingStudio = listStudioProcesses();
-  if (existingStudio.length > 0) {
-    throw new Error(`Close existing Studio windows before running this smoke test: ${JSON.stringify(existingStudio)}`);
+  const existingInstanceId = process.env.MCP_INSTANCE_ID?.trim();
+  if (existingInstanceId) {
+    const client = new McpClient('regular-tooling-existing', { env: SERVER_ENV });
+    try {
+      await client.start();
+      await client.initialize();
+      await runEditModeToolSmoke(client, existingInstanceId);
+    } finally {
+      await client.stop();
+    }
+    return;
   }
 
+  if (await isPortOpen(BASE_PORT)) {
+    throw new Error(`Port ${BASE_PORT} is already occupied. Stop existing MCP servers before running this smoke test.`);
+  }
+  if (!windowsPortIsAvailable(BASE_PORT)) {
+    throw new Error(
+      `A Windows process is listening on port ${BASE_PORT}. ` +
+      'Studio would connect to it instead of the test server.',
+    );
+  }
+
+  await configureStudioDirectoryIsolation({ requireStudioClosed: false });
+  const worker = createIsolatedStudioDirectory({ prefix: 'tooling-smoke' });
   const { version } = JSON.parse(readFileSync(path.join(REPO_ROOT, 'package.json'), 'utf8'));
-  const pluginsDir = resolvePluginsDir();
-  const backups = backupPluginFiles(pluginsDir);
   let client;
-  let instanceId;
+  let launch;
+  let bodyError;
 
   try {
     client = new McpClient('regular-tooling-primary', {
       command: 'node',
       args: [DIST, '--auto-install-plugin'],
-      env: SERVER_ENV,
+      env: {
+        ...SERVER_ENV,
+        MCP_PLUGINS_DIR: worker.pluginsDirectory,
+        RSMCP_STUDIO_WORKING_DIRECTORY: worker.workingDirectory,
+      },
       startupTimeoutMs: 60000,
     });
     await client.start();
     await client.initialize();
 
-    instanceId = await launchManagedPlace(client);
-    const edit = await waitForEditInstance(client, version, instanceId);
+    launch = await launchManagedPlace(client, worker.workingDirectory);
+    const edit = await waitForEditInstance(client, version, launch.instance_id);
     await runEditModeToolSmoke(client, edit.instanceId);
-    await runLiveRegressionSuite(edit.instanceId);
+  } catch (error) {
+    bodyError = error;
+    throw error;
   } finally {
-    if (client && instanceId) {
-      await closeManagedInstance(client, instanceId).catch((err) => {
-        console.warn(`  (manage_instance close cleanup failed): ${err.message}`);
-      });
+    const cleanupErrors = [];
+    if (client && launch) {
+      try {
+        await closeManagedInstance(client, launch);
+      } catch (error) {
+        cleanupErrors.push(error);
+        try {
+          await closeStudioProcess({
+            processId: launch.pid,
+            startedAtFileTime: launch.process_started_at_file_time,
+          });
+        } catch (identityError) {
+          cleanupErrors.push(identityError);
+        }
+      }
     }
     if (client) {
-      await client.stop();
-      await waitPortClosed(58741).catch(() => {});
+      try {
+        await client.stop();
+        await waitPortClosed(BASE_PORT);
+      } catch (error) {
+        cleanupErrors.push(error);
+      }
     }
-    restorePluginFiles(pluginsDir, backups);
-    const remaining = listStudioProcesses();
-    if (remaining.length > 0) {
-      throw new Error(`Studio processes remain after cleanup: ${JSON.stringify(remaining)}`);
+    try {
+      await configureStudioDirectoryIsolation({ requireStudioClosed: false });
+    } catch (error) {
+      cleanupErrors.push(error);
+    }
+    await delay(1000);
+    try {
+      worker.cleanup();
+    } catch (error) {
+      cleanupErrors.push(error);
+    }
+    if (cleanupErrors.length > 0) {
+      if (bodyError) {
+        throw new AggregateError(
+          [bodyError, ...cleanupErrors],
+          `Studio tooling smoke failed and cleanup also failed: ${cleanupErrors.map(String).join('; ')}`,
+          { cause: bodyError },
+        );
+      }
+      throw new AggregateError(cleanupErrors, 'Studio tooling smoke cleanup failed');
     }
   }
 }
 
-main().catch((err) => {
+try {
+  await main();
+} catch (err) {
   console.error(`\n❌ regular Studio tooling smoke failed: ${err instanceof Error ? err.message : String(err)}`);
-  process.exit(1);
-});
+  process.exitCode = 1;
+}

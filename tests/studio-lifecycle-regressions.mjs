@@ -1,27 +1,25 @@
 #!/usr/bin/env node
 
+import { randomUUID } from 'node:crypto';
 import { createConnection } from 'node:net';
 import {
-  existsSync,
-  mkdtempSync,
   readFileSync,
   readdirSync,
-  rmSync,
   statSync,
   writeFileSync,
 } from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
-import { McpClient, DIST, assert } from './lib/mcp-client.mjs';
+import { BASE_PORT, McpClient, DIST, assert } from './lib/mcp-client.mjs';
 import { resolveAuthToken } from '../packages/core/dist/auth.js';
 import {
-  closeAllStudio,
-  listStudioProcesses,
-  resolvePluginsDir,
+  closeStudioProcess,
+  configureStudioDirectoryIsolation,
+  createIsolatedStudioDirectory,
+  resolveStudioLogsDir,
 } from '../scripts/studio-lifecycle.mjs';
 
-const INSTANCE_UUID = '11111111-2222-4333-8444-555555555555';
+const INSTANCE_UUID = randomUUID();
 const INSTANCE_ID = `anon:${INSTANCE_UUID}`;
 const REPRO_PLUGIN_NAME = '000_RSMCP_EditHistoryRepro.rbxmx';
 const SERVER_ENV = {
@@ -99,18 +97,58 @@ function reproPluginXml(marker, invalidUtf8 = false) {
 `;
 }
 
-async function launchLocalPlace(client, placeFile) {
-  return client.callTool('manage_instance', {
+async function launchLocalPlace(client, placeFile, workingDirectory, launchedProcesses) {
+  await configureStudioDirectoryIsolation({ requireStudioClosed: false });
+  const launch = await client.callTool('manage_instance', {
     action: 'launch',
     source: 'local_file',
     local_place_file: placeFile,
+    studio_working_directory: workingDirectory,
+    require_process_identity: true,
+    wait_for_connection: false,
     timeout_ms: 120000,
-  }, 130000);
+  });
+  assert(!!launch.launch_id, `identity launch returned launch_id (${JSON.stringify(launch)})`);
+  assert(Number.isSafeInteger(launch.pid), `identity launch returned pid (${JSON.stringify(launch)})`);
+  assert(
+    typeof launch.process_started_at_file_time === 'string',
+    `identity launch returned process creation time (${JSON.stringify(launch)})`,
+  );
+  launchedProcesses.push({
+    processId: launch.pid,
+    startedAtFileTime: launch.process_started_at_file_time,
+  });
+
+  const authorized = await client.callTool('manage_instance', {
+    action: 'authorize',
+    launch_id: launch.launch_id,
+  });
+  assert(authorized.process_authorized === true, 'identity launch was authorized');
+  const completed = await client.callTool('manage_instance', {
+    action: 'complete',
+    launch_id: launch.launch_id,
+  });
+  assert(completed.process_ownership_released === true, 'identity launch ownership was released');
+
+  const deadline = Date.now() + 120000;
+  let status;
+  while (Date.now() < deadline) {
+    status = await client.callTool('manage_instance', {
+      action: 'status',
+      launch_id: launch.launch_id,
+    });
+    if (status.connected && status.instance_id) {
+      return { ...status, launch_id: launch.launch_id };
+    }
+    if (status.state === 'failed' || status.state === 'exited') break;
+    await delay(250);
+  }
+  throw new Error(`Managed Studio launch did not connect: ${JSON.stringify(status)}`);
 }
 
 async function serverInstances() {
   const { token } = resolveAuthToken();
-  const response = await fetch('http://127.0.0.1:58741/instances', {
+  const response = await fetch(`http://127.0.0.1:${BASE_PORT}/instances`, {
     headers: token ? { 'X-MCP-Auth': token } : undefined,
   });
   if (!response.ok) throw new Error(`/instances returned HTTP ${response.status}`);
@@ -118,7 +156,7 @@ async function serverInstances() {
 }
 
 async function waitForStudioLogLine(needle, startedAt, timeoutMs = 20_000) {
-  const logsDir = path.resolve(resolvePluginsDir(), '..', 'logs');
+  const logsDir = resolveStudioLogsDir();
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     const candidates = readdirSync(logsDir)
@@ -154,25 +192,21 @@ async function assertLogMarker(client, marker, expectedCount, expectedLevel = 'E
 }
 
 async function main() {
-  if (process.env.RSMCP_E2E_CLOSE_ALL_STUDIO !== '1') {
-    throw new Error('This E2E force-closes Studio. Set RSMCP_E2E_CLOSE_ALL_STUDIO=1 to run it.');
-  }
-  if (await isPortOpen(58741)) {
-    throw new Error('Port 58741 is already occupied. Stop existing MCP servers before running this E2E.');
-  }
-  if (listStudioProcesses().length > 0) {
-    throw new Error(`Close existing Studio windows before running this E2E: ${JSON.stringify(listStudioProcesses())}`);
+  if (await isPortOpen(BASE_PORT)) {
+    throw new Error(`Port ${BASE_PORT} is already occupied. Stop existing MCP servers before running this E2E.`);
   }
 
-  const tempRoot = mkdtempSync(path.join(os.tmpdir(), 'robloxstudio-mcp-lifecycle-e2e-'));
-  const placeFile = path.join(tempRoot, 'Lifecycle.rbxlx');
-  const reproPlugin = path.join(resolvePluginsDir(), REPRO_PLUGIN_NAME);
-  const priorReproPlugin = existsSync(reproPlugin) ? readFileSync(reproPlugin) : undefined;
+  await configureStudioDirectoryIsolation({ requireStudioClosed: false });
+  const worker = createIsolatedStudioDirectory({ prefix: 'lifecycle-regressions' });
+  const placeFile = path.join(worker.workingDirectory, 'Lifecycle.rbxlx');
+  const reproPlugin = path.join(worker.pluginsDirectory, REPRO_PLUGIN_NAME);
   const markerA = `[MCP-EDIT-HISTORY-E2E-A-${Date.now()}]`;
   const markerB = `[MCP-EDIT-HISTORY-E2E-B-${Date.now()}]`;
   const liveInvalidMarker = `[MCP-LIVE-INVALID-UTF8-${Date.now()}]`;
+  const launchedProcesses = [];
   let client;
   let keepOldSessionAlive;
+  let bodyError;
 
   try {
     writeFileSync(placeFile, lifecyclePlaceXml());
@@ -180,15 +214,24 @@ async function main() {
 
     client = new McpClient('studio-lifecycle-regressions', {
       command: 'node',
-      args: [DIST],
-      env: SERVER_ENV,
+      args: [DIST, '--auto-install-plugin'],
+      env: {
+        ...SERVER_ENV,
+        MCP_PLUGINS_DIR: worker.pluginsDirectory,
+        RSMCP_STUDIO_WORKING_DIRECTORY: worker.workingDirectory,
+      },
       startupTimeoutMs: 60000,
     });
     await client.start();
     await client.initialize();
 
     console.log('\n=== edit startup history captures pre-listener errors ===');
-    const firstLaunch = await launchLocalPlace(client, placeFile);
+    const firstLaunch = await launchLocalPlace(
+      client,
+      placeFile,
+      worker.workingDirectory,
+      launchedProcesses,
+    );
     assert(firstLaunch.instance_id === INSTANCE_ID, 'first launch uses the persisted anonymous instance id');
     const firstSessions = matchingEditSessions(await serverInstances());
     assert(firstSessions.length === 1, 'first launch has one edit registration');
@@ -201,18 +244,24 @@ async function main() {
 
     // Force termination prevents plugin.Unloading from reliably completing
     // /disconnect, reproducing the stale-registration fast-relaunch race.
-    await closeAllStudio({ requireEnv: false });
+    await closeStudioProcess(launchedProcesses[0]);
+    await configureStudioDirectoryIsolation({ requireStudioClosed: false });
     writeFileSync(reproPlugin, reproPluginXml(markerB));
 
     // Keep the dead session artificially fresh through the replacement's
     // initial /ready. This guarantees a real HTTP 409, after which the new
     // plugin must continue polling and retry automatically.
     keepOldSessionAlive = setInterval(() => {
-      fetch(`http://127.0.0.1:58741/poll?pluginSessionId=${encodeURIComponent(firstSessionId)}`).catch(() => {});
+      fetch(`http://127.0.0.1:${BASE_PORT}/poll?pluginSessionId=${encodeURIComponent(firstSessionId)}`).catch(() => {});
     }, 250);
     console.log('\n=== fast relaunch automatically takes over a stale predecessor ===');
     const relaunchedAt = Date.now();
-    const secondLaunchPromise = launchLocalPlace(client, placeFile);
+    const secondLaunchPromise = launchLocalPlace(
+      client,
+      placeFile,
+      worker.workingDirectory,
+      launchedProcesses,
+    );
     const conflictObservedAt = await waitForStudioLogLine(
       `/ready rejected for ${INSTANCE_ID}/edit: HTTP 409 Conflict`,
       relaunchedAt,
@@ -266,17 +315,70 @@ async function main() {
       'live MessageOut capture escapes malformed UTF-8 bytes without dropping the log message',
     );
     console.log('\n✅ Studio lifecycle regressions PASSED');
+  } catch (error) {
+    bodyError = error;
+    throw error;
   } finally {
-    if (keepOldSessionAlive) clearInterval(keepOldSessionAlive);
-    await closeAllStudio({ requireEnv: false }).catch(() => {});
-    if (client) await client.stop();
-    if (priorReproPlugin === undefined) rmSync(reproPlugin, { force: true });
-    else writeFileSync(reproPlugin, priorReproPlugin);
-    rmSync(tempRoot, { recursive: true, force: true });
+    const cleanupErrors = [];
+    clearInterval(keepOldSessionAlive);
+    if (client) {
+      try {
+        const status = await client.callTool('manage_instance', { action: 'status' });
+        for (const record of status?.managed ?? []) {
+          if (
+            record.studio_working_directory === worker.workingDirectory &&
+            typeof record.launch_id === 'string'
+          ) {
+            await client.callTool('manage_instance', {
+              action: 'close',
+              launch_id: record.launch_id,
+            });
+          }
+        }
+      } catch (error) {
+        cleanupErrors.push(error);
+      }
+    }
+    for (const identity of launchedProcesses) {
+      try {
+        await closeStudioProcess(identity);
+      } catch (error) {
+        cleanupErrors.push(error);
+      }
+    }
+    if (client) {
+      try {
+        await client.stop();
+      } catch (error) {
+        cleanupErrors.push(error);
+      }
+    }
+    try {
+      await configureStudioDirectoryIsolation({ requireStudioClosed: false });
+    } catch (error) {
+      cleanupErrors.push(error);
+    }
+    try {
+      worker.cleanup();
+    } catch (error) {
+      cleanupErrors.push(error);
+    }
+    if (cleanupErrors.length > 0) {
+      if (bodyError) {
+        throw new AggregateError(
+          [bodyError, ...cleanupErrors],
+          `Studio lifecycle regression failed and cleanup also failed: ${cleanupErrors.map(String).join('; ')}`,
+          { cause: bodyError },
+        );
+      }
+      throw new AggregateError(cleanupErrors, 'Studio lifecycle regression cleanup failed');
+    }
   }
 }
 
-main().catch((error) => {
+try {
+  await main();
+} catch (error) {
   console.error(`\n❌ Studio lifecycle regressions FAILED: ${error instanceof Error ? error.stack ?? error.message : String(error)}`);
-  process.exit(1);
-});
+  process.exitCode = 1;
+}

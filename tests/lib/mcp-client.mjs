@@ -1,11 +1,10 @@
 // Shared utility for integration tests under tests/.
 //
 // Spawns the built MCP server (packages/robloxstudio-mcp/dist/index.js) as a
-// subprocess and drives it via stdio JSON-RPC. If port 58741 is already
-// claimed by another MCP subprocess (typically the developer's Claude Code
-// instance), the spawned subprocess enters proxy mode and forwards through
-// the existing primary — which is the correct behavior for testing the
-// proxy-mode code path.
+// subprocess and drives it via stdio JSON-RPC. Every subprocess in one suite
+// shares BASE_PORT: the first is primary and later subprocesses proxy through
+// it. Self-contained suite wrappers assign distinct ports so concurrent
+// worktrees cannot proxy into one another.
 //
 // Each test file is responsible for its own playtest start/stop lifecycle.
 // Tests should leave the Studio state clean (no orphan playtests, no
@@ -15,11 +14,12 @@ import { spawn } from 'node:child_process';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
+import { testBasePort } from './test-port.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 export const REPO_ROOT = resolve(__dirname, '..', '..');
 export const DIST = resolve(REPO_ROOT, 'packages/robloxstudio-mcp/dist/index.js');
-export const BASE_PORT = 58741;
+export const BASE_PORT = testBasePort();
 
 const ROUTED_TOOLS = new Set([
   'solo_playtest',
@@ -42,6 +42,16 @@ const ROUTED_TOOLS = new Set([
   'simulate_keyboard_input',
 ]);
 
+let confirmedAutoAssignedPrimary;
+
+function hasLiveConfirmedPrimary() {
+  const client = confirmedAutoAssignedPrimary;
+  return client?.proc
+    && client.exitCode === null
+    && !client.proc.killed
+    && client.proc.signalCode === null;
+}
+
 export class McpClient {
   constructor(label = 'client', options = {}) {
     this.label = label;
@@ -55,13 +65,27 @@ export class McpClient {
     this.pending = new Map();
     this.stderrLines = [];
     this.stdoutBuf = '';
+    this.stderrBuf = '';
     this.exitCode = null;
   }
 
   async start() {
+    const childEnv = { ...process.env, ...this.env };
+    const autoAssignedPort = childEnv.RSMCP_AUTO_ASSIGNED_PORT === '1';
+    const mustEstablishPrimary = autoAssignedPort && !hasLiveConfirmedPrimary();
+    const explicitClientRequirement = Object.prototype.hasOwnProperty.call(
+      this.env ?? {},
+      'ROBLOX_STUDIO_REQUIRE_PRIMARY',
+    );
+    if (mustEstablishPrimary) {
+      childEnv.ROBLOX_STUDIO_REQUIRE_PRIMARY = '1';
+    } else if (autoAssignedPort && !explicitClientRequirement) {
+      delete childEnv.ROBLOX_STUDIO_REQUIRE_PRIMARY;
+    }
+
     this.proc = spawn(this.command, this.args, {
       cwd: this.cwd,
-      env: this.env ? { ...process.env, ...this.env } : process.env,
+      env: childEnv,
       stdio: ['pipe', 'pipe', 'pipe'],
     });
     this.proc.stdout.setEncoding('utf8');
@@ -90,8 +114,13 @@ export class McpClient {
     });
 
     this.proc.stderr.on('data', (chunk) => {
-      const lines = chunk.split('\n').filter((l) => l.trim());
-      for (const line of lines) this.stderrLines.push(line);
+      this.stderrBuf += chunk;
+      let nl;
+      while ((nl = this.stderrBuf.indexOf('\n')) !== -1) {
+        const line = this.stderrBuf.slice(0, nl).trim();
+        this.stderrBuf = this.stderrBuf.slice(nl + 1);
+        if (line) this.stderrLines.push(line);
+      }
     });
 
     this.proc.on('exit', (code) => {
@@ -101,12 +130,22 @@ export class McpClient {
         pending.reject(new Error(`McpClient ${this.label}: subprocess exited before RPC ${id} completed`));
       }
       this.pending.clear();
+      if (confirmedAutoAssignedPrimary === this) {
+        confirmedAutoAssignedPrimary = undefined;
+      }
     });
 
     // Wait for the subprocess to print its "running on stdio" banner so we
     // know stdio MCP is ready. Bound at 5s — fresh launches usually settle
     // in <1s but cold-start can stretch.
     await this._waitForLog('running on stdio', this.startupTimeoutMs);
+    if (mustEstablishPrimary) {
+      if (!this.isPrimary()) {
+        await this.stop();
+        throw new Error(`McpClient ${this.label}: auto-assigned port did not start in primary mode`);
+      }
+      confirmedAutoAssignedPrimary = this;
+    }
   }
 
   async _waitForLog(substr, timeoutMs) {
@@ -174,6 +213,9 @@ export class McpClient {
   }
 
   async stop() {
+    if (confirmedAutoAssignedPrimary === this) {
+      confirmedAutoAssignedPrimary = undefined;
+    }
     if (this.proc && !this.proc.killed) {
       for (const [id, pending] of this.pending.entries()) {
         clearTimeout(pending.timeoutId);
@@ -209,6 +251,18 @@ export function assertNotContains(haystack, needle, msg) {
     throw new Error(`ASSERT FAIL: ${msg}\n    unexpected substring: ${JSON.stringify(needle)}\n    in: ${JSON.stringify(haystack)}`);
   }
   console.log(`  ✓ ${msg}`);
+}
+
+export function selectEditInstance(connected, expectedInstanceId = process.env.MCP_INSTANCE_ID) {
+  const instances = connected?.instances ?? connected;
+  if (!Array.isArray(instances)) return undefined;
+  return instances.find((instance) => {
+    const id = instance?.id ?? instance?.instanceId;
+    const roles = Array.isArray(instance?.roles)
+      ? instance.roles
+      : (instance?.role ? [instance.role] : []);
+    return roles.includes('edit') && (!expectedInstanceId || id === expectedInstanceId);
+  });
 }
 
 async function getInstanceList(client) {

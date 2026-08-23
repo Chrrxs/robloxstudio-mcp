@@ -8,6 +8,50 @@ import { getStudioPlatformCapabilities } from './studio-platform.js';
 // @chrrxs/robloxstudio-mcp and @chrrxs/robloxstudio-mcp-inspector. Bundled
 // into both via tsup's noExternal at publish time, so changes here ship in
 // both packages on the next publish.
+const DEFAULT_PLUGIN_PORT = 58741;
+const SERVER_URL_SETTING_KEY_PATTERN =
+  /MCP_LAST_SUCCESSFUL_SERVER_URL_GLOBAL_V1|MCP_LAST_SUCCESSFUL_SERVER_URL_|MCP_SERVER_URL_/g;
+
+/**
+ * The bundled plugin is XML, so a custom bridge port can be embedded without
+ * rebuilding it. Port-specific setting keys prevent a remembered default URL
+ * from overriding the custom URL when Studio starts.
+ */
+export function configurePluginAssetForPort(
+  source: Buffer,
+  rawPort: string | undefined = process.env.ROBLOX_STUDIO_PORT,
+): Buffer {
+  if (rawPort === undefined || rawPort === '') return source;
+  if (!/^\d+$/.test(rawPort)) {
+    throw new Error(`ROBLOX_STUDIO_PORT must be an integer from 1 to 65535; received ${JSON.stringify(rawPort)}`);
+  }
+
+  const port = Number(rawPort);
+  if (!Number.isSafeInteger(port) || port < 1 || port > 65535) {
+    throw new Error(`ROBLOX_STUDIO_PORT must be an integer from 1 to 65535; received ${JSON.stringify(rawPort)}`);
+  }
+  if (port === DEFAULT_PLUGIN_PORT) return source;
+
+  const defaultPort = String(DEFAULT_PLUGIN_PORT);
+  const configuredPort = String(port);
+  const defaultUrl = `http://localhost:${defaultPort}`;
+  const defaultBasePort = `BASE_PORT = ${defaultPort}`;
+  const original = source.toString('utf8');
+  if (!original.includes(defaultUrl) || !original.includes(defaultBasePort)) {
+    throw new Error(`Bundled Studio plugin does not contain the expected default port ${defaultPort}`);
+  }
+
+  const configured = original
+    .replaceAll(defaultUrl, `http://localhost:${configuredPort}`)
+    .replaceAll(defaultBasePort, `BASE_PORT = ${configuredPort}`)
+    .replace(
+      SERVER_URL_SETTING_KEY_PATTERN,
+      (key) => key.endsWith('_')
+        ? `${key}PORT_${configuredPort}_`
+        : `${key}_PORT_${configuredPort}`,
+    );
+  return Buffer.from(configured, 'utf8');
+}
 
 export function isWSL(): boolean {
   return getStudioPlatformCapabilities().isWsl;

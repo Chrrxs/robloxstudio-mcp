@@ -8,6 +8,7 @@ import {
 import { RobloxCookieClient } from '../roblox-cookie-client.js';
 import {
   parseStudioProcessEnvironmentPatch,
+  parseStudioWorkingDirectory,
   StudioInstanceManager,
   type ManagedStudioInstance,
   type StudioLaunchSource,
@@ -2724,6 +2725,7 @@ export class RobloxStudioTools {
       consecutive_confirmed_misses: record.consecutiveConfirmedMisses ?? 0,
       source: record.source,
       local_place_file: record.localPlaceFile,
+      studio_working_directory: record.studioWorkingDirectory,
       place_id: record.placeId,
       place_version: record.placeVersion,
       launched_at: new Date(record.launchedAt).toISOString(),
@@ -2955,6 +2957,7 @@ export class RobloxStudioTools {
       studioExecutable = request.studio_executable;
     }
     const processEnvironment = parseStudioProcessEnvironmentPatch(request.process_environment);
+    const studioWorkingDirectory = parseStudioWorkingDirectory(request.studio_working_directory);
 
     if (launchSource === 'published_place' && placeId !== undefined && await this._isLatestPublishedPlaceOpen(placeId)) {
       return this._textResult({
@@ -2983,6 +2986,7 @@ export class RobloxStudioTools {
       connectionTimeoutMs: timeoutMs,
       studioExecutable,
       processEnvironment,
+      studioWorkingDirectory,
       ...(requireProcessIdentity ? { requireProcessIdentity: true } : {}),
     });
 

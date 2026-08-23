@@ -3,7 +3,14 @@
 // bracket-quoted paths for unsafe names, accept those paths everywhere, and
 // still accept legacy paths such as "..dir" for names that begin with a dot.
 
-import { McpClient, runTest, assert, assertContains, waitForEditPeer } from './lib/mcp-client.mjs';
+import {
+  McpClient,
+  runTest,
+  assert,
+  assertContains,
+  selectEditInstance,
+  waitForEditPeer,
+} from './lib/mcp-client.mjs';
 
 const LUAU_KEYWORDS = new Set([
   'and', 'break', 'continue', 'do', 'else', 'elseif', 'end', 'export',
@@ -50,9 +57,14 @@ await runTest('canonical instance paths resolve across tools', async ({ track })
   await waitForEditPeer(client);
 
   const instances = await client.callTool('get_connected_instances', {});
-  const edit = instances.instances?.find((i) => i.roles?.includes('edit'));
-  const instanceId = edit?.id;
-  assert(typeof instanceId === 'string' && instanceId.length > 0, 'edit instance is connected');
+  const edit = selectEditInstance(instances);
+  const instanceId = edit?.id ?? edit?.instanceId;
+  assert(
+    typeof instanceId === 'string' && instanceId.length > 0,
+    process.env.MCP_INSTANCE_ID
+      ? `requested edit instance ${process.env.MCP_INSTANCE_ID} is connected`
+      : 'edit instance is connected',
+  );
 
   let originalServerScriptServiceName;
   const renameService = await client.callTool('execute_luau', {

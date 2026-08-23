@@ -30,6 +30,7 @@ export interface ManagedInstanceRegistryRecord {
   universeId?: number;
   placeVersion?: number;
   localPlaceFile?: string;
+  studioWorkingDirectory?: string;
   deleteLocalPlaceFileOnClose?: boolean;
   launchedAt: number;
   attachedAt?: number;

@@ -11,7 +11,12 @@ export {
 } from './tools/definitions.js';
 export type { ToolDefinition, ToolCategory } from './tools/definitions.js';
 export { OpenCloudClient } from './opencloud-client.js';
-export { getPluginsFolder, isWSL, handleVariantConflict } from './install-plugin-helpers.js';
+export {
+  configurePluginAssetForPort,
+  getPluginsFolder,
+  handleVariantConflict,
+  isWSL,
+} from './install-plugin-helpers.js';
 export { RobloxCookieClient } from './roblox-cookie-client.js';
 export {
   canonicalBuiltInSkillName,

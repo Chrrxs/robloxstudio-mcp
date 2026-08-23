@@ -34,6 +34,7 @@ export interface StudioLaunchOptions {
   connectionTimeoutMs?: number;
   studioExecutable?: string;
   processEnvironment?: StudioProcessEnvironmentPatch;
+  studioWorkingDirectory?: string;
   requireProcessIdentity?: boolean;
 }
 
@@ -52,6 +53,7 @@ export interface ManagedStudioInstance {
   universeId?: number;
   placeVersion?: number;
   localPlaceFile?: string;
+  studioWorkingDirectory?: string;
   launchedAt: number;
   connectionDeadlineAt?: number;
   state: StudioLaunchState;
@@ -136,6 +138,7 @@ export interface StudioInstanceManagerOptions {
     exe: string,
     args: string[],
     processEnvironment?: StudioProcessEnvironmentPatch,
+    studioWorkingDirectory?: string,
   ) => StudioChildProcess | Promise<StudioChildProcess>;
   confirmedExitMisses?: number;
   confirmedExitGraceMs?: number;
@@ -336,6 +339,14 @@ export function parseStudioProcessEnvironmentPatch(value: unknown): StudioProces
   return { set, remove };
 }
 
+export function parseStudioWorkingDirectory(value: unknown): string | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== 'string' || value.trim().length === 0 || value.includes('\0')) {
+    throw new Error('studio_working_directory must be a non-empty string without null characters.');
+  }
+  return value;
+}
+
 function patchedProcessEnvironment(patch: StudioProcessEnvironmentPatch): NodeJS.ProcessEnv {
   const environment = { ...process.env };
   for (const name of patch.remove ?? []) delete environment[name];
@@ -380,14 +391,22 @@ export function buildWindowsStudioStartScript(
   exe: string,
   args: string[],
   processEnvironment?: StudioProcessEnvironmentPatch,
+  studioWorkingDirectory?: string,
 ): string {
-  return buildWindowsStudioStartScriptFromConvertedExe(toStudioLaunchArg(exe), args, processEnvironment);
+  const workingDirectory = parseStudioWorkingDirectory(studioWorkingDirectory);
+  return buildWindowsStudioStartScriptFromConvertedExe(
+    toStudioLaunchArg(exe),
+    args,
+    processEnvironment,
+    workingDirectory ? toStudioLaunchArg(workingDirectory) : undefined,
+  );
 }
 
 function buildWindowsStudioStartScriptFromConvertedExe(
   windowsExe: string,
   args: string[],
   processEnvironment?: StudioProcessEnvironmentPatch,
+  windowsWorkingDirectory?: string,
 ): string {
   const environmentPatch = parseStudioProcessEnvironmentPatch(processEnvironment);
   const commandLine = [windowsExe, ...args].map(quoteWindowsCommandLineArg).join(' ');
@@ -588,7 +607,7 @@ public sealed class McpSuspendedStudio : IDisposable
             throw new InvalidOperationException("Unexpected Studio process wait result: " + wait);
     }
 
-    public static McpSuspendedStudio Start(string application, string commandLine)
+    public static McpSuspendedStudio Start(string application, string commandLine, string currentDirectory)
     {
         IntPtr jobHandle = CreateJobObjectW(IntPtr.Zero, null);
         if (jobHandle == IntPtr.Zero)
@@ -600,9 +619,9 @@ public sealed class McpSuspendedStudio : IDisposable
             startup.cb = Marshal.SizeOf(startup);
             ProcessInformation created;
             uint flags = CREATE_SUSPENDED | CREATE_BREAKAWAY_FROM_JOB;
-            bool started = CreateProcessW(application, new StringBuilder(commandLine), IntPtr.Zero, IntPtr.Zero, false, flags, IntPtr.Zero, null, ref startup, out created);
+            bool started = CreateProcessW(application, new StringBuilder(commandLine), IntPtr.Zero, IntPtr.Zero, false, flags, IntPtr.Zero, currentDirectory, ref startup, out created);
             if (!started && Marshal.GetLastWin32Error() == 5)
-                started = CreateProcessW(application, new StringBuilder(commandLine), IntPtr.Zero, IntPtr.Zero, false, CREATE_SUSPENDED, IntPtr.Zero, null, ref startup, out created);
+                started = CreateProcessW(application, new StringBuilder(commandLine), IntPtr.Zero, IntPtr.Zero, false, CREATE_SUSPENDED, IntPtr.Zero, currentDirectory, ref startup, out created);
             if (!started)
                 throw new Win32Exception(Marshal.GetLastWin32Error(), "CreateProcessW failed");
             try
@@ -679,7 +698,7 @@ public sealed class McpSuspendedStudio : IDisposable
     }
 }
 '@`,
-    `$launch = [McpSuspendedStudio]::Start(${powershellStringLiteral(windowsExe)}, ${powershellStringLiteral(commandLine)})`,
+    `$launch = [McpSuspendedStudio]::Start(${powershellStringLiteral(windowsExe)}, ${powershellStringLiteral(commandLine)}, ${windowsWorkingDirectory === undefined ? '$null' : powershellStringLiteral(windowsWorkingDirectory)})`,
     'try {',
     '[Console]::Out.WriteLine((ConvertTo-Json @{ pid = $launch.ProcessId; started = [string]$launch.StartedAtFileTime } -Compress)); [Console]::Out.Flush()',
     '$accepted = $false',
@@ -726,12 +745,17 @@ async function spawnWindowsStudio(
   exe: string,
   args: string[],
   processEnvironment?: StudioProcessEnvironmentPatch,
+  studioWorkingDirectory?: string,
 ): Promise<StudioChildProcess> {
   const windowsExe = await toStudioLaunchArgAsync(exe);
+  const windowsWorkingDirectory = studioWorkingDirectory
+    ? await toStudioLaunchArgAsync(studioWorkingDirectory)
+    : undefined;
   const script = buildWindowsStudioStartScriptFromConvertedExe(
     windowsExe,
     args,
     processEnvironment,
+    windowsWorkingDirectory,
   );
   const launcher = spawn("powershell.exe", ["-NoProfile", "-Command", script], {
     cwd:
@@ -1606,6 +1630,7 @@ export class StudioInstanceManager {
     const initialSnapshot = await this.getProcessSnapshot(true);
     await this.sweepRegistry(initialSnapshot);
     const processEnvironment = parseStudioProcessEnvironmentPatch(options.processEnvironment);
+    const studioWorkingDirectory = parseStudioWorkingDirectory(options.studioWorkingDirectory);
     if (
       options.studioExecutable !== undefined &&
       (typeof options.studioExecutable !== 'string' ||
@@ -1625,7 +1650,8 @@ export class StudioInstanceManager {
       (this.processAdapter.resolveStudioExe ? await this.processAdapter.resolveStudioExe() : await resolveStudioExeAsync());
     const args = await Promise.all(buildStudioLaunchArgs(preparedOptions).map(toStudioLaunchArgAsync));
     const spawnOptions: Parameters<typeof spawn>[2] = {
-      cwd: isWsl() && existsSync('/mnt/c/Windows') ? '/mnt/c/Windows' : process.cwd(),
+      cwd: studioWorkingDirectory ??
+        (isWsl() && existsSync('/mnt/c/Windows') ? '/mnt/c/Windows' : process.cwd()),
       detached: true,
       stdio: 'ignore',
       ...(processEnvironment ? { env: patchedProcessEnvironment(processEnvironment) } : {}),
@@ -1638,7 +1664,12 @@ export class StudioInstanceManager {
         lifecycleCapabilities.processIdentity.launcher === 'windows-retained' ||
         lifecycleCapabilities.processIdentity.launcher === 'wsl-windows-retained'
       ) {
-        proc = await this.windowsStudioLauncher(exe, args, processEnvironment);
+        proc = await this.windowsStudioLauncher(
+          exe,
+          args,
+          processEnvironment,
+          studioWorkingDirectory,
+        );
       } else {
         const child = spawn(exe, args, spawnOptions);
         proc = {
@@ -1711,6 +1742,7 @@ export class StudioInstanceManager {
       universeId: preparedOptions.universeId,
       placeVersion: preparedOptions.placeVersion,
       localPlaceFile: preparedOptions.localPlaceFile,
+      studioWorkingDirectory,
       launchedAt,
       connectionDeadlineAt: options.requireProcessIdentity
         ? undefined
@@ -2434,6 +2466,7 @@ export class StudioInstanceManager {
       placeVersion: record.placeVersion,
       localPlaceFile: record.localPlaceFile,
       deleteLocalPlaceFileOnClose: record.deleteLocalPlaceFileOnClose,
+      studioWorkingDirectory: record.studioWorkingDirectory,
       launchedAt: record.launchedAt,
       attachedAt: record.connectedAt,
       connectionDeadlineAt: record.connectionDeadlineAt,
@@ -2478,6 +2511,7 @@ export class StudioInstanceManager {
       universeId: record.universeId,
       placeVersion: record.placeVersion,
       localPlaceFile: record.localPlaceFile,
+      studioWorkingDirectory: record.studioWorkingDirectory,
       launchedAt: record.launchedAt,
       connectionDeadlineAt:
         record.connectionDeadlineAt ??

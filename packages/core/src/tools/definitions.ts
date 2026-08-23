@@ -464,6 +464,10 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
           type: 'string',
           description: 'Exact Studio executable for launch; otherwise auto-discovered.'
         },
+        studio_working_directory: {
+          type: 'string',
+          description: 'Studio process working directory; isolates relative plugin folders per launch.'
+        },
         process_environment: {
           type: 'object',
           description: 'Launch-only environment changes; never stored.',

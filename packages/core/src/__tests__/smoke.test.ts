@@ -243,6 +243,7 @@ describe('Smoke', () => {
     expect(script).toContain('WaitForSingleObject(processHandle, 15000)');
     expect(script).toContain('$launch.StartedAtFileTime');
     expect(script).not.toContain('$psi.UseShellExecute');
+    expect(script).toContain("'C:\\Roblox\\RobloxStudioBeta.exe', 'C:\\Roblox\\RobloxStudioBeta.exe --task EditFile --localPlaceFile C:\\Places\\Baseplate.rbxl', $null)");
   });
 
   test('Windows Studio shutdown uses a creation-checked process handle', () => {
@@ -262,7 +263,7 @@ describe('Smoke', () => {
     expect(script).not.toContain('Stop-Process');
   });
 
-  test('WSL Studio launch applies validated environment values as PowerShell data', () => {
+  test('WSL Studio launch applies environment and working-directory values as PowerShell data', () => {
     const script = buildWindowsStudioStartScript(
       'C:\\Roblox\\RobloxStudioBeta.exe',
       ['--task', 'EditFile'],
@@ -273,6 +274,7 @@ describe('Smoke', () => {
         },
         remove: ['STUDIO_LAUNCH_LOADED_BUILD_VERSION'],
       },
+      "C:\\Studio Workers\\worker's-directory",
     );
 
     expect(script).toContain(
@@ -284,11 +286,22 @@ describe('Smoke', () => {
     expect(script.indexOf("'STUDIO_LAUNCH_LOADER'")).toBeLessThan(
       script.indexOf('[McpSuspendedStudio]::Start('),
     );
+    expect(script).toContain(
+      "[McpSuspendedStudio]::Start('C:\\Roblox\\RobloxStudioBeta.exe', 'C:\\Roblox\\RobloxStudioBeta.exe --task EditFile', 'C:\\Studio Workers\\worker''s-directory')",
+    );
+    expect(script).toContain('Start(string application, string commandLine, string currentDirectory)');
+    expect(script.match(/IntPtr\.Zero, currentDirectory, ref startup/g)).toHaveLength(2);
     expect(script).toContain('CREATE_SUSPENDED');
 
     expect(() => buildWindowsStudioStartScript('Studio.exe', [], {
       set: { 'STUDIO_LAUNCH_LOADER; Remove-Item Env:PATH': 'loader.dll' },
     })).toThrow(/Invalid process environment variable name/);
+    expect(() => buildWindowsStudioStartScript(
+      'Studio.exe',
+      [],
+      undefined,
+      ' \t',
+    )).toThrow(/studio_working_directory must be a non-empty string/);
   });
 
   test('HTTP server starts and responds to health check', async () => {
@@ -464,10 +477,11 @@ describe('Smoke', () => {
       connectionTimeoutMs: 120000,
       studioExecutable: undefined,
       processEnvironment: undefined,
+      studioWorkingDirectory: undefined,
     });
   });
 
-  test('manage_instance threads exact executable and process environment into launch', async () => {
+  test('manage_instance threads exact executable, process environment, and working directory into launch', async () => {
     const bridge = new BridgeService();
     const tools = new RobloxStudioTools(bridge);
     const launch = jest.fn(async (options) => ({
@@ -491,6 +505,7 @@ describe('Smoke', () => {
       local_place_file: '/tmp/custom-launch-place.rbxl',
       wait_for_connection: false,
       studio_executable: 'C:\\Roblox\\version-custom\\RobloxStudioBeta.exe',
+      studio_working_directory: 'C:\\Studio Workers\\worker-7',
       process_environment: {
         set: {
           STUDIO_LAUNCH_LOADER: 'C:\\LaunchTools\\studio_loader.dll',
@@ -502,6 +517,7 @@ describe('Smoke', () => {
 
     expect(launch).toHaveBeenCalledWith(expect.objectContaining({
       studioExecutable: 'C:\\Roblox\\version-custom\\RobloxStudioBeta.exe',
+      studioWorkingDirectory: 'C:\\Studio Workers\\worker-7',
       processEnvironment: {
         set: {
           STUDIO_LAUNCH_LOADER: 'C:\\LaunchTools\\studio_loader.dll',
@@ -519,10 +535,11 @@ describe('Smoke', () => {
     })).rejects.toThrow(/Invalid process environment variable name/);
   });
 
-  test('Studio launch uses the exact executable, patches only the child environment, and does not persist it', async () => {
+  test('Studio launch uses the exact executable and working directory, patches only the child environment, and persists no environment secrets', async () => {
     const registryDir = fs.mkdtempSync(path.join(os.tmpdir(), 'robloxstudio-mcp-registry-'));
     const exactExecutable = 'C:\\Roblox\\version-custom\\RobloxStudioBeta.exe';
     const parentLoadedVersion = process.env.STUDIO_LAUNCH_LOADED_BUILD_VERSION;
+    const studioWorkingDirectory = '/tmp/rsmcp-worker-7655';
     const liveProcessIds = new Set<number>();
     const resolveStudioExe = jest.fn(() => 'C:\\Roblox\\latest\\RobloxStudioBeta.exe');
     let capturedSpawnOptions: SpawnOptions | undefined;
@@ -551,6 +568,7 @@ describe('Smoke', () => {
         source: 'local_file',
         localPlaceFile: '/tmp/custom-launch-place.rbxl',
         studioExecutable: exactExecutable,
+        studioWorkingDirectory,
         processEnvironment: {
           set: {
             STUDIO_LAUNCH_LOADER: 'C:\\LaunchTools\\secret-loader.dll',
@@ -562,6 +580,8 @@ describe('Smoke', () => {
 
       expect(resolveStudioExe).not.toHaveBeenCalled();
       expect(record.exe).toBe(exactExecutable);
+      expect(record.studioWorkingDirectory).toBe(studioWorkingDirectory);
+      expect(capturedSpawnOptions?.cwd).toBe(studioWorkingDirectory);
       expect((capturedSpawnOptions?.env as NodeJS.ProcessEnv).STUDIO_LAUNCH_LOADER).toBe('C:\\LaunchTools\\secret-loader.dll');
       expect((capturedSpawnOptions?.env as NodeJS.ProcessEnv).STUDIO_LAUNCH_BUILD_VERSION).toBe('0.0.0+build.123');
       expect((capturedSpawnOptions?.env as NodeJS.ProcessEnv).STUDIO_LAUNCH_LOADED_BUILD_VERSION).toBeUndefined();
@@ -572,6 +592,7 @@ describe('Smoke', () => {
         'utf8',
       );
       expect(registryRecord).toContain(exactExecutable.replace(/\\/g, '\\\\'));
+      expect(registryRecord).toContain('"studioWorkingDirectory": "/tmp/rsmcp-worker-7655"');
       expect(registryRecord).not.toContain('STUDIO_LAUNCH_LOADER');
       expect(registryRecord).not.toContain('secret-loader.dll');
       expect(registryRecord).not.toContain('processEnvironment');

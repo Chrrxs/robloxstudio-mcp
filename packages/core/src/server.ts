@@ -80,7 +80,13 @@ export class RobloxStudioMCPServer {
       boundPort = result.port;
       console.error(`HTTP server listening on ${host}:${boundPort} for Studio plugin (primary mode)`);
       console.error(`Streamable HTTP MCP endpoint: http://localhost:${boundPort}/mcp`);
-    } catch {
+    } catch (error) {
+      if (process.env.ROBLOX_STUDIO_REQUIRE_PRIMARY === '1') {
+        console.error(
+          `Port ${basePort} is unavailable and ROBLOX_STUDIO_REQUIRE_PRIMARY=1; refusing proxy mode`,
+        );
+        throw error;
+      }
       // basePort taken — another MCP subprocess owns the plugin connection.
       // Fall back to proxy mode and forward all bridge calls through it.
       bridgeMode = 'proxy';

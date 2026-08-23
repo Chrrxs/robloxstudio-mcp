@@ -284,10 +284,12 @@ describe('Tool schema compatibility', () => {
       'require_process_identity',
       'source',
       'studio_executable',
+      'studio_working_directory',
       'timeout_ms',
       'wait_for_connection',
     ].sort());
     expect(props.studio_executable).toMatchObject({ type: 'string' });
+    expect(props.studio_working_directory).toMatchObject({ type: 'string' });
     expect(props.process_environment).toMatchObject({
       type: 'object',
       additionalProperties: false,

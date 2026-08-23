@@ -7,29 +7,81 @@ state it starts.
 
 ## Prerequisites
 
-1. **Roblox Studio open to a place** with the project's plugin installed and
-   connected (toolbar icon green or yellow, not red). Opening only Studio's
-   launcher is not enough because plugins do not load there.
-2. **Port `localhost:58741` available or already held by this MCP server.**
-   Tests start their own subprocesses when the port is free. If a primary
-   subprocess is already running, tests use proxy mode and forward through it.
+1. **The main Studio plugin installed.** Studio itself does not need to be open:
+   `run-all.mjs` launches and closes its own managed baseplate through
+   `manage_instance`.
+2. **The server and Studio plugin configured for the same port.** The runner
+   starts a local control subprocess on `58741` by default. Set
+   `ROBLOX_STUDIO_PORT` when the installed plugin uses another port.
 3. **The built dist** at `packages/robloxstudio-mcp/dist/index.js` —
-   `npm run build` if it's stale. If you've also changed plugin code, fully
-   restart Studio so it picks up the new `.rbxmx`.
+   `npm run build` if it is stale. If plugin code changed, rebuild and reinstall
+   the `.rbxmx` before running.
 4. **`HttpEnabled = true`** in Studio Experience Settings (Security tab).
 
 ## Run
 
-```bash
-# All tests, sequential
-node tests/run-all.mjs
+**Feature completion gate:** a feature is not complete until
+`npm run test:e2e` passes. This short gate exercises edit-mode tooling plus one
+solo playtest covering edit, server, and client execution. Run the targeted
+suite for any specialized area the feature changes.
 
-# Or one at a time
-node tests/eval-bridge-error-preservation.mjs
+```bash
+# Required for every feature
+npm run test:e2e
+
+# Required before release; runs every live Studio suite
+npm run test:e2e:full
+
+# Full managed functional suite, without installer/lifecycle/isolation E2Es
+npm run test:studio:runner
+
+# Reuse a specific already-connected instance for the full functional suite
+MCP_INSTANCE_ID=anon:... ROBLOX_STUDIO_PORT=43123 node tests/run-all.mjs
+
+# Run an individual regression while iterating
 node tests/execute-luau-error-preservation.mjs
-node tests/proxy-mode-peer-fanout.mjs
-node tests/execute-luau-output-capture.mjs
 ```
+
+The full gate does not launch the feature smoke separately: its complete
+functional runner covers those checks in the same Studio session before the
+independent auto-install, lifecycle, and parallel-isolation suites.
+
+| Change area | Required live command |
+|---|---|
+| Ordinary feature | `npm run test:e2e` |
+| Paths, properties, tools, runtime, simulation, or multiplayer | `npm run test:studio:runner` (replaces the smaller feature gate) |
+| Installer, package artifacts, variants, or version repair | Feature gate plus `npm run test:e2e:auto-install` |
+| Studio launch, takeover, or startup-log lifecycle | Feature gate plus `npm run test:e2e:lifecycle` |
+| Port allocation, worker directories, or concurrent Studio isolation | Feature gate plus `npm run test:studio:parallel` |
+| Release | `npm run test:e2e:full` (replaces all commands above) |
+
+When `MCP_INSTANCE_ID` is unset, the runner starts the built MCP server as the
+required primary on the configured port and gives it a random, run-scoped auth
+token. Through authenticated `POST /mcp/manage_instance` calls, it snapshots
+managed launches, stages a uniquely named baseplate, launches it with retained
+process identity, authorizes and completes the launch, and waits for its edit
+connection. Every child test receives the same port, token, and returned
+instance ID. The `finally` cleanup closes the exact `launch_id`; an indeterminate
+HTTP launch response is reconciled against the pre-launch snapshot and staged
+place path. Supplying `MCP_INSTANCE_ID` instead keeps the caller-owned instance
+open and skips all launch lifecycle calls.
+
+For a self-contained run of the complete managed functional suite, including
+all edit, playtest, runtime, proxy, simulation, and multiplayer tests, use:
+
+```bash
+npm run test:studio:runner
+```
+
+Independent worktree workers receive distinct leased ports instead of
+accidentally proxying through each other's servers. Roblox Studio processes and
+the installed plugin folder are global to the OS user, so destructive live
+suites also take a cross-platform, heartbeating worktree lease. Multiple
+worktrees may start the commands together; one waits while the other owns that
+global mutation boundary, preventing plugin backup/restore and close-all races.
+The lease keeps durable copies of the installed plugins and lifecycle fixture,
+so a successor restores them before proceeding even if the prior test process
+was killed.
 
 The Codex/WSL environment regression is non-destructive and does not launch
 Studio. It starts the real source wrapper with `WSL_INTEROP` and
@@ -54,16 +106,24 @@ instances, and fail-closed second-scan behavior:
 npm run test:asset-security
 ```
 
+## Managed runner profiles
+
+`npm run test:studio:smoke` invokes `run-all.mjs --managed --smoke`; it runs the
+two representative live tests used by the feature gate. `npm run
+test:studio:runner` omits `--smoke` and runs all twelve functional tests. Both
+ignore inherited instance or Studio worker selection, lease an isolated port,
+install the matching main plugin, and own the primary server and Studio
+lifecycle.
+
 ## Release smoke: regular Studio tools
 
-`tests/studio-tooling-smoke.mjs` is a destructive release smoke test for the
-normal main-plugin tool surface. It requires Studio to be closed first,
-auto-installs the local main plugin into a backed-up plugin folder, launches a
-temporary `.rbxlx` place through `manage_instance`, verifies
-edit-mode read/write/script/tag/attribute/execute tools, then runs
-`tests/run-all.mjs` against the same primary server to cover playtest, runtime,
-proxy, and multiplayer paths. Cleanup closes the explicit launched `instance_id`
-through `manage_instance`. It restores the original plugin files afterward.
+`tests/studio-tooling-smoke.mjs` is the focused release smoke for the normal
+main-plugin edit-mode tool surface. It auto-installs the local main plugin,
+launches a temporary place through `manage_instance`, and verifies read, write,
+script, tag, attribute, and execute tools. It does not rerun `run-all.mjs`.
+Both managed runner profiles execute these assertions inside their existing
+Studio session, avoiding a second install and launch. The focused command
+remains available for iteration:
 
 ```bash
 RSMCP_E2E_CLOSE_ALL_STUDIO=1 npm run test:studio:tools
@@ -76,6 +136,10 @@ requires Studio to be closed first, installs the main and inspector plugins,
 launches Studio through `manage_instance`, checks version/variant metadata,
 verifies mismatch warnings, closes the explicit launched `instance_id`, and
 restores the original plugin files.
+Its subprocess runner bypasses the Windows `npm.cmd`/`npx.cmd` shims and invokes
+their Node CLI entry points directly. It drains output through process close,
+terminates the whole process tree on timeout, and turns pre-exit spawn failures
+into immediate, causal errors instead of waiting indefinitely.
 
 ```bash
 RSMCP_E2E_CLOSE_ALL_STUDIO=1 npm run test:e2e:auto-install
@@ -97,9 +161,11 @@ RSMCP_E2E_CLOSE_ALL_STUDIO=1 npm run test:e2e:lifecycle
 The E2E defaults to freshly built local packed tarballs and prints
 `artifactSource: local-pack`, so unpublished changes are what reach Studio.
 Set `RSMCP_E2E_ARTIFACT_SOURCE=latest` to test the published release instead.
-It requires port `58741` to be free and no Studio windows to be open before it
-starts. The close-all environment variable is still required as an explicit
-opt-in for launching and closing Studio.
+The self-contained auto-install, lifecycle, and tooling commands each lease an
+open port and install a plugin configured for that port, so an unrelated MCP
+server on the default port does not block targeted or full verification.
+All destructive E2Es still require no Studio windows to be open and the
+close-all environment variable remains an explicit opt-in.
 
 Studio lifecycle helpers are available directly:
 
@@ -131,11 +197,19 @@ node scripts/studio-lifecycle.mjs wait-connected --variant main --version <expec
   lifecycle tools and performs best-effort end-test cleanup in its `finally` block.
 - Tests do not modify the place's persistent state — they only print, eval,
   and read from the runtime log buffer.
+- `run-all.mjs` closes only the exact managed `launch_id` it created; a
+  supplied `MCP_INSTANCE_ID` remains caller-owned and is not closed.
 
 ## Layout
 
 - `lib/mcp-client.mjs` — shared utility for spawning + driving subprocesses
   via stdio JSON-RPC, plus minimal assertion helpers.
+- `lib/mcp-http-client.mjs` — explicit-token authenticated direct calls to
+  `/mcp/<tool>`, including structured HTTP/tool error handling.
+- `lib/managed-studio-session.mjs` — owned-primary launch, process-identity
+  handoff, lost-response reconciliation, reuse, and strict cleanup.
+- `lib/studio-test-lease.mjs` — heartbeating, stale-owner-aware serialization
+  and crash-recoverable plugin backups for parallel WSL/Windows worktrees.
 - `<feature>.mjs` — one test file per concern, each runnable directly with
   `node`.
-- `run-all.mjs` — runs every test sequentially.
+- `run-all.mjs` — manages a baseplate and runs the live suite sequentially.

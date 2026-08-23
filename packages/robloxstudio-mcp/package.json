@@ -12,7 +12,7 @@
   },
   "files": [
     "dist/**/*",
-    "studio-plugin/**/*"
+    "studio-plugin/MCPPlugin.rbxmx"
   ],
   "scripts": {
     "build": "tsup",

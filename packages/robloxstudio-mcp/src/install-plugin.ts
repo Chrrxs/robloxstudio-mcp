@@ -1,9 +1,13 @@
-import { copyFileSync, createWriteStream, existsSync, mkdirSync, readFileSync, unlinkSync } from 'fs';
+import { createWriteStream, existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'fs';
 import { dirname, join } from 'path';
 import { fileURLToPath } from 'url';
 import { get } from 'https';
 import { IncomingMessage } from 'http';
-import { getPluginsFolder, handleVariantConflict } from '@chrrxs/robloxstudio-mcp-core';
+import {
+  configurePluginAssetForPort,
+  getPluginsFolder,
+  handleVariantConflict,
+} from '@chrrxs/robloxstudio-mcp-core';
 
 const REPO = 'chrrxs/robloxstudio-mcp';
 const ASSET_NAME = 'MCPPlugin.rbxmx';
@@ -138,11 +142,10 @@ function assertBundledPluginVersion(source: string): void {
   }
 }
 
-function filesMatch(a: string, b: string): boolean {
-	if (!existsSync(b)) return false;
-	const aBytes = readFileSync(a);
-	const bBytes = readFileSync(b);
-	return aBytes.length === bBytes.length && aBytes.equals(bBytes);
+function filesMatch(expected: Buffer, actualPath: string): boolean {
+  if (!existsSync(actualPath)) return false;
+  const actual = readFileSync(actualPath);
+  return expected.length === actual.length && expected.equals(actual);
 }
 
 export async function installBundledPlugin(options: InstallOptions = {}): Promise<void> {
@@ -157,10 +160,11 @@ export async function installBundledPlugin(options: InstallOptions = {}): Promis
 
   const pluginsFolder = prepareInstall({ replaceVariant, log, warn });
   const dest = join(pluginsFolder, ASSET_NAME);
+  const configured = configurePluginAssetForPort(readFileSync(source));
 
-  if (filesMatch(source, dest)) return;
+  if (filesMatch(configured, dest)) return;
 
-  copyFileSync(source, dest);
+  writeFileSync(dest, configured);
   log(`Installed ${ASSET_NAME} to ${dest}`);
 }
 
@@ -175,11 +179,12 @@ export async function installPlugin(options: InstallOptions = {}): Promise<void>
   if (bundled) {
     assertBundledPluginVersion(bundled);
     const dest = join(pluginsFolder, ASSET_NAME);
-    if (filesMatch(bundled, dest)) {
+    const configured = configurePluginAssetForPort(readFileSync(bundled));
+    if (filesMatch(configured, dest)) {
       log(`${ASSET_NAME} already installed.`);
       return;
     }
-    copyFileSync(bundled, dest);
+    writeFileSync(dest, configured);
     log(`Installed bundled ${ASSET_NAME} to ${dest}`);
     return;
   }
@@ -200,5 +205,8 @@ export async function installPlugin(options: InstallOptions = {}): Promise<void>
   const dest = join(pluginsFolder, ASSET_NAME);
   log(`Downloading ${ASSET_NAME} from ${release.tag_name}...`);
   await download(asset.browser_download_url, dest);
+  const downloaded = readFileSync(dest);
+  const configured = configurePluginAssetForPort(downloaded);
+  if (configured !== downloaded) writeFileSync(dest, configured);
   log(`Installed to ${dest}`);
 }
