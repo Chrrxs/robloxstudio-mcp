@@ -12,11 +12,11 @@
   },
   "files": [
     "dist/**/*",
-    "studio-plugin/**/*"
+    "studio-plugin/MCPPlugin.rbxmx"
   ],
   "scripts": {
     "build": "tsup",
-    "prepack": "node ../../scripts/prepack.mjs",
+    "prepack": "node ../../scripts/prepack.mjs MCPPlugin.rbxmx",
     "postpack": "node ../../scripts/postpack.mjs"
   },
   "keywords": [
