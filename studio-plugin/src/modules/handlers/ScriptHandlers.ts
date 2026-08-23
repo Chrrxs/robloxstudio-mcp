@@ -110,9 +110,9 @@ function getScriptSource(requestData: Record<string, unknown>) {
 
 function setScriptSource(requestData: Record<string, unknown>) {
 	const instancePath = requestData.instancePath as string;
-	const newSource = requestData.source as string;
+	const newSource = requestData.source;
 
-	if (!instancePath || !newSource) return { error: "Instance path and source are required" };
+	if (!instancePath || !typeIs(newSource, "string")) return { error: "Instance path and source are required" };
 
 	const instance = getInstanceByPath(instancePath);
 	if (!instance) return { error: `Instance not found: ${instancePath}` };

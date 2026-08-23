@@ -128,6 +128,8 @@ const DEFAULT_MAX_TIMERS_PER_GROUP = 5;
 const DEFAULT_MAX_RELATED_TIMERS = 3;
 const DEFAULT_MAX_EVENTS = 250000;
 const MAX_EVENTS = 1000000;
+const COOPERATIVE_CLOCK_CHECK_INTERVAL = 128;
+const MAX_COOPERATIVE_SLICE_SECONDS = 0.008;
 const DEFAULT_FRAME_WINDOW = 240;
 const BASE64_CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 const PAD_BYTE = string.byte("=")[0];
@@ -147,6 +149,66 @@ const FOCUS_GROUP_MASKS: Record<string, string[]> = {
 };
 
 let cachedLibMP: LibMPLike | undefined;
+
+type CooperativeCheckpoint = () => void;
+
+// Sampling the clock avoids a timing call for every event while still bounding
+// each VM resumption. Sorting uses the same checkpoint so no full sort is atomic.
+
+function createCooperativeCheckpoint(): CooperativeCheckpoint {
+	let operationsSinceClockCheck = 0;
+	let sliceStartedAt = os.clock();
+
+	return () => {
+		operationsSinceClockCheck += 1;
+		if (operationsSinceClockCheck < COOPERATIVE_CLOCK_CHECK_INTERVAL) return;
+
+		operationsSinceClockCheck = 0;
+		if (os.clock() - sliceStartedAt < MAX_COOPERATIVE_SLICE_SECONDS) return;
+
+		task.wait();
+		sliceStartedAt = os.clock();
+	};
+}
+
+function cooperativeSort<T>(
+	values: T[],
+	comesBefore: (left: T, right: T) => boolean,
+	checkpoint: CooperativeCheckpoint,
+): void {
+	const count = values.size();
+	if (count < 2) return;
+
+	function siftDown(start: number, lastIndex: number): void {
+		let root = start;
+		while (root * 2 + 1 <= lastIndex) {
+			checkpoint();
+			let candidate = root;
+			const left = root * 2 + 1;
+			if (comesBefore(values[candidate], values[left])) candidate = left;
+			const right = left + 1;
+			if (right <= lastIndex && comesBefore(values[candidate], values[right])) candidate = right;
+			if (candidate === root) return;
+
+			const value = values[root];
+			values[root] = values[candidate];
+			values[candidate] = value;
+			root = candidate;
+		}
+	}
+
+	for (let start = math.floor((count - 2) / 2); start >= 0; start--) {
+		siftDown(start, count - 1);
+		checkpoint();
+	}
+	for (let lastIndex = count - 1; lastIndex > 0; lastIndex--) {
+		const value = values[0];
+		values[0] = values[lastIndex];
+		values[lastIndex] = value;
+		checkpoint();
+		siftDown(0, lastIndex - 1);
+	}
+}
 
 function normalizeDurationMs(value: unknown): number {
 	if (!typeIs(value, "number")) return DEFAULT_DURATION_MS;
@@ -246,7 +308,11 @@ function addFrameRaw(map: Map<number, number>, frameId: number, raw: number): vo
 	map.set(frameId, (map.get(frameId) ?? 0) + raw);
 }
 
-function summarizeFrameImpact(frameRawById: Map<number, number> | undefined, analyzedFrames: number): Record<string, unknown> {
+function summarizeFrameImpact(
+	frameRawById: Map<number, number> | undefined,
+	analyzedFrames: number,
+	checkpoint: CooperativeCheckpoint,
+): Record<string, unknown> {
 	if (frameRawById === undefined || frameRawById.size() === 0) {
 		return {
 			active_frame_count: 0,
@@ -262,6 +328,7 @@ function summarizeFrameImpact(frameRawById: Map<number, number> | undefined, ana
 	let maxUs = 0;
 	let maxFrameId = 0;
 	for (const [frameId, raw] of frameRawById) {
+		checkpoint();
 		const us = rawToUs(raw);
 		values.push(us);
 		totalUs += us;
@@ -270,7 +337,7 @@ function summarizeFrameImpact(frameRawById: Map<number, number> | undefined, ana
 			maxFrameId = frameId;
 		}
 	}
-	values.sort((a, b) => a < b);
+	cooperativeSort(values, (a, b) => a < b, checkpoint);
 
 	return {
 		active_frame_count: values.size(),
@@ -283,7 +350,7 @@ function summarizeFrameImpact(frameRawById: Map<number, number> | undefined, ana
 	};
 }
 
-function encodeBase64(buf: buffer): string {
+function encodeBase64(buf: buffer, checkpoint: CooperativeCheckpoint): string {
 	const len = buffer.len(buf);
 	const fullTriples = math.floor(len / 3);
 	const remaining = len - fullTriples * 3;
@@ -305,6 +372,7 @@ function encodeBase64(buf: buffer): string {
 
 		si += 3;
 		di += 4;
+		checkpoint();
 	}
 
 	if (remaining === 2) {
@@ -386,13 +454,19 @@ function recommendedToolsForGroups(groups: Record<string, unknown>[], targetRole
 	return tools;
 }
 
-function collectFrameSummary(session: LibMPSession, startFrame: number, frameMax: number): Record<string, unknown> {
+function collectFrameSummary(
+	session: LibMPSession,
+	startFrame: number,
+	frameMax: number,
+	checkpoint: CooperativeCheckpoint,
+): Record<string, unknown> {
 	const frameRows: Record<string, unknown>[] = [];
 	const durations: number[] = [];
 	let incompleteFrames = 0;
 	let pausedFrames = 0;
 
 	for (let frameId = startFrame; frameId <= frameMax; frameId++) {
+		checkpoint();
 		const [ok, descOrErr] = safeCall(() => session.GetFrameDesc(frameId));
 		if (!ok || !descOrErr) continue;
 		const desc = descOrErr as FrameDesc;
@@ -415,11 +489,14 @@ function collectFrameSummary(session: LibMPSession, startFrame: number, frameMax
 		frameRows.push(row);
 	}
 
-	durations.sort((a, b) => a < b);
-	frameRows.sort((a, b) => (a.duration_us as number) > (b.duration_us as number));
+	cooperativeSort(durations, (a, b) => a < b, checkpoint);
+	cooperativeSort(frameRows, (a, b) => (a.duration_us as number) > (b.duration_us as number), checkpoint);
 
 	let totalUs = 0;
-	for (const duration of durations) totalUs += duration;
+	for (const duration of durations) {
+		totalUs += duration;
+		checkpoint();
+	}
 
 	const topFrames: Record<string, unknown>[] = [];
 	for (let i = 0; i < math.min(10, frameRows.size()); i++) {
@@ -642,6 +719,8 @@ function captureMicroProfiler(requestData: Record<string, unknown>): unknown {
 		};
 	}
 
+	const checkpoint = createCooperativeCheckpoint();
+
 	const stacks = new Map<number, StackEntry[]>();
 	const aggregates = new Map<number, TimerAggregate>();
 	const timerThreadAggregates = new Map<number, Map<number, TimerAggregate>>();
@@ -658,7 +737,9 @@ function captureMicroProfiler(requestData: Record<string, unknown>): unknown {
 	let lastProcessedFrameId: number | undefined;
 	let lastProcessedTimestampRaw: number | undefined;
 
-	while (eventsSampled < maxEvents && iterator.Step()) {
+	while (eventsSampled < maxEvents) {
+		checkpoint();
+		if (!iterator.Step()) break;
 		eventsSampled += 1;
 		const state = iterator.GetState();
 		if (!state) continue;
@@ -686,6 +767,7 @@ function captureMicroProfiler(requestData: Record<string, unknown>): unknown {
 			exitEvents += 1;
 			let entry: StackEntry | undefined;
 			while (stack.size() > 0) {
+				checkpoint();
 				const candidate = stack.pop();
 				if (candidate && candidate.timerId === timerId) {
 					entry = candidate;
@@ -735,7 +817,7 @@ function captureMicroProfiler(requestData: Record<string, unknown>): unknown {
 	const sampledFrameCoveragePct = percent(sampledFrames.size(), framesConsidered);
 	const analysisFrameMin = sampledFrameMin ?? startFrame;
 	const analysisFrameMax = sampledFrameMax ?? frameMax;
-	const frameSummary = collectFrameSummary(session, analysisFrameMin, analysisFrameMax);
+	const frameSummary = collectFrameSummary(session, analysisFrameMin, analysisFrameMax, checkpoint);
 	const analysisFrameCount = typeIs(frameSummary.frames, "number") && (frameSummary.frames as number) > 0
 		? frameSummary.frames as number
 		: sampledFrames.size() > 0
@@ -758,6 +840,7 @@ function captureMicroProfiler(requestData: Record<string, unknown>): unknown {
 	let omittedByFilter = 0;
 
 	for (const [timerId, aggregate] of aggregates) {
+		checkpoint();
 		const info = getTimerInfo(timerId);
 		const totalUs = rawToUs(aggregate.inclusive_raw);
 		if (!includeIdle && isIdleTimer(info)) {
@@ -807,7 +890,7 @@ function captureMicroProfiler(requestData: Record<string, unknown>): unknown {
 		};
 		const maxToAvg = ratio(maxUs, avgUs);
 		if (maxToAvg !== undefined) row.max_to_avg = maxToAvg;
-		const timerFrameImpact = summarizeFrameImpact(timerFrameAggregates.get(timerId), analysisFrameCount);
+		const timerFrameImpact = summarizeFrameImpact(timerFrameAggregates.get(timerId), analysisFrameCount, checkpoint);
 		for (const [key, value] of pairs(timerFrameImpact)) {
 			row[key as string] = value;
 		}
@@ -827,13 +910,17 @@ function captureMicroProfiler(requestData: Record<string, unknown>): unknown {
 				groupFrames = new Map<number, number>();
 				groupFrameAggregates.set(group, groupFrames);
 			}
-			for (const [frameId, raw] of timerFrames) addFrameRaw(groupFrames, frameId, raw);
+			for (const [frameId, raw] of timerFrames) {
+				addFrameRaw(groupFrames, frameId, raw);
+				checkpoint();
+			}
 		}
 
 		const perThread = timerThreadAggregates.get(timerId);
 		if (perThread !== undefined) {
 			const timerThreadSummaryRows: Record<string, unknown>[] = [];
 			for (const [threadId, threadAggregate] of perThread) {
+				checkpoint();
 				let threadAggregateRow = threadAggregates.get(threadId);
 				if (threadAggregateRow === undefined) {
 					threadAggregateRow = { timer_id: threadId, inclusive_raw: 0, exclusive_raw: 0, count: 0, max_raw: 0 };
@@ -880,7 +967,7 @@ function captureMicroProfiler(requestData: Record<string, unknown>): unknown {
 					count: threadAggregate.count,
 				});
 			}
-			timerThreadSummaryRows.sort((a, b) => (a.inclusive_us as number) > (b.inclusive_us as number));
+			cooperativeSort(timerThreadSummaryRows, (a, b) => (a.inclusive_us as number) > (b.inclusive_us as number), checkpoint);
 			if (maxRelatedTimers > 0 && timerThreadSummaryRows.size() > 0) {
 				const topTimerThreads: Record<string, unknown>[] = [];
 				for (let i = 0; i < math.min(maxRelatedTimers, timerThreadSummaryRows.size()); i++) topTimerThreads.push(timerThreadSummaryRows[i]);
@@ -889,12 +976,13 @@ function captureMicroProfiler(requestData: Record<string, unknown>): unknown {
 		}
 	}
 
-	rows.sort((a, b) => (a.inclusive_us as number) > (b.inclusive_us as number));
+	cooperativeSort(rows, (a, b) => (a.inclusive_us as number) > (b.inclusive_us as number), checkpoint);
 
 	const edgeRows: Record<string, unknown>[] = [];
 	const parentRelationsByChild = new Map<number, Record<string, unknown>[]>();
 	const childRelationsByParent = new Map<number, Record<string, unknown>[]>();
 	for (const [, edge] of edgeAggregates) {
+		checkpoint();
 		const parentRow = rowsByTimerId.get(edge.parent_timer_id);
 		const childRow = rowsByTimerId.get(edge.child_timer_id);
 		if (parentRow === undefined || childRow === undefined) continue;
@@ -951,15 +1039,18 @@ function captureMicroProfiler(requestData: Record<string, unknown>): unknown {
 			pct_of_timer_inclusive: percent(inclusiveUs, parentRow.inclusive_us as number),
 		});
 	}
-	edgeRows.sort((a, b) => (a.inclusive_us as number) > (b.inclusive_us as number));
+	cooperativeSort(edgeRows, (a, b) => (a.inclusive_us as number) > (b.inclusive_us as number), checkpoint);
 	if (maxRelatedTimers > 0) {
 		for (const [, relationRows] of parentRelationsByChild) {
-			relationRows.sort((a, b) => (a.inclusive_us as number) > (b.inclusive_us as number));
+			checkpoint();
+			cooperativeSort(relationRows, (a, b) => (a.inclusive_us as number) > (b.inclusive_us as number), checkpoint);
 		}
 		for (const [, relationRows] of childRelationsByParent) {
-			relationRows.sort((a, b) => (a.inclusive_us as number) > (b.inclusive_us as number));
+			checkpoint();
+			cooperativeSort(relationRows, (a, b) => (a.inclusive_us as number) > (b.inclusive_us as number), checkpoint);
 		}
 		for (const row of rows) {
+			checkpoint();
 			const timerId = row.timer_id as number;
 			const parents = parentRelationsByChild.get(timerId);
 			const children = childRelationsByParent.get(timerId);
@@ -984,8 +1075,11 @@ function captureMicroProfiler(requestData: Record<string, unknown>): unknown {
 	}
 
 	const rowsByExclusive: Record<string, unknown>[] = [];
-	for (const row of rows) rowsByExclusive.push(row);
-	rowsByExclusive.sort((a, b) => (a.exclusive_us as number) > (b.exclusive_us as number));
+	for (const row of rows) {
+		rowsByExclusive.push(row);
+		checkpoint();
+	}
+	cooperativeSort(rowsByExclusive, (a, b) => (a.exclusive_us as number) > (b.exclusive_us as number), checkpoint);
 	const topTimersByExclusive: Record<string, unknown>[] = [];
 	for (let i = 0; i < math.min(maxTimers, rowsByExclusive.size()); i++) {
 		const row = copyRecord(rowsByExclusive[i]);
@@ -1002,6 +1096,7 @@ function captureMicroProfiler(requestData: Record<string, unknown>): unknown {
 
 	const threadRows: Record<string, unknown>[] = [];
 	for (const [threadId, aggregate] of threadAggregates) {
+		checkpoint();
 		const info = getThreadInfo(threadId);
 		const inclusiveUs = rawToUs(aggregate.inclusive_raw);
 		const exclusiveUs = rawToUs(aggregate.exclusive_raw);
@@ -1019,7 +1114,7 @@ function captureMicroProfiler(requestData: Record<string, unknown>): unknown {
 			pct_of_analyzed_wall: percent(inclusiveUs, analysisDurationUs),
 		};
 		const timerRows = threadTimerRows.get(threadId) ?? [];
-		timerRows.sort((a, b) => (a.inclusive_us as number) > (b.inclusive_us as number));
+		cooperativeSort(timerRows, (a, b) => (a.inclusive_us as number) > (b.inclusive_us as number), checkpoint);
 		const topThreadTimers: Record<string, unknown>[] = [];
 		for (let i = 0; i < math.min(maxTimersPerGroup, timerRows.size()); i++) {
 			const timerRow = copyRecord(timerRows[i]);
@@ -1028,7 +1123,7 @@ function captureMicroProfiler(requestData: Record<string, unknown>): unknown {
 		if (topThreadTimers.size() > 0) row.top_timers = topThreadTimers;
 		threadRows.push(row);
 	}
-	threadRows.sort((a, b) => (a.inclusive_us as number) > (b.inclusive_us as number));
+	cooperativeSort(threadRows, (a, b) => (a.inclusive_us as number) > (b.inclusive_us as number), checkpoint);
 	const topThreads: Record<string, unknown>[] = [];
 	for (let i = 0; i < math.min(maxGroups, threadRows.size()); i++) {
 		const row = threadRows[i];
@@ -1038,8 +1133,9 @@ function captureMicroProfiler(requestData: Record<string, unknown>): unknown {
 
 	const groupRows: Record<string, unknown>[] = [];
 	for (const [, aggregate] of groupAggregates) {
+		checkpoint();
 		const timerRows = groupTimerRows.get(aggregate.group) ?? [];
-		timerRows.sort((a, b) => (a.inclusive_us as number) > (b.inclusive_us as number));
+		cooperativeSort(timerRows, (a, b) => (a.inclusive_us as number) > (b.inclusive_us as number), checkpoint);
 		const topGroupTimers: Record<string, unknown>[] = [];
 		for (let i = 0; i < math.min(maxTimersPerGroup, timerRows.size()); i++) {
 			const timerRow = timerRows[i];
@@ -1068,14 +1164,14 @@ function captureMicroProfiler(requestData: Record<string, unknown>): unknown {
 			timer_count: timerRows.size(),
 			pct_of_analyzed_wall: percent(inclusiveUs, analysisDurationUs),
 		};
-		const groupFrameImpact = summarizeFrameImpact(groupFrameAggregates.get(aggregate.group), analysisFrameCount);
+		const groupFrameImpact = summarizeFrameImpact(groupFrameAggregates.get(aggregate.group), analysisFrameCount, checkpoint);
 		for (const [key, value] of pairs(groupFrameImpact)) {
 			groupRow[key as string] = value;
 		}
 		if (topGroupTimers.size() > 0) groupRow.top_timers = topGroupTimers;
 		groupRows.push(groupRow);
 	}
-	groupRows.sort((a, b) => (a.inclusive_us as number) > (b.inclusive_us as number));
+	cooperativeSort(groupRows, (a, b) => (a.inclusive_us as number) > (b.inclusive_us as number), checkpoint);
 	const topGroups: Record<string, unknown>[] = [];
 	for (let i = 0; i < math.min(maxGroups, groupRows.size()); i++) {
 		const row = copyRecord(groupRows[i]);
@@ -1084,8 +1180,11 @@ function captureMicroProfiler(requestData: Record<string, unknown>): unknown {
 	}
 
 	const groupRowsByExclusive: Record<string, unknown>[] = [];
-	for (const row of groupRows) groupRowsByExclusive.push(row);
-	groupRowsByExclusive.sort((a, b) => (a.exclusive_us as number) > (b.exclusive_us as number));
+	for (const row of groupRows) {
+		groupRowsByExclusive.push(row);
+		checkpoint();
+	}
+	cooperativeSort(groupRowsByExclusive, (a, b) => (a.exclusive_us as number) > (b.exclusive_us as number), checkpoint);
 	const topGroupsByExclusive: Record<string, unknown>[] = [];
 	for (let i = 0; i < math.min(maxGroups, groupRowsByExclusive.size()); i++) {
 		const row = copyRecord(groupRowsByExclusive[i]);
@@ -1099,7 +1198,10 @@ function captureMicroProfiler(requestData: Record<string, unknown>): unknown {
 	if (omittedByFilter > 0) omitted.filtered_out = omittedByFilter;
 
 	let openStackEntriesAtEnd = 0;
-	for (const [, stack] of stacks) openStackEntriesAtEnd += stack.size();
+	for (const [, stack] of stacks) {
+		openStackEntriesAtEnd += stack.size();
+		checkpoint();
+	}
 	const iteratorFinished = eventsSampled < maxEvents;
 	const partialReasons: string[] = [];
 	if (eventsSampled >= maxEvents) partialReasons.push("event_limit_hit");
@@ -1151,13 +1253,25 @@ function captureMicroProfiler(requestData: Record<string, unknown>): unknown {
 			"max_invocation_us",
 		];
 		const timerIndex: Record<string, unknown>[] = [];
-		for (const row of rows) timerIndex.push(pickFields(row, timerFields));
+		for (const row of rows) {
+			timerIndex.push(pickFields(row, timerFields));
+			checkpoint();
+		}
 		const groupIndex: Record<string, unknown>[] = [];
-		for (const row of groupRows) groupIndex.push(pickFields(row, groupFields));
+		for (const row of groupRows) {
+			groupIndex.push(pickFields(row, groupFields));
+			checkpoint();
+		}
 		const threadIndex: Record<string, unknown>[] = [];
-		for (const row of threadRows) threadIndex.push(pickFields(row, threadFields));
+		for (const row of threadRows) {
+			threadIndex.push(pickFields(row, threadFields));
+			checkpoint();
+		}
 		const edgeIndex: Record<string, unknown>[] = [];
-		for (const row of edgeRows) edgeIndex.push(pickFields(row, edgeFields));
+		for (const row of edgeRows) {
+			edgeIndex.push(pickFields(row, edgeFields));
+			checkpoint();
+		}
 		comparisonIndex = {
 			timers: timerIndex,
 			groups: groupIndex,
@@ -1253,7 +1367,7 @@ function captureMicroProfiler(requestData: Record<string, unknown>): unknown {
 	result.backend = backend;
 	if (session.GetDataFormatVersion() !== undefined) result.libmp_data_format_version = session.GetDataFormatVersion();
 	if (session.GetObjSize() !== undefined) result.snapshot_object_size_bytes = session.GetObjSize();
-	if (includeRawBuffer) result.raw_snapshot_base64 = encodeBase64(snapshot);
+	if (includeRawBuffer) result.raw_snapshot_base64 = encodeBase64(snapshot, checkpoint);
 
 	iterator.Dispose();
 	session.Dispose();

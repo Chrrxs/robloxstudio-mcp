@@ -314,6 +314,36 @@ return document:GetText()
     assert(draftSource.source === '1: ',
       `get_script_source preserves an empty live editor draft (${JSON.stringify(draftSource)})`);
 
+    const populatedDraft = await client.callTool('set_script_source', {
+      instancePath: scriptPath,
+      source: 'local beforeClear = true\nreturn beforeClear\n',
+      instance_id: instanceId,
+    });
+    assert(populatedDraft.success === true && populatedDraft.method === 'UpdateSourceAsync',
+      `set_script_source populates the empty live editor draft editor-safely (${JSON.stringify(populatedDraft)})`);
+
+    const populatedRead = await client.callTool('get_script_source', {
+      instancePath: scriptPath,
+      instance_id: instanceId,
+    });
+    assertContains(populatedRead.source, 'return beforeClear',
+      'get_script_source confirms the live editor draft is non-empty before clearing');
+
+    const clearedSource = await client.callTool('set_script_source', {
+      instancePath: scriptPath,
+      source: '',
+      instance_id: instanceId,
+    });
+    assert(clearedSource.success === true && clearedSource.method === 'UpdateSourceAsync',
+      `set_script_source clears a non-empty live editor draft editor-safely (${JSON.stringify(clearedSource)})`);
+
+    const clearedRead = await client.callTool('get_script_source', {
+      instancePath: scriptPath,
+      instance_id: instanceId,
+    });
+    assert(clearedRead.source === '1: ',
+      `set_script_source cleared the non-empty live draft exactly (${JSON.stringify(clearedRead)})`);
+
     const restoredDraft = await client.callTool('set_script_source', {
       instancePath: scriptPath,
       source: 'local value = 40\nreturn value + 1\n',
