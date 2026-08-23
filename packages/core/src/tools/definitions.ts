@@ -283,81 +283,63 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
 
   // === Selection ===
   {
-    name: 'get_selection',
+    name: 'selection',
     category: 'read',
-    description: 'Use when the current Studio selection should define the objects to work on.',
+    description: 'Use to read, change, or frame the Studio selection.',
     inputSchema: {
       type: 'object',
       properties: {
-        instance_id: {
+        action: {
           type: 'string',
-          description: 'Connected place ID; required with multiple places.'
-        }
-      }
-    }
-  },
-  {
-    name: 'set_selection',
-    category: 'write',
-    description: 'Set which objects are highlighted in the Studio editor. Select what you just built or changed: it shows the user the result, and puts the instance under Studio\'s own move and scale handles. Pairs with capture_screenshot — select, then screenshot, so the shot shows what changed. mode="set" replaces the selection (default), "add" extends it, "remove" shrinks it; an empty paths array with mode="set" clears the selection.',
-    inputSchema: {
-      type: 'object',
-      properties: {
+          enum: ['get', 'set', 'view'],
+          description: 'Lifecycle action.'
+        },
         paths: {
           type: 'array',
-          items: { type: 'string' },
-          description: 'Instance paths to select, e.g. ["game.Workspace.House.Door"]. Empty array + mode="set" clears.'
+          items: { type: 'string', minLength: 1 },
+          description: 'Set paths; empty clears.'
         },
         mode: {
           type: 'string',
           enum: ['set', 'add', 'remove'],
-          description: '"set" replaces the whole selection (default), "add" extends it, "remove" deselects just these.'
+          default: 'set',
+          description: 'Update mode.'
         },
-        instance_id: {
-          type: 'string',
-          description: 'Which connected Studio place to target. Required when multiple places are connected; omit when one. Use get_connected_instances to list available IDs.'
-        }
-      },
-      required: ['paths']
-    }
-  },
-  {
-    name: 'focus_viewport',
-    category: 'write',
-    description: 'Aim the Studio camera at an instance and frame it so the whole thing is on screen. This is what makes capture_screenshot worth having: a picture of wherever the camera happened to be answers nothing, while a picture of the thing you just built answers "does it look right". Workflow: build or change something, focus_viewport it, capture_screenshot. The framing distance is computed from the instance\'s bounding size and the camera\'s field of view, so a doorway and a whole map both fill a similar share of the frame. Use from to pick the viewing direction (a compass angle in degrees: 0 looks from +X toward origin, 90 from +Z), padding to zoom tighter (<1) or wider (>1). Works in Edit mode and during playtests on the running client viewport.',
-    inputSchema: {
-      type: 'object',
-      properties: {
         path: {
           type: 'string',
-          description: 'The instance to look at: a part, model, or folder containing them.'
+          minLength: 1,
+          description: 'BasePart or Model path for view.'
         },
         from: {
           type: 'number',
-          description: 'Optional compass angle in degrees for where to view from. Omit to keep a sensible default angle.'
+          description: 'Compass degrees: 0 from +X, 90 from +Z.'
         },
         padding: {
           type: 'number',
-          description: 'Optional framing tightness: 1 fills the frame (default), <1 crops closer, >1 pulls back.'
+          exclusiveMinimum: 0,
+          maximum: 10,
+          default: 1,
+          description: 'Distance scale.'
         },
         angleY: {
           type: 'number',
-          description: 'Optional elevation in degrees above horizontal (default ~20, clamped to avoid gimbal flip at the poles).'
+          minimum: -89,
+          maximum: 89,
+          description: 'Elevation degrees.'
         },
         instance_id: {
           type: 'string',
-          description: 'Which connected Studio place to target. Required when multiple places are connected; omit when one. Use get_connected_instances to list available IDs.'
+          description: 'Place ID; required if ambiguous.'
         }
       },
-      required: ['path']
+      required: ['action']
     }
   },
 
-  // === Luau Execution ===
   {
     name: 'execute_luau',
     category: 'write',
-    description: 'Use for custom edit work or plugin-context access to a live server or client.',
+    description: 'Use for custom Studio traversal, edits, or peer execution.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -380,7 +362,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
   {
     name: 'eval_server_runtime',
     category: 'write',
-    description: 'Use when Luau must run in the live server Script VM and share the game\'s require cache.',
+    description: 'Use to run Luau in the live server VM with its require cache.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -399,7 +381,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
   {
     name: 'eval_client_runtime',
     category: 'write',
-    description: 'Use when Luau must run in a live client LocalScript VM and share the game\'s require cache.',
+    description: 'Use to run Luau in a live client VM with its require cache.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -478,7 +460,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
   {
     name: 'manage_instance',
     category: 'write',
-    description: 'Use to launch, inspect, authorize, or close Studio processes and list place revisions.',
+    description: 'Use to manage Studio processes or list place revisions.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -603,7 +585,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
   {
     name: 'set_network_profile',
     category: 'write',
-    description: 'Use to apply simulated latency, jitter, or packet loss to playtest clients.',
+    description: 'Use to simulate client latency, jitter, or packet loss.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -666,7 +648,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
   {
     name: 'get_simulation_state',
     category: 'read',
-    description: 'Use to inspect network and device simulator state before or after simulation tests.',
+    description: 'Use to inspect current network and device simulation.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -689,7 +671,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
   {
     name: 'reset_simulation_state',
     category: 'write',
-    description: 'Use to clear network and device simulator settings between simulation tests.',
+    description: 'Use to clear network and device simulation state.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -715,7 +697,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
   {
     name: 'get_device_simulator_state',
     category: 'read',
-    description: 'Use to inspect active device simulation or list built-in device presets.',
+    description: 'Use to inspect device simulation or list device presets.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -741,7 +723,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
   {
     name: 'set_device_simulator',
     category: 'write',
-    description: 'Use to start, change, or stop device simulation in edit mode or on playtest clients.',
+    description: 'Use to manage device simulation in edit or a playtest client.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -878,7 +860,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
   {
     name: 'multiplayer_playtest',
     category: 'write',
-    description: 'Use to run or inspect a StudioTestService playtest with multiple clients.',
+    description: 'Use to run or inspect a multi-client Studio playtest.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -1008,7 +990,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
   {
     name: 'capture_micro_profiler',
     category: 'read',
-    description: 'Use to attribute frame time across engine and game work on a running server or client.',
+    description: 'Use to profile engine and game frame time on a live peer.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -1135,7 +1117,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
   {
     name: 'breakpoints',
     category: 'write',
-    description: 'Use when Studio breakpoints or logpoints are needed to trace script execution.',
+    description: 'Use to trace script execution with breakpoints or logpoints.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -1236,7 +1218,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
   {
     name: 'get_asset_details',
     category: 'read',
-    description: 'Use to inspect full catalog metadata for one shortlisted Creator Store asset.',
+    description: 'Use to inspect a shortlisted Creator Store asset.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -1303,7 +1285,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
   {
     name: 'generate_model',
     category: 'write',
-    description: 'Use to generate and stage a Roblox model from text or an image reference.',
+    description: 'Use to stage a Roblox model from text or an image.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -1455,7 +1437,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
   {
     name: 'capture_screenshot',
     category: 'read',
-    description: 'Use when you need the current Studio viewport as an image or input coordinate map.',
+    description: 'Use to capture the Studio viewport or map input coordinates.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -1554,7 +1536,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
   {
     name: 'get_memory_breakdown',
     category: 'read',
-    description: 'Use to compare Roblox memory categories across edit, server, or client peers.',
+    description: 'Use to compare memory categories across Studio peers.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -1577,7 +1559,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
   {
     name: 'get_scene_analysis',
     category: 'read',
-    description: 'Use to attribute scene cost to instances, scripts, triangles, animation, or audio.',
+    description: 'Use to attribute scene cost across instances and content.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -1681,7 +1663,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
   {
     name: 'find_and_replace_in_scripts',
     category: 'write',
-    description: 'Use to preview or apply the same text replacement across multiple scripts.',
+    description: 'Use to preview or apply one replacement across scripts.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -1731,7 +1713,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
   {
     name: 'get_roblox_skills',
     category: 'read',
-    description: 'Use to list or read Roblox-authored Studio Assistant skills on demand.',
+    description: 'Use to read installed Roblox Studio Assistant skills.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -1753,7 +1735,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
   {
     name: 'get_roblox_docs',
     category: 'read',
-    description: 'Use to look up official Roblox engine or Luau reference documentation.',
+    description: 'Use to read official Roblox engine or Luau references.',
     inputSchema: {
       type: 'object',
       properties: {

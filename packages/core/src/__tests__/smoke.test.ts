@@ -2277,7 +2277,7 @@ describe('Smoke', () => {
     })).toBe(true);
   });
 
-  test('client broker forwards script profiler captures to client peers', () => {
+  test('client broker forwards client-only viewport and profiler operations', () => {
     const cwd = process.cwd();
     const repoRoot = fs.existsSync(path.join(cwd, 'studio-plugin')) ? cwd : path.resolve(cwd, '../..');
     const source = fs.readFileSync(path.join(repoRoot, 'studio-plugin/src/modules/ClientBroker.ts'), 'utf8');
@@ -2285,6 +2285,8 @@ describe('Smoke', () => {
     expect(source).toContain('payload.endpoint === "/api/capture-script-profiler"');
     expect(source).toContain('"/api/capture-micro-profiler"');
     expect(source).toContain('payload.endpoint === "/api/capture-micro-profiler"');
+    expect(source).toContain('\t"/api/focus-viewport",');
+    expect(source).toContain('payload.endpoint === "/api/focus-viewport"');
   });
 
   test('breakpoints decorates response with resolved target role', async () => {

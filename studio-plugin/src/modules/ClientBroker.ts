@@ -4,6 +4,7 @@ import MemoryHandlers from "./handlers/MemoryHandlers";
 import SceneAnalysisHandlers from "./handlers/SceneAnalysisHandlers";
 import CaptureHandlers from "./handlers/CaptureHandlers";
 import InputHandlers from "./handlers/InputHandlers";
+import MetadataHandlers from "./handlers/MetadataHandlers";
 import EvalRuntimeHandlers from "./handlers/EvalRuntimeHandlers";
 import BreakpointHandlers from "./handlers/BreakpointHandlers";
 import ScriptProfilerHandlers from "./handlers/ScriptProfilerHandlers";
@@ -109,6 +110,8 @@ const CLIENT_BROKER_ALLOWED_ENDPOINTS = new Set<string>([
 	// pipeline, so it must execute in the client peer's VM.
 	"/api/simulate-mouse-input",
 	"/api/simulate-keyboard-input",
+	// Viewport framing must target the same live client captured by screenshots.
+	"/api/focus-viewport",
 ]);
 
 interface ReadyResponseBody {
@@ -295,6 +298,9 @@ function setupClientBroker() {
 		}
 		if (payload && payload.endpoint === "/api/simulate-keyboard-input") {
 			return InputHandlers.simulateKeyboardInput(payload.data ?? {});
+		}
+		if (payload && payload.endpoint === "/api/focus-viewport") {
+			return MetadataHandlers.focusViewport(payload.data ?? {});
 		}
 		if (payload && payload.endpoint === "/api/execute-luau") {
 			return handleExecuteLuau(payload.data);

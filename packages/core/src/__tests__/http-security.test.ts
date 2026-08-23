@@ -43,9 +43,9 @@ describe('HTTP security', () => {
       const app = createHttpServer(tools, bridge, undefined, undefined, {
         allowedOrigins: ['http://localhost:5173'],
       });
-      const ok = await request(app).options('/mcp/get_selection').set('Origin', 'http://localhost:5173');
+      const ok = await request(app).options('/mcp/selection').set('Origin', 'http://localhost:5173');
       expect(ok.status).toBe(204);
-      const bad = await request(app).options('/mcp/get_selection').set('Origin', 'https://evil.example');
+      const bad = await request(app).options('/mcp/selection').set('Origin', 'https://evil.example');
       expect(bad.status).toBe(403);
     });
   });
@@ -66,7 +66,7 @@ describe('HTTP security', () => {
       }
       const instances = await request(app).get('/instances');
       expect(instances.status).toBe(401);
-      const tool = await request(app).post('/mcp/get_selection').send({});
+      const tool = await request(app).post('/mcp/selection').send({});
       expect(tool.status).toBe(401);
     });
 

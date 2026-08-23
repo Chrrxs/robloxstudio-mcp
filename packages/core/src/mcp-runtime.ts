@@ -63,6 +63,7 @@ const SIDE_EFFECTING_READ_TOOLS = new Set([
   'capture_micro_profiler',
   'capture_script_profiler',
   'export_rbxm',
+  'selection',
 ]);
 const NON_DESTRUCTIVE_SIDE_EFFECT_TOOLS = new Set([
   'capture_device_matrix',
@@ -71,6 +72,7 @@ const NON_DESTRUCTIVE_SIDE_EFFECT_TOOLS = new Set([
   'insert_asset',
   'insert_script_lines',
   'upload_asset',
+  'selection',
 ]);
 const IDEMPOTENT_WRITE_TOOLS = new Set([
   'capture_device_matrix',
@@ -80,6 +82,7 @@ const IDEMPOTENT_WRITE_TOOLS = new Set([
   'set_network_profile',
   'set_properties',
   'set_script_source',
+  'selection',
 ]);
 const OPEN_WORLD_TOOLS = new Set([
   'eval_client_runtime',
@@ -269,6 +272,11 @@ export function serverInstructions(definitions: readonly ToolDefinition[]): stri
   }
   if (has('capture_screenshot', 'simulate_mouse_input')) {
     instructions.push('Capture a screenshot before sending mouse input so its pixel coordinates match the viewport.');
+  }
+  if (has('selection', 'capture_screenshot')) {
+    instructions.push(
+      'Use selection action=view before capture_screenshot when the viewport must frame a specific instance.',
+    );
   }
   if (has('get_roblox_docs')) {
     instructions.push('Use get_roblox_docs instead of guessing unfamiliar engine or Luau APIs.');

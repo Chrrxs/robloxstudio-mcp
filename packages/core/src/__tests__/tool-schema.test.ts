@@ -1,4 +1,4 @@
-import { TOOL_DEFINITIONS } from '../tools/definitions.js';
+import { getReadOnlyTools, TOOL_DEFINITIONS } from '../tools/definitions.js';
 import { TOOL_HANDLERS } from '../http-server.js';
 import { RobloxStudioTools } from '../tools/index.js';
 import { BridgeService } from '../bridge-service.js';
@@ -68,6 +68,40 @@ describe('Tool schema compatibility', () => {
       expect(activeNames.has(name)).toBe(false);
       expect(TOOL_HANDLERS[name]).toBeUndefined();
     }
+  });
+
+  test('selection exposes one get/set/view lifecycle', () => {
+    const tool = TOOL_DEFINITIONS.find(candidate => candidate.name === 'selection');
+    expect(tool).toBeDefined();
+    expect(tool!.category).toBe('read');
+    expect(getReadOnlyTools()).toContain(tool);
+
+    const schema = tool!.inputSchema as {
+      properties?: Record<string, { enum?: string[]; default?: unknown }>;
+      required?: string[];
+    };
+    const props = schema.properties ?? {};
+    expect(schema.required).toEqual(['action']);
+    expect(props.action.enum).toEqual(['get', 'set', 'view']);
+    expect(props.mode).toMatchObject({ enum: ['set', 'add', 'remove'], default: 'set' });
+    expect(Object.keys(props).sort()).toEqual([
+      'action',
+      'angleY',
+      'from',
+      'instance_id',
+      'mode',
+      'padding',
+      'path',
+      'paths',
+    ]);
+
+    for (const removed of ['get_selection', 'set_selection', 'focus_viewport']) {
+      expect(TOOL_DEFINITIONS.some(candidate => candidate.name === removed)).toBe(false);
+      expect(TOOL_HANDLERS[removed]).toBeUndefined();
+    }
+    expect(TOOL_HANDLERS.selection).toBeDefined();
+    expect(TOOL_GUIDE_MARKDOWN).toContain('## Selection and viewport');
+    expect(TOOL_GUIDE_MARKDOWN).toContain('An empty paths array in set mode clears it');
   });
 
   test('grep_scripts exposes one explicit pattern-mode switch', () => {
@@ -188,9 +222,7 @@ describe('Tool schema compatibility', () => {
       insert_script_lines: 'insertScriptLines',
       delete_script_lines: 'deleteScriptLines',
       get_attributes: 'getAttributes',
-      get_selection: 'getSelection',
-      set_selection: 'setSelection',
-      focus_viewport: 'focusViewport',
+      selection: 'selection',
       execute_luau: 'executeLuau',
       eval_server_runtime: 'evalServerRuntime',
       eval_client_runtime: 'evalClientRuntime',

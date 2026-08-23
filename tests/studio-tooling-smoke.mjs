@@ -184,12 +184,22 @@ async function runEditModeToolSmoke(client, instanceId) {
     'delete_script_lines',
     'find_and_replace_in_scripts',
     'get_attributes',
-    'get_selection',
+    'selection',
     'execute_luau',
   ]) {
     assert(names.has(tool), `tools/list exposes ${tool}`);
   }
-  for (const removed of ['get_services', 'create_object', 'set_property', 'set_attribute', 'add_tag', 'delete_object']) {
+  for (const removed of [
+    'get_services',
+    'create_object',
+    'set_property',
+    'set_attribute',
+    'add_tag',
+    'delete_object',
+    'get_selection',
+    'set_selection',
+    'focus_viewport',
+  ]) {
     assert(!names.has(removed), `tools/list omits removed ${removed}`);
   }
 
@@ -384,8 +394,37 @@ return document:GetText()
     assert(exec.success === true, 'execute_luau edit target succeeds');
     assert(String(exec.returnValue) === 'true', 'execute_luau can read edited Workspace state');
 
-    const selection = await client.callTool('get_selection', { instance_id: instanceId });
-    assertNoError(selection, 'get_selection succeeds');
+    const viewed = await client.callTool('selection', {
+      action: 'view',
+      path: partPath,
+      padding: 1.1,
+      instance_id: instanceId,
+    });
+    assert(viewed.success === true && viewed.cameraPosition, 'selection view frames the smoke part');
+
+    const selected = await client.callTool('selection', {
+      action: 'set',
+      paths: [partPath],
+      instance_id: instanceId,
+    });
+    assert(selected.success === true && selected.selected === 1, 'selection set selects the smoke part');
+
+    const selection = await client.callTool('selection', {
+      action: 'get',
+      instance_id: instanceId,
+    });
+    assertNoError(selection, 'selection get succeeds');
+    assert(
+      selection.selection?.some((entry) => entry.path === partPath),
+      'selection get returns the smoke part',
+    );
+
+    const cleared = await client.callTool('selection', {
+      action: 'set',
+      paths: [],
+      instance_id: instanceId,
+    });
+    assert(cleared.success === true && cleared.selected === 0, 'selection set clears with empty paths');
   } finally {
     const deleted = await client.callTool('execute_luau', {
       target: 'edit',

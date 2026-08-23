@@ -11,6 +11,7 @@ catalog. Update exact-name integrations as follows:
 | `multiplayer_test_add_players` | `multiplayer_playtest` with `action: "add_players"` |
 | `multiplayer_test_leave_client` | `multiplayer_playtest` with `action: "leave_client"` |
 | `multiplayer_test_end` | `multiplayer_playtest` with `action: "end"` |
+| `get_selection` | `selection` with `action: "get"` |
 | `get_file_tree` | `get_project_structure` |
 | `search_files` | `search_objects` for instances; `grep_scripts` for source |
 | `search_by_property` | `search_objects` with `searchType: "property"` |

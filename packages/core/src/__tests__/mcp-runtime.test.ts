@@ -90,11 +90,14 @@ describe('MCP v2 tool runtime', () => {
     const names = new Set(catalog.map((tool) => tool.name));
     const byName = new Map(catalog.map((tool) => [tool.name, tool]));
     const serialized = JSON.stringify(catalog);
+    const inspectorCatalog = getReadOnlyTools().map(publicToolDefinition);
 
     expect(catalog).toHaveLength(47);
     expect(serialized.length).toBeLessThanOrEqual(43_000);
     expect(catalog.filter((tool) => tool.outputSchema)).toHaveLength(46);
     expect(catalog.every((tool) => tool.description.length <= 120)).toBe(true);
+    expect(inspectorCatalog).toHaveLength(24);
+    expect(JSON.stringify(inspectorCatalog).length).toBeLessThanOrEqual(20_000);
 
     for (const removed of [
       'start_playtest',
@@ -138,6 +141,9 @@ describe('MCP v2 tool runtime', () => {
       'get_tagged',
       'undo',
       'redo',
+      'get_selection',
+      'set_selection',
+      'focus_viewport',
     ]) {
       expect(names.has(removed)).toBe(false);
       expect(TOOL_HANDLERS[removed]).toBeUndefined();
@@ -177,6 +183,12 @@ describe('MCP v2 tool runtime', () => {
     }
     expect(byName.get('edit_script_lines')?.annotations.idempotentHint).toBe(false);
     expect(byName.get('find_and_replace_in_scripts')?.annotations.idempotentHint).toBe(false);
+    expect(byName.get('selection')?.annotations).toMatchObject({
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    });
   });
 
   test('keeps selection, argument, and behavior metadata in their contract layers', () => {
@@ -223,6 +235,7 @@ describe('MCP v2 tool runtime', () => {
     expect(fullInstructions).toContain('solo_playtest');
     expect(fullInstructions).toContain('preview');
     expect(fullInstructions).toContain('robloxstudio://tool-guides');
+    expect(fullInstructions).toContain('selection action=view before capture_screenshot');
     expect(fullInstructions).not.toContain('—');
 
     const inspectorDefinitions = getReadOnlyTools();
@@ -233,6 +246,8 @@ describe('MCP v2 tool runtime', () => {
         expect(inspectorInstructions).not.toContain(definition.name);
       }
     }
+    expect(inspectorNames.has('selection')).toBe(true);
+    expect(inspectorInstructions).toContain('selection action=view before capture_screenshot');
     expect(inspectorInstructions).toContain('get_connected_instances');
     expect(inspectorInstructions).toContain('get_roblox_docs');
     expect(inspectorInstructions).toContain('robloxstudio://tool-guides');

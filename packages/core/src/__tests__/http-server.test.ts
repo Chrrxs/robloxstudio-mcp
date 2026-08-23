@@ -240,6 +240,29 @@ describe('HTTP Server', () => {
       expect(multiplayerPlaytest).toHaveBeenLastCalledWith('start', 2, undefined, undefined, undefined, 5, 'place:test');
     });
 
+    test('selection handler forwards the lifecycle action and options together', async () => {
+      const selection = jest.fn(async () => ({ content: [] }));
+      const fakeTools = { selection } as unknown as RobloxStudioTools;
+
+      await TOOL_HANDLERS.selection(fakeTools, {
+        action: 'view',
+        path: 'game.Workspace.Subject',
+        padding: 1.25,
+        instance_id: 'place:test',
+      });
+
+      expect(selection).toHaveBeenLastCalledWith(
+        'view',
+        expect.objectContaining({
+          action: 'view',
+          path: 'game.Workspace.Subject',
+          padding: 1.25,
+          instance_id: 'place:test',
+        }),
+        'place:test',
+      );
+    });
+
     test('grep_scripts uses only usePattern for pattern mode', async () => {
       const grepScripts = jest.fn(async () => ({ content: [] }));
       const fakeTools = { grepScripts } as unknown as RobloxStudioTools;

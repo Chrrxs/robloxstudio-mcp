@@ -85,7 +85,7 @@ function getSelection(_requestData: Record<string, unknown>) {
 function setSelection(requestData: Record<string, unknown>) {
 	const rawPaths = requestData.paths;
 	if (!typeIs(rawPaths, "table")) {
-		return { error: "paths is required (array of instance paths; empty array clears the selection)" };
+		return { error: "paths is required (an empty array clears in set mode)" };
 	}
 
 	const mode = (requestData.mode as string) ?? "set";
@@ -93,19 +93,27 @@ function setSelection(requestData: Record<string, unknown>) {
 		return { error: `mode must be "set", "add" or "remove" (got: ${mode})` };
 	}
 
+	const paths = rawPaths as unknown[];
+	if (paths.size() === 0 && mode !== "set") {
+		return { error: `paths cannot be empty in ${mode} mode` };
+	}
+
 	const targets: Instance[] = [];
 	const missing: string[] = [];
-	for (const entry of rawPaths as unknown[]) {
-		const path = tostring(entry);
-		const instance = getInstanceByPath(path);
+	for (const entry of paths) {
+		if (!typeIs(entry, "string") || entry === "") {
+			return { error: "paths must contain non-empty instance path strings" };
+		}
+		const instance = getInstanceByPath(entry);
 		if (instance) {
 			targets.push(instance);
 		} else {
-			missing.push(path);
+			missing.push(entry);
 		}
 	}
 
-	if (targets.size() === 0) {
+	const clearsSelection = mode === "set" && paths.size() === 0;
+	if (targets.size() === 0 && !clearsSelection) {
 		return { error: "No matching instances found for any path", missingPaths: missing };
 	}
 
@@ -127,9 +135,11 @@ function setSelection(requestData: Record<string, unknown>) {
 		selected: targets.size(),
 		missingPaths: missing,
 		message:
-			mode === "remove"
-				? `Deselected ${targets.size()} object(s)`
-				: `${targets.size()} object(s) ${mode === "add" ? "added to" : "in"} the selection`,
+			clearsSelection
+				? "Selection cleared"
+				: mode === "remove"
+					? `Deselected ${targets.size()} object(s)`
+					: `${targets.size()} object(s) ${mode === "add" ? "added to" : "in"} the selection`,
 	};
 }
 
@@ -145,26 +155,30 @@ function focusViewport(requestData: Record<string, unknown>) {
 	if (!instance) return { error: `Instance not found: ${instancePath}` };
 
 	const workspace = game.GetService("Workspace");
-	// CurrentCamera is nil in rare windows (headless edit sessions, mid-swap);
-	// better a clear error than a nil deref inside the pcall.
 	const camera = workspace.CurrentCamera;
 	if (!camera) return { error: "Workspace.CurrentCamera is unavailable right now" };
 
 	const padding = tonumber(requestData.padding as number) ?? 1;
 	if (padding <= 0 || padding > 10) {
-		return { error: "padding must be between 0 (exclusive) and 10" };
+		return { error: "padding must be greater than 0 and at most 10" };
 	}
 
-	// Where we view from. Default elevation keeps most subjects readable
-	// (straight-on hides the top face); `from` picks the compass direction.
-	let angleY = tonumber(requestData.angleY as number) ?? 20;
-	if (angleY > 89) angleY = 89;
-	if (angleY < -89) angleY = -89;
-	const compassDeg = tonumber(requestData.from as number) ?? 215;
+	const compassOverride =
+		requestData.from === undefined ? undefined : tonumber(requestData.from as number);
+	if (requestData.from !== undefined && compassOverride === undefined) {
+		return { error: "from must be a compass angle in degrees" };
+	}
+
+	const elevationOverride =
+		requestData.angleY === undefined ? undefined : tonumber(requestData.angleY as number);
+	if (
+		requestData.angleY !== undefined &&
+		(elevationOverride === undefined || elevationOverride < -89 || elevationOverride > 89)
+	) {
+		return { error: "angleY must be between -89 and 89" };
+	}
 
 	const [ok, err] = pcall(() => {
-		// Only parts and models have a 3D extent; folders and scripts don't.
-		// Report that as a readable message instead of a raw API error.
 		let boundsCF: CFrame;
 		let boundsSize: Vector3;
 		if (instance.IsA("Model")) {
@@ -177,25 +191,40 @@ function focusViewport(requestData: Record<string, unknown>) {
 				`Cannot frame a ${instance.ClassName}: it has no 3D bounding box. Frame a part or model instead.`
 			);
 		}
-		const radius = math.max(boundsSize.X, math.max(boundsSize.Y, boundsSize.Z)) / 2;
 
-		// Half the vertical FOV plus half the horizontal FOV (via aspect ratio)
-		// must both cover the subject; solve for distance with a little margin.
-		const fovY = math.rad(camera.FieldOfView);
-		const viewport = camera.ViewportSize;
-		const fovX = 2 * math.atan(math.tan(fovY / 2) * (viewport.X / math.max(viewport.Y, 1)));
-		const fitDistance = radius / math.sin(math.min(fovY, fovX) / 2);
+		const center = boundsCF.Position;
+		let direction = camera.CFrame.LookVector.mul(-1);
 
-		const yaw = math.rad(compassDeg);
-		const pitch = math.rad(angleY);
-		const direction = new Vector3(math.cos(pitch) * math.cos(yaw), math.sin(pitch), math.cos(pitch) * math.sin(yaw));
-		const eye = boundsCF.Position.add(direction.Unit.mul(fitDistance * padding));
+		const currentHorizontal = new Vector3(direction.X, 0, direction.Z);
+		let horizontalDirection =
+			currentHorizontal.Magnitude < 0.001 ? new Vector3(1, 0, 0) : currentHorizontal.Unit;
+		if (compassOverride !== undefined) {
+			const yaw = math.rad(compassOverride);
+			horizontalDirection = new Vector3(math.cos(yaw), 0, math.sin(yaw));
+		}
 
-		camera.CFrame = CFrame.lookAt(eye, boundsCF.Position);
+		let vertical = direction.Y;
+		let horizontalMagnitude = math.sqrt(math.max(0, 1 - vertical * vertical));
+		if (elevationOverride !== undefined) {
+			const pitch = math.rad(elevationOverride);
+			vertical = math.sin(pitch);
+			horizontalMagnitude = math.cos(pitch);
+		}
+		direction = horizontalDirection
+			.mul(horizontalMagnitude)
+			.add(new Vector3(0, vertical, 0))
+			.Unit;
 
-		// In edit mode the camera can be re-owned by Studio's camera scripts on
-		// the next input; setting CameraType pins our shot until the user moves.
 		camera.CameraType = Enum.CameraType.Scriptable;
+		camera.CFrame = CFrame.lookAt(center.add(direction.mul(math.max(boundsSize.Magnitude, 1))), center);
+		camera.Focus = new CFrame(center);
+		camera.ZoomToExtents(boundsCF, boundsSize);
+
+		if (padding !== 1) {
+			const fittedOffset = camera.CFrame.Position.sub(center);
+			camera.CFrame = CFrame.lookAt(center.add(fittedOffset.mul(padding)), center);
+		}
+		camera.Focus = new CFrame(center);
 	});
 
 	if (!ok) return { error: `focus failed: ${tostring(err)}` };
@@ -208,7 +237,6 @@ function focusViewport(requestData: Record<string, unknown>) {
 			Y: camera.CFrame.Position.Y,
 			Z: camera.CFrame.Position.Z,
 		},
-		message: "Camera framed on target. Take capture_screenshot now.",
 	};
 }
 

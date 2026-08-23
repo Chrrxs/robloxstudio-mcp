@@ -1742,8 +1742,41 @@ export class RobloxStudioTools {
     };
   }
 
+  async selection(
+    action: string,
+    opts: {
+      paths?: unknown;
+      mode?: string;
+      path?: string;
+      from?: number;
+      padding?: number;
+      angleY?: number;
+    } = {},
+    instance_id?: string,
+  ) {
+    if (action !== 'get' && action !== 'set' && action !== 'view') {
+      throw new Error('selection requires action=get|set|view');
+    }
+
+    if (action === 'get') {
+      return this.getSelection(instance_id);
+    }
+
+    if (action === 'set') {
+      if (!Array.isArray(opts.paths)) {
+        throw new Error('selection action=set requires a paths array; empty clears');
+      }
+      return this.setSelection(opts.paths, opts.mode, instance_id);
+    }
+
+    if (!opts.path) {
+      throw new Error('selection action=view requires path');
+    }
+    return this.focusViewport(opts.path, opts.from, opts.padding, opts.angleY, instance_id);
+  }
+
   async getSelection(instance_id?: string) {
-    const response = await this._callSingle('/api/get-selection', {}, undefined, instance_id);
+    const response = await this._callSingle('/api/get-selection', {}, 'edit', instance_id);
     return {
       content: [
         {
@@ -1755,14 +1788,19 @@ export class RobloxStudioTools {
   }
 
   async setSelection(paths: string[], mode: string | undefined, instance_id?: string) {
-    if (!Array.isArray(paths)) {
-      throw new Error('set_selection requires paths (array of instance paths; empty array clears the selection)');
+    if (!Array.isArray(paths) || paths.some(path => typeof path !== 'string' || path.length === 0)) {
+      throw new Error('selection paths must contain only non-empty instance paths');
     }
-    const selectionMode = mode || 'set';
+    const selectionMode = mode ?? 'set';
     if (!['set', 'add', 'remove'].includes(selectionMode)) {
-      throw new Error(`set_selection mode must be "set", "add" or "remove" (got: ${selectionMode})`);
+      throw new Error(`selection mode must be "set", "add" or "remove" (got: ${selectionMode})`);
     }
-    const response = await this._callSingle('/api/set-selection', { paths, mode: selectionMode }, undefined, instance_id);
+    const response = await this._callSingle(
+      '/api/set-selection',
+      { paths, mode: selectionMode },
+      'edit',
+      instance_id,
+    );
     return {
       content: [
         {
@@ -1773,16 +1811,30 @@ export class RobloxStudioTools {
     };
   }
 
-  async focusViewport(instancePath: string, from?: unknown, padding?: number, angleY?: number, instance_id?: string) {
+  async focusViewport(
+    instancePath: string,
+    from?: number,
+    padding?: number,
+    angleY?: number,
+    instance_id?: string,
+  ) {
     if (!instancePath) {
-      throw new Error('focus_viewport requires path (the instance to frame)');
+      throw new Error('selection action=view requires path');
     }
+    if (padding !== undefined && (padding <= 0 || padding > 10)) {
+      throw new Error('selection padding must be greater than 0 and at most 10');
+    }
+    if (angleY !== undefined && (angleY < -89 || angleY > 89)) {
+      throw new Error('selection angleY must be between -89 and 89');
+    }
+
+    const { instanceId, clientRole } = this._resolveRuntime(instance_id);
     const response = await this._callSingle('/api/focus-viewport', {
       path: instancePath,
       from,
       padding,
       angleY,
-    }, undefined, instance_id);
+    }, clientRole ?? 'edit', instanceId);
     return {
       content: [
         {

@@ -28,6 +28,7 @@ screenshots, memory reports, and profiler captures from each peer.
 
 - Run Luau in Studio's edit context with `execute_luau`.
 - Use `set_properties` for instance properties and `find_and_replace_in_scripts` for script text. For project-specific bulk edits, use `execute_luau`.
+- Use `selection` to inspect or update Studio selection and frame a part or model before capturing the viewport.
 - Capture the viewport with `capture_screenshot`, then send mouse or keyboard input.
 
 ### Inspect Creator Store assets
@@ -95,7 +96,10 @@ On Windows, wrap with `cmd /c` if `npx` doesn't resolve:
 
 [![NPM Version](https://img.shields.io/npm/v/@chrrxs/robloxstudio-mcp-inspector)](https://www.npmjs.com/package/@chrrxs/robloxstudio-mcp-inspector)
 
-24 Studio-safe inspection tools: no DataModel or script edits. Export and profiler tools can still write files only to explicit local paths. Install only one variant at a time (the installers remove the other automatically):
+24 Studio-safe inspection tools: no DataModel or script edits. The selection
+tool can change editor selection and camera framing; export and profiler tools
+can write files only to explicit local paths. Install only one variant at a time
+(the installers remove the other automatically):
 
 ```bash
 claude mcp add robloxstudio-inspector -- npx -y @chrrxs/robloxstudio-mcp-inspector@latest --auto-install-plugin

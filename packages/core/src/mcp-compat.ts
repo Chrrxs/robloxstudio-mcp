@@ -17,7 +17,6 @@ Tool descriptions explain selection. Input schemas explain arguments. This guide
 - Use canonical DataModel paths returned by the tools. Paths usually start with game.
 - Call get_connected_instances when more than one place may be connected. Pass the chosen row's id as instance_id on later calls.
 - Use get_place_info for the active place identity and settings.
-- Use get_selection only when the user's current Studio selection should set the scope.
 
 ## Discovery and edit work
 
@@ -25,6 +24,13 @@ Tool descriptions explain selection. Input schemas explain arguments. This guide
 - Use get_instance_properties and get_attributes after locating an instance.
 - Use execute_luau for custom traversal, bulk edits, and work that would otherwise need many tool calls. It runs through the Studio plugin context.
 - Use set_properties when several known properties on one instance can be updated in one request.
+
+## Selection and viewport
+
+- Use selection with action=get when the user's Studio selection should define the scope.
+- Use action=set with instance paths to replace, add to, or remove from the selection. An empty paths array in set mode clears it.
+- Use action=view with a BasePart or Model path to frame it. The current viewing direction is preserved unless from or angleY overrides it. padding below 1 crops closer and above 1 pulls back.
+- For visual proof, change the instance, frame it with selection, then call capture_screenshot.
 
 ## Script changes
 
