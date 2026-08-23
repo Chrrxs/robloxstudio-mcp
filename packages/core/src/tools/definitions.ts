@@ -285,51 +285,51 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
   {
     name: 'selection',
     category: 'read',
-    description: 'Use to read, change, or frame the Studio selection.',
+    description: 'Use to get, set, or frame selection.',
     inputSchema: {
       type: 'object',
       properties: {
         action: {
           type: 'string',
           enum: ['get', 'set', 'view'],
-          description: 'Lifecycle action.'
+          description: 'View frames the target.'
         },
         paths: {
           type: 'array',
           items: { type: 'string', minLength: 1 },
-          description: 'Set paths; empty clears.'
+          description: 'Set needs paths; empty clears in set mode.'
         },
         mode: {
           type: 'string',
           enum: ['set', 'add', 'remove'],
           default: 'set',
-          description: 'Update mode.'
+          description: 'How set applies paths.'
         },
         path: {
           type: 'string',
           minLength: 1,
-          description: 'BasePart or Model path for view.'
+          description: 'View needs a BasePart or Model path.'
         },
         from: {
           type: 'number',
-          description: 'Compass degrees: 0 from +X, 90 from +Z.'
+          description: 'View azimuth: 0 +X, 90 +Z.'
         },
         padding: {
           type: 'number',
           exclusiveMinimum: 0,
           maximum: 10,
           default: 1,
-          description: 'Distance scale.'
+          description: 'View distance scale.'
         },
         angleY: {
           type: 'number',
           minimum: -89,
           maximum: 89,
-          description: 'Elevation degrees.'
+          description: 'View elevation in degrees.'
         },
         instance_id: {
           type: 'string',
-          description: 'Place ID; required if ambiguous.'
+          description: 'Connected place ID if multiple are open.'
         }
       },
       required: ['action']

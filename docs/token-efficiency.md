@@ -4,12 +4,6 @@ Version 3.0 treats the MCP wire surface as a budgeted public API.
 
 ## Catalog budget
 
-The 2.23.1 catalog contained 81 advertised tools and serialized to 95,892
-characters (about 23,973 tokens using the deliberately simple `characters / 4`
-estimate). The 3.0 catalog contains 47 canonical tools and serializes to 42,839
-characters (about 10,710 estimated tokens), a 55.3% reduction. The 24-tool
-inspector catalog serializes to 19,461 characters (about 4,865 estimated tokens).
-
 The regression test caps the serialized public catalog at 43,000 characters,
 tool descriptions at 120 characters, and argument descriptions at 64 characters.
 It also requires structured output schemas for every tool except the
@@ -30,9 +24,8 @@ API decision.
   `robloxstudio://tool-guides`. Official engine references remain available through
   the `robloxdocs://` resource templates.
 
-The shared server instructions are 978 characters and are advertised once. The
-5,305-character tool guide is not part of the tool catalog and is read only when
-needed.
+The server advertises shared instructions once. Clients read the detailed tool
+guide only when needed, and the guide is not part of the tool catalog.
 
 ## Response contract
 
