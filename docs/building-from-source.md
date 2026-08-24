@@ -23,6 +23,11 @@ npm run test:e2e
 ```
 
 This checks representative edit-mode, playtest, server, and client behavior.
+Before launching Studio, the gate recompiles and assembles
+`studio-plugin/MCPPlugin.rbxmx` from the current worktree, then installs that
+exact file into its isolated plugin directory. The artifact-only build does
+not alter your normal Studio plugin folder, and the installer never falls back
+to a published release.
 Run the targeted E2E for any specialized subsystem the feature changes. The
 auto-install, full functional, lifecycle, and parallel-isolation suites are
 reserved for relevant changes and the release gate:

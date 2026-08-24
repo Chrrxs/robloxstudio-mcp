@@ -7,16 +7,15 @@ state it starts.
 
 ## Prerequisites
 
-1. **The main Studio plugin installed.** Studio itself does not need to be open:
-   `run-all.mjs` launches and closes its own managed baseplate through
-   `manage_instance`.
-2. **The server and Studio plugin configured for the same port.** The runner
-   starts a local control subprocess on `58741` by default. Set
-   `ROBLOX_STUDIO_PORT` when the installed plugin uses another port.
-3. **The built dist** at `packages/robloxstudio-mcp/dist/index.js` —
-   `npm run build` if it is stale. If plugin code changed, rebuild and reinstall
-   the `.rbxmx` before running.
-4. **`HttpEnabled = true`** in Studio Experience Settings (Security tab).
+1. **The built server dist** at `packages/robloxstudio-mcp/dist/index.js` —
+   run `npm run build` when it is stale.
+2. **Plugin build dependencies** under `studio-plugin/node_modules` — install
+   them with `npm ci --prefix studio-plugin`. The managed Studio gates rebuild
+   `studio-plugin/MCPPlugin.rbxmx` from the current worktree, then install that
+   exact file into an isolated directory; they never download a published
+   plugin as a fallback. Run `npm run build:plugin` before individual test
+   scripts that reuse an already-open Studio instance.
+3. **`HttpEnabled = true`** in Studio Experience Settings (Security tab).
 
 ## Run
 

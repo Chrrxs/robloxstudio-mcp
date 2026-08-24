@@ -21,6 +21,7 @@ import {
 } from '../scripts/studio-lifecycle.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
+const WORKTREE_PLUGIN = resolve(__dirname, '..', 'studio-plugin', 'MCPPlugin.rbxmx');
 const forceManagedSession = process.argv.includes('--managed');
 if (forceManagedSession) {
   delete process.env.MCP_INSTANCE_ID;
@@ -88,7 +89,13 @@ async function main() {
     process.env.MCP_PLUGINS_DIR = worker.pluginsDirectory;
     process.env.RSMCP_STUDIO_WORKING_DIRECTORY = worker.workingDirectory;
     process.env.RSMCP_STUDIO_DIRECTORY_ISOLATED = '1';
-    await runChecked(process.execPath, [DIST, '--install-plugin'], process.env);
+    console.log(`Installing worktree plugin ${WORKTREE_PLUGIN}`);
+    // Never hide a missing worktree build by downloading a released plugin.
+    await runChecked(
+      process.execPath,
+      [DIST, '--install-bundled-plugin', '--plugin-path', WORKTREE_PLUGIN],
+      process.env,
+    );
   }
 
   let studioSession;
