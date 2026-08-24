@@ -36,6 +36,7 @@ const FULL_TESTS = [
   'eval-bridge-error-preservation.mjs',
   'eval-context-routing.mjs',
   'runtime-bridge-lifecycle.mjs',
+  'micro-profiler-responsiveness.mjs',
   'execute-luau-error-preservation.mjs',
   'proxy-mode-peer-fanout.mjs',
   'execute-luau-output-capture.mjs',
@@ -46,6 +47,7 @@ const FULL_TESTS = [
 const FEATURE_TESTS = [
   'studio-tooling-smoke.mjs',
   'eval-context-routing.mjs',
+  'micro-profiler-responsiveness.mjs',
 ];
 const featureSmoke = process.argv.includes('--smoke');
 const TESTS = featureSmoke ? FEATURE_TESTS : FULL_TESTS;
