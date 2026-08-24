@@ -513,14 +513,12 @@ export function createHttpServer(tools: RobloxStudioTools, bridge: BridgeService
       ? bridge.getPendingRequest(callerInstanceId, callerRole)
       : null;
 
-    // Long-polling: Wait up to 15 seconds if there is no pending request
     if (!pendingRequest && knownInstance && callerInstanceId && callerRole) {
       const startWait = Date.now();
       while (Date.now() - startWait < 15000) {
-        await new Promise(resolve => setTimeout(resolve, 50)); // Poll every 50ms
+        await new Promise((resolve) => setTimeout(resolve, 50));
         pendingRequest = bridge.getPendingRequest(callerInstanceId, callerRole);
         if (pendingRequest) break;
-        // Break early if client disconnected or MCP server deactivated
         if (!isMCPServerActive() || !bridge.getInstanceBySessionId(pluginSessionId!)) {
           break;
         }

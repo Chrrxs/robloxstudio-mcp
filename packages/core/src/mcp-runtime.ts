@@ -111,7 +111,6 @@ function compactPublicValue(value: unknown): unknown {
   for (const [key, child] of Object.entries(value)) {
     if (child === undefined || child === null || INTERNAL_RESULT_KEYS.has(key)) continue;
     
-    // Aggressively strip empty collections to save tokens on massive hierarchies
     if (Array.isArray(child) && child.length === 0) {
       if (key === 'children' || key === 'attributes' || key === 'tags' || key === 'capabilities' || key === 'errors' || key === 'warnings') {
         continue;
