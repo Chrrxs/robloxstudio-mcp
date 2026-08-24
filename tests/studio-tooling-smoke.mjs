@@ -244,6 +244,18 @@ return true
   });
   assert(setup.success === true && String(setup.returnValue) === 'true', 'execute_luau creates smoke fixtures');
 
+  const assertExactScriptSource = async (expectedLines, message) => {
+    const source = await client.callTool('get_script_source', {
+      instancePath: scriptPath,
+      instance_id: instanceId,
+    });
+    const expected = expectedLines.map((line, index) => `${index + 1}: ${line}`).join('\n');
+    assert(
+      source.source === expected,
+      `${message} (${JSON.stringify({ expected, actual: source.source })})`,
+    );
+  };
+
   try {
     const setProp = await client.callTool('set_properties', {
       instancePath: partPath,
@@ -285,6 +297,79 @@ return true
       instance_id: instanceId,
     });
     assertContains(source.source, 'return value + 1', 'get_script_source returns edited source');
+
+    const escapeHeavyLines = [
+      String.raw`local newline = "\n"`,
+      String.raw`local tab = "\t"`,
+      String.raw`local carriage = "\r"`,
+      String.raw`local quote = "say \"hi\""`,
+      String.raw`local windowsPath = "C:\\Users\\dev\\file.lua"`,
+      'return newline .. tab .. carriage .. quote .. windowsPath',
+    ];
+    const escapedSetSource = await client.callTool('set_script_source', {
+      instancePath: scriptPath,
+      source: escapeHeavyLines.join('\n'),
+      instance_id: instanceId,
+    });
+    assert(escapedSetSource.success === true, 'set_script_source accepts escape-heavy source');
+    await assertExactScriptSource(
+      escapeHeavyLines,
+      'set_script_source preserves already-decoded source text exactly',
+    );
+
+    const quotedReplacement = String.raw`local quote = "say \"bye\""`;
+    const escapedEdit = await client.callTool('edit_script_lines', {
+      instancePath: scriptPath,
+      old_string: escapeHeavyLines[3],
+      new_string: quotedReplacement,
+      line_range: '4',
+      instance_id: instanceId,
+    });
+    assert(escapedEdit.success === true, 'edit_script_lines accepts escape-heavy source text');
+    escapeHeavyLines[3] = quotedReplacement;
+    await assertExactScriptSource(
+      escapeHeavyLines,
+      'edit_script_lines preserves already-decoded search and replacement text exactly',
+    );
+
+    const insertedEscapeLines = [
+      String.raw`local pattern = "\\n\\t"`,
+      String.raw`local json = "{\"key\":\"value\\n\"}"`,
+    ];
+    const escapedInsert = await client.callTool('insert_script_lines', {
+      instancePath: scriptPath,
+      afterLine: 5,
+      newContent: insertedEscapeLines.join('\n'),
+      instance_id: instanceId,
+    });
+    assert(escapedInsert.success === true, 'insert_script_lines accepts escape-heavy source text');
+    escapeHeavyLines.splice(5, 0, ...insertedEscapeLines);
+    await assertExactScriptSource(
+      escapeHeavyLines,
+      'insert_script_lines preserves already-decoded source text exactly',
+    );
+
+    const pathPattern = String.raw`C:\\Users\\dev\\file.lua`;
+    const pathReplacement = String.raw`D:\\Build\\out.lua`;
+    const escapedFindAndReplace = await client.callTool('find_and_replace_in_scripts', {
+      pattern: pathPattern,
+      replacement: pathReplacement,
+      caseSensitive: true,
+      path: scriptPath,
+      classFilter: 'Script',
+      instance_id: instanceId,
+    });
+    assert(
+      escapedFindAndReplace.success === true
+        && escapedFindAndReplace.totalReplacements === 1
+        && escapedFindAndReplace.scriptsModified === 1,
+      `find_and_replace_in_scripts accepts exact escape-heavy text (${JSON.stringify(escapedFindAndReplace)})`,
+    );
+    escapeHeavyLines[4] = escapeHeavyLines[4].replace(pathPattern, pathReplacement);
+    await assertExactScriptSource(
+      escapeHeavyLines,
+      'find_and_replace_in_scripts preserves already-decoded pattern and replacement text exactly',
+    );
 
     const openedDraft = await client.callTool('execute_luau', {
       target: 'edit',

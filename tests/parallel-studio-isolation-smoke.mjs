@@ -13,12 +13,13 @@ import {
   readStudioPluginDirectorySetting,
   resolveStudioLogsDir,
 } from '../scripts/studio-lifecycle.mjs';
-import { DIST, McpClient } from './lib/mcp-client.mjs';
+import { DIST, McpClient, REPO_ROOT } from './lib/mcp-client.mjs';
 import { acquireSuitePort } from './lib/test-port.mjs';
 
 const WORKER_COUNT = 2;
 const PROCESS_LOG_TIMEOUT_MS = 15000;
 const LAUNCH_TIMEOUT_MS = 30000;
+const WORKTREE_PLUGIN = path.join(REPO_ROOT, 'studio-plugin', 'MCPPlugin.rbxmx');
 
 async function installPlugin(worker, port, workerIndex) {
   const env = {
@@ -34,10 +35,14 @@ async function installPlugin(worker, port, workerIndex) {
   if (studioExecutable) env.ROBLOX_STUDIO_EXE = studioExecutable;
   else delete env.ROBLOX_STUDIO_EXE;
 
-  const child = spawn(process.execPath, [DIST, '--install-plugin'], {
-    env,
-    stdio: 'inherit',
-  });
+  const child = spawn(
+    process.execPath,
+    [DIST, '--install-bundled-plugin', '--plugin-path', WORKTREE_PLUGIN],
+    {
+      env,
+      stdio: 'inherit',
+    },
+  );
   const [code, signal] = await once(child, 'exit');
   if (signal || code !== 0) {
     throw new Error(`Plugin installer ${workerIndex + 1} exited ${signal ?? code ?? 1}`);
