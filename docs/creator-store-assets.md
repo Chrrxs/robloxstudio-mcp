@@ -1,57 +1,38 @@
-# Creator Store Assets
+# Creator Store Assets & Security
 
-## Search and details
+## Search & Discovery
 
-`search_assets` searches public Creator Store decals, images, models, audio,
-particles, and VFX. Results are compact: they include the asset ID, name,
-description excerpt, and audio duration when available. Results include all
-creators by default; pass `robloxCreatedOnly: true` to restrict results to
-assets created by Roblox.
+`search_assets` queries public decals, images, models, audio, particles, and VFX. Results are compact (ID, name, description excerpt, audio duration). Set `robloxCreatedOnly: true` for Roblox-authored assets only.
 
-Call `get_asset_details` for full metadata on shortlisted assets and
-`get_asset_thumbnail` for an inline image.
+Use `get_asset_details` for comprehensive metadata and `get_asset_thumbnail` for visual inspection.
 
-## Preview
+## Security Previews
 
-`preview_asset` loads an asset into an unparented wrapper and returns a bounded
-hierarchy, capability summary, and complete security scan. It never reads or
-returns imported script source.
+`preview_asset` safely loads assets into an isolated, unparented wrapper and returns a hierarchy summary, capability list, and security scan. **Note:** Previews never read or execute script source code.
 
-The preview inventories every `Sound` and `AudioPlayer` with playback metadata.
-It also recognizes a requested Creator Store Audio asset when Studio represents
-it as an empty wrapper model.
+The preview system inventories `Sound` and `AudioPlayer` instances, accurately interpreting audio assets even if loaded as empty wrappers.
 
-Inline audio is enabled by default. The MCP server—not the Studio plugin—uses
-`ROBLOX_OPEN_CLOUD_API_KEY` with `asset:read` permission to request the direct
-Audio asset or each unique nested sound through Roblox's asset-delivery API.
-Set `includeAudio: false` for metadata only. `maxAudioPreviews` defaults to
-three and can be set as high as five.
+### Inline Audio Previews
+Enabled by default. The local MCP server uses your `ROBLOX_OPEN_CLOUD_API_KEY` (requires `asset:read`) to download audio via secure delivery APIs.
 
-Downloads are accepted only from HTTPS locations on `rbxcdn.com` or the exact
-Roblox-owned legacy host `contentdelivery.roblox.com`. The server validates MP3,
-OGG, WAV, or FLAC file signatures and enforces per-file and aggregate byte
-limits. Audio bytes remain in memory and are not written to disk. A failed or
-inaccessible download is reported without weakening insertion sanitization or
-preventing the structural preview from returning.
+Set `includeAudio: false` to skip audio. `maxAudioPreviews` defaults to 3 (max 5).
 
-## Safe insertion
+**Audio Restrictions:**
+- HTTPS only from `rbxcdn.com` or `contentdelivery.roblox.com`.
+- Strict MIME/signature validation (MP3, OGG, WAV, FLAC).
+- Enforced byte limits.
+- In-memory only; never written to disk.
+- Returns structural preview with warnings on download failure.
 
-To preview or insert a public third-party asset, enable
-**Allow Loading Third Party Assets** in Studio under
-**Game Settings → Security**. Roblox disables this setting by default. When it
-is disabled, preview and insertion failures include a setup hint.
+## Safe Insertion Pipeline
 
-`insert_asset` treats every Creator Store asset as untrusted. `AssetService`
-loads the asset into an unparented wrapper, then the plugin scans the complete
-descendant hierarchy and destroys every `LuaSourceContainer`—including
-`Script`, `LocalScript`, `ModuleScript`, and future subclasses—and every
-`PackageLink`.
+Enable **Allow Loading Third Party Assets** in **Game Settings → Security** to insert third-party assets.
 
-The plugin performs a second complete scan before parenting any remaining
-content. If a script or `PackageLink` survived, the entire loaded asset is
-destroyed and nothing is inserted. The policy does not depend on instance
-names, Unicode, hierarchy depth, creator verification, source contents, or
-asset reputation.
+### Sanitization Policy
+`insert_asset` treats all assets as untrusted. The pipeline applies a strict protocol:
 
-Non-script content such as particles, beams, trails, attachments, decals,
-textures, meshes, lights, sounds, fire, smoke, and sparkles is preserved.
+1. **Isolation:** `AssetService` loads the asset into a sandboxed wrapper.
+2. **Purge:** Permanently destroys every `PackageLink` and `LuaSourceContainer` (`Script`, `LocalScript`, `ModuleScript`).
+3. **Verification:** Aborts and destroys the asset if any script or `PackageLink` survives.
+
+This policy is absolute. Visual, audio, and physical properties (meshes, lights, constraints) are preserved.

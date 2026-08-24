@@ -526,7 +526,6 @@ describe('Tool schema compatibility', () => {
     expect(tool!.description).toMatch(/^Use /);
     expect(TOOL_GUIDE_MARKDOWN).toContain('generate_model stages generated content under ServerStorage');
     expect((props.image_mime_type as { enum?: string[] }).enum).toEqual(['image/png']);
-    expect(props.image_base64).toMatchObject({ maxLength: 44_739_244 });
     expect((props.schema as { enum?: string[]; default?: string }).enum).toEqual(['Body1', 'Car5']);
     expect((props.schema as { enum?: string[]; default?: string }).default).toBe('Body1');
     expect((props.schema_groups as { items?: unknown }).items).toBeTruthy();

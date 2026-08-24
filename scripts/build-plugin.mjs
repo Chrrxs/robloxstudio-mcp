@@ -256,24 +256,20 @@ function resolvePluginsDir() {
   }
 }
 
-if (process.argv.includes('--build-only')) {
-  console.log('Skipped Studio install (--build-only).');
-} else {
-  const pluginsDir = resolvePluginsDir();
-  if (pluginsDir) {
-    mkdirSync(pluginsDir, { recursive: true });
-    const otherInstallPath = join(pluginsDir, otherVariant.outputName);
-    if (existsSync(otherInstallPath)) {
-      unlinkSync(otherInstallPath);
-      console.log(`Removed conflicting ${otherVariant.outputName} from ${pluginsDir}`);
-    }
-    const installPath = join(pluginsDir, variant.outputName);
-    copyFileSync(outputPath, installPath);
-    console.log(`Installed to ${installPath}`);
-  } else {
-    console.log(
-      `Skipped install: no Studio plugins folder resolvable on ${process.platform}. ` +
-      `Set MCP_PLUGINS_DIR or copy ${variant.outputName} manually.`,
-    );
+const pluginsDir = resolvePluginsDir();
+if (pluginsDir) {
+  mkdirSync(pluginsDir, { recursive: true });
+  const otherInstallPath = join(pluginsDir, otherVariant.outputName);
+  if (existsSync(otherInstallPath)) {
+    unlinkSync(otherInstallPath);
+    console.log(`Removed conflicting ${otherVariant.outputName} from ${pluginsDir}`);
   }
+  const installPath = join(pluginsDir, variant.outputName);
+  copyFileSync(outputPath, installPath);
+  console.log(`Installed to ${installPath}`);
+} else {
+  console.log(
+    `Skipped install: no Studio plugins folder resolvable on ${process.platform}. ` +
+    `Set MCP_PLUGINS_DIR or copy ${variant.outputName} manually.`,
+  );
 }

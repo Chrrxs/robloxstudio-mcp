@@ -8,6 +8,12 @@
   },
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
+  "files": [
+    "dist/**/*.js",
+    "dist/**/*.d.ts",
+    "!dist/__tests__/**/*",
+    "!dist/**/*.map"
+  ],
   "dependencies": {
     "fzstd": "^0.1.1"
   },

@@ -1,5 +1,4 @@
 import type { ToolAnnotations } from '@modelcontextprotocol/server';
-import { MAX_PNG_BASE64_CHARACTERS } from '../image-decode.js';
 
 export type ToolCategory = 'read' | 'write';
 
@@ -1300,8 +1299,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
         },
         image_base64: {
           type: 'string',
-          maxLength: MAX_PNG_BASE64_CHARACTERS,
-          description: 'PNG base64; image/png required; single source.'
+          description: 'Base64 PNG; needs image_mime_type and excludes other images.'
         },
         image_mime_type: {
           type: 'string',

@@ -442,7 +442,7 @@ export class OpenCloudClient {
       const chunks: Buffer[] = [];
       let totalBytes = 0;
       const reader = contentResponse.body.getReader();
-      while (true) {
+      for (;;) {
         const { done, value } = await reader.read();
         if (done) break;
         totalBytes += value.byteLength;

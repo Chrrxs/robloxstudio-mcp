@@ -133,6 +133,9 @@ export class RobloxStudioMCPServer {
           // basePort still taken — discard the candidate, leave proxy bridge live.
         }
       }, promotionIntervalMs);
+      if (typeof promotionInterval === 'object' && 'unref' in promotionInterval) {
+        promotionInterval.unref();
+      }
     }
 
     // Legacy port 3002 for old plugins
@@ -198,11 +201,17 @@ export class RobloxStudioMCPServer {
         }
       }
     }, 5000);
+    if (typeof activityInterval === 'object' && 'unref' in activityInterval) {
+      activityInterval.unref();
+    }
 
     const cleanupInterval = setInterval(() => {
       this.bridge.cleanupOldRequests();
       this.bridge.cleanupStaleInstances();
     }, 5000);
+    if (typeof cleanupInterval === 'object' && 'unref' in cleanupInterval) {
+      cleanupInterval.unref();
+    }
 
     const shutdown = async () => {
       console.error('Shutting down MCP server...');
@@ -212,6 +221,9 @@ export class RobloxStudioMCPServer {
       if (this.bridge instanceof ProxyBridgeService) {
         this.bridge.stop();
       }
+      await this.tools.dispose().catch((error) => {
+        console.error(`[lifecycle] Failed to stop background Studio work: ${error instanceof Error ? error.message : String(error)}`);
+      });
       await stdioHandle.close().catch(() => {});
       await Promise.all([
         (primaryApp as any)?.closeMcpHandler?.(),

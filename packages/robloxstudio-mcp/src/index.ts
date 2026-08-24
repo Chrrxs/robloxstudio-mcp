@@ -1,27 +1,16 @@
 import { RobloxStudioMCPServer, getAllTools } from '@chrrxs/robloxstudio-mcp-core';
 import { createRequire } from 'module';
-import { installBundledPlugin, installPlugin } from './install-plugin.js';
 
-const flagValue = (flag: string): string | undefined => {
-  const idx = process.argv.indexOf(flag);
-  return idx !== -1 && idx + 1 < process.argv.length ? process.argv[idx + 1] : undefined;
-};
-
-const installBundledOnly = process.argv.includes('--install-bundled-plugin');
-const installWithFallback = process.argv.includes('--install-plugin');
-
-if (installBundledOnly || installWithFallback) {
-  const install = installBundledOnly
-    ? installBundledPlugin
-    : installPlugin;
-  await install({ sourcePath: flagValue('--plugin-path') }).catch((err) => {
+if (process.argv.includes('--install-plugin')) {
+  const { installPlugin } = await import('./install-plugin.js');
+  await installPlugin().catch((err) => {
     console.error(err instanceof Error ? err.message : String(err));
     process.exitCode = 1;
   });
 } else {
   if (process.argv.includes('--auto-install-plugin')) {
+    const { installBundledPlugin } = await import('./install-plugin.js');
     await installBundledPlugin({
-      sourcePath: flagValue('--plugin-path'),
       log: (message) => console.error(`[install-plugin] ${message}`),
       warn: (message) => console.error(message),
     }).catch((err) => {
@@ -30,6 +19,11 @@ if (installBundledOnly || installWithFallback) {
       );
     });
   }
+
+  const flagValue = (flag: string): string | undefined => {
+    const idx = process.argv.indexOf(flag);
+    return idx !== -1 && idx + 1 < process.argv.length ? process.argv[idx + 1] : undefined;
+  };
 
   const openCloudKey = flagValue('--open-cloud-key');
   const creatorId = flagValue('--creator-id');

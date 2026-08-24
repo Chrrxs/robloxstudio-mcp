@@ -465,7 +465,7 @@ export function createHttpServer(tools: RobloxStudioTools, bridge: BridgeService
   });
 
 
-  app.get('/poll', (req, res) => {
+  app.get('/poll', async (req, res) => {
     const pluginSessionId = req.query.pluginSessionId as string | undefined;
 
     if (pluginSessionId) {
@@ -509,9 +509,23 @@ export function createHttpServer(tools: RobloxStudioTools, bridge: BridgeService
     // restarted (its in-memory instances map is empty) and the plugin
     // should re-issue /ready. Without this, polls succeed (HTTP 200) but
     // the server treats the plugin as anonymous and routes nothing to it.
-    const pendingRequest = knownInstance && callerInstanceId && callerRole
+    let pendingRequest = knownInstance && callerInstanceId && callerRole
       ? bridge.getPendingRequest(callerInstanceId, callerRole)
       : null;
+
+    // Long-polling: Wait up to 15 seconds if there is no pending request
+    if (!pendingRequest && knownInstance && callerInstanceId && callerRole) {
+      const startWait = Date.now();
+      while (Date.now() - startWait < 15000) {
+        await new Promise(resolve => setTimeout(resolve, 50)); // Poll every 50ms
+        pendingRequest = bridge.getPendingRequest(callerInstanceId, callerRole);
+        if (pendingRequest) break;
+        // Break early if client disconnected or MCP server deactivated
+        if (!isMCPServerActive() || !bridge.getInstanceBySessionId(pluginSessionId!)) {
+          break;
+        }
+      }
+    }
 
     if (pendingRequest) {
       res.json({
@@ -611,7 +625,12 @@ export function createHttpServer(tools: RobloxStudioTools, bridge: BridgeService
     app.post(`/mcp/${toolName}`, async (req, res) => {
       try {
         const result = normalizeToolResult(await handler(tools, req.body), 'modern');
-        if (result.structuredContent && result.content.length === 0) {
+        if (result.isError) {
+          res.status(500).json(result.structuredContent ?? result);
+          return;
+        }
+        const hasMedia = result.content.some((block) => block.type !== 'text');
+        if (result.structuredContent && !hasMedia) {
           res.json(result.structuredContent);
         } else {
           res.json(result);
@@ -639,30 +658,27 @@ export function createHttpServer(tools: RobloxStudioTools, bridge: BridgeService
  * Attempt to bind an Express app to a port, using an explicit http.Server
  * so that EADDRINUSE errors are properly caught.
  */
-export function listenWithRetry(
+export async function listenWithRetry(
   app: express.Express,
   host: string,
   startPort: number,
   maxAttempts: number = 5
 ): Promise<{ server: http.Server; port: number }> {
-  return new Promise(async (resolve, reject) => {
-    for (let i = 0; i < maxAttempts; i++) {
-      const port = startPort + i;
-      try {
-        const server = await bindPort(app, host, port);
-        resolve({ server, port });
-        return;
-      } catch (err: any) {
-        if (err.code === 'EADDRINUSE') {
-          console.error(`Port ${port} in use, trying next...`);
-          continue;
-        }
-        reject(err);
-        return;
+  for (let i = 0; i < maxAttempts; i++) {
+    const port = startPort + i;
+    try {
+      const server = await bindPort(app, host, port);
+      return { server, port };
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'EADDRINUSE') {
+        console.error(`Port ${port} in use, trying next...`);
+        continue;
       }
+      throw err;
     }
-    reject(new Error(`All ports ${startPort}-${startPort + maxAttempts - 1} are in use. Stop some MCP server instances and retry.`));
-  });
+  }
+
+  throw new Error(`All ports ${startPort}-${startPort + maxAttempts - 1} are in use. Stop some MCP server instances and retry.`);
 }
 
 function bindPort(app: express.Express, host: string, port: number): Promise<http.Server> {

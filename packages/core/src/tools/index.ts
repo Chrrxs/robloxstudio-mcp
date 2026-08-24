@@ -13,10 +13,7 @@ import {
   type ManagedStudioInstance,
   type StudioLaunchSource,
 } from '../studio-instance-manager.js';
-import {
-  decodeImagePathToRgba,
-  decodePngBase64ToRgba,
-} from '../image-decode.js';
+import { decodeImagePathToRgba, decodePngToRgba } from '../image-decode.js';
 import { DOC_CATEGORIES, getRobloxDoc, isDocCategory } from '../roblox-docs.js';
 import { findBuiltInStudioSkill, loadBuiltInStudioSkills } from '../studio-skills.js';
 import { rgbaToJpeg } from '../jpeg-encoder.js';
@@ -967,6 +964,11 @@ export class RobloxStudioTools {
 
   getStudioLifecycleCapabilities() {
     return this.instanceManager.getLifecycleCapabilities();
+  }
+
+  async dispose(): Promise<void> {
+    await this.managedConnectionAssociations;
+    await this.instanceManager.dispose();
   }
 
   private _textResult(body: Record<string, unknown>) {
@@ -3955,7 +3957,7 @@ export class RobloxStudioTools {
       if (imageMimeType !== 'image/png') {
         throw new Error('image_mime_type must be "image/png" when image_base64 is provided.');
       }
-      const decoded = decodePngBase64ToRgba(imageBase64);
+      const decoded = decodePngToRgba(Buffer.from(imageBase64, 'base64'));
       const png = rgbaToPng(decoded.rgba, decoded.width, decoded.height);
       const imageAssetId = await this.uploadGenerateModelReferenceImage(
         png,

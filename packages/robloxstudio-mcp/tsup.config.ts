@@ -9,9 +9,12 @@ export default defineConfig({
   bundle: true,
   splitting: false,
   clean: true,
-  noExternal: ['@chrrxs/robloxstudio-mcp-core'],
+  shims: true,
+  noExternal: [/(.*)/],
   banner: {
-    js: '#!/usr/bin/env node',
+    js: `#!/usr/bin/env node
+import { createRequire as __createRequire } from 'module';
+const require = __createRequire(import.meta.url);`,
   },
   onSuccess: async () => {
     const assetsDir = join('dist', 'assets');

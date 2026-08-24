@@ -24,6 +24,9 @@ export class ProxyBridgeService extends BridgeService {
       () => this.refreshInstances(),
       ProxyBridgeService.REFRESH_INTERVAL_MS,
     );
+    if (typeof this.refreshTimer === 'object' && 'unref' in this.refreshTimer) {
+      this.refreshTimer.unref();
+    }
   }
 
   private authHeaders(extra?: Record<string, string>): Record<string, string> {

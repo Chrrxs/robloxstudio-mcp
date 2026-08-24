@@ -1,62 +1,44 @@
-# Configuration
+# Configuration & Security
 
-## Local HTTP bridge
+## Local HTTP Bridge
 
-The bridge binds to `127.0.0.1` by default and rejects cross-origin browser
-requests unless their origin is explicitly allowed. The normal stdio MCP
-transport is unaffected by HTTP authentication.
+The internal HTTP bridge binds to `127.0.0.1` and rejects cross-origin browser requests unless explicitly allowed. The `stdio` MCP transport is isolated and unaffected by HTTP authentication.
 
-HTTP endpoints that can invoke tools (`/mcp`, `/mcp/<tool>`, `/proxy`,
-`/instances`, and `/unregister-instance-id`) require a shared-secret token. The
-server creates one at `~/.robloxstudio-mcp/auth-token` on first run and uses
-mode `0600` on platforms that support POSIX permissions. HTTP MCP clients can
-send the token as either:
+HTTP endpoints that invoke tools (`/mcp`, `/mcp/<tool>`, `/proxy`, `/instances`, `/unregister-instance-id`) require a shared-secret authorization token. The server generates this token at `~/.robloxstudio-mcp/auth-token` on first run (`0600` permissions).
 
+HTTP clients must supply this token:
 ```text
 X-MCP-Auth: <token>
 Authorization: Bearer <token>
 ```
 
-Plugin-facing endpoints (`/ready`, `/poll`, `/response`, and `/disconnect`)
-remain tokenless because Roblox Studio plugins cannot read the local token.
-Those endpoints register the plugin and exchange queued bridge messages; they
-cannot directly invoke tools. Passive health and status endpoints are also
-tokenless.
+### Plugin-Facing Endpoints
+Endpoints for the Studio plugin (`/ready`, `/poll`, `/response`, `/disconnect`) operate without tokens because local plugins cannot read external files. These endpoints strictly queue messages and cannot invoke tools.
 
-Setting `ROBLOX_STUDIO_HOST` to a non-loopback address exposes the bridge to
-other machines. Only do this on a trusted network, retain token authentication,
-and treat the token as a secret.
+> **Caution:** Setting `ROBLOX_STUDIO_HOST` to a non-loopback address (e.g., `0.0.0.0`) exposes the bridge to the network. Treat your token as a secret.
 
-## Multiple connected places
+## Multiple Connected Places
 
-Connect every open Studio place to the same MCP server URL. The server tracks
-each connection; call `get_connected_instances` to receive compact
-`{ id, name, roles }` rows, then pass a row's `id` as `instance_id` to route a
-tool call to that game. Per-place port tabs such as `58742` are not the
-supported routing model.
+All open Studio places connect to the same MCP server URL. 
+Use `get_connected_instances` to retrieve a list of active places (`{ id, name, roles }`). Route tool calls by passing an `id` into the `instance_id` argument. Separate ports for separate places are not supported.
 
-## Version mismatch behavior
+## Version Mismatches
 
-If the Studio plugin and MCP server versions differ, the plugin remains
-connected and displays a yellow warning banner. `/health` and `/status` also
-report version mismatch details; MCP tool results omit this internal diagnostic
-metadata.
+If the Studio plugin and MCP server versions mismatch, the plugin displays a yellow warning. `/health` and `/status` endpoints report the mismatch, but standard MCP tools omit this to save tokens.
 
-Restart the MCP server with `--auto-install-plugin`, then fully close and reopen
-Studio to load the matching plugin.
+To fix, restart the server with `--auto-install-plugin`, then restart Roblox Studio.
 
-## Environment variables
+## Environment Variables
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `ROBLOX_STUDIO_HOST` | `127.0.0.1` | HTTP bridge bind address. |
 | `ROBLOX_STUDIO_PORT` | `58741` | HTTP bridge port. |
-| `ROBLOX_STUDIO_AUTH_TOKEN` | Auto-generated token file | Explicit shared secret that overrides the token file. |
-| `ROBLOX_STUDIO_NO_AUTH` | Unset | Set to `1` or `true` to disable HTTP tool authentication. This is not recommended. |
-| `ROBLOX_STUDIO_ALLOWED_ORIGINS` | None | Comma-separated browser origins allowed to call the HTTP API cross-origin. |
-| `ROBLOX_OPEN_CLOUD_API_KEY` | None | Roblox Open Cloud key used by features such as audio preview and place version access. Required permissions depend on the tool. |
-| `MCP_PLUGINS_DIR` | Platform Studio Plugins folder | Override the destination used by plugin installation. |
+| `ROBLOX_STUDIO_AUTH_TOKEN` | Auto-generated file | Explicit shared secret overriding the token file. |
+| `ROBLOX_STUDIO_NO_AUTH` | Unset | Set to `1` or `true` to disable HTTP tool authentication. **Not recommended.** |
+| `ROBLOX_STUDIO_ALLOWED_ORIGINS` | None | Comma-separated browser origins permitted cross-origin access. |
+| `ROBLOX_STUDIO_MCP_RESULT_MODE` | `compatible` | Controls response formatting. Enforces text fallbacks for compatibility across all CLI/IDEs (including Antigravity). |
+| `ROBLOX_OPEN_CLOUD_API_KEY` | None | Roblox Open Cloud key. Permissions vary by tool. |
+| `MCP_PLUGINS_DIR` | Platform Plugins folder | Overrides the plugin installation folder. |
 
-Creator Store audio preview requires `asset:read` permission. See
-[Creator Store assets](creator-store-assets.md) for its download and validation
-behavior.
+> **Note:** Audio previews require `asset:read`. See [Creator Store assets](creator-store-assets.md).

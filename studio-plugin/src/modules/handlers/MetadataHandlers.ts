@@ -1,5 +1,6 @@
 import Utils from "../Utils";
 import LuauExec from "../LuauExec";
+import Recording from "../Recording";
 
 const Selection = game.GetService("Selection");
 
@@ -243,11 +244,20 @@ function focusViewport(requestData: Record<string, unknown>) {
 function executeLuau(requestData: Record<string, unknown>) {
 	const code = requestData.code as string;
 	if (!code || code === "") return { error: "Code is required" };
+
+	const recordingId = Recording.beginRecording("MCP execute_luau");
+	
 	// All wrapping, print/warn capture, loadstring fallback, JSON-encoding
 	// of table returns, and parse-error recovery live in LuauExec so the
 	// edit/server (this handler) and the play-client (ClientBroker) take
 	// the same code path and produce identical output shapes.
-	return LuauExec.execute(code);
+	const result = LuauExec.execute(code);
+	
+	if (recordingId !== undefined) {
+		Recording.finishRecording(recordingId, result.success);
+	}
+	
+	return result;
 }
 
 export = {
