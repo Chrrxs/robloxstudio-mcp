@@ -3,3 +3,5 @@ out/
 include/*
 !include/LibMP.lua
 *.tsbuildinfo
+*.rbxm
+.*.lock
