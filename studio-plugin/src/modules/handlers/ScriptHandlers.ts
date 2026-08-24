@@ -131,45 +131,9 @@ function setScriptSource(requestData: Record<string, unknown>) {
 		};
 	}
 
-	const [replaceSuccess, replaceResult] = pcall(() => {
-		const parent = instance.Parent;
-		const name = instance.Name;
-		const className = instance.ClassName;
-		const wasBaseScript = instance.IsA("BaseScript");
-		const enabled = wasBaseScript ? instance.Enabled : undefined;
-
-		const newScript = new Instance(className as keyof CreatableInstances) as LuaSourceContainer;
-		newScript.Name = name;
-		// @rbxts/types does not expose PluginSecurity Source writes.
-		const writableNewScript = newScript as unknown as { Source: string };
-		writableNewScript.Source = sourceToSet;
-		if (readScriptSource(newScript) !== sourceToSet) {
-			error("Replacement script source did not match the requested source");
-		}
-		if (wasBaseScript && enabled !== undefined) {
-			const newBaseScript = newScript as BaseScript;
-			newBaseScript.Enabled = enabled;
-		}
-
-		newScript.Parent = parent;
-		instance.Destroy();
-
-		return {
-			success: true,
-			instancePath: getInstancePath(newScript),
-			method: "replace",
-			message: "Script replaced successfully with new source",
-		};
-	});
-
-	if (replaceSuccess) {
-		finishRecording(recordingId, true);
-		return replaceResult;
-	}
-
 	finishRecording(recordingId, false);
 	return {
-		error: `Failed to set script source. ${applyResult.error} Replace method failed: ${replaceResult}`,
+		error: `Failed to set script source: ${applyResult.error}`,
 	};
 }
 
