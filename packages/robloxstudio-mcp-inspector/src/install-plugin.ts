@@ -16,6 +16,7 @@ const TIMEOUT_MS = 30_000;
 const MAX_REDIRECTS = 5;
 
 interface InstallOptions {
+  sourcePath?: string;
   replaceVariant?: boolean;
   log?: (message: string) => void;
   warn?: (message: string) => void;
@@ -101,6 +102,11 @@ function bundledAssetPath(): string | null {
   return candidates.find((candidate) => existsSync(candidate)) ?? null;
 }
 
+function resolvePluginAssetPath(sourcePath: string | undefined): string | null {
+  if (sourcePath === undefined) return bundledAssetPath();
+  return existsSync(sourcePath) ? sourcePath : null;
+}
+
 function packageVersion(): string {
   const currentDir = dirname(fileURLToPath(import.meta.url));
   const pkg = JSON.parse(readFileSync(join(currentDir, '..', 'package.json'), 'utf8')) as { version?: string };
@@ -136,9 +142,11 @@ export async function installBundledPlugin(options: InstallOptions = {}): Promis
   const log = options.log ?? console.log;
   const warn = options.warn ?? console.warn;
   const replaceVariant = options.replaceVariant ?? true;
-  const source = bundledAssetPath();
+  const source = resolvePluginAssetPath(options.sourcePath);
   if (!source) {
-    throw new Error(`Bundled ${ASSET_NAME} not found in package`);
+    throw new Error(
+      `Bundled ${ASSET_NAME} not found. Run npm run build:plugin:inspector in this worktree first.`,
+    );
   }
   assertBundledPluginVersion(source);
 
@@ -156,8 +164,11 @@ export async function installPlugin(options: InstallOptions = {}): Promise<void>
   const replaceVariant = options.replaceVariant ?? true;
   const log = options.log ?? console.log;
   const warn = options.warn ?? console.warn;
+  const bundled = resolvePluginAssetPath(options.sourcePath);
+  if (options.sourcePath !== undefined && !bundled) {
+    throw new Error(`Plugin asset not found at explicit path ${options.sourcePath}.`);
+  }
   const pluginsFolder = prepareInstall({ replaceVariant, log, warn });
-  const bundled = bundledAssetPath();
 
   if (bundled) {
     assertBundledPluginVersion(bundled);
