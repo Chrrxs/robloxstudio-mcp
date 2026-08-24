@@ -8,17 +8,6 @@ const SOURCE_TRUNCATE_CHAR_BUDGET = 25000;
 const SOURCE_TRUNCATE_LINE_BUDGET = 400;
 const SOURCE_TRUNCATE_TO_LINES = 300;
 
-function normalizeEscapes(s: string): string {
-	let result = s;
-	result = result.gsub("\\\\", "\x01")[0];
-	result = result.gsub("\\n", "\n")[0];
-	result = result.gsub("\\t", "\t")[0];
-	result = result.gsub("\\r", "\r")[0];
-	result = result.gsub('\\"', '"')[0];
-	result = result.gsub("\x01", "\\")[0];
-	return result;
-}
-
 function getTopServiceName(instance: Instance): string {
 	let topServiceInst: Instance = instance;
 	while (topServiceInst.Parent && topServiceInst.Parent !== game) {
@@ -120,7 +109,8 @@ function setScriptSource(requestData: Record<string, unknown>) {
 		return { error: `Instance is not a script-like object: ${instance.ClassName}` };
 	}
 
-	const sourceToSet = normalizeEscapes(newSource);
+	// Communication has already JSON-decoded the poll payload; source text is exact at this boundary.
+	const sourceToSet = newSource;
 	const recordingId = beginRecording(`Set script source: ${instance.Name}`);
 
 	const [readSuccess, readResult] = pcall(() => readScriptSource(instance).size());
@@ -141,60 +131,21 @@ function setScriptSource(requestData: Record<string, unknown>) {
 		};
 	}
 
-	const [replaceSuccess, replaceResult] = pcall(() => {
-		const parent = instance.Parent;
-		const name = instance.Name;
-		const className = instance.ClassName;
-		const wasBaseScript = instance.IsA("BaseScript");
-		const enabled = wasBaseScript ? instance.Enabled : undefined;
-
-		const newScript = new Instance(className as keyof CreatableInstances) as LuaSourceContainer;
-		newScript.Name = name;
-		// @rbxts/types does not expose PluginSecurity Source writes.
-		const writableNewScript = newScript as unknown as { Source: string };
-		writableNewScript.Source = sourceToSet;
-		if (readScriptSource(newScript) !== sourceToSet) {
-			error("Replacement script source did not match the requested source");
-		}
-		if (wasBaseScript && enabled !== undefined) {
-			const newBaseScript = newScript as BaseScript;
-			newBaseScript.Enabled = enabled;
-		}
-
-		newScript.Parent = parent;
-		instance.Destroy();
-
-		return {
-			success: true,
-			instancePath: getInstancePath(newScript),
-			method: "replace",
-			message: "Script replaced successfully with new source",
-		};
-	});
-
-	if (replaceSuccess) {
-		finishRecording(recordingId, true);
-		return replaceResult;
-	}
-
 	finishRecording(recordingId, false);
 	return {
-		error: `Failed to set script source. ${applyResult.error} Replace method failed: ${replaceResult}`,
+		error: `Failed to set script source: ${applyResult.error}`,
 	};
 }
 
 function editScriptLines(requestData: Record<string, unknown>) {
 	const instancePath = requestData.instancePath as string;
-	let oldString = requestData.old_string as string;
-	let newString = requestData.new_string as string;
+	const oldString = requestData.old_string as string;
+	const newString = requestData.new_string as string;
 	const startLine = requestData.startLine as number | undefined;
 
 	if (!instancePath || oldString === undefined || newString === undefined) {
 		return { error: "Instance path, old_string, and new_string are required" };
 	}
-
-	oldString = normalizeEscapes(oldString);
-	newString = normalizeEscapes(newString);
 
 	const instance = getInstanceByPath(instancePath);
 	if (!instance) return { error: `Instance not found: ${instancePath}` };
@@ -270,11 +221,9 @@ function editScriptLines(requestData: Record<string, unknown>) {
 function insertScriptLines(requestData: Record<string, unknown>) {
 	const instancePath = requestData.instancePath as string;
 	const afterLine = (requestData.afterLine as number) ?? 0;
-	let newContent = requestData.newContent as string;
+	const newContent = requestData.newContent as string;
 
 	if (!instancePath || !newContent) return { error: "Instance path and newContent are required" };
-
-	newContent = normalizeEscapes(newContent);
 
 	const instance = getInstanceByPath(instancePath);
 	if (!instance) return { error: `Instance not found: ${instancePath}` };
