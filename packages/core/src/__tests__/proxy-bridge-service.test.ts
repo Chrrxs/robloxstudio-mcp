@@ -47,7 +47,7 @@ describe('ProxyBridgeService', () => {
 
     const proxy = new ProxyBridgeService('http://primary');
     try {
-      await new Promise((resolve) => setImmediate(resolve));
+      await proxy.waitForInitialRefresh();
 
       const observed: string[] = [];
       proxy.onInstanceRegistered((instance) => observed.push(`${instance.instanceId}:${instance.role}`));
@@ -121,7 +121,7 @@ describe('ProxyBridgeService', () => {
 
     const proxy = new ProxyBridgeService('http://primary');
     try {
-      await new Promise((resolve) => setImmediate(resolve));
+      await proxy.waitForInitialRefresh();
 
       expect(proxy.getPublicInstances().map((inst) => inst.role).sort()).toEqual(['edit', 'server']);
       await expect(proxy.unregisterInstanceIdEverywhere('anon:proxy-place')).resolves.toEqual(removed);

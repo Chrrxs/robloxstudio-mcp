@@ -103,6 +103,216 @@ describe('BridgeService', () => {
       const second = bridge.getPendingRequest('place:1', 'edit');
       expect(second!.request.data.order).toBe(2);
     });
+
+    test('wakes a waiting poll when a matching request is queued', async () => {
+      register(bridge, { pluginSessionId: 'p1', instanceId: 'place:1', role: 'edit' });
+      const poll = bridge.waitForPendingRequest('p1');
+      const response = bridge.sendRequest('/api/test', { hello: 'world' }, 'place:1', 'edit');
+
+      const delivery = await poll;
+      expect(delivery.kind).toBe('request');
+      if (delivery.kind !== 'request') throw new Error('expected request delivery');
+      expect(delivery.request).toEqual({
+        endpoint: '/api/test',
+        data: { hello: 'world' },
+      });
+
+      bridge.resolveRequest(delivery.requestId, { ok: true });
+      await expect(response).resolves.toEqual({ ok: true });
+    });
+
+    test('claims work queued before polling without retaining a poll deadline', async () => {
+      register(bridge, { pluginSessionId: 'p1', instanceId: 'place:1', role: 'edit' });
+      const response = bridge.sendRequest('/api/test', { queued: true }, 'place:1', 'edit');
+
+      const delivery = await bridge.waitForPendingRequest('p1');
+      expect(delivery.kind).toBe('request');
+      if (delivery.kind !== 'request') throw new Error('expected request delivery');
+      expect(delivery.request.data).toEqual({ queued: true });
+
+      bridge.resolveRequest(delivery.requestId, { ok: true });
+      await expect(response).resolves.toEqual({ ok: true });
+      expect(jest.getTimerCount()).toBe(0);
+    });
+
+    test('isolates concurrent waiting polls across 12 active Studio instances', async () => {
+      const instanceNumbers = Array.from({ length: 12 }, (_, index) => index + 1);
+      const polls = instanceNumbers.map((number) => {
+        register(bridge, {
+          pluginSessionId: `session-${number}`,
+          instanceId: `place:${number}`,
+          role: 'edit',
+        });
+        return bridge.waitForPendingRequest(`session-${number}`);
+      });
+
+      const responses = [...instanceNumbers]
+        .reverse()
+        .map((number) => bridge.sendRequest(
+          '/api/test',
+          { instance: number },
+          `place:${number}`,
+          'edit',
+        ));
+      const deliveries = await Promise.all(polls);
+
+      for (const [index, delivery] of deliveries.entries()) {
+        expect(delivery.kind).toBe('request');
+        if (delivery.kind !== 'request') throw new Error('expected request delivery');
+        expect(delivery.request.data).toEqual({ instance: index + 1 });
+        bridge.resolveRequest(delivery.requestId, { ok: true });
+      }
+      await expect(Promise.all(responses)).resolves.toHaveLength(12);
+    });
+
+    test('one plugin session cannot hold more than one waiting poll', async () => {
+      register(bridge, { pluginSessionId: 'p1', instanceId: 'place:1', role: 'edit' });
+      const firstPoll = bridge.waitForPendingRequest('p1');
+      const secondPoll = bridge.waitForPendingRequest('p1');
+
+      await expect(firstPoll).resolves.toEqual({ kind: 'superseded' });
+      const response = bridge.sendRequest('/api/test', {}, 'place:1', 'edit');
+      const delivery = await secondPoll;
+      expect(delivery.kind).toBe('request');
+      if (delivery.kind !== 'request') throw new Error('expected request delivery');
+      bridge.resolveRequest(delivery.requestId, {});
+      await expect(response).resolves.toEqual({});
+    });
+
+    test('an open poll remains live past the duplicate takeover threshold', async () => {
+      register(bridge, { pluginSessionId: 'active-session', instanceId: 'anon:active', role: 'edit' });
+      const controller = new AbortController();
+      const poll = bridge.waitForPendingRequest('active-session', { signal: controller.signal });
+      jest.advanceTimersByTime(10_000);
+
+      const duplicate = bridge.registerInstance({
+        pluginSessionId: 'duplicate-session',
+        instanceId: 'anon:active',
+        role: 'edit',
+      });
+      expect(duplicate.ok).toBe(false);
+      expect(bridge.getInstanceBySessionId('active-session')).toBeDefined();
+
+      controller.abort();
+      await expect(poll).resolves.toEqual({ kind: 'aborted' });
+      const replacement = bridge.registerInstance({
+        pluginSessionId: 'replacement-session',
+        instanceId: 'anon:active',
+        role: 'edit',
+      });
+      expect(replacement.ok).toBe(true);
+    });
+
+    test('a timed-out poll refreshes session liveness at the completed exchange', async () => {
+      register(bridge, { pluginSessionId: 'active-session', instanceId: 'anon:active', role: 'edit' });
+      const poll = bridge.waitForPendingRequest('active-session', { timeoutMs: 15_000 });
+      jest.advanceTimersByTime(15_000);
+      await expect(poll).resolves.toEqual({ kind: 'timeout' });
+
+      jest.advanceTimersByTime(2_500);
+      const premature = bridge.registerInstance({
+        pluginSessionId: 'replacement-session',
+        instanceId: 'anon:active',
+        role: 'edit',
+      });
+      expect(premature.ok).toBe(false);
+
+      jest.advanceTimersByTime(501);
+      const replacement = bridge.registerInstance({
+        pluginSessionId: 'replacement-session',
+        instanceId: 'anon:active',
+        role: 'edit',
+      });
+      expect(replacement.ok).toBe(true);
+    });
+
+    test('disconnecting a plugin releases its waiting poll', async () => {
+      register(bridge, { pluginSessionId: 'p1', instanceId: 'place:1', role: 'edit' });
+      const poll = bridge.waitForPendingRequest('p1');
+      bridge.unregisterInstance('p1');
+      await expect(poll).resolves.toEqual({ kind: 'session_closed' });
+    });
+
+    test('does not redeliver a mutating request after a poll claims it', async () => {
+      register(bridge, { pluginSessionId: 'p1', instanceId: 'place:1', role: 'edit' });
+      const response = bridge.sendRequest('/api/test', { mutates: true }, 'place:1', 'edit');
+      const firstDelivery = await bridge.waitForPendingRequest('p1');
+      expect(firstDelivery.kind).toBe('request');
+      if (firstDelivery.kind !== 'request') throw new Error('expected request delivery');
+
+      const retryPoll = bridge.waitForPendingRequest('p1', { timeoutMs: 100 });
+      jest.advanceTimersByTime(100);
+      await expect(retryPoll).resolves.toEqual({ kind: 'timeout' });
+
+      bridge.resolveRequest(firstDelivery.requestId, { ok: true });
+      await expect(response).resolves.toEqual({ ok: true });
+    });
+
+    test('aborting an idle poll removes only its waiter', async () => {
+      register(bridge, { pluginSessionId: 'p1', instanceId: 'place:1', role: 'edit' });
+      const controller = new AbortController();
+      const abortedPoll = bridge.waitForPendingRequest('p1', { signal: controller.signal });
+      controller.abort();
+      await expect(abortedPoll).resolves.toEqual({ kind: 'aborted' });
+
+      const response = bridge.sendRequest('/api/test', {}, 'place:1', 'edit');
+      const nextDelivery = await bridge.waitForPendingRequest('p1');
+      expect(nextDelivery.kind).toBe('request');
+      if (nextDelivery.kind !== 'request') throw new Error('expected request delivery');
+      bridge.resolveRequest(nextDelivery.requestId, { ok: true });
+      await expect(response).resolves.toEqual({ ok: true });
+    });
+
+    test('bridge shutdown releases all idle polls', async () => {
+      register(bridge, { pluginSessionId: 'p1', instanceId: 'place:1', role: 'edit' });
+      register(bridge, { pluginSessionId: 'p2', instanceId: 'place:2', role: 'edit' });
+      const polls = [
+        bridge.waitForPendingRequest('p1'),
+        bridge.waitForPendingRequest('p2'),
+      ];
+
+      bridge.clearAllPendingRequests();
+      await expect(Promise.all(polls)).resolves.toEqual([
+        { kind: 'bridge_closed' },
+        { kind: 'bridge_closed' },
+      ]);
+    });
+
+    test('a waiting session follows anon-to-published identity migration', async () => {
+      register(bridge, { pluginSessionId: 'p1', instanceId: 'anon:old', role: 'edit' });
+      const poll = bridge.waitForPendingRequest('p1');
+      bridge.updateInstanceMetadata('p1', { placeId: 52 });
+      const response = bridge.sendRequest('/api/test', {}, 'place:52', 'edit');
+
+      const delivery = await poll;
+      expect(delivery.kind).toBe('request');
+      if (delivery.kind !== 'request') throw new Error('expected request delivery');
+      bridge.resolveRequest(delivery.requestId, { ok: true });
+      await expect(response).resolves.toEqual({ ok: true });
+    });
+
+    test('bounds tokenless held polls above the 12-Studio operating envelope', async () => {
+      const polls = Array.from({ length: 128 }, (_, index) => {
+        register(bridge, {
+          pluginSessionId: `session-${index}`,
+          instanceId: `place:${index}`,
+          role: 'edit',
+        });
+        return bridge.waitForPendingRequest(`session-${index}`);
+      });
+      register(bridge, {
+        pluginSessionId: 'overflow-session',
+        instanceId: 'place:overflow',
+        role: 'edit',
+      });
+
+      await expect(bridge.waitForPendingRequest('overflow-session')).resolves.toEqual({
+        kind: 'capacity',
+      });
+      bridge.clearAllPendingRequests();
+      const settled = await Promise.all(polls);
+      expect(settled.every((result) => result.kind === 'bridge_closed')).toBe(true);
+    });
   });
 
   describe('registerInstance', () => {

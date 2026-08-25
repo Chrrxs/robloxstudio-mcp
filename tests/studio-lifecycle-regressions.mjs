@@ -155,6 +155,19 @@ async function serverInstances() {
   return response.json();
 }
 
+async function waitForSessionActivityAdvance(pluginSessionId, priorActivity, timeoutMs = 5_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const body = await serverInstances();
+    const session = (body.instances ?? []).find(
+      (instance) => instance.pluginSessionId === pluginSessionId,
+    );
+    if (session?.lastActivity > priorActivity) return;
+    await delay(25);
+  }
+  throw new Error(`Session ${pluginSessionId} did not enter its held poll within ${timeoutMs}ms`);
+}
+
 async function waitForStudioLogLine(needle, startedAt, timeoutMs = 20_000) {
   const logsDir = resolveStudioLogsDir();
   const deadline = Date.now() + timeoutMs;
@@ -247,13 +260,41 @@ async function main() {
     await closeStudioProcess(launchedProcesses[0]);
     await configureStudioDirectoryIsolation({ requireStudioClosed: false });
     writeFileSync(reproPlugin, reproPluginXml(markerB));
+    const staleSession = (await serverInstances()).instances.find(
+      (instance) => instance.pluginSessionId === firstSessionId,
+    );
+    assert(staleSession, 'terminated Studio session remains registered for takeover reproduction');
+    const staleSessionActivity = staleSession.lastActivity;
 
-    // Keep the dead session artificially fresh through the replacement's
-    // initial /ready. This guarantees a real HTTP 409, after which the new
-    // plugin must continue polling and retry automatically.
-    keepOldSessionAlive = setInterval(() => {
-      fetch(`http://127.0.0.1:${BASE_PORT}/poll?pluginSessionId=${encodeURIComponent(firstSessionId)}`).catch(() => {});
-    }, 250);
+    // Keep sequential long polls open through the replacement's initial
+    // /ready. They never overlap, while renewal carries liveness beyond one
+    // 15-second server hold if Studio launches slowly.
+    const oldPollController = new AbortController();
+    keepOldSessionAlive = {
+      controller: oldPollController,
+      completion: (async () => {
+        while (!oldPollController.signal.aborted) {
+          const response = await fetch(
+            `http://127.0.0.1:${BASE_PORT}/poll?pluginSessionId=${encodeURIComponent(firstSessionId)}&pollMode=long`,
+            { signal: oldPollController.signal },
+          );
+          if (!response.ok) {
+            throw new Error(`Held stale-session poll returned HTTP ${response.status}`);
+          }
+          const body = await response.json();
+          if (body.knownInstance !== true) {
+            throw new Error('Held stale-session poll lost its registered session');
+          }
+          if (body.request !== null && body.request !== undefined) {
+            throw new Error('Held stale-session poll unexpectedly claimed work');
+          }
+        }
+      })().then(
+        () => undefined,
+        (error) => error,
+      ),
+    };
+    await waitForSessionActivityAdvance(firstSessionId, staleSessionActivity);
     console.log('\n=== fast relaunch automatically takes over a stale predecessor ===');
     const relaunchedAt = Date.now();
     const secondLaunchPromise = launchLocalPlace(
@@ -266,7 +307,9 @@ async function main() {
       `/ready rejected for ${INSTANCE_ID}/edit: HTTP 409 Conflict`,
       relaunchedAt,
     );
-    clearInterval(keepOldSessionAlive);
+    keepOldSessionAlive.controller.abort();
+    const oldPollError = await keepOldSessionAlive.completion;
+    if (oldPollError !== undefined && oldPollError.name !== 'AbortError') throw oldPollError;
     keepOldSessionAlive = undefined;
     assert(true, `replacement receives a real duplicate 409 after ${conflictObservedAt - relaunchedAt}ms`);
 
@@ -320,7 +363,13 @@ async function main() {
     throw error;
   } finally {
     const cleanupErrors = [];
-    clearInterval(keepOldSessionAlive);
+    if (keepOldSessionAlive) {
+      keepOldSessionAlive.controller.abort();
+      const oldPollError = await keepOldSessionAlive.completion;
+      if (oldPollError !== undefined && oldPollError.name !== 'AbortError') {
+        cleanupErrors.push(oldPollError);
+      }
+    }
     if (client) {
       try {
         const status = await client.callTool('manage_instance', { action: 'status' });

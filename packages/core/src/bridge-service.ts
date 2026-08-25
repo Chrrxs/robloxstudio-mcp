@@ -38,6 +38,39 @@ interface PendingRequest {
   timeoutMs: number;
 }
 
+export interface PendingPollOptions {
+  signal?: AbortSignal;
+  timeoutMs?: number;
+}
+
+export type PendingPollResult =
+  | {
+      kind: 'request';
+      requestId: string;
+      request: {
+        endpoint: string;
+        data: unknown;
+      };
+    }
+  | {
+      kind:
+        | 'timeout'
+        | 'unknown_session'
+        | 'superseded'
+        | 'aborted'
+        | 'session_closed'
+        | 'bridge_closed'
+        | 'capacity';
+    };
+
+interface PendingPollWaiter {
+  pluginSessionId: string;
+  timeoutId: NodeJS.Timeout;
+  signal?: AbortSignal;
+  onAbort?: () => void;
+  resolve: (result: PendingPollResult) => void;
+}
+
 export type RoutingErrorCode =
   | 'multiple_instances_connected'
   | 'ambiguous_target'
@@ -133,6 +166,11 @@ const STALE_INSTANCE_MS = 30000;
 // close/relaunch does not strand the replacement plugin for 30-35 seconds.
 const DUPLICATE_TAKEOVER_MS = 3000;
 const INSTANCE_ALIAS_TTL_MS = 5 * 60 * 1000;
+const DEFAULT_POLL_WAIT_TIMEOUT_MS = 15_000;
+// Twelve Studio windows can each expose edit, server, and up to eight
+// multiplayer clients (120 peers). Keep bounded headroom without allowing
+// tokenless plugin-facing requests to retain unlimited sockets and timers.
+const MAX_ACTIVE_POLLS = 128;
 
 interface InstanceAlias {
   targetInstanceId: string;
@@ -150,6 +188,7 @@ export class BridgeService {
   private instances: Map<string, PluginInstance> = new Map();
   private instanceAliases: Map<string, InstanceAlias> = new Map();
   private instanceRegisteredListeners: Set<InstanceRegisteredListener> = new Set();
+  private pendingPolls: Map<string, PendingPollWaiter> = new Map();
   private requestTimeout = 30000;
 
   onInstanceRegistered(listener: InstanceRegisteredListener): () => void {
@@ -289,7 +328,7 @@ export class BridgeService {
       (i) => i.instanceId === instanceId && i.role === assignedRole && i.pluginSessionId !== pluginSessionId,
     );
     if (existing) {
-      if (Date.now() - existing.lastActivity > DUPLICATE_TAKEOVER_MS) {
+      if (!this.pendingPolls.has(existing.pluginSessionId) && Date.now() - existing.lastActivity > DUPLICATE_TAKEOVER_MS) {
         // Reject requests owned by the unresponsive process instead of
         // redelivering a potentially mutating in-flight call to the new load.
         this.unregisterInstance(existing.pluginSessionId);
@@ -323,6 +362,7 @@ export class BridgeService {
     this.instances.set(pluginSessionId, registered);
 
     this.notifyInstanceRegistered(toPublic(registered));
+    this.dispatchPendingPolls(instanceId, assignedRole);
 
     return { ok: true, assignedRole, instanceId };
   }
@@ -330,6 +370,10 @@ export class BridgeService {
   unregisterInstance(pluginSessionId: string) {
     const removed = this.instances.get(pluginSessionId);
     this.instances.delete(pluginSessionId);
+    const pendingPoll = this.pendingPolls.get(pluginSessionId);
+    if (pendingPoll) {
+      this.settlePendingPoll(pendingPoll, { kind: 'session_closed' });
+    }
 
     if (!removed) return;
 
@@ -403,6 +447,7 @@ export class BridgeService {
         this.rememberInstanceAlias(priorInstanceId, canonicalInstanceId);
         this.migratePendingRequests(priorInstanceId, canonicalInstanceId);
         inst.instanceId = canonicalInstanceId;
+        this.dispatchPendingPolls(canonicalInstanceId, inst.role);
       }
     }
   }
@@ -410,7 +455,7 @@ export class BridgeService {
   cleanupStaleInstances() {
     const now = Date.now();
     for (const [id, inst] of this.instances.entries()) {
-      if (now - inst.lastActivity > STALE_INSTANCE_MS) {
+      if (!this.pendingPolls.has(id) && now - inst.lastActivity > STALE_INSTANCE_MS) {
         this.unregisterInstance(id);
       }
     }
@@ -590,6 +635,7 @@ export class BridgeService {
       };
 
       this.pendingRequests.set(requestId, request);
+      this.dispatchPendingPolls(targetInstanceId, targetRole);
     });
   }
 
@@ -620,6 +666,104 @@ export class BridgeService {
     }
 
     return null;
+  }
+
+  waitForPendingRequest(
+    pluginSessionId: string,
+    options: PendingPollOptions = {},
+  ): Promise<PendingPollResult> {
+    const instance = this.instances.get(pluginSessionId);
+    if (!instance) {
+      return Promise.resolve({ kind: 'unknown_session' });
+    }
+    if (options.signal?.aborted) {
+      return Promise.resolve({ kind: 'aborted' });
+    }
+
+    this.updateInstanceActivity(pluginSessionId);
+    const existingPoll = this.pendingPolls.get(pluginSessionId);
+    if (existingPoll) {
+      this.settlePendingPoll(existingPoll, { kind: 'superseded' });
+    }
+
+    const pendingRequest = this.getPendingRequest(instance.instanceId, instance.role);
+    if (pendingRequest) {
+      return Promise.resolve({
+        kind: 'request',
+        requestId: pendingRequest.requestId,
+        request: pendingRequest.request,
+      });
+    }
+    if (this.pendingPolls.size >= MAX_ACTIVE_POLLS) {
+      return Promise.resolve({ kind: 'capacity' });
+    }
+
+    const timeoutMs = Math.min(
+      DEFAULT_POLL_WAIT_TIMEOUT_MS,
+      Math.max(1, options.timeoutMs ?? DEFAULT_POLL_WAIT_TIMEOUT_MS),
+    );
+    let resolvePoll!: (result: PendingPollResult) => void;
+    // Promise.withResolvers is unavailable on the declared Node 20.0 minimum.
+    const promise = new Promise<PendingPollResult>((resolve) => {
+      resolvePoll = resolve;
+    });
+    let waiter!: PendingPollWaiter;
+    const timeoutId = setTimeout(() => {
+      this.settlePendingPoll(waiter, { kind: 'timeout' }, true);
+    }, timeoutMs);
+    timeoutId.unref();
+    waiter = {
+      pluginSessionId,
+      timeoutId,
+      signal: options.signal,
+      resolve: resolvePoll,
+    };
+    if (options.signal) {
+      waiter.onAbort = () => {
+        this.settlePendingPoll(waiter, { kind: 'aborted' });
+      };
+      options.signal.addEventListener('abort', waiter.onAbort, { once: true });
+    }
+    this.pendingPolls.set(pluginSessionId, waiter);
+    return promise;
+  }
+
+
+  private dispatchPendingPolls(targetInstanceId?: string, targetRole?: string): void {
+    for (const waiter of Array.from(this.pendingPolls.values())) {
+      const instance = this.instances.get(waiter.pluginSessionId);
+      if (!instance) {
+        this.settlePendingPoll(waiter, { kind: 'session_closed' });
+        continue;
+      }
+      if (targetInstanceId !== undefined && instance.instanceId !== targetInstanceId) continue;
+      if (targetRole !== undefined && instance.role !== targetRole) continue;
+
+      const pendingRequest = this.getPendingRequest(instance.instanceId, instance.role);
+      if (!pendingRequest) continue;
+      this.settlePendingPoll(waiter, {
+        kind: 'request',
+        requestId: pendingRequest.requestId,
+        request: pendingRequest.request,
+      }, true);
+    }
+  }
+
+  private settlePendingPoll(
+    waiter: PendingPollWaiter,
+    result: PendingPollResult,
+    refreshActivity = false,
+  ): void {
+    if (this.pendingPolls.get(waiter.pluginSessionId) !== waiter) return;
+    this.pendingPolls.delete(waiter.pluginSessionId);
+    clearTimeout(waiter.timeoutId);
+    if (waiter.signal && waiter.onAbort) {
+      waiter.signal.removeEventListener('abort', waiter.onAbort);
+    }
+    if (refreshActivity) {
+      this.updateInstanceActivity(waiter.pluginSessionId);
+    }
+    waiter.resolve(result);
   }
 
   resolveRequest(requestId: string, response: any) {
@@ -657,5 +801,8 @@ export class BridgeService {
       request.reject(new Error('Connection closed'));
     }
     this.pendingRequests.clear();
+    for (const waiter of Array.from(this.pendingPolls.values())) {
+      this.settlePendingPoll(waiter, { kind: 'bridge_closed' });
+    }
   }
 }

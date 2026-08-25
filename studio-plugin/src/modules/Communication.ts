@@ -56,6 +56,7 @@ let lastVersionMismatchWarningKey: string | undefined;
 let lastReadyInstanceId: string | undefined;
 const readyFailureLogKeys = new Set<string>();
 let retryingDuplicateReady = false;
+let pollEpoch = 0;
 
 // Cache the published place name from MarketplaceService:GetProductInfo so
 // /ready can carry a friendly identifier (e.g. "Natural Disasters") distinct
@@ -321,16 +322,22 @@ function pollForRequests() {
 	if (!conn.isActive) return;
 	if (conn.isPolling) return;
 
+	const epoch = pollEpoch;
 	conn.isPolling = true;
 
 	const [success, result] = pcall(() => {
-		return HttpService.RequestAsync({
-			Url: `${conn.serverUrl}/poll?pluginSessionId=${pluginSessionId}`,
-			Method: "GET",
+		const requestOptions = {
+			Url: `${conn.serverUrl}/poll?pluginSessionId=${pluginSessionId}&pollMode=long`,
+			Method: "GET" as const,
 			Headers: { "Content-Type": "application/json" },
-		});
+			Timeout: State.POLL_REQUEST_TIMEOUT_SECONDS,
+		};
+		return HttpService.RequestAsync(requestOptions);
 	});
 
+	// A held request can finish after deactivate/reactivate. Only the current
+	// lifecycle epoch may mutate connection state or clear a newer poll's lock.
+	if (epoch !== pollEpoch || !conn.isActive) return;
 	conn.isPolling = false;
 
 	const ui = UI.getElements();
@@ -342,6 +349,12 @@ function pollForRequests() {
 		conn.lastSuccessfulConnection = tick();
 
 		const data = HttpService.JSONDecode(result.Body) as PollResponse;
+		conn.lastPoll = tick();
+		if (result.Success && data.pollMode === "long" && data.knownInstance !== false && data.request === undefined) {
+			// The server held this request until work or timeout, so immediately
+			// replace it instead of reintroducing the legacy 500 ms idle gap.
+			conn.lastPoll = 0;
+		}
 		const mcpConnected = data.mcpConnected === true;
 		conn.lastHttpOk = true;
 		conn.lastMcpOk = mcpConnected;
@@ -418,6 +431,7 @@ function pollForRequests() {
 			});
 		}
 	} else if (conn.isActive) {
+		conn.lastPoll = tick();
 		conn.consecutiveFailures++;
 
 		if (conn.consecutiveFailures > 1) {
@@ -490,6 +504,9 @@ function activatePlugin() {
 	const conn = State.getActiveConnection();
 	const ui = UI.getElements();
 
+	pollEpoch++;
+	conn.isPolling = false;
+	conn.lastPoll = 0;
 	conn.isActive = true;
 	conn.consecutiveFailures = 0;
 	conn.currentRetryDelay = 0.5;
@@ -540,6 +557,8 @@ function activatePlugin() {
 
 function deactivatePlugin() {
 	const conn = State.getActiveConnection();
+	pollEpoch++;
+	conn.isPolling = false;
 	conn.isActive = false;
 	conn.lastMcpOk = false;
 

@@ -1,7 +1,7 @@
 import { serveStdio } from '@modelcontextprotocol/server/stdio';
 import http from 'http';
 import { createHttpServer, listenWithRetry, TOOL_HANDLERS } from './http-server.js';
-import type { HttpSecurityOptions } from './http-server.js';
+import type { HttpSecurityOptions, RobloxStudioHttpApp } from './http-server.js';
 import { resolveAuthToken } from './auth.js';
 import { RobloxStudioTools } from './tools/index.js';
 import { BridgeService } from './bridge-service.js';
@@ -62,7 +62,7 @@ export class RobloxStudioMCPServer {
 
     let bridgeMode: 'primary' | 'proxy' = 'primary';
     let httpHandle: http.Server | undefined;
-    let primaryApp: ReturnType<typeof createHttpServer> | undefined;
+    let primaryApp: RobloxStudioHttpApp | undefined;
     let boundPort = 0;
     let promotionInterval: ReturnType<typeof setInterval> | undefined;
 
@@ -92,6 +92,7 @@ export class RobloxStudioMCPServer {
       bridgeMode = 'proxy';
       primaryApp = undefined;
       const proxyBridge = new ProxyBridgeService(`http://localhost:${basePort}`, auth.token);
+      await proxyBridge.waitForInitialRefresh();
       this.bridge = proxyBridge;
       this.tools = new RobloxStudioTools(this.bridge);
       console.error(`Port ${basePort} in use - entering proxy mode (forwarding to localhost:${basePort})`);
@@ -126,7 +127,7 @@ export class RobloxStudioMCPServer {
           boundPort = result.port;
           primaryApp = candidateApp;
           bridgeMode = 'primary';
-          (primaryApp as any).setMCPServerActive(true);
+          primaryApp.setMCPServerActive(true);
           console.error(`Promoted from proxy to primary on port ${boundPort}`);
           if (promotionInterval) clearInterval(promotionInterval);
         } catch {
@@ -138,14 +139,14 @@ export class RobloxStudioMCPServer {
     // Legacy port 3002 for old plugins
     const LEGACY_PORT = 3002;
     let legacyHandle: http.Server | undefined;
-    let legacyApp: ReturnType<typeof createHttpServer> | undefined;
+    let legacyApp: RobloxStudioHttpApp | undefined;
     if (boundPort !== LEGACY_PORT && bridgeMode === 'primary') {
       legacyApp = createHttpServer(this.tools, this.bridge, this.allowedToolNames, this.config, security);
       try {
         const result = await listenWithRetry(legacyApp, host, LEGACY_PORT, 1);
         legacyHandle = result.server;
         console.error(`Legacy HTTP server also listening on ${host}:${LEGACY_PORT} for old plugins`);
-        (legacyApp as any).setMCPServerActive(true);
+        legacyApp.setMCPServerActive(true);
       } catch {
         console.error(`Legacy port ${LEGACY_PORT} in use, skipping backward-compat listener`);
       }
@@ -170,7 +171,7 @@ export class RobloxStudioMCPServer {
     console.error(`${this.config.name} v${this.config.version} running on stdio`);
 
     if (primaryApp) {
-      (primaryApp as any).setMCPServerActive(true);
+      primaryApp.setMCPServerActive(true);
     }
 
     console.error(bridgeMode === 'primary'
@@ -180,12 +181,12 @@ export class RobloxStudioMCPServer {
     console.error('Waiting for Studio plugin to connect...');
 
     const activityInterval = setInterval(() => {
-      if (primaryApp) (primaryApp as any).trackMCPActivity();
-      if (legacyApp) (legacyApp as any).trackMCPActivity();
+      if (primaryApp) primaryApp.trackMCPActivity();
+      if (legacyApp) legacyApp.trackMCPActivity();
 
       if (bridgeMode === 'primary' && primaryApp) {
-        const pluginConnected = (primaryApp as any).isPluginConnected();
-        const mcpActive = (primaryApp as any).isMCPServerActive();
+        const pluginConnected = primaryApp.isPluginConnected();
+        const mcpActive = primaryApp.isMCPServerActive();
 
         if (pluginConnected && mcpActive) {
           // All good
@@ -209,13 +210,16 @@ export class RobloxStudioMCPServer {
       clearInterval(activityInterval);
       clearInterval(cleanupInterval);
       if (promotionInterval) clearInterval(promotionInterval);
+      primaryApp?.setMCPServerActive(false);
+      legacyApp?.setMCPServerActive(false);
+      this.bridge.clearAllPendingRequests();
       if (this.bridge instanceof ProxyBridgeService) {
         this.bridge.stop();
       }
       await stdioHandle.close().catch(() => {});
       await Promise.all([
-        (primaryApp as any)?.closeMcpHandler?.(),
-        (legacyApp as any)?.closeMcpHandler?.(),
+        primaryApp?.closeMcpHandler(),
+        legacyApp?.closeMcpHandler(),
       ]).catch(() => {});
       if (httpHandle) httpHandle.close();
       if (legacyHandle) legacyHandle.close();

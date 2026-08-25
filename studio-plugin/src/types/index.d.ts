@@ -34,6 +34,7 @@ export interface PollResponse {
 	pluginVersion?: string;
 	pluginVariant?: string;
 	versionMismatch?: boolean;
+	pollMode?: "long";
 	request?: RequestPayload;
 	requestId?: string;
 	// Server signals knownInstance=false when its in-memory instances map

@@ -128,6 +128,7 @@ interface PollResponseBody {
 	// in-memory instances map (typically after an MCP process restart).
 	// Triggers a re-register POST to /ready.
 	knownInstance?: boolean;
+	pollMode?: "long";
 }
 
 // Throttle re-ready calls per proxyId so a brief window of unknownInstance
@@ -339,13 +340,23 @@ function pollProxy(proxyId: string, player: Player, rf: RemoteFunction) {
 			unregisterProxy(player);
 			break;
 		}
-		const [ok, res] = pcall(() =>
-			HttpService.RequestAsync({
-				Url: `${mcpUrl}/poll?pluginSessionId=${proxyId}`,
-				Method: "GET",
+
+		let nextPollDelay = 0.5;
+		const [ok, res] = pcall(() => {
+			const requestOptions = {
+				Url: `${mcpUrl}/poll?pluginSessionId=${proxyId}&pollMode=long`,
+				Method: "GET" as const,
 				Headers: { "Content-Type": "application/json" },
-			}),
-		);
+				Timeout: State.POLL_REQUEST_TIMEOUT_SECONDS,
+			};
+			return HttpService.RequestAsync(requestOptions);
+		});
+
+		// RequestAsync may yield for the full long-poll window. Never apply a
+		// stale response to a player whose proxy was removed or replaced.
+		const currentProxy = proxyByPlayer.get(player);
+		if (player.Parent === undefined || currentProxy?.pluginSessionId !== proxyId) break;
+
 		if (ok && res && (res.Success || res.StatusCode === 503)) {
 			const [okJson, body] = pcall(() => HttpService.JSONDecode(res.Body) as PollResponseBody);
 			if (okJson && body) {
@@ -378,9 +389,19 @@ function pollProxy(proxyId: string, player: Player, rf: RemoteFunction) {
 					}
 					postJson("/response", { requestId: body.requestId, response });
 				}
+
+				if (res.Success && body.pollMode === "long" && body.knownInstance !== false && body.request === undefined) {
+					nextPollDelay = 0;
+				}
 			}
 		}
-		task.wait(0.5);
+
+		if (nextPollDelay > 0) {
+			task.wait(nextPollDelay);
+		} else {
+			// Yield one scheduler turn before replacing a completed long poll.
+			task.wait();
+		}
 	}
 }
 

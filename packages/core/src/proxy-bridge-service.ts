@@ -7,6 +7,7 @@ export class ProxyBridgeService extends BridgeService {
   readonly proxyInstanceId: string;
   private proxyRequestTimeout = 30000;
   private cachedInstances: PluginInstance[] = [];
+  private readonly initialRefresh: Promise<void>;
   private refreshTimer?: ReturnType<typeof setInterval>;
   private static REFRESH_INTERVAL_MS = 1000;
 
@@ -19,11 +20,15 @@ export class ProxyBridgeService extends BridgeService {
     // see real data. Without this, anything that enumerates peers from a
     // proxy-mode subprocess (target=all fanout, get_connected_instances)
     // sees the proxy's own empty instances Map and returns nothing.
-    this.refreshInstances();
+    this.initialRefresh = this.refreshInstances();
     this.refreshTimer = setInterval(
       () => this.refreshInstances(),
       ProxyBridgeService.REFRESH_INTERVAL_MS,
     );
+  }
+
+  waitForInitialRefresh(): Promise<void> {
+    return this.initialRefresh;
   }
 
   private authHeaders(extra?: Record<string, string>): Record<string, string> {
