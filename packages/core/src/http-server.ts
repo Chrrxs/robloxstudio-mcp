@@ -465,7 +465,7 @@ export function createHttpServer(tools: RobloxStudioTools, bridge: BridgeService
   });
 
 
-  app.get('/poll', (req, res) => {
+  app.get('/poll', async (req, res) => {
     const pluginSessionId = req.query.pluginSessionId as string | undefined;
 
     if (pluginSessionId) {
@@ -509,9 +509,21 @@ export function createHttpServer(tools: RobloxStudioTools, bridge: BridgeService
     // restarted (its in-memory instances map is empty) and the plugin
     // should re-issue /ready. Without this, polls succeed (HTTP 200) but
     // the server treats the plugin as anonymous and routes nothing to it.
-    const pendingRequest = knownInstance && callerInstanceId && callerRole
+    let pendingRequest = knownInstance && callerInstanceId && callerRole
       ? bridge.getPendingRequest(callerInstanceId, callerRole)
       : null;
+
+    if (!pendingRequest && knownInstance && callerInstanceId && callerRole) {
+      const startWait = Date.now();
+      while (Date.now() - startWait < 15000) {
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        pendingRequest = bridge.getPendingRequest(callerInstanceId, callerRole);
+        if (pendingRequest) break;
+        if (!isMCPServerActive() || !bridge.getInstanceBySessionId(pluginSessionId!)) {
+          break;
+        }
+      }
+    }
 
     if (pendingRequest) {
       res.json({
