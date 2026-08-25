@@ -12,33 +12,23 @@ Complete your AI assistant integration with this easy-to-install Studio plugin. 
 
 2. **No restart needed** - Plugin appears immediately in toolbar!
 
-### Method 2: Direct Download
-1. **Download the plugin:**
-   - **GitHub Release**: [Download MCPPlugin.rbxmx](https://github.com/chrrxs/robloxstudio-mcp/releases/latest/download/MCPPlugin.rbxmx)
-   - **CLI installer**: `npx -y @chrrxs/robloxstudio-mcp@latest --install-plugin`
-   - This is the official Roblox plugin format
+### Method 2: CLI Installer
+Run the installer bundled with the latest server package:
 
-2. **Install to plugins folder:**
-   - **Windows**: Save to `%LOCALAPPDATA%/Roblox/Plugins/`
-   - **macOS**: Save to `~/Documents/Roblox/Plugins/`
-   - **Or use Studio**: Plugins tab > Plugins Folder > drop the file
-   - Keep only one MCP variant in this folder. Remove `MCPInspectorPlugin.rbxmx` if installing `MCPPlugin.rbxmx`, and remove `MCPPlugin.rbxmx` if installing the inspector variant.
+```bash
+npx -y @chrrxs/robloxstudio-mcp@latest --install-plugin
+```
 
-3. **Restart Roblox Studio** - Plugin appears automatically!
+Fully close and reopen Roblox Studio after the plugin is installed or updated.
 
-### Method 3: Save as Local Plugin
-1. **Copy the plugin code:**
-   - Open [studio-plugin/src/server/index.server.ts](https://github.com/chrrxs/robloxstudio-mcp/blob/main/studio-plugin/src/server/index.server.ts) on GitHub (or build locally - see project README)
-   - Copy all the code (Ctrl+A, Ctrl+C)
-
-2. **Create in Studio:**
-   - Open Roblox Studio with any place
-   - Create a new Script in ServerScriptService
-   - Paste the plugin code
-   - **Right-click script** > **"Save as Local Plugin..."**
-   - Name it "Roblox Studio MCP"
-
-3. **Plugin appears immediately** in your toolbar!
+### Method 3: Direct Download
+1. Download [MCPPlugin.rbxmx](https://github.com/chrrxs/robloxstudio-mcp/releases/latest/download/MCPPlugin.rbxmx).
+2. Save it to the Studio Plugins folder:
+   - **Windows**: `%LOCALAPPDATA%/Roblox/Plugins/`
+   - **macOS**: `~/Documents/Roblox/Plugins/`
+   - **From Studio**: Open **Plugins > Plugins Folder**, then copy the file there.
+   - Keep only one MCP variant in this folder. Remove `MCPInspectorPlugin.rbxmx` when installing `MCPPlugin.rbxmx`.
+3. Fully close and reopen Roblox Studio.
 
 ## Setup & Configuration
 
