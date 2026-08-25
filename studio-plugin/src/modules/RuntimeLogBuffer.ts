@@ -142,7 +142,7 @@ function install(): void {
 	// Seed from per-DataModel LogHistory so get_runtime_logs can still see them;
 	// edit history is bounded to the current Studio process above.
 	seedRuntimeHistory();
-	LogService.MessageOut.Connect((msg, t, context?: Record<string, unknown>) => {
+	LogService.MessageOut.Connect((msg, t, context?: any) => {
 		pushEntry(msg, t, undefined, context);
 	});
 }
