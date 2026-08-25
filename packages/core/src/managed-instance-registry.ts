@@ -2,6 +2,7 @@ import * as fs from 'fs/promises';
 import { randomUUID } from 'crypto';
 import * as os from 'os';
 import * as path from 'path';
+import { setTimeout as delayTimer } from 'node:timers/promises';
 
 const REGISTRY_VERSION = 1;
 const LOCK_STALE_MS = 10000;
@@ -98,7 +99,7 @@ export function defaultManagedInstanceRegistryDir(): string {
 }
 
 function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+  return delayTimer(ms, undefined, { ref: false });
 }
 
 function ymd(timestamp: number): string {
