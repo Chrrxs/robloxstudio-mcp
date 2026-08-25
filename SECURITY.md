@@ -1,24 +1,25 @@
 # Security Policy
 
-## Reporting a vulnerability
+## Reporting a Vulnerability
 
-Please do not open a public issue for a suspected vulnerability.
+**Do not open a public issue for suspected vulnerabilities.**
 
-Report it privately through
-[GitHub private vulnerability reporting](https://github.com/Chrrxs/robloxstudio-mcp/security/advisories/new).
-Include the affected version, impact, reproduction steps or a proof of concept,
-and any known mitigations. Please avoid including secrets, personal data, or
-unrelated Roblox experience content.
+Report vulnerabilities privately via [GitHub Private Vulnerability Reporting](https://github.com/Chrrxs/robloxstudio-mcp/security/advisories/new).
 
-The maintainers will use the private advisory to investigate, coordinate a fix,
-and agree on disclosure timing with the reporter. Keep vulnerability details
-confidential until a fix and advisory are published.
+Include:
+- Affected versions
+- Impact
+- Reproduction steps or PoC
+- Known mitigations
 
-## Supported versions
+> **Note:** Exclude API keys, personal data, and unrelated Roblox content.
 
-Security fixes target the latest released version. If the issue affects an
-older version, please confirm whether it is also present in the latest release
-when practical.
+## Disclosure Process
 
-For non-security bugs and feature requests, use
-[GitHub Issues](https://github.com/Chrrxs/robloxstudio-mcp/issues).
+Maintainers will use the private advisory to investigate, fix, and agree on a disclosure timeline. Keep details confidential until a fix is published.
+
+## Supported Versions
+
+Security fixes target the **latest release**. If the issue affects an older version, verify it on the latest release if possible.
+
+For non-security bugs and feature requests, use [GitHub Issues](https://github.com/Chrrxs/robloxstudio-mcp/issues).

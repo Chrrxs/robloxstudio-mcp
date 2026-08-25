@@ -1,40 +1,51 @@
-# Building from source
+# Building from Source
 
-Node.js 20 or newer is required.
+Requires **Node.js 20+**.
 
+## 1. Install Dependencies
 ```bash
-npm install && cd studio-plugin && npm install && cd ..
-npm run build                                            # node packages
-cd studio-plugin && npm run build && cd ..               # plugin TS → Luau
-node scripts/build-plugin.mjs                            # → MCPPlugin.rbxmx
-node scripts/build-plugin.mjs --variant inspector        # → MCPInspectorPlugin.rbxmx
+npm install
+cd studio-plugin && npm install && cd ..
 ```
 
-On WSL the `.rbxmx` is auto-installed into `/mnt/c/Users/<you>/AppData/Local/Roblox/Plugins/`, and the local build script removes the other plugin variant from that folder. Set `MCP_PLUGINS_DIR` to override. **Fully close and reopen Studio** after a plugin rebuild, and verify only the one variant you intend to test remains in the Plugins folder.
+## 2. Compile
+Compile Node packages and transpile the plugin from TypeScript to Luau:
+```bash
+npm run build
+cd studio-plugin && npm run build && cd ..
+```
 
-Do not leave both `MCPPlugin.rbxmx` and `MCPInspectorPlugin.rbxmx` in the Studio Plugins folder; Studio loads both and they can register duplicate runtime peers.
+## 3. Build the Plugin Model
+Generate the `.rbxmx` plugin file.
 
-## Feature completion gate
+**Warning:** Do not install both `MCPPlugin.rbxmx` and `MCPInspectorPlugin.rbxmx` simultaneously. It will duplicate peers and break connections.
 
-A feature is not complete until the short live Studio gate passes:
+```bash
+# Standard plugin
+node scripts/build-plugin.mjs
 
+# Inspector variant
+node scripts/build-plugin.mjs --variant inspector
+```
+
+> **WSL Users:** The script automatically installs to `/mnt/c/Users/<you>/AppData/Local/Roblox/Plugins/` and removes competing variants. Override via `MCP_PLUGINS_DIR`. **Restart Studio** after rebuilding.
+
+---
+
+## Testing
+
+Features must pass the E2E gate.
+
+### Standard E2E
+Checks edit-mode, playtest, server, and client behavior:
 ```bash
 npm run test:e2e
 ```
 
-This checks representative edit-mode, playtest, server, and client behavior.
-Before launching Studio, the gate recompiles and assembles
-`studio-plugin/MCPPlugin.rbxmx` from the current worktree, then installs that
-exact file into its isolated plugin directory. The artifact-only build does
-not alter your normal Studio plugin folder, and the installer never falls back
-to a published release.
-Run the targeted E2E for any specialized subsystem the feature changes. The
-auto-install, full functional, lifecycle, and parallel-isolation suites are
-reserved for relevant changes and the release gate:
-
+### Full Release Gate
+Run for large architectural changes or release preparation:
 ```bash
 npm run test:e2e:full
 ```
 
-See [`tests/README.md`](../tests/README.md) for the selection guide and
-individual commands.
+See [Tests Documentation](../tests/README.md) for details.

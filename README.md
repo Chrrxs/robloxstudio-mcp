@@ -9,10 +9,9 @@ screenshots, memory reports, and profiler captures from each peer.
 ## What it can do
 
 ### Debug a running game
-
-- Run Luau with `eval_server_runtime` or `eval_client_runtime`. Both tools execute in a live server or client context and use the same `require` cache as your game scripts.
-- Instrument live code with `breakpoints`. It records each hit without pausing the playtest.
-- Read output from edit mode, the server, or a specific client with `get_runtime_logs`, including messages logged during startup.
+- Run Luau with `eval_server_runtime` or `eval_client_runtime`. Both execute in live context using the game's `require` cache.
+- Instrument live code with `breakpoints` without pausing the playtest.
+- Read output from edit mode, server, or specific clients with `get_runtime_logs`.
 
 ### Automate playtests
 
@@ -46,27 +45,15 @@ See the [complete tool list](packages/core/src/tools/definitions.ts).
 
 ## Setup
 
-1. Add the server to your MCP client. `--auto-install-plugin` also installs the matching Studio plugin:
+1. Add the server to your MCP client (`--auto-install-plugin` installs the matching Studio plugin):
 
 ```bash
-# Claude Code
+# Claude Code / Codex CLI
 claude mcp add robloxstudio -- npx -y @chrrxs/robloxstudio-mcp@latest --auto-install-plugin
-
-# Codex CLI
 codex mcp add robloxstudio -- npx -y @chrrxs/robloxstudio-mcp@latest --auto-install-plugin
-
-# Gemini CLI
-gemini mcp add robloxstudio npx --trust -- -y @chrrxs/robloxstudio-mcp@latest --auto-install-plugin
 ```
 
-2. After the plugin is installed or updated, fully close and reopen Studio. The plugin shows **Connected** when it is ready.
-
-Multiple open places can connect to the same server. Call `get_connected_instances`, then pass the returned place's `id` as `instance_id` with later tool calls.
-
-Set `MCP_PLUGINS_DIR` to use a custom Plugins folder. For a manual plugin install, run `npx -y @chrrxs/robloxstudio-mcp@latest --install-plugin`.
-
-<details>
-<summary>Other MCP clients (Claude Desktop, Cursor, etc.)</summary>
+For JSON-configured clients (Cursor, Antigravity, Claude Desktop, Windsurf, VS Code):
 
 ```json
 {
@@ -79,18 +66,10 @@ Set `MCP_PLUGINS_DIR` to use a custom Plugins folder. For a manual plugin instal
 }
 ```
 
-On Windows, wrap with `cmd /c` if `npx` doesn't resolve:
-```json
-{
-  "mcpServers": {
-    "robloxstudio-mcp": {
-      "command": "cmd",
-      "args": ["/c", "npx", "-y", "@chrrxs/robloxstudio-mcp@latest", "--auto-install-plugin"]
-    }
-  }
-}
-```
-</details>
+2. Fully close and reopen Studio after installation. The plugin shows **Connected** when ready.
+
+- Pass `instance_id` to route calls when multiple places are open.
+- Set `MCP_PLUGINS_DIR` for custom plugin paths, or run `npx -y @chrrxs/robloxstudio-mcp@latest --install-plugin` to install manually.
 
 ## Inspector edition (DataModel read-only)
 
