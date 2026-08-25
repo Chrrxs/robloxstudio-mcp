@@ -52,7 +52,7 @@ function collectPropertySchemas(
 }
 
 describe('MCP v2 tool runtime', () => {
-  test('projects JSON once for modern clients and preserves media', () => {
+  test('keeps a compact JSON text fallback for modern clients and preserves media', () => {
     const result = normalizeToolResult({
       content: [
         {
@@ -70,7 +70,32 @@ describe('MCP v2 tool runtime', () => {
 
     expect(result.structuredContent).toEqual({ success: true, value: 42 });
     expect(result.content).toEqual([
+      { type: 'text', text: JSON.stringify({ success: true, value: 42 }) },
       { type: 'image', data: 'aW1hZ2U=', mimeType: 'image/png' },
+    ]);
+  });
+
+  test('allows verified modern clients to opt into structured-only results', () => {
+    const result = normalizeToolResult({
+      content: [{ type: 'text', text: JSON.stringify({ value: 42 }) }],
+    }, 'modern', 'structured');
+
+    expect(result.structuredContent).toEqual({ value: 42 });
+    expect(result.content).toEqual([]);
+  });
+
+  test('keeps unrelated JSON text blocks while replacing the structured projection', () => {
+    const result = normalizeToolResult({
+      structuredContent: { success: true },
+      content: [
+        { type: 'text', text: JSON.stringify({ success: true }) },
+        { type: 'text', text: JSON.stringify({ note: 'separate JSON document' }) },
+      ],
+    }, 'modern');
+
+    expect(result.content).toEqual([
+      { type: 'text', text: JSON.stringify({ success: true }) },
+      { type: 'text', text: JSON.stringify({ note: 'separate JSON document' }) },
     ]);
   });
 
@@ -83,6 +108,19 @@ describe('MCP v2 tool runtime', () => {
     expect(result.content).toEqual([
       { type: 'text', text: JSON.stringify({ value: 42 }) },
     ]);
+  });
+
+  test('turns an unexpected empty tool response into a visible error', () => {
+    const result = normalizeToolResult({ content: [] }, 'modern');
+
+    expect(result).toEqual({
+      content: [{
+        type: 'text',
+        text: JSON.stringify({ error: 'empty_tool_result', message: 'Tool returned no content.' }),
+      }],
+      structuredContent: { error: 'empty_tool_result', message: 'Tool returned no content.' },
+      isError: true,
+    });
   });
 
   test('keeps the catalog within the 3.0 token budget', () => {
@@ -293,7 +331,7 @@ describe('MCP v2 tool runtime', () => {
 
   test.each([
     ['legacy', undefined, true],
-    ['2026-07-28', { mode: { pin: '2026-07-28' as const } }, false],
+    ['2026-07-28', { mode: { pin: '2026-07-28' as const } }, true],
   ])('serves %s clients on the shared HTTP endpoint', async (_label, versionNegotiation, keepsTextProjection) => {
     const definition = TOOL_DEFINITIONS.find((tool) => tool.name === 'get_place_info')!;
     const getPlaceInfo = jest.fn(async () => ({
@@ -330,7 +368,7 @@ describe('MCP v2 tool runtime', () => {
       expect(getPlaceInfo).toHaveBeenCalled();
     } finally {
       await client.close().catch(() => {});
-      await (app as any).closeMcpHandler?.();
+      await (app as typeof app & { closeMcpHandler?: () => Promise<void> | void }).closeMcpHandler?.();
       await new Promise<void>((resolve) => httpServer.close(() => resolve()));
     }
   });

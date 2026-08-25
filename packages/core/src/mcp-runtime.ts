@@ -14,6 +14,7 @@ import type { RobloxStudioTools } from './tools/index.js';
 import type { ToolDefinition } from './tools/definitions.js';
 
 export type ProtocolEra = McpRequestContext['era'];
+export type ToolResultMode = 'compatible' | 'structured';
 
 export interface McpRuntimeConfig {
   name: string;
@@ -128,36 +129,82 @@ function parseJsonObject(text: string): Record<string, unknown> | undefined {
 }
 
 /**
- * Converts the historic JSON-in-text result shape into the lean 2026 MCP shape.
- * Modern clients receive JSON once in structuredContent; legacy clients keep the
- * text projection required by older SDKs. Human-readable text and media survive.
+ * Defaults to a standards-compatible text fallback so clients that do not
+ * surface structuredContent never render an apparently empty tool result.
+ * Set ROBLOX_STUDIO_MCP_RESULT_MODE=structured only for clients verified to
+ * consume structuredContent directly.
  */
-export function normalizeToolResult(raw: unknown, era: ProtocolEra): CallToolResult {
+export function resolveToolResultMode(
+  value = process.env.ROBLOX_STUDIO_MCP_RESULT_MODE,
+): ToolResultMode {
+  return value?.trim().toLowerCase() === 'structured'
+    ? 'structured'
+    : 'compatible';
+}
+
+/**
+ * Converts the historic JSON-in-text result shape into structured MCP output.
+ * By default, each structured result also has one compact JSON text projection.
+ * That fallback keeps results visible in clients that do not surface
+ * structuredContent, while preserving human-readable text and media.
+ */
+export function normalizeToolResult(
+  raw: unknown,
+  era: ProtocolEra,
+  resultMode = resolveToolResultMode(),
+): CallToolResult {
   const result = (raw && typeof raw === 'object' ? raw : {}) as ToolResultLike;
   const originalContent = Array.isArray(result.content) ? result.content : [];
   let structured = asStructuredObject(result.structuredContent);
-  const jsonTextIndex = originalContent.findIndex((block) =>
-    block.type === 'text' && typeof block.text === 'string' && !!parseJsonObject(block.text));
+  let jsonTextIndex = -1;
 
   if (!structured) {
-    if (jsonTextIndex >= 0) {
-      structured = parseJsonObject((originalContent[jsonTextIndex] as { type: 'text'; text: string }).text);
+    for (const [index, block] of originalContent.entries()) {
+      if (block.type !== 'text' || typeof block.text !== 'string') continue;
+      const parsed = parseJsonObject(block.text);
+      if (!parsed) continue;
+      structured = parsed;
+      jsonTextIndex = index;
+      break;
+    }
+  } else {
+    const serializedStructured = JSON.stringify(structured);
+    for (const [index, block] of originalContent.entries()) {
+      if (block.type !== 'text' || typeof block.text !== 'string') continue;
+      const parsed = parseJsonObject(block.text);
+      if (parsed && JSON.stringify(parsed) === serializedStructured) {
+        jsonTextIndex = index;
+        break;
+      }
     }
   }
 
   if (!structured) {
+    if (originalContent.length === 0) {
+      const emptyResult = {
+        error: 'empty_tool_result',
+        message: 'Tool returned no content.',
+      };
+      return {
+        content: [{ type: 'text', text: JSON.stringify(emptyResult) }],
+        structuredContent: emptyResult,
+        isError: true,
+      };
+    }
     return {
       content: originalContent as CallToolResult['content'],
       ...(result.isError ? { isError: true } : {}),
     };
   }
 
-  const content = era === 'modern'
-    ? originalContent.filter((_, index) => index !== jsonTextIndex)
-    : [
+  const nonProjectionContent = originalContent.filter((_, index) => index !== jsonTextIndex);
+  const includeTextProjection = era === 'legacy' || resultMode === 'compatible';
+  const content = includeTextProjection
+    ? [
         { type: 'text' as const, text: JSON.stringify(structured) },
-        ...originalContent.filter((_, index) => index !== jsonTextIndex),
-      ];
+        ...nonProjectionContent,
+      ]
+    : nonProjectionContent;
 
   return {
     content: content as CallToolResult['content'],
