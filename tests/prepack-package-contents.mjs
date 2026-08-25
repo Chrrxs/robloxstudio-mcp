@@ -67,6 +67,7 @@ try {
       {
         cwd: packageDir,
         encoding: 'utf8',
+        shell: process.platform === 'win32',
       },
     );
     assert.equal(

@@ -1,5 +1,5 @@
 import { existsSync, unlinkSync } from 'fs';
-import { execSync } from 'child_process';
+import { execFileSync } from 'child_process';
 import { join } from 'path';
 import { homedir } from 'os';
 import { getStudioPlatformCapabilities } from './studio-platform.js';
@@ -62,17 +62,15 @@ function getWindowsUserPluginsDir(): string | null {
   // wslpath. cmd.exe spams a "UNC paths are not supported" warning to stderr
   // when the CWD is on the Linux side - silence it with stdio: 'ignore'.
   try {
-    const localAppData = execSync('cmd.exe /c "echo %LOCALAPPDATA%"', {
+    const localAppData = execFileSync('cmd.exe', ['/c', 'echo %LOCALAPPDATA%'], {
       stdio: ['ignore', 'pipe', 'ignore'],
-    })
-      .toString()
-      .trim();
+      encoding: 'utf8',
+    }).trim();
     if (!localAppData || localAppData.includes('%')) return null;
-    const linuxPath = execSync(`wslpath -u '${localAppData.replace(/'/g, "'\\''")}'`, {
+    const linuxPath = execFileSync('wslpath', ['-u', localAppData], {
       stdio: ['ignore', 'pipe', 'ignore'],
-    })
-      .toString()
-      .trim();
+      encoding: 'utf8',
+    }).trim();
     if (!linuxPath) return null;
     return join(linuxPath, 'Roblox', 'Plugins');
   } catch {
@@ -137,8 +135,8 @@ export function handleVariantConflict({
 
   warn(
     `\n[install-plugin] WARNING: ${otherAssetName} is already present in ${pluginsFolder}.\n` +
-	      `Only one MCP plugin variant should be present. If both variants are in the Studio ` +
-	      `Plugins folder, Studio loads both and runtime routing can become unpredictable.\n` +
-	      `Delete ${otherAssetName} manually or use the default CLI installer behavior to replace it.\n`,
-	  );
-	}
+      `Only one MCP plugin variant should be present. If both variants are in the Studio ` +
+      `Plugins folder, Studio loads both and runtime routing can become unpredictable.\n` +
+      `Delete ${otherAssetName} manually or use the default CLI installer behavior to replace it.\n`,
+  );
+}
