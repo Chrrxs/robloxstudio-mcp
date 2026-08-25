@@ -257,6 +257,36 @@ return true
   };
 
   try {
+    const fullTree = await client.callTool('get_project_structure', {
+      path: folderPath,
+      maxDepth: 5,
+      instance_id: instanceId,
+    });
+    assertNoError(fullTree, 'get_project_structure returns smoke fixture');
+    assert(Array.isArray(fullTree.children), 'get_project_structure preserves populated children');
+    const partNode = fullTree.children.find((child) => child.name === 'SmokePart');
+    const scriptNode = fullTree.children.find((child) => child.name === 'SmokeScript');
+    const nestedNode = scriptNode?.children?.find((child) => child.name === 'NestedModule');
+    assert(partNode && !Object.hasOwn(partNode, 'children'), 'get_project_structure omits children from a leaf');
+    assert(Array.isArray(scriptNode?.children), 'get_project_structure preserves a branch children array');
+    assert(
+      nestedNode && !Object.hasOwn(nestedNode, 'children'),
+      'get_project_structure omits children from a nested leaf',
+    );
+
+    const truncatedTree = await client.callTool('get_project_structure', {
+      path: folderPath,
+      maxDepth: 0,
+      instance_id: instanceId,
+    });
+    const truncatedPart = truncatedTree.children?.find((child) => child.name === 'SmokePart');
+    assert(
+      truncatedPart?.hasMore === true &&
+        truncatedPart.childCount === 0 &&
+        !Object.hasOwn(truncatedPart, 'children'),
+      'get_project_structure preserves max-depth markers when children are omitted',
+    );
+
     const setProp = await client.callTool('set_properties', {
       instancePath: partPath,
       properties: { Transparency: 0.25 },
@@ -276,6 +306,15 @@ return true
       instance_id: instanceId,
     });
     assert(attrs.attributes?.SmokeAttr?.value === 'ok', 'get_attributes returns smoke attribute');
+
+    const emptyAttrs = await client.callTool('get_attributes', {
+      instancePath: scriptPath,
+      instance_id: instanceId,
+    });
+    assert(
+      emptyAttrs.count === 0 && !Object.hasOwn(emptyAttrs, 'attributes'),
+      'get_attributes omits an empty attributes collection while preserving count',
+    );
 
     const tag = await client.callTool('execute_luau', {
       target: 'edit',

@@ -74,6 +74,27 @@ describe('MCP v2 tool runtime', () => {
     ]);
   });
 
+  test('preserves public empty collections and null values', () => {
+    const result = normalizeToolResult({
+      content: [{
+        type: 'text',
+        text: JSON.stringify({
+          children: [],
+          attributes: [],
+          process_running: null,
+          nested: { warnings: [] },
+        }),
+      }],
+    }, 'modern');
+
+    expect(result.structuredContent).toEqual({
+      children: [],
+      attributes: [],
+      process_running: null,
+      nested: { warnings: [] },
+    });
+  });
+
   test('keeps one JSON text projection for legacy clients', () => {
     const result = normalizeToolResult({
       content: [{ type: 'text', text: JSON.stringify({ value: 42 }) }],

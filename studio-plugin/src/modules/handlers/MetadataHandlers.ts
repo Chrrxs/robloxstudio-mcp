@@ -50,7 +50,9 @@ function getAttributes(requestData: Record<string, unknown>) {
 			count++;
 		}
 
-		return { instancePath, attributes: serializedAttributes, count };
+		const response: Record<string, unknown> = { instancePath, count };
+		if (count > 0) response.attributes = serializedAttributes;
+		return response;
 	});
 
 	if (success) return result;
