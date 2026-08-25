@@ -411,7 +411,6 @@ function buildWindowsStudioStartScriptFromConvertedExe(
   const environmentPatch = parseStudioProcessEnvironmentPatch(processEnvironment);
   const commandLine = [windowsExe, ...args].map(quoteWindowsCommandLineArg).join(' ');
   return [
-    "$ErrorActionPreference = 'Stop'",
     ...(environmentPatch ? powershellEnvironmentPatchStatements(environmentPatch) : []),
     `Add-Type -TypeDefinition @'
 using System;
@@ -610,8 +609,6 @@ public sealed class McpSuspendedStudio : IDisposable
 
     public static McpSuspendedStudio Start(string application, string commandLine, string currentDirectory)
     {
-        if (String.IsNullOrEmpty(currentDirectory))
-            currentDirectory = null;
         IntPtr jobHandle = CreateJobObjectW(IntPtr.Zero, null);
         if (jobHandle == IntPtr.Zero)
             throw new Win32Exception(Marshal.GetLastWin32Error(), "CreateJobObjectW failed");
@@ -1368,6 +1365,7 @@ export class StudioInstanceManager {
   private readonly launchCompletionTimeoutMs: number;
   private coordinatorTimer?: ReturnType<typeof setInterval>;
   private coordinatorRefresh?: Promise<void>;
+  private disposed = false;
   private cachedSnapshot?: StudioProcessSnapshot;
   private snapshotInFlight?: Promise<StudioProcessSnapshot>;
   private launchQueue: Promise<void> = Promise.resolve();
@@ -1400,6 +1398,17 @@ export class StudioInstanceManager {
       windowsInteropAvailable: platform.windowsInteropAvailable,
       processIdentity: { ...platform.processIdentity },
     };
+  }
+
+  /** Stop background lifecycle work without altering managed Studio processes. */
+  async dispose(): Promise<void> {
+    this.disposed = true;
+    this.stopCoordinator();
+    for (const timer of this.connectionTimers.values()) clearTimeout(timer);
+    this.connectionTimers.clear();
+    for (const timer of this.launchCompletionTimers.values()) clearTimeout(timer);
+    this.launchCompletionTimers.clear();
+    await this.coordinatorRefresh?.catch(() => {});
   }
 
   async list(): Promise<ManagedStudioInstance[]> {
@@ -2248,6 +2257,9 @@ export class StudioInstanceManager {
     this.pending.delete(record);
     this.clearConnectionTimer(record);
     this.clearLaunchCompletionTimer(record);
+    if (this.managedByInstanceId.size === 0 && this.pending.size === 0) {
+      this.stopCoordinator();
+    }
   }
 
   private armLaunchCompletionTimer(record: ManagedStudioInstance) {
@@ -2315,7 +2327,7 @@ export class StudioInstanceManager {
   }
 
   private startCoordinator(record: ManagedStudioInstance) {
-    if (!record.recordId || record.closedAt !== undefined) return;
+    if (this.disposed || !record.recordId || record.closedAt !== undefined) return;
     if (record.state === 'launching' && record.connectionDeadlineAt !== undefined) {
       const timeout = setTimeout(() => {
         this.runInBackground(
@@ -2328,7 +2340,7 @@ export class StudioInstanceManager {
     }
     if (this.coordinatorTimer) return;
     this.coordinatorTimer = setInterval(() => {
-      if (this.coordinatorRefresh) return;
+      if (this.disposed || this.coordinatorRefresh) return;
       this.coordinatorRefresh = this.refreshOwnedRecords()
         .catch((error) => {
           this.reportBackgroundFailure('refreshing managed Studio records', error);
@@ -2340,6 +2352,12 @@ export class StudioInstanceManager {
     if (typeof this.coordinatorTimer === 'object' && 'unref' in this.coordinatorTimer) {
       this.coordinatorTimer.unref();
     }
+  }
+
+  private stopCoordinator() {
+    if (!this.coordinatorTimer) return;
+    clearInterval(this.coordinatorTimer);
+    this.coordinatorTimer = undefined;
   }
 
   private clearConnectionTimer(record: ManagedStudioInstance) {

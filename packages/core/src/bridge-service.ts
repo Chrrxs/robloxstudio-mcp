@@ -574,6 +574,9 @@ export class BridgeService {
           reject(new Error('Request timeout'));
         }
       }, effectiveTimeoutMs);
+      if (typeof timeoutId === 'object' && 'unref' in timeoutId) {
+        timeoutId.unref();
+      }
 
       const request: PendingRequest = {
         id: requestId,

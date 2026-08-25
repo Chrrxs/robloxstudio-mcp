@@ -221,13 +221,6 @@ describe('Smoke', () => {
       ['--task', 'EditFile', '--localPlaceFile', 'C:\\Places\\Baseplate.rbxl'],
     );
 
-    expect(script.startsWith("$ErrorActionPreference = 'Stop'\n")).toBe(true);
-    expect(script).toContain(
-      'if (String.IsNullOrEmpty(currentDirectory))\n            currentDirectory = null;',
-    );
-    expect(script.indexOf('String.IsNullOrEmpty(currentDirectory)')).toBeLessThan(
-      script.indexOf('bool started = CreateProcessW'),
-    );
     expect(script).toContain('CREATE_SUSPENDED');
     expect(script).toContain('JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE');
     expect(script).toContain('AssignProcessToJobObject');
@@ -1511,6 +1504,7 @@ describe('Smoke', () => {
 
   test('status refreshes ten managed records from one process snapshot', async () => {
     const registryDir = fs.mkdtempSync(path.join(os.tmpdir(), 'robloxstudio-mcp-registry-'));
+    let manager: StudioInstanceManager | undefined;
     let nextPid = 6700;
     let snapshotCalls = 0;
     const live = new Map<number, string>();
@@ -1540,7 +1534,7 @@ describe('Smoke', () => {
     };
 
     try {
-      const manager = new StudioInstanceManager({ registryDir, processAdapter });
+      manager = new StudioInstanceManager({ registryDir, processAdapter });
       for (let index = 0; index < 10; index += 1) {
         await manager.launch({ source: 'local_file', localPlaceFile: `/tmp/snapshot-${index}.rbxl` });
       }
@@ -1549,6 +1543,7 @@ describe('Smoke', () => {
       expect(await manager.list()).toHaveLength(10);
       expect(snapshotCalls).toBe(1);
     } finally {
+      await manager?.dispose();
       fs.rmSync(registryDir, { recursive: true, force: true });
     }
   });

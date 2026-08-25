@@ -969,6 +969,11 @@ export class RobloxStudioTools {
     return this.instanceManager.getLifecycleCapabilities();
   }
 
+  async dispose(): Promise<void> {
+    await this.managedConnectionAssociations;
+    await this.instanceManager.dispose();
+  }
+
   private _textResult(body: Record<string, unknown>) {
     return { content: [{ type: 'text', text: JSON.stringify(body) }] };
   }
