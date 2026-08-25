@@ -221,6 +221,13 @@ describe('Smoke', () => {
       ['--task', 'EditFile', '--localPlaceFile', 'C:\\Places\\Baseplate.rbxl'],
     );
 
+    expect(script.startsWith("$ErrorActionPreference = 'Stop'\n")).toBe(true);
+    expect(script).toContain(
+      'if (String.IsNullOrEmpty(currentDirectory))\n            currentDirectory = null;',
+    );
+    expect(script.indexOf('String.IsNullOrEmpty(currentDirectory)')).toBeLessThan(
+      script.indexOf('bool started = CreateProcessW'),
+    );
     expect(script).toContain('CREATE_SUSPENDED');
     expect(script).toContain('JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE');
     expect(script).toContain('AssignProcessToJobObject');

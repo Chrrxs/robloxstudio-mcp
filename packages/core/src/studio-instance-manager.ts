@@ -411,6 +411,7 @@ function buildWindowsStudioStartScriptFromConvertedExe(
   const environmentPatch = parseStudioProcessEnvironmentPatch(processEnvironment);
   const commandLine = [windowsExe, ...args].map(quoteWindowsCommandLineArg).join(' ');
   return [
+    "$ErrorActionPreference = 'Stop'",
     ...(environmentPatch ? powershellEnvironmentPatchStatements(environmentPatch) : []),
     `Add-Type -TypeDefinition @'
 using System;
@@ -609,6 +610,8 @@ public sealed class McpSuspendedStudio : IDisposable
 
     public static McpSuspendedStudio Start(string application, string commandLine, string currentDirectory)
     {
+        if (String.IsNullOrEmpty(currentDirectory))
+            currentDirectory = null;
         IntPtr jobHandle = CreateJobObjectW(IntPtr.Zero, null);
         if (jobHandle == IntPtr.Zero)
             throw new Win32Exception(Marshal.GetLastWin32Error(), "CreateJobObjectW failed");
