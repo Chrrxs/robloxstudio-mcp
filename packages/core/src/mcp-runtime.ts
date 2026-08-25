@@ -108,7 +108,14 @@ function compactPublicValue(value: unknown): unknown {
 
   const compact: Record<string, unknown> = {};
   for (const [key, child] of Object.entries(value)) {
-    if (child === undefined || INTERNAL_RESULT_KEYS.has(key)) continue;
+    if (child === undefined || child === null || INTERNAL_RESULT_KEYS.has(key)) continue;
+    
+    if (Array.isArray(child) && child.length === 0) {
+      if (key === 'children' || key === 'attributes' || key === 'tags' || key === 'capabilities' || key === 'errors' || key === 'warnings') {
+        continue;
+      }
+    }
+    
     compact[key] = compactPublicValue(child);
   }
   return compact;
