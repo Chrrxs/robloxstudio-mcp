@@ -3,6 +3,8 @@ import * as path from 'path';
 import { BridgeService } from '../bridge-service.js';
 import { RobloxStudioTools } from '../tools/index.js';
 
+const RUNTIME_LOG_TEST_CLAIM_OWNER = 'runtime-log-context-test';
+
 function repositoryRoot(): string {
   const cwd = process.cwd();
   return fs.existsSync(path.join(cwd, 'studio-plugin')) ? cwd : path.resolve(cwd, '../..');
@@ -10,8 +12,19 @@ function repositoryRoot(): string {
 
 async function nextPendingRequest(bridge: BridgeService) {
   for (let attempt = 0; attempt < 10; attempt += 1) {
-    const pending = bridge.getPendingRequest('place:test', 'edit');
-    if (pending) return pending;
+    const queued = bridge.claimNextRequestForPhysical(
+      'edit-session',
+      RUNTIME_LOG_TEST_CLAIM_OWNER,
+    );
+    if (queued) {
+      return {
+        requestId: queued.requestId,
+        request: {
+          endpoint: queued.endpoint,
+          data: queued.data as Record<string, unknown>,
+        },
+      };
+    }
     await new Promise<void>((resolve) => setImmediate(resolve));
   }
   throw new Error('timed out waiting for the plugin request');
@@ -34,6 +47,7 @@ describe('runtime log structured context', () => {
     const bridge = new BridgeService();
     bridge.registerInstance({
       pluginSessionId: 'edit-session',
+      physicalSessionId: 'edit-session',
       instanceId: 'place:test',
       role: 'edit',
     });

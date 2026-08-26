@@ -1,11 +1,18 @@
 import { randomUUID } from 'crypto';
+import type {
+  StudioQueuedRequest,
+  StudioSession,
+  StudioTransportQueue,
+} from './studio-transport.js';
 
 export interface PluginInstance {
   // Internal: per-plugin GUID, regenerated on every plugin load.
-  // Used as the /poll URL parameter so the server can identify which plugin
-  // process is asking for work. Not user-facing — MCP tools and the LLM
-  // operate on `instanceId` (the place identifier) plus `role`.
+  // Identifies one logical registration in multiplexed SSE envelopes. MCP
+  // tools route by the user-facing `instanceId` plus `role`.
   pluginSessionId: string;
+  // Internal: the physical Studio peer that owns the downstream connection.
+  // Logical play-client sessions point at their play-server session.
+  physicalSessionId: string;
   // User-facing routing key: identifies the place file.
   // Format: "place:${PlaceId}" for published places, "anon:${uuid}" for
   // unpublished places (where the UUID lives on ServerStorage's
@@ -19,7 +26,6 @@ export interface PluginInstance {
   pluginVersion: string;
   pluginVariant: string;
   serverVersion: string;
-  versionMismatch: boolean;
   lastActivity: number;
   connectedAt: number;
 }
@@ -31,45 +37,13 @@ interface PendingRequest {
   targetInstanceId: string;
   targetRole: string;
   timestamp: number;
-  inFlight: boolean;
+  claimOwner?: string;
   resolve: (value: any) => void;
   reject: (error: any) => void;
   timeoutId: ReturnType<typeof setTimeout>;
   timeoutMs: number;
 }
 
-export interface PendingPollOptions {
-  signal?: AbortSignal;
-  timeoutMs?: number;
-}
-
-export type PendingPollResult =
-  | {
-      kind: 'request';
-      requestId: string;
-      request: {
-        endpoint: string;
-        data: unknown;
-      };
-    }
-  | {
-      kind:
-        | 'timeout'
-        | 'unknown_session'
-        | 'superseded'
-        | 'aborted'
-        | 'session_closed'
-        | 'bridge_closed'
-        | 'capacity';
-    };
-
-interface PendingPollWaiter {
-  pluginSessionId: string;
-  timeoutId: NodeJS.Timeout;
-  signal?: AbortSignal;
-  onAbort?: () => void;
-  resolve: (result: PendingPollResult) => void;
-}
 
 export type RoutingErrorCode =
   | 'multiple_instances_connected'
@@ -97,7 +71,7 @@ export class RoutingFailure extends Error {
   }
 }
 
-// Shape exposed to MCP tool callers — strips the internal pluginSessionId.
+// Shape exposed to MCP tool callers — strips internal transport session IDs.
 export interface PublicPluginInstance {
   instanceId: string;
   role: string;
@@ -108,7 +82,6 @@ export interface PublicPluginInstance {
   pluginVersion: string;
   pluginVariant: string;
   serverVersion: string;
-  versionMismatch: boolean;
   lastActivity: number;
   connectedAt: number;
 }
@@ -127,6 +100,7 @@ export type ResolveTargetResult =
 
 export interface RegisterInstanceInput {
   pluginSessionId: string;
+  physicalSessionId: string;
   instanceId: string;
   role: string;
   placeId?: number;
@@ -153,24 +127,17 @@ export function toPublic(inst: PluginInstance): PublicPluginInstance {
     pluginVersion: inst.pluginVersion,
     pluginVariant: inst.pluginVariant,
     serverVersion: inst.serverVersion,
-    versionMismatch: inst.versionMismatch,
     lastActivity: inst.lastActivity,
     connectedAt: inst.connectedAt,
   };
 }
 
 const STALE_INSTANCE_MS = 30000;
-// A healthy plugin polls twice per second. If a duplicate tuple has not polled
-// for this long, it is no longer routable and a new plugin load may take over.
-// This is deliberately much shorter than general stale cleanup so a Studio
-// close/relaunch does not strand the replacement plugin for 30-35 seconds.
+// Active downstream delivery protects a tuple from takeover. Once delivery
+// closes, an inactive duplicate may take over after this shorter threshold so
+// a Studio close/relaunch does not strand the replacement for stale cleanup.
 const DUPLICATE_TAKEOVER_MS = 3000;
 const INSTANCE_ALIAS_TTL_MS = 5 * 60 * 1000;
-const DEFAULT_POLL_WAIT_TIMEOUT_MS = 15_000;
-// Twelve Studio windows can each expose edit, server, and up to eight
-// multiplayer clients (120 peers). Keep bounded headroom without allowing
-// tokenless plugin-facing requests to retain unlimited sockets and timers.
-const MAX_ACTIVE_POLLS = 128;
 
 interface InstanceAlias {
   targetInstanceId: string;
@@ -182,13 +149,15 @@ function publishedInstanceId(placeId: number | undefined): string | undefined {
   return `place:${Math.trunc(placeId)}`;
 }
 
-export class BridgeService {
+export class BridgeService implements StudioTransportQueue {
   private pendingRequests: Map<string, PendingRequest> = new Map();
   // Keyed by pluginSessionId (the per-plugin GUID).
   private instances: Map<string, PluginInstance> = new Map();
   private instanceAliases: Map<string, InstanceAlias> = new Map();
   private instanceRegisteredListeners: Set<InstanceRegisteredListener> = new Set();
-  private pendingPolls: Map<string, PendingPollWaiter> = new Map();
+  private requestAvailableListeners = new Set<(physicalSessionId: string) => void>();
+  private sessionClosedListeners = new Set<(session: StudioSession) => void>();
+  private deliveryOwnersByPhysicalSession = new Map<string, Set<string>>();
   private requestTimeout = 30000;
 
   onInstanceRegistered(listener: InstanceRegisteredListener): () => void {
@@ -215,6 +184,55 @@ export class BridgeService {
         // not reject an otherwise valid plugin connection.
       }
     }
+  }
+
+  onRequestAvailable(listener: (physicalSessionId: string) => void): () => void {
+    this.requestAvailableListeners.add(listener);
+    return () => this.requestAvailableListeners.delete(listener);
+  }
+
+
+  onSessionClosed(listener: (session: StudioSession) => void): () => void {
+    this.sessionClosedListeners.add(listener);
+    return () => this.sessionClosedListeners.delete(listener);
+  }
+
+
+  setDeliveryActive(physicalSessionId: string, owner: string, active: boolean): void {
+    let owners = this.deliveryOwnersByPhysicalSession.get(physicalSessionId);
+    if (active) {
+      if (!owners) {
+        owners = new Set<string>();
+        this.deliveryOwnersByPhysicalSession.set(physicalSessionId, owners);
+      }
+      owners.add(owner);
+      return;
+    }
+    if (!owners) return;
+    owners.delete(owner);
+    if (owners.size === 0) this.deliveryOwnersByPhysicalSession.delete(physicalSessionId);
+  }
+
+
+  private notifyRequestAvailable(physicalSessionId: string): void {
+    for (const listener of this.requestAvailableListeners) {
+      try {
+        listener(physicalSessionId);
+      } catch {
+        // Delivery observers cannot break request queue ownership.
+      }
+    }
+  }
+
+
+  private physicalSessionsForTarget(targetInstanceId: string, targetRole: string): string[] {
+    const physicalSessionIds = new Set<string>();
+    for (const instance of this.instances.values()) {
+      if (instance.instanceId === targetInstanceId && instance.role === targetRole) {
+        physicalSessionIds.add(instance.physicalSessionId);
+      }
+    }
+    return Array.from(physicalSessionIds);
   }
 
   private canonicalInstanceId(instanceId: string, placeId?: number): string {
@@ -294,7 +312,6 @@ export class BridgeService {
     const pluginVersion = input.pluginVersion ?? '';
     const pluginVariant = input.pluginVariant ?? 'unknown';
     const serverVersion = input.serverVersion ?? '';
-    const versionMismatch = pluginVersion !== '' && serverVersion !== '' && pluginVersion !== serverVersion;
 
     this.rememberInstanceAlias(rawInstanceId, instanceId);
     if (prior && prior.instanceId !== instanceId) {
@@ -328,7 +345,9 @@ export class BridgeService {
       (i) => i.instanceId === instanceId && i.role === assignedRole && i.pluginSessionId !== pluginSessionId,
     );
     if (existing) {
-      if (!this.pendingPolls.has(existing.pluginSessionId) && Date.now() - existing.lastActivity > DUPLICATE_TAKEOVER_MS) {
+      const existingDeliveryActive =
+        (this.deliveryOwnersByPhysicalSession.get(existing.physicalSessionId)?.size ?? 0) > 0;
+      if (!existingDeliveryActive && Date.now() - existing.lastActivity > DUPLICATE_TAKEOVER_MS) {
         // Reject requests owned by the unresponsive process instead of
         // redelivering a potentially mutating in-flight call to the new load.
         this.unregisterInstance(existing.pluginSessionId);
@@ -346,6 +365,7 @@ export class BridgeService {
 
     const registered: PluginInstance = {
       pluginSessionId,
+      physicalSessionId: input.physicalSessionId,
       instanceId,
       role: assignedRole,
       placeId: input.placeId ?? 0,
@@ -355,28 +375,44 @@ export class BridgeService {
       pluginVersion,
       pluginVariant,
       serverVersion,
-      versionMismatch,
       lastActivity: Date.now(),
       connectedAt: prior?.connectedAt ?? Date.now(),
     };
     this.instances.set(pluginSessionId, registered);
 
     this.notifyInstanceRegistered(toPublic(registered));
-    this.dispatchPendingPolls(instanceId, assignedRole);
+    this.notifyRequestAvailable(registered.physicalSessionId);
 
     return { ok: true, assignedRole, instanceId };
   }
 
   unregisterInstance(pluginSessionId: string) {
     const removed = this.instances.get(pluginSessionId);
-    this.instances.delete(pluginSessionId);
-    const pendingPoll = this.pendingPolls.get(pluginSessionId);
-    if (pendingPoll) {
-      this.settlePendingPoll(pendingPoll, { kind: 'session_closed' });
-    }
-
     if (!removed) return;
+    const logicalChildren = removed.physicalSessionId === pluginSessionId
+      ? Array.from(this.instances.values()).filter(
+          (instance) =>
+            instance.pluginSessionId !== pluginSessionId &&
+            instance.physicalSessionId === pluginSessionId,
+        )
+      : [];
+    this.instances.delete(pluginSessionId);
 
+    const session: StudioSession = {
+      logicalSessionId: pluginSessionId,
+      physicalSessionId: removed.physicalSessionId,
+    };
+    for (const listener of this.sessionClosedListeners) {
+      try {
+        listener(session);
+      } catch {
+        // Cleanup proceeds even if a downstream adapter fails.
+      }
+    }
+    if (removed.physicalSessionId === pluginSessionId) {
+      this.deliveryOwnersByPhysicalSession.delete(pluginSessionId);
+    }
+    for (const child of logicalChildren) this.unregisterInstance(child.pluginSessionId);
     // Reject any pending requests targeted at this (instanceId, role) tuple
     // if no other plugin handles it.
     for (const [id, req] of this.pendingRequests.entries()) {
@@ -421,9 +457,13 @@ export class BridgeService {
   }
 
   updateInstanceActivity(pluginSessionId: string) {
-    const inst = this.instances.get(pluginSessionId);
-    if (inst) {
-      inst.lastActivity = Date.now();
+    const instance = this.instances.get(pluginSessionId);
+    if (!instance) return;
+    const now = Date.now();
+    for (const candidate of this.instances.values()) {
+      if (candidate.physicalSessionId === instance.physicalSessionId) {
+        candidate.lastActivity = now;
+      }
     }
   }
 
@@ -447,7 +487,7 @@ export class BridgeService {
         this.rememberInstanceAlias(priorInstanceId, canonicalInstanceId);
         this.migratePendingRequests(priorInstanceId, canonicalInstanceId);
         inst.instanceId = canonicalInstanceId;
-        this.dispatchPendingPolls(canonicalInstanceId, inst.role);
+        this.notifyRequestAvailable(inst.physicalSessionId);
       }
     }
   }
@@ -455,7 +495,9 @@ export class BridgeService {
   cleanupStaleInstances() {
     const now = Date.now();
     for (const [id, inst] of this.instances.entries()) {
-      if (!this.pendingPolls.has(id) && now - inst.lastActivity > STALE_INSTANCE_MS) {
+      const deliveryActive =
+        (this.deliveryOwnersByPhysicalSession.get(inst.physicalSessionId)?.size ?? 0) > 0;
+      if (!deliveryActive && now - inst.lastActivity > STALE_INSTANCE_MS) {
         this.unregisterInstance(id);
       }
     }
@@ -627,7 +669,6 @@ export class BridgeService {
         targetInstanceId,
         targetRole,
         timestamp: Date.now(),
-        inFlight: false,
         resolve,
         reject,
         timeoutId,
@@ -635,135 +676,64 @@ export class BridgeService {
       };
 
       this.pendingRequests.set(requestId, request);
-      this.dispatchPendingPolls(targetInstanceId, targetRole);
+      for (const physicalSessionId of this.physicalSessionsForTarget(targetInstanceId, targetRole)) {
+        this.notifyRequestAvailable(physicalSessionId);
+      }
     });
   }
 
-  getPendingRequest(
-    callerInstanceId: string,
-    callerRole: string,
-  ): { requestId: string; request: { endpoint: string; data: any } } | null {
-    let oldestRequest: PendingRequest | null = null;
 
+  claimNextRequestForPhysical(
+    physicalSessionId: string,
+    claimOwner: string,
+  ): StudioQueuedRequest | null {
+    let oldestRequest: PendingRequest | undefined;
+    let logicalSessionId = '';
     for (const request of this.pendingRequests.values()) {
-      if (request.targetInstanceId !== callerInstanceId) continue;
-      if (request.targetRole !== callerRole) continue;
-      if (request.inFlight) continue;
+      if (request.claimOwner !== undefined) continue;
+      let matchingSessionId: string | undefined;
+      for (const candidate of this.instances.values()) {
+        if (
+          candidate.physicalSessionId === physicalSessionId &&
+          candidate.instanceId === request.targetInstanceId &&
+          candidate.role === request.targetRole
+        ) {
+          matchingSessionId = candidate.pluginSessionId;
+          break;
+        }
+      }
+      if (!matchingSessionId) continue;
       if (!oldestRequest || request.timestamp < oldestRequest.timestamp) {
         oldestRequest = request;
+        logicalSessionId = matchingSessionId;
       }
     }
-
-    if (oldestRequest) {
-      oldestRequest.inFlight = true;
-      return {
-        requestId: oldestRequest.id,
-        request: {
-          endpoint: oldestRequest.endpoint,
-          data: oldestRequest.data,
-        },
-      };
-    }
-
-    return null;
-  }
-
-  waitForPendingRequest(
-    pluginSessionId: string,
-    options: PendingPollOptions = {},
-  ): Promise<PendingPollResult> {
-    const instance = this.instances.get(pluginSessionId);
-    if (!instance) {
-      return Promise.resolve({ kind: 'unknown_session' });
-    }
-    if (options.signal?.aborted) {
-      return Promise.resolve({ kind: 'aborted' });
-    }
-
-    this.updateInstanceActivity(pluginSessionId);
-    const existingPoll = this.pendingPolls.get(pluginSessionId);
-    if (existingPoll) {
-      this.settlePendingPoll(existingPoll, { kind: 'superseded' });
-    }
-
-    const pendingRequest = this.getPendingRequest(instance.instanceId, instance.role);
-    if (pendingRequest) {
-      return Promise.resolve({
-        kind: 'request',
-        requestId: pendingRequest.requestId,
-        request: pendingRequest.request,
-      });
-    }
-    if (this.pendingPolls.size >= MAX_ACTIVE_POLLS) {
-      return Promise.resolve({ kind: 'capacity' });
-    }
-
-    const timeoutMs = Math.min(
-      DEFAULT_POLL_WAIT_TIMEOUT_MS,
-      Math.max(1, options.timeoutMs ?? DEFAULT_POLL_WAIT_TIMEOUT_MS),
-    );
-    let resolvePoll!: (result: PendingPollResult) => void;
-    // Promise.withResolvers is unavailable on the declared Node 20.0 minimum.
-    const promise = new Promise<PendingPollResult>((resolve) => {
-      resolvePoll = resolve;
-    });
-    let waiter!: PendingPollWaiter;
-    const timeoutId = setTimeout(() => {
-      this.settlePendingPoll(waiter, { kind: 'timeout' }, true);
-    }, timeoutMs);
-    timeoutId.unref();
-    waiter = {
-      pluginSessionId,
-      timeoutId,
-      signal: options.signal,
-      resolve: resolvePoll,
+    if (!oldestRequest) return null;
+    oldestRequest.claimOwner = claimOwner;
+    return {
+      requestId: oldestRequest.id,
+      logicalSessionId,
+      target: oldestRequest.targetRole,
+      endpoint: oldestRequest.endpoint,
+      data: oldestRequest.data,
     };
-    if (options.signal) {
-      waiter.onAbort = () => {
-        this.settlePendingPoll(waiter, { kind: 'aborted' });
-      };
-      options.signal.addEventListener('abort', waiter.onAbort, { once: true });
-    }
-    this.pendingPolls.set(pluginSessionId, waiter);
-    return promise;
   }
 
-
-  private dispatchPendingPolls(targetInstanceId?: string, targetRole?: string): void {
-    for (const waiter of Array.from(this.pendingPolls.values())) {
-      const instance = this.instances.get(waiter.pluginSessionId);
-      if (!instance) {
-        this.settlePendingPoll(waiter, { kind: 'session_closed' });
-        continue;
+  releaseDeliveryClaims(claimOwner: string): void {
+    const physicalSessionIds = new Set<string>();
+    for (const request of this.pendingRequests.values()) {
+      if (request.claimOwner !== claimOwner) continue;
+      request.claimOwner = undefined;
+      for (const physicalSessionId of this.physicalSessionsForTarget(
+        request.targetInstanceId,
+        request.targetRole,
+      )) {
+        physicalSessionIds.add(physicalSessionId);
       }
-      if (targetInstanceId !== undefined && instance.instanceId !== targetInstanceId) continue;
-      if (targetRole !== undefined && instance.role !== targetRole) continue;
-
-      const pendingRequest = this.getPendingRequest(instance.instanceId, instance.role);
-      if (!pendingRequest) continue;
-      this.settlePendingPoll(waiter, {
-        kind: 'request',
-        requestId: pendingRequest.requestId,
-        request: pendingRequest.request,
-      }, true);
     }
-  }
-
-  private settlePendingPoll(
-    waiter: PendingPollWaiter,
-    result: PendingPollResult,
-    refreshActivity = false,
-  ): void {
-    if (this.pendingPolls.get(waiter.pluginSessionId) !== waiter) return;
-    this.pendingPolls.delete(waiter.pluginSessionId);
-    clearTimeout(waiter.timeoutId);
-    if (waiter.signal && waiter.onAbort) {
-      waiter.signal.removeEventListener('abort', waiter.onAbort);
+    for (const physicalSessionId of physicalSessionIds) {
+      this.notifyRequestAvailable(physicalSessionId);
     }
-    if (refreshActivity) {
-      this.updateInstanceActivity(waiter.pluginSessionId);
-    }
-    waiter.resolve(result);
   }
 
   resolveRequest(requestId: string, response: any) {
@@ -801,8 +771,5 @@ export class BridgeService {
       request.reject(new Error('Connection closed'));
     }
     this.pendingRequests.clear();
-    for (const waiter of Array.from(this.pendingPolls.values())) {
-      this.settlePendingPoll(waiter, { kind: 'bridge_closed' });
-    }
   }
 }

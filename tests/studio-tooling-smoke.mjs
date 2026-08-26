@@ -62,7 +62,6 @@ async function waitForEditInstance(client, expectedVersion, instanceId, timeoutM
         assert(peer.pluginVariant === 'main', 'regular tooling loaded the main plugin');
         assert(peer.pluginVersion === expectedVersion, `Studio plugin version is v${expectedVersion}`);
         assert(peer.serverVersion === expectedVersion, `MCP server version is v${expectedVersion}`);
-        assert(peer.versionMismatch === false, 'regular tooling has no version mismatch');
         return { ...edit, instanceId: edit.id };
       }
       last = connected;

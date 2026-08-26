@@ -17,11 +17,11 @@ X-MCP-Auth: <token>
 Authorization: Bearer <token>
 ```
 
-Plugin-facing endpoints (`/ready`, `/poll`, `/response`, and `/disconnect`)
+Plugin-facing endpoints (`/ready`, `/events`, `/response`, and `/disconnect`)
 remain tokenless because Roblox Studio plugins cannot read the local token.
-Those endpoints register the plugin and exchange queued bridge messages; they
-cannot directly invoke tools. Passive health and status endpoints are also
-tokenless.
+The plugin receives queued bridge messages over a persistent `/events` stream
+and posts results to `/response`. These endpoints cannot directly invoke tools.
+Passive health and status endpoints are also tokenless.
 
 Setting `ROBLOX_STUDIO_HOST` to a non-loopback address exposes the bridge to
 other machines. Only do this on a trusted network, retain token authentication,
@@ -35,15 +35,13 @@ each connection; call `get_connected_instances` to receive compact
 tool call to that game. Per-place port tabs such as `58742` are not the
 supported routing model.
 
-## Version mismatch behavior
+## Version compatibility
 
-If the Studio plugin and MCP server versions differ, the plugin remains
-connected and displays a yellow warning banner. `/health` and `/status` also
-report version mismatch details; MCP tool results omit this internal diagnostic
-metadata.
+The Studio plugin and MCP server must have the same version. `/ready` rejects a
+mismatched plugin rather than keeping an unsupported protocol pair connected.
 
 Restart the MCP server with `--auto-install-plugin`, then fully close and reopen
-Studio to load the matching plugin.
+Studio to load the matching bundled plugin.
 
 ## Environment variables
 

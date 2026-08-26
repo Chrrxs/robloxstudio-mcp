@@ -36,6 +36,7 @@
     "test:studio:smoke": "npm run build:plugin:artifact && node tests/run-with-test-port.mjs tests/run-all.mjs --managed --smoke",
     "test:studio:runner": "npm run build:plugin:artifact && node tests/run-with-test-port.mjs tests/run-all.mjs --managed",
     "test:studio:parallel": "npm run build:plugin:artifact && node tests/parallel-studio-isolation-smoke.mjs",
+    "test:studio:sse-capacity": "npm run build:plugin:artifact && node tests/sse-multi-studio-capacity.mjs",
     "test:e2e:wsl-process-identity": "node tests/run-with-test-port.mjs tests/wsl-process-identity-launch.mjs",
     "test:e2e:lifecycle": "npm run test:e2e:wsl-process-identity && node tests/run-with-test-port.mjs tests/studio-lifecycle-regressions.mjs",
     "test:studio:tools": "node tests/run-with-test-port.mjs tests/studio-tooling-smoke.mjs",

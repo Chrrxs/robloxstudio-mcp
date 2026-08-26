@@ -1,33 +1,52 @@
 import request from 'supertest';
-import { createHttpServer } from '../http-server.js';
+import { createHttpServer, type RobloxStudioHttpApp } from '../http-server.js';
 import { RobloxStudioTools } from '../tools/index.js';
 import { BridgeService } from '../bridge-service.js';
-import { Application } from 'express';
 
-const READY = (overrides: Partial<{ pluginSessionId: string; instanceId: string; role: string }> = {}) => ({
-  pluginSessionId: 'session-1',
-  instanceId: 'place:test',
-  role: 'edit',
-  placeId: 0,
-  placeName: 'TestPlace',
-  dataModelName: 'TestPlace',
-  isRunning: false,
-  ...overrides,
-});
+interface ReadyOverrides {
+  pluginSessionId?: string;
+  physicalSessionId?: string;
+  instanceId?: string;
+  role?: string;
+}
+
+function ready(overrides: ReadyOverrides = {}) {
+  const pluginSessionId = overrides.pluginSessionId ?? 'session-1';
+  return {
+    pluginSessionId,
+    physicalSessionId: overrides.physicalSessionId ?? pluginSessionId,
+    instanceId: 'place:test',
+    role: 'edit',
+    placeId: 0,
+    placeName: 'TestPlace',
+    dataModelName: 'TestPlace',
+    isRunning: false,
+    pluginVersion: 'test-version',
+    pluginVariant: 'main',
+    ...overrides,
+  };
+}
+
+const TEST_SERVER_CONFIG = {
+  name: 'robloxstudio-mcp',
+  version: 'test-version',
+  tools: [],
+};
 
 describe('Integration', () => {
-  let app: Application & any;
+  let app: RobloxStudioHttpApp;
   let bridge: BridgeService;
   let tools: RobloxStudioTools;
 
   beforeEach(() => {
     bridge = new BridgeService();
     tools = new RobloxStudioTools(bridge);
-    app = createHttpServer(tools, bridge);
+    app = createHttpServer(tools, bridge, undefined, TEST_SERVER_CONFIG);
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     bridge.clearAllPendingRequests();
+    await app.cleanup();
   });
 
   describe('Full Connection Flow', () => {
@@ -36,26 +55,13 @@ describe('Integration', () => {
       expect(status.body.pluginConnected).toBe(false);
       expect(status.body.mcpServerActive).toBe(false);
 
-      await request(app).post('/ready').send(READY()).expect(200);
-
+      await request(app).post('/ready').send(ready()).expect(200);
       status = await request(app).get('/status').expect(200);
       expect(status.body.pluginConnected).toBe(true);
 
-      const pollIdle = await request(app).get('/poll?pluginSessionId=session-1').expect(503);
-      expect(pollIdle.body).toMatchObject({
-        error: 'MCP server not connected',
-        pluginConnected: true,
-        mcpConnected: false,
-      });
-
       app.setMCPServerActive(true);
-
-      const pollActive = await request(app).get('/poll?pluginSessionId=session-1').expect(200);
-      expect(pollActive.body).toMatchObject({
-        request: null,
-        mcpConnected: true,
-        pluginConnected: true,
-      });
+      status = await request(app).get('/status').expect(200);
+      expect(status.body.mcpServerActive).toBe(true);
 
       await request(app).post('/disconnect').send({ pluginSessionId: 'session-1' }).expect(200);
       status = await request(app).get('/status').expect(200);
@@ -65,114 +71,116 @@ describe('Integration', () => {
 
   describe('Request/Response Flow', () => {
     test('complete request/response cycle', async () => {
-      await request(app).post('/ready').send(READY()).expect(200);
+      await request(app).post('/ready').send(ready()).expect(200);
       app.setMCPServerActive(true);
 
-      const promise = bridge.sendRequest('/api/test-endpoint', { testData: 'hello', value: 123 }, 'place:test', 'edit');
-
-      const poll = await request(app).get('/poll?pluginSessionId=session-1').expect(200);
-      expect(poll.body.request).toMatchObject({
+      const responsePromise = bridge.sendRequest(
+        '/api/test-endpoint',
+        { testData: 'hello', value: 123 },
+        'place:test',
+        'edit',
+      );
+      const delivery = bridge.claimNextRequestForPhysical('session-1', 'integration-stream');
+      expect(delivery).toMatchObject({
         endpoint: '/api/test-endpoint',
         data: { testData: 'hello', value: 123 },
       });
-      const requestId = poll.body.requestId;
 
       await request(app)
         .post('/response')
-        .send({ requestId, response: { success: true, result: 'processed', echo: 'hello' } })
+        .send({
+          requestId: delivery!.requestId,
+          response: { success: true, result: 'processed', echo: 'hello' },
+        })
         .expect(200);
 
-      const result = await promise;
-      expect(result).toEqual({ success: true, result: 'processed', echo: 'hello' });
+      await expect(responsePromise).resolves.toEqual({
+        success: true,
+        result: 'processed',
+        echo: 'hello',
+      });
     });
 
     test('error responses propagate', async () => {
-      await request(app).post('/ready').send(READY()).expect(200);
-      app.setMCPServerActive(true);
+      await request(app).post('/ready').send(ready()).expect(200);
+      const responsePromise = bridge.sendRequest('/api/failing', {}, 'place:test', 'edit');
+      responsePromise.catch(() => {});
+      const delivery = bridge.claimNextRequestForPhysical('session-1', 'integration-stream');
 
-      const promise = bridge.sendRequest('/api/failing', {}, 'place:test', 'edit');
-      promise.catch(() => {});
-
-      const poll = await request(app).get('/poll?pluginSessionId=session-1').expect(200);
       await request(app)
         .post('/response')
-        .send({ requestId: poll.body.requestId, error: 'Operation failed: Invalid input' })
+        .send({ requestId: delivery!.requestId, error: 'Operation failed: Invalid input' })
         .expect(200);
 
-      await expect(promise).rejects.toEqual('Operation failed: Invalid input');
+      await expect(responsePromise).rejects.toEqual('Operation failed: Invalid input');
     });
   });
 
   describe('Disconnect Recovery', () => {
-    test('disconnect rejects pending requests, reconnect resumes', async () => {
-      await request(app).post('/ready').send(READY()).expect(200);
-      app.setMCPServerActive(true);
-
-      const req1 = bridge.sendRequest('/api/test1', {}, 'place:test', 'edit');
-      const req2 = bridge.sendRequest('/api/test2', {}, 'place:test', 'edit');
-      req1.catch(() => {});
-      req2.catch(() => {});
-
-      const poll = await request(app).get('/poll?pluginSessionId=session-1').expect(200);
-      expect(poll.body.request).toBeTruthy();
+    test('disconnect rejects pending requests and a new physical session resumes', async () => {
+      await request(app).post('/ready').send(ready()).expect(200);
+      const first = bridge.sendRequest('/api/test1', {}, 'place:test', 'edit');
+      const second = bridge.sendRequest('/api/test2', {}, 'place:test', 'edit');
+      first.catch(() => {});
+      second.catch(() => {});
+      bridge.claimNextRequestForPhysical('session-1', 'old-stream');
 
       await request(app).post('/disconnect').send({ pluginSessionId: 'session-1' }).expect(200);
-      await expect(req1).rejects.toThrow(/disconnected/);
-      await expect(req2).rejects.toThrow(/disconnected/);
+      await expect(first).rejects.toThrow(/disconnected/);
+      await expect(second).rejects.toThrow(/disconnected/);
 
-      await request(app).post('/ready').send(READY({ pluginSessionId: 'session-2' })).expect(200);
+      await request(app).post('/ready').send(ready({ pluginSessionId: 'session-2' })).expect(200);
+      const resumed = bridge.sendRequest('/api/test3', {}, 'place:test', 'edit');
+      const delivery = bridge.claimNextRequestForPhysical('session-2', 'new-stream');
+      expect(delivery?.endpoint).toBe('/api/test3');
 
-      const newReq = bridge.sendRequest('/api/test3', {}, 'place:test', 'edit');
-      const newPoll = await request(app).get('/poll?pluginSessionId=session-2').expect(200);
-      expect(newPoll.body.request?.endpoint).toBe('/api/test3');
-
-      await request(app).post('/response').send({ requestId: newPoll.body.requestId, response: { success: true } }).expect(200);
-      const result = await newReq;
-      expect(result).toEqual({ success: true });
+      await request(app)
+        .post('/response')
+        .send({ requestId: delivery!.requestId, response: { success: true } })
+        .expect(200);
+      await expect(resumed).resolves.toEqual({ success: true });
     });
   });
 
   describe('Timeout Handling', () => {
     test('request times out after 30s', async () => {
       jest.useFakeTimers();
+      await request(app).post('/ready').send(ready()).expect(200);
+      const responsePromise = bridge.sendRequest('/api/slow', {}, 'place:test', 'edit');
+      bridge.claimNextRequestForPhysical('session-1', 'integration-stream');
 
-      await request(app).post('/ready').send(READY()).expect(200);
-      app.setMCPServerActive(true);
-
-      const promise = bridge.sendRequest('/api/slow', {}, 'place:test', 'edit');
-      await request(app).get('/poll?pluginSessionId=session-1').expect(200);
-
-      jest.advanceTimersByTime(31000);
-
-      await expect(promise).rejects.toThrow('Request timeout');
+      jest.advanceTimersByTime(31_000);
+      await expect(responsePromise).rejects.toThrow('Request timeout');
       jest.useRealTimers();
     });
   });
 
   describe('Multi-instance routing', () => {
-    test('two distinct instances each receive their own requests', async () => {
-      await request(app).post('/ready').send(READY({ pluginSessionId: 's-a', instanceId: 'place:A' })).expect(200);
-      await request(app).post('/ready').send(READY({ pluginSessionId: 's-b', instanceId: 'place:B' })).expect(200);
-      app.setMCPServerActive(true);
+    test('two distinct physical sessions receive only their own requests', async () => {
+      await request(app).post('/ready').send(ready({
+        pluginSessionId: 's-a',
+        instanceId: 'place:A',
+      })).expect(200);
+      await request(app).post('/ready').send(ready({
+        pluginSessionId: 's-b',
+        instanceId: 'place:B',
+      })).expect(200);
 
-      const reqA = bridge.sendRequest('/api/test', { who: 'A' }, 'place:A', 'edit');
-      const reqB = bridge.sendRequest('/api/test', { who: 'B' }, 'place:B', 'edit');
-      reqA.catch(() => {});
-      reqB.catch(() => {});
+      const responseA = bridge.sendRequest('/api/test', { who: 'A' }, 'place:A', 'edit');
+      const responseB = bridge.sendRequest('/api/test', { who: 'B' }, 'place:B', 'edit');
+      const deliveryA = bridge.claimNextRequestForPhysical('s-a', 'stream-a');
+      const deliveryB = bridge.claimNextRequestForPhysical('s-b', 'stream-b');
+      expect(deliveryA?.data).toEqual({ who: 'A' });
+      expect(deliveryB?.data).toEqual({ who: 'B' });
 
-      // Plugin A polls — must only see A's request.
-      const pollA = await request(app).get('/poll?pluginSessionId=s-a').expect(200);
-      expect(pollA.body.request.data.who).toBe('A');
-
-      // Plugin B polls — must only see B's request.
-      const pollB = await request(app).get('/poll?pluginSessionId=s-b').expect(200);
-      expect(pollB.body.request.data.who).toBe('B');
-
-      await request(app).post('/response').send({ requestId: pollA.body.requestId, response: { ok: 'A' } }).expect(200);
-      await request(app).post('/response').send({ requestId: pollB.body.requestId, response: { ok: 'B' } }).expect(200);
-
-      expect(await reqA).toEqual({ ok: 'A' });
-      expect(await reqB).toEqual({ ok: 'B' });
+      await request(app).post('/response')
+        .send({ requestId: deliveryA!.requestId, response: { ok: 'A' } })
+        .expect(200);
+      await request(app).post('/response')
+        .send({ requestId: deliveryB!.requestId, response: { ok: 'B' } })
+        .expect(200);
+      await expect(responseA).resolves.toEqual({ ok: 'A' });
+      await expect(responseB).resolves.toEqual({ ok: 'B' });
     });
   });
 });

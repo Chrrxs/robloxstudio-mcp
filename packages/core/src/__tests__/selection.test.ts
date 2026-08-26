@@ -2,9 +2,16 @@ import { BridgeService } from '../bridge-service.js';
 import { RobloxStudioTools } from '../tools/index.js';
 import { StudioHttpClient } from '../tools/studio-client.js';
 
-function registerRole(bridge: BridgeService, pluginSessionId: string, role: string, isRunning: boolean) {
+function registerRole(
+  bridge: BridgeService,
+  pluginSessionId: string,
+  role: string,
+  isRunning: boolean,
+  physicalSessionId = pluginSessionId,
+) {
   const result = bridge.registerInstance({
     pluginSessionId,
+    physicalSessionId,
     instanceId: 'place:test',
     role,
     placeId: 0,
@@ -23,7 +30,7 @@ describe('selection lifecycle tool', () => {
   test('routes get and set to edit while view follows the screenshot viewport', async () => {
     const bridge = new BridgeService();
     registerRole(bridge, 'edit-session', 'edit', false);
-    registerRole(bridge, 'client-session', 'client-1', true);
+    registerRole(bridge, 'client-session', 'client-1', true, 'server-session');
 
     const request = jest.spyOn(StudioHttpClient.prototype, 'request')
       .mockResolvedValue({ success: true });

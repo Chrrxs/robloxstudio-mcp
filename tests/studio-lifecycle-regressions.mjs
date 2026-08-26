@@ -165,7 +165,7 @@ async function waitForSessionActivityAdvance(pluginSessionId, priorActivity, tim
     if (session?.lastActivity > priorActivity) return;
     await delay(25);
   }
-  throw new Error(`Session ${pluginSessionId} did not enter its held poll within ${timeoutMs}ms`);
+  throw new Error(`Session ${pluginSessionId} did not activate its event stream within ${timeoutMs}ms`);
 }
 
 async function waitForStudioLogLine(needle, startedAt, timeoutMs = 20_000) {
@@ -266,27 +266,30 @@ async function main() {
     assert(staleSession, 'terminated Studio session remains registered for takeover reproduction');
     const staleSessionActivity = staleSession.lastActivity;
 
-    // Keep sequential long polls open through the replacement's initial
-    // /ready. They never overlap, while renewal carries liveness beyond one
-    // 15-second server hold if Studio launches slowly.
-    const oldPollController = new AbortController();
+    // Re-open the terminated peer's event stream long enough to reproduce a
+    // duplicate that is still transport-active using the production SSE
+    // contract.
+    const oldStreamController = new AbortController();
     keepOldSessionAlive = {
-      controller: oldPollController,
+      controller: oldStreamController,
       completion: (async () => {
-        while (!oldPollController.signal.aborted) {
-          const response = await fetch(
-            `http://127.0.0.1:${BASE_PORT}/poll?pluginSessionId=${encodeURIComponent(firstSessionId)}&pollMode=long`,
-            { signal: oldPollController.signal },
-          );
-          if (!response.ok) {
-            throw new Error(`Held stale-session poll returned HTTP ${response.status}`);
-          }
-          const body = await response.json();
-          if (body.knownInstance !== true) {
-            throw new Error('Held stale-session poll lost its registered session');
-          }
-          if (body.request !== null && body.request !== undefined) {
-            throw new Error('Held stale-session poll unexpectedly claimed work');
+        const response = await fetch(
+          `http://127.0.0.1:${BASE_PORT}/events?pluginSessionId=${encodeURIComponent(firstSessionId)}`,
+          {
+            headers: { Accept: 'text/event-stream' },
+            signal: oldStreamController.signal,
+          },
+        );
+        if (!response.ok) {
+          throw new Error(`Held stale-session event stream returned HTTP ${response.status}`);
+        }
+        if (!response.body) throw new Error('Held stale-session event stream has no response body');
+        const reader = response.body.getReader();
+        while (!oldStreamController.signal.aborted) {
+          const event = await reader.read();
+          if (event.done) {
+            if (oldStreamController.signal.aborted) break;
+            throw new Error('Held stale-session event stream closed unexpectedly');
           }
         }
       })().then(
@@ -308,8 +311,8 @@ async function main() {
       relaunchedAt,
     );
     keepOldSessionAlive.controller.abort();
-    const oldPollError = await keepOldSessionAlive.completion;
-    if (oldPollError !== undefined && oldPollError.name !== 'AbortError') throw oldPollError;
+    const oldStreamError = await keepOldSessionAlive.completion;
+    if (oldStreamError !== undefined && oldStreamError.name !== 'AbortError') throw oldStreamError;
     keepOldSessionAlive = undefined;
     assert(true, `replacement receives a real duplicate 409 after ${conflictObservedAt - relaunchedAt}ms`);
 
@@ -365,9 +368,9 @@ async function main() {
     const cleanupErrors = [];
     if (keepOldSessionAlive) {
       keepOldSessionAlive.controller.abort();
-      const oldPollError = await keepOldSessionAlive.completion;
-      if (oldPollError !== undefined && oldPollError.name !== 'AbortError') {
-        cleanupErrors.push(oldPollError);
+      const oldStreamError = await keepOldSessionAlive.completion;
+      if (oldStreamError !== undefined && oldStreamError.name !== 'AbortError') {
+        cleanupErrors.push(oldStreamError);
       }
     }
     if (client) {

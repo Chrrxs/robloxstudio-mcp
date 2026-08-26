@@ -12,7 +12,6 @@ function publicInstance(instance: PluginInstance): PublicPluginInstance {
     pluginVersion: instance.pluginVersion,
     pluginVariant: instance.pluginVariant,
     serverVersion: instance.serverVersion,
-    versionMismatch: instance.versionMismatch,
     lastActivity: instance.lastActivity,
     connectedAt: instance.connectedAt,
   };
@@ -24,6 +23,7 @@ describe('ProxyBridgeService', () => {
     const instances: PluginInstance[] = [
       {
         pluginSessionId: 'edit-session',
+        physicalSessionId: 'edit-session',
         instanceId: 'anon:proxy-place',
         role: 'edit',
         placeId: 0,
@@ -33,7 +33,6 @@ describe('ProxyBridgeService', () => {
         pluginVersion: '2.21.0',
         pluginVariant: 'main',
         serverVersion: '2.21.0',
-        versionMismatch: false,
         lastActivity: now,
         connectedAt: now,
       },
@@ -56,6 +55,7 @@ describe('ProxyBridgeService', () => {
       instances.push({
         ...instances[0],
         pluginSessionId: 'server-session',
+        physicalSessionId: 'server-session',
         role: 'server',
         isRunning: true,
         connectedAt: now + 1,
@@ -73,6 +73,7 @@ describe('ProxyBridgeService', () => {
     const instances: PluginInstance[] = [
       {
         pluginSessionId: 'edit-session',
+        physicalSessionId: 'edit-session',
         instanceId: 'anon:proxy-place',
         role: 'edit',
         placeId: 0,
@@ -82,12 +83,12 @@ describe('ProxyBridgeService', () => {
         pluginVersion: '2.20.0',
         pluginVariant: 'main',
         serverVersion: '2.20.0',
-        versionMismatch: false,
         lastActivity: now,
         connectedAt: now,
       },
       {
         pluginSessionId: 'server-session',
+        physicalSessionId: 'server-session',
         instanceId: 'anon:proxy-place',
         role: 'server',
         placeId: 0,
@@ -97,7 +98,6 @@ describe('ProxyBridgeService', () => {
         pluginVersion: '2.20.0',
         pluginVariant: 'main',
         serverVersion: '2.20.0',
-        versionMismatch: false,
         lastActivity: now,
         connectedAt: now,
       },

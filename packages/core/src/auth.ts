@@ -6,9 +6,10 @@ import { homedir } from 'os';
 // Shared-secret auth for the local HTTP surface. The token gates the
 // tool-invoking endpoints (/mcp, /mcp/*, /proxy, /instances,
 // /unregister-instance-id) so that localhost malware and cross-origin web
-// pages can't drive Studio blind. Plugin-facing endpoints (/ready, /poll,
+// pages can't drive Studio blind. Plugin-facing endpoints (/ready, /events,
 // /response, /disconnect) stay tokenless because Studio plugins cannot read
-// local files; they only register/poll and cannot invoke tools.
+// local files; they only register or exchange queued bridge messages and cannot
+// invoke tools directly.
 //
 // Resolution order:
 //   1. ROBLOX_STUDIO_NO_AUTH=1|true  -> auth disabled (explicit opt-out)

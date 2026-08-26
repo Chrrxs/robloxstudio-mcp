@@ -9,6 +9,12 @@ import type { ToolDefinition } from './tools/definitions.js';
 import { createToolHttpHandler, normalizeToolResult, publicToolErrorBody } from './mcp-runtime.js';
 import { tokensMatch } from './auth.js';
 import { StudioLaunchPreDispatchError } from './studio-instance-manager.js';
+import {
+  SseStudioTransport,
+  MAX_ACTIVE_EVENT_STREAMS,
+  type EventStreamHandle,
+  type StudioStatusEvent,
+} from './studio-transport.js';
 
 export interface HttpSecurityOptions {
   /** When set, tool-invoking endpoints require this token. */
@@ -25,6 +31,7 @@ export interface RobloxStudioHttpApp extends Express {
   isMCPServerActive(): boolean;
   trackMCPActivity(): void;
   closeMcpHandler(): Promise<void> | undefined;
+  cleanup(): Promise<void>;
 }
 
 interface StreamableHttpConfig {
@@ -208,34 +215,46 @@ export function createHttpServer(tools: RobloxStudioTools, bridge: BridgeService
   let lastMCPActivity = 0;
   let mcpServerStartTime = 0;
   const proxyInstances = new Set<string>();
-  const warnedVersionMismatches = new Set<string>();
-  let activePollEpoch = new AbortController();
-  activePollEpoch.abort();
+  const rejectedVersionSessions = new Set<string>();
+  const eventTransport = new SseStudioTransport(bridge);
+  const eventStreamHandles = new Set<EventStreamHandle>();
 
   const setMCPServerActive = (active: boolean) => {
     mcpServerActive = active;
     if (active) {
-      if (activePollEpoch.signal.aborted) {
-        activePollEpoch = new AbortController();
-      }
       mcpServerStartTime = Date.now();
       lastMCPActivity = Date.now();
     } else {
-      activePollEpoch.abort();
       mcpServerStartTime = 0;
       lastMCPActivity = 0;
     }
+    eventTransport.refreshStatus();
   };
 
   const trackMCPActivity = () => {
     if (mcpServerActive) {
+      const wasConnected = (Date.now() - lastMCPActivity) < 30000;
       lastMCPActivity = Date.now();
+      if (!wasConnected) eventTransport.refreshStatus();
     }
   };
 
   const isMCPServerActive = () => {
     if (!mcpServerActive) return false;
     return (Date.now() - lastMCPActivity) < 30000;
+  };
+
+  const eventStatus = (physicalSessionId: string): StudioStatusEvent => {
+    const instance = bridge.getInstanceBySessionId(physicalSessionId);
+    const knownInstance = instance?.physicalSessionId === physicalSessionId;
+    return {
+      kind: 'status',
+      knownInstance,
+      mcpConnected: isMCPServerActive(),
+      serverVersion: serverConfig?.version,
+      pluginVersion: instance?.pluginVersion,
+      pluginVariant: instance?.pluginVariant,
+    };
   };
 
   const isPluginConnected = () => {
@@ -276,9 +295,9 @@ export function createHttpServer(tools: RobloxStudioTools, bridge: BridgeService
 
   // -- Shared-secret auth --
   // Tool-invoking endpoints require the token; plugin-facing endpoints
-  // (/ready, /poll, /response, /disconnect) and passive status endpoints
-  // stay open because the Studio plugin can't read local files. Those routes
-  // only register/poll — they cannot invoke tools.
+  // (/ready, /events, /response, /disconnect) and passive status endpoints
+  // stay open because the Studio plugin cannot read local files. These routes
+  // only register or receive downstream work; they cannot invoke tools.
   const authToken = security?.authToken;
   const authRequired = (path: string) =>
     path === '/mcp' || path.startsWith('/mcp/') ||
@@ -329,11 +348,11 @@ export function createHttpServer(tools: RobloxStudioTools, bridge: BridgeService
       pluginConnected: instances.length > 0,
       instanceCount: instances.length,
       instances: publicInstances,
-      versionMismatch: publicInstances.some((inst) => inst.versionMismatch),
       mcpServerActive: isMCPServerActive(),
       uptime: mcpServerActive ? Date.now() - mcpServerStartTime : 0,
       pendingRequests: bridge.getPendingRequestCount(),
       proxyInstanceCount: proxyInstances.size,
+      activeEventStreams: eventTransport.activeStreamCount,
       streamableHttp: !!serverConfig,
     });
   });
@@ -342,6 +361,7 @@ export function createHttpServer(tools: RobloxStudioTools, bridge: BridgeService
   app.post('/ready', (req, res) => {
     const {
       pluginSessionId,
+      physicalSessionId,
       instanceId,
       role,
       placeId,
@@ -352,6 +372,7 @@ export function createHttpServer(tools: RobloxStudioTools, bridge: BridgeService
       pluginVariant,
     } = req.body;
     const requestContext = {
+      physicalSessionId: typeof physicalSessionId === 'string' ? physicalSessionId : undefined,
       instanceId: typeof instanceId === 'string' ? instanceId : undefined,
       role: typeof role === 'string' ? role : undefined,
       placeId: typeof placeId === 'number' ? placeId : undefined,
@@ -362,12 +383,15 @@ export function createHttpServer(tools: RobloxStudioTools, bridge: BridgeService
       pluginVariant: typeof pluginVariant === 'string' ? pluginVariant : undefined,
     };
 
-    if (!pluginSessionId || !instanceId || !role) {
-      const missingFields = [
-        !pluginSessionId ? 'pluginSessionId' : undefined,
-        !instanceId ? 'instanceId' : undefined,
-        !role ? 'role' : undefined,
-      ].filter((field): field is string => !!field);
+    const missingFields = [
+      typeof pluginSessionId !== 'string' || pluginSessionId === '' ? 'pluginSessionId' : undefined,
+      typeof physicalSessionId !== 'string' || physicalSessionId === '' ? 'physicalSessionId' : undefined,
+      typeof instanceId !== 'string' || instanceId === '' ? 'instanceId' : undefined,
+      typeof role !== 'string' || role === '' ? 'role' : undefined,
+      typeof pluginVersion !== 'string' || pluginVersion === '' ? 'pluginVersion' : undefined,
+      typeof pluginVariant !== 'string' || pluginVariant === '' ? 'pluginVariant' : undefined,
+    ].filter((field): field is string => !!field);
+    if (missingFields.length > 0) {
       res.status(400).json({
         success: false,
         error: 'missing_ready_fields',
@@ -377,20 +401,89 @@ export function createHttpServer(tools: RobloxStudioTools, bridge: BridgeService
       });
       return;
     }
+    const serverVersion = serverConfig?.version;
+    if (!serverVersion) {
+      res.status(503).json({
+        success: false,
+        error: 'server_version_unavailable',
+        message: 'The MCP server cannot accept Studio connections without a configured version.',
+        request: requestContext,
+      });
+      return;
+    }
+    if (pluginVersion !== serverVersion) {
+      if (!rejectedVersionSessions.has(pluginSessionId)) {
+        if (rejectedVersionSessions.size >= 256) rejectedVersionSessions.clear();
+        rejectedVersionSessions.add(pluginSessionId);
+        console.error(
+          `[plugin-version-rejected] Studio plugin v${pluginVersion} (${pluginVariant}) ` +
+          `does not match MCP server v${serverVersion} for ${instanceId}/${role}`,
+        );
+      }
+      res.status(426).json({
+        success: false,
+        error: 'plugin_version_mismatch',
+        message: `Studio plugin v${pluginVersion} does not match MCP server v${serverVersion}.`,
+        pluginVersion,
+        serverVersion,
+        request: requestContext,
+      });
+      return;
+    }
+
+    const isClientRole = role === 'client' || /^client-[1-9]\d*$/.test(role);
+    const isLogicalSession = physicalSessionId !== pluginSessionId;
+    if (
+      (isLogicalSession && !isClientRole) ||
+      (!isLogicalSession && isClientRole) ||
+      (!isClientRole && role !== 'edit' && role !== 'server')
+    ) {
+      res.status(400).json({
+        success: false,
+        error: 'invalid_session_topology',
+        message: 'Physical sessions must use the edit or server role; client roles must use a distinct physical server session.',
+        request: requestContext,
+      });
+      return;
+    }
+
+    if (isLogicalSession) {
+      const physicalOwner = bridge.getInstanceBySessionId(physicalSessionId);
+      const requestedInstanceId = typeof placeId === 'number' && Number.isFinite(placeId) && placeId > 0
+        ? `place:${Math.trunc(placeId)}`
+        : bridge.resolveInstanceId(instanceId);
+      if (
+        !physicalOwner ||
+        physicalOwner.pluginSessionId !== physicalSessionId ||
+        physicalOwner.physicalSessionId !== physicalSessionId ||
+        physicalOwner.role !== 'server' ||
+        physicalOwner.instanceId !== requestedInstanceId
+      ) {
+        res.status(409).json({
+          success: false,
+          error: 'physical_session_unavailable',
+          message: 'A logical client requires a registered physical server session for the same Studio instance.',
+          request: requestContext,
+        });
+        return;
+      }
+    }
+
 
     let result: RegisterInstanceResult;
     try {
       result = bridge.registerInstance({
         pluginSessionId,
+        physicalSessionId,
         instanceId,
         role,
         placeId: typeof placeId === 'number' ? placeId : 0,
         placeName: typeof placeName === 'string' ? placeName : '',
         dataModelName: typeof dataModelName === 'string' ? dataModelName : '',
         isRunning: !!isRunning,
-        pluginVersion: typeof pluginVersion === 'string' ? pluginVersion : '',
-        pluginVariant: typeof pluginVariant === 'string' ? pluginVariant : 'unknown',
-        serverVersion: serverConfig?.version ?? '',
+        pluginVersion,
+        pluginVariant,
+        serverVersion,
       });
     } catch (err) {
       res.status(500).json({
@@ -412,21 +505,13 @@ export function createHttpServer(tools: RobloxStudioTools, bridge: BridgeService
       });
       return;
     }
-    const registered = bridge.getInstanceBySessionId(pluginSessionId);
-    if (registered?.versionMismatch && !warnedVersionMismatches.has(pluginSessionId)) {
-      warnedVersionMismatches.add(pluginSessionId);
-      console.error(
-        `[version-mismatch] Studio plugin v${registered.pluginVersion} (${registered.pluginVariant}) ` +
-        `does not match MCP server v${registered.serverVersion} for ${registered.instanceId}/${registered.role}`,
-      );
-    }
+    eventTransport.refreshStatus(physicalSessionId);
 
     res.json({
       success: true,
       assignedRole: result.assignedRole,
       instanceId: result.instanceId,
-      serverVersion: serverConfig?.version,
-      versionMismatch: registered?.versionMismatch ?? false,
+      serverVersion,
     });
   });
 
@@ -460,7 +545,6 @@ export function createHttpServer(tools: RobloxStudioTools, bridge: BridgeService
       instanceCount: instances.length,
       instances: publicInstances,
       serverVersion: serverConfig?.version,
-      versionMismatch: publicInstances.some((inst) => inst.versionMismatch),
       mcpServerActive: isMCPServerActive(),
       lastMCPActivity,
       uptime: mcpServerActive ? Date.now() - mcpServerStartTime : 0
@@ -469,201 +553,74 @@ export function createHttpServer(tools: RobloxStudioTools, bridge: BridgeService
 
 
   app.get('/instances', (req, res) => {
-    // Includes the internal pluginSessionId so proxy-mode subprocesses can
-    // reproduce the full PluginInstance shape (they need the session id for
-    // local bookkeeping; not exposed via MCP tools).
+    // Includes internal logical and physical transport session IDs so
+    // proxy-mode subprocesses can reproduce PluginInstance for bookkeeping.
+    // Neither identifier is exposed through MCP tools.
     const instances = bridge.getInstances();
     res.json({
       instances,
       serverVersion: serverConfig?.version,
-      versionMismatch: instances.some((inst) => inst.versionMismatch),
     });
   });
 
-
-  app.get('/poll', async (req, res, next) => {
+  app.get('/events', (req, res) => {
     const pluginSessionId = typeof req.query.pluginSessionId === 'string'
       ? req.query.pluginSessionId
       : undefined;
-    // Opt-in keeps older plugins on their original short-poll/default-timeout path.
-    const longPollRequested = req.query.pollMode === 'long';
-
-    if (pluginSessionId) {
-      bridge.updateInstanceActivity(pluginSessionId);
-    }
-
-    const pollMetadata = () => {
-      const instance = pluginSessionId
-        ? bridge.getInstanceBySessionId(pluginSessionId)
-        : undefined;
-      return {
-        knownInstance: instance !== undefined,
-        pluginVersion: instance?.pluginVersion,
-        pluginVariant: instance?.pluginVariant,
-        versionMismatch: instance?.versionMismatch ?? false,
-      };
-    };
-
-    let metadata = pollMetadata();
-    if (!isMCPServerActive()) {
-      res.status(503).json({
-        error: 'MCP server not connected',
-        pluginConnected: true,
-        mcpConnected: false,
-        knownInstance: metadata.knownInstance,
-        serverVersion: serverConfig?.version,
-        pluginVersion: metadata.pluginVersion,
-        pluginVariant: metadata.pluginVariant,
-        versionMismatch: metadata.versionMismatch,
-        request: null,
+    if (!pluginSessionId) {
+      res.status(400).json({
+        error: 'missing_plugin_session_id',
+        message: 'pluginSessionId is required',
       });
       return;
     }
 
-    if (!pluginSessionId || !metadata.knownInstance) {
-      res.json({
-        request: null,
-        mcpConnected: true,
-        pluginConnected: true,
+    const instance = bridge.getInstanceBySessionId(pluginSessionId);
+    if (!instance) {
+      res.status(404).json({
+        error: 'unknown_session',
         knownInstance: false,
-        serverVersion: serverConfig?.version,
-        pluginVersion: metadata.pluginVersion,
-        pluginVariant: metadata.pluginVariant,
-        versionMismatch: metadata.versionMismatch,
-        proxyInstanceCount: proxyInstances.size,
-        pollMode: longPollRequested ? 'long' : undefined,
+      });
+      return;
+    }
+    if (instance.physicalSessionId !== pluginSessionId) {
+      res.status(409).json({
+        error: 'logical_session_has_no_event_stream',
+        physicalSessionId: instance.physicalSessionId,
+      });
+      return;
+    }
+    if (!eventTransport.canOpen(pluginSessionId)) {
+      res.setHeader('Retry-After', '1');
+      res.status(503).json({
+        error: 'event_stream_capacity_reached',
+        capacity: MAX_ACTIVE_EVENT_STREAMS,
       });
       return;
     }
 
-    if (!longPollRequested) {
-      const instance = bridge.getInstanceBySessionId(pluginSessionId);
-      const pendingRequest = instance
-        ? bridge.getPendingRequest(instance.instanceId, instance.role)
-        : null;
-      metadata = pollMetadata();
-      res.json({
-        request: pendingRequest?.request ?? null,
-        requestId: pendingRequest?.requestId,
-        mcpConnected: true,
-        pluginConnected: true,
-        knownInstance: metadata.knownInstance,
-        serverVersion: serverConfig?.version,
-        pluginVersion: metadata.pluginVersion,
-        pluginVariant: metadata.pluginVariant,
-        versionMismatch: metadata.versionMismatch,
-        proxyInstanceCount: proxyInstances.size,
-      });
+    bridge.updateInstanceActivity(pluginSessionId);
+    res.status(200);
+    res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+    res.setHeader('Cache-Control', 'no-cache, no-transform');
+    res.setHeader('Connection', 'keep-alive');
+    res.setHeader('X-Accel-Buffering', 'no');
+    res.flushHeaders();
+
+    const handle = eventTransport.open(
+      pluginSessionId,
+      res,
+      () => eventStatus(pluginSessionId),
+    );
+    if (!handle) {
+      res.end();
       return;
     }
-
-    const pollEpoch = activePollEpoch;
-    const pollController = new AbortController();
-    let socketClosed = false;
-    let mcpBecameInactive = false;
-    const detachListeners = () => {
-      req.removeListener('aborted', onSocketClosed);
-      res.removeListener('close', onSocketClosed);
-      res.removeListener('finish', onResponseFinished);
-      pollEpoch.signal.removeEventListener('abort', onMCPInactive);
-    };
-    const onSocketClosed = () => {
-      socketClosed = true;
-      pollController.abort();
-      detachListeners();
-    };
-    const onResponseFinished = () => {
-      detachListeners();
-    };
-    const onMCPInactive = () => {
-      mcpBecameInactive = true;
-      pollController.abort();
-    };
-
-    req.once('aborted', onSocketClosed);
-    res.once('close', onSocketClosed);
-    res.once('finish', onResponseFinished);
-    pollEpoch.signal.addEventListener('abort', onMCPInactive, { once: true });
-    if (req.aborted || res.destroyed) {
-      onSocketClosed();
-    } else if (pollEpoch.signal.aborted) {
-      onMCPInactive();
-    }
-
-    try {
-      const result = await bridge.waitForPendingRequest(pluginSessionId, {
-        signal: pollController.signal,
-      });
-
-      if (socketClosed || res.destroyed) {
-        return;
-      }
-
-      metadata = pollMetadata();
-      // A claimed request wins a same-turn deactivation race. Replacing it
-      // with 503 here would strand a potentially mutating in-flight call.
-      if (result.kind === 'request' && metadata.knownInstance) {
-        res.json({
-          request: result.request,
-          requestId: result.requestId,
-          mcpConnected: true,
-          pluginConnected: true,
-          knownInstance: true,
-          serverVersion: serverConfig?.version,
-          pluginVersion: metadata.pluginVersion,
-          pluginVariant: metadata.pluginVariant,
-          versionMismatch: metadata.versionMismatch,
-          proxyInstanceCount: proxyInstances.size,
-          pollMode: 'long',
-        });
-        return;
-      }
-
-      if (mcpBecameInactive || pollEpoch.signal.aborted || !isMCPServerActive()) {
-        res.status(503).json({
-          error: 'MCP server not connected',
-          pluginConnected: true,
-          mcpConnected: false,
-          knownInstance: metadata.knownInstance,
-          serverVersion: serverConfig?.version,
-          pluginVersion: metadata.pluginVersion,
-          pluginVariant: metadata.pluginVariant,
-          versionMismatch: metadata.versionMismatch,
-          request: null,
-        });
-        return;
-      }
-
-      if (result.kind === 'capacity') {
-        res.setHeader('Retry-After', '1');
-        res.status(503).json({
-          error: 'Poll capacity reached',
-          code: 'poll_capacity_reached',
-          pluginConnected: true,
-          mcpConnected: true,
-          knownInstance: metadata.knownInstance,
-          request: null,
-        });
-        return;
-      }
-
-      res.json({
-        request: null,
-        mcpConnected: true,
-        pluginConnected: true,
-        knownInstance: metadata.knownInstance,
-        serverVersion: serverConfig?.version,
-        pluginVersion: metadata.pluginVersion,
-        pluginVariant: metadata.pluginVariant,
-        versionMismatch: metadata.versionMismatch,
-        proxyInstanceCount: proxyInstances.size,
-        pollMode: 'long',
-      });
-    } catch (error) {
-      detachListeners();
-      next(error);
-    }
+    eventStreamHandles.add(handle);
+    res.once('close', () => eventStreamHandles.delete(handle));
   });
+
+
 
 
   app.post('/response', (req, res) => {
@@ -755,6 +712,12 @@ export function createHttpServer(tools: RobloxStudioTools, bridge: BridgeService
   app.isMCPServerActive = isMCPServerActive;
   app.trackMCPActivity = trackMCPActivity;
   app.closeMcpHandler = () => mcpHandler?.close();
+  app.cleanup = async () => {
+    for (const handle of eventStreamHandles) handle.close();
+    eventStreamHandles.clear();
+    eventTransport.close();
+    await mcpHandler?.close();
+  };
 
   return app;
 }

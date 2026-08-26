@@ -66,7 +66,7 @@ await runTest('proxy-mode subprocess fans out to peers via primary', async ({ tr
 
     // Case 3: get_memory_breakdown target=all should produce per-peer data
     const mem = await proxy.callTool('get_memory_breakdown', { target: 'all' });
-    const memPeers = Object.keys(mem).filter((k) => k !== 'edit-proxy');
+    const memPeers = Object.keys(mem);
     assert(memPeers.length > 0,
       `get_memory_breakdown target=all reports per-peer data (got peers: ${JSON.stringify(memPeers)})`);
   } finally {

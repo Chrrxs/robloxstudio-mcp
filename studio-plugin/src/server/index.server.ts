@@ -3,7 +3,7 @@ import UI from "../modules/UI";
 import Communication from "../modules/Communication";
 import ClientBroker from "../modules/ClientBroker";
 import ServerUrlSettings from "../modules/ServerUrlSettings";
-import { cleanupLegacyEditBridges, ensureRuntimeBridgeInstalled } from "../modules/EvalBridges";
+import { cleanupEditBridgeArtifacts, ensureRuntimeBridgeInstalled } from "../modules/EvalBridges";
 import RuntimeLogBuffer from "../modules/RuntimeLogBuffer";
 import StopPlayMonitor from "../modules/StopPlayMonitor";
 import BreakpointHandlers from "../modules/handlers/BreakpointHandlers";
@@ -94,7 +94,7 @@ task.delay(TOOLBAR_REGISTRATION_DELAY_SECONDS, registerToolbarButton);
 task.delay(2, () => {
 	const role = ClientBroker.forkRole();
 	if (role === "edit") {
-		cleanupLegacyEditBridges();
+		cleanupEditBridgeArtifacts();
 	} else {
 		const result = ensureRuntimeBridgeInstalled();
 		if (!result.installed) {

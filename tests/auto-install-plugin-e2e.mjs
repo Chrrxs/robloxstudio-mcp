@@ -481,7 +481,6 @@ async function waitForEditInstance(client, expected, instanceId, timeoutMs = 120
         assert(edit.pluginVariant === expected.variant, `Studio loaded ${expected.variant} plugin variant`);
         assert(edit.pluginVersion === expected.version, `Studio plugin version is v${expected.version}`);
         assert(edit.serverVersion === expected.serverVersion, `MCP server version is v${expected.serverVersion}`);
-        assert(edit.versionMismatch === expected.versionMismatch, `versionMismatch is ${expected.versionMismatch}`);
         return { ...place, instanceId: place.id };
       }
       last = connected;
@@ -518,7 +517,7 @@ async function startManagerForArtifact(label, managerArtifact) {
   return startClient(label, managerArtifact, { autoInstall: false });
 }
 
-async function launchManagedPlace(managerClient) {
+async function launchManagedPlace(managerClient, { waitForConnection = true } = {}) {
   await configureStudioDirectoryIsolation({ requireStudioClosed: false });
   const launched = await managerClient.callTool('manage_instance', {
     action: 'launch',
@@ -554,6 +553,8 @@ async function launchManagedPlace(managerClient) {
     completed.process_ownership_released === true,
     `manage_instance released Studio launch ${launched.launch_id}`,
   );
+  if (!waitForConnection) return launched.launch_id;
+
 
   const deadline = Date.now() + 120000;
   let status;
@@ -681,17 +682,6 @@ async function writeMismatchedPlugin(artifact, pluginsDir) {
   writeFileSync(installedPath, source.replace(needle, replacement), 'utf8');
 }
 
-async function waitForStudioLog(client, instanceId, needle, timeoutMs = 30000) {
-  const deadline = Date.now() + timeoutMs;
-  let last;
-  while (Date.now() < deadline) {
-    const logs = await client.callTool('get_runtime_logs', { target: 'edit', tail: 100, instance_id: instanceId });
-    last = logs;
-    if (JSON.stringify(logs).includes(needle)) return;
-    await delay(1000);
-  }
-  throw new Error(`Studio output did not contain ${needle}. Last logs: ${JSON.stringify(last)}`);
-}
 
 async function runMatchingCase(artifact, managerArtifact, pluginsDir) {
   console.log(`\n=== ${artifact.variant} auto-install loads matching plugin ===`);
@@ -719,7 +709,6 @@ async function runMatchingCase(artifact, managerArtifact, pluginsDir) {
       variant: artifact.variant,
       version: artifact.version,
       serverVersion: artifact.version,
-      versionMismatch: false,
     }, instanceId);
     await assertToolSurface(client, artifact, edit.instanceId);
   } catch (error) {
@@ -750,13 +739,12 @@ async function runMatchingCase(artifact, managerArtifact, pluginsDir) {
 }
 
 async function runMismatchCase(artifact, managerArtifact, pluginsDir) {
-  console.log(`\n=== ${artifact.variant} mismatch is visible and repairable ===`);
+  console.log(`\n=== ${artifact.variant} mismatch is rejected and repairable ===`);
   removeVariantFiles(pluginsDir);
   await writeMismatchedPlugin(artifact, pluginsDir);
 
   let mismatchManager;
   let mismatchClient;
-  let mismatchEdit;
   let mismatchInstanceId;
   let fatalMismatchCloseError;
   let mismatchBodyError;
@@ -767,25 +755,34 @@ async function runMismatchCase(artifact, managerArtifact, pluginsDir) {
     mismatchClient = await startClient(`${artifact.variant}-mismatch`, artifact, { autoInstall: false });
     const mismatchLauncher = mismatchManager ?? mismatchClient;
 
-    mismatchInstanceId = await launchManagedPlace(mismatchLauncher);
-    mismatchEdit = await waitForEditInstance(mismatchClient, {
-      variant: artifact.variant,
-      version: `${artifact.version}-mismatch`,
-      serverVersion: artifact.version,
-      versionMismatch: true,
-    }, mismatchInstanceId);
-    await assertToolSurface(mismatchClient, artifact, mismatchEdit.instanceId);
-    const mismatchLogs = `${mismatchClient.recentStderr(50)}\n${mismatchManager?.recentStderr(50) ?? ''}`;
-    assert(mismatchLogs.includes('[version-mismatch]'), 'server stderr contains version mismatch warning');
-    await waitForStudioLog(mismatchClient, mismatchEdit.instanceId, 'Version mismatch');
-    assert(true, 'Studio output contains version mismatch warning');
+    mismatchInstanceId = await launchManagedPlace(mismatchLauncher, { waitForConnection: false });
+    const rejectionDeadline = Date.now() + 30000;
+    let rejectionLogs = '';
+    while (Date.now() < rejectionDeadline) {
+      rejectionLogs = `${mismatchClient.recentStderr(100)}\n${mismatchManager?.recentStderr(100) ?? ''}`;
+      if (
+        rejectionLogs.includes('[plugin-version-rejected]') &&
+        rejectionLogs.includes(`${artifact.version}-mismatch`)
+      ) {
+        break;
+      }
+      await delay(500);
+    }
+    assert(rejectionLogs.includes('[plugin-version-rejected]'), 'server rejects the mismatched bundled plugin');
+
+    const statusResponse = await fetch(`http://127.0.0.1:${BASE_PORT}/status`);
+    const status = await statusResponse.json();
+    assert(
+      Array.isArray(status.instances) && status.instances.length === 0,
+      'mismatched plugin is not registered as a usable Studio peer',
+    );
   } catch (error) {
     mismatchBodyError = error;
     throw error;
   } finally {
     const mismatchLauncher = mismatchManager ?? mismatchClient;
     if (mismatchLauncher) {
-      await closeManagedInstance(mismatchLauncher, mismatchEdit?.instanceId ?? mismatchInstanceId).catch((error) => {
+      await closeManagedInstance(mismatchLauncher, mismatchInstanceId).catch((error) => {
         if (error?.ownedStudioMayBeRunning) fatalMismatchCloseError = error;
         else deferredCleanupErrors.push(error);
       });
@@ -797,7 +794,7 @@ async function runMismatchCase(artifact, managerArtifact, pluginsDir) {
       if (mismatchBodyError) {
         throw new AggregateError(
           [mismatchBodyError, fatalMismatchCloseError],
-          'Mismatch auto-install case failed and its Studio process may still be running',
+          'Mismatch rejection case failed and its Studio process may still be running',
           { cause: mismatchBodyError },
         );
       }
@@ -826,7 +823,7 @@ async function runMismatchCase(artifact, managerArtifact, pluginsDir) {
       variant: artifact.variant,
       version: artifact.version,
       serverVersion: artifact.version,
-      versionMismatch: false,
+
     }, repairInstanceId);
   } catch (error) {
     repairBodyError = error;

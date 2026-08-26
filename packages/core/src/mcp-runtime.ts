@@ -53,7 +53,6 @@ const INTERNAL_RESULT_KEYS = new Set([
   'pluginVersion',
   'requestId',
   'serverVersion',
-  'versionMismatch',
 ]);
 
 const TEXT_RESULT_TOOLS = new Set(['get_roblox_docs']);

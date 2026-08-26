@@ -6,7 +6,6 @@ describe('Studio plugin installation', () => {
     'const DEFAULT_MCP_URL = "http://localhost:58741";',
     'const GLOBAL_SETTING_KEY = "MCP_LAST_SUCCESSFUL_SERVER_URL_GLOBAL_V1";',
     'const SETTING_KEY_PREFIX = "MCP_LAST_SUCCESSFUL_SERVER_URL_";',
-    'const LEGACY_SETTING_KEY_PREFIX = "MCP_SERVER_URL_";',
     'const UNRELATED_ID = 58741;',
   ].join('\n'));
 
@@ -29,7 +28,6 @@ describe('Studio plugin installation', () => {
     expect(configured).toContain('http://localhost:43123');
     expect(configured).toContain('MCP_LAST_SUCCESSFUL_SERVER_URL_GLOBAL_V1_PORT_43123');
     expect(configured).toContain('MCP_LAST_SUCCESSFUL_SERVER_URL_PORT_43123_');
-    expect(configured).toContain('MCP_SERVER_URL_PORT_43123_');
     expect(configured).toContain('const UNRELATED_ID = 58741;');
   });
 

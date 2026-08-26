@@ -10,7 +10,7 @@ import { getStudioPlatformCapabilities } from './studio-platform.js';
 // both packages on the next publish.
 const DEFAULT_PLUGIN_PORT = 58741;
 const SERVER_URL_SETTING_KEY_PATTERN =
-  /MCP_LAST_SUCCESSFUL_SERVER_URL_GLOBAL_V1|MCP_LAST_SUCCESSFUL_SERVER_URL_|MCP_SERVER_URL_/g;
+  /MCP_LAST_SUCCESSFUL_SERVER_URL_GLOBAL_V1|MCP_LAST_SUCCESSFUL_SERVER_URL_/g;
 
 /**
  * The bundled plugin is XML, so a custom bridge port can be embedded without

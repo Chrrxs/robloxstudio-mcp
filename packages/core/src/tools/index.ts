@@ -1200,7 +1200,7 @@ export class RobloxStudioTools {
     toolName: string,
   ): { instanceId: string; role: string; selectedTarget: string } {
     const selectedTarget = target ?? 'edit';
-    if (selectedTarget === 'server' || selectedTarget === 'all' || selectedTarget === 'all-clients' || selectedTarget === 'edit-proxy') {
+    if (selectedTarget === 'server' || selectedTarget === 'all' || selectedTarget === 'all-clients') {
       throw new Error(`${toolName} target must be "edit" or "client-N" (got: ${selectedTarget})`);
     }
     if (selectedTarget !== 'edit' && !/^client-\d+$/.test(selectedTarget)) {
@@ -1249,7 +1249,7 @@ export class RobloxStudioTools {
     toolName: string,
   ): { instanceId: string; selectedTarget: string; roles: string[]; warnings: string[] } {
     const selectedTarget = target ?? 'edit-and-clients';
-    if (selectedTarget === 'server' || selectedTarget === 'all' || selectedTarget === 'edit-proxy') {
+    if (selectedTarget === 'server' || selectedTarget === 'all') {
       throw new Error(`${toolName} target must be "edit", "client-N", "all-clients", or "edit-and-clients" (got: ${selectedTarget})`);
     }
 
@@ -2366,11 +2366,10 @@ export class RobloxStudioTools {
 
   async getRuntimeLogs(target?: string, since?: number, tail?: number, filter?: string, instance_id?: string) {
     // Per-capture in-memory log buffer (see studio-plugin RuntimeLogBuffer.ts).
-    // target="all" (default) fans out to every connected instance except
-    // edit-proxy (which has no buffer, just polls for stop-playtest), merges
-    // by (ts, seq) and dedups same-message-and-level entries captured within
-    // 2 seconds in different buffers. Ordinary Studio playtests reflect logs
-    // across edit/server/client, so capturedBy is not a reliable origin peer;
+    // target="all" (default) fans out to every connected role, merges by
+    // (ts, seq), and deduplicates same-message-and-level entries captured
+    // within 2 seconds in different buffers. Ordinary Studio playtests reflect
+    // logs across edit/server/client, so capturedBy is not a reliable origin;
     // only StudioTestService multiplayer sessions get a peer attribution.
     const tgt = target ?? 'all';
     const data: Record<string, unknown> = {};
@@ -2414,7 +2413,7 @@ export class RobloxStudioTools {
       };
     }
 
-    const targets = resolved.targets.filter((t) => t.targetRole !== 'edit-proxy');
+    const targets = resolved.targets;
 
     type PeerResponse = {
       capturedBy?: string;
@@ -3254,9 +3253,8 @@ export class RobloxStudioTools {
   async stopPlaytest(instance_id?: string, timeout = 15) {
     // The edit DM's stopPlaytest handler writes a plugin:SetSetting request
     // that StopPlayMonitor reads from inside the play-server DM (the only DM where
-    // StudioTestService:EndTest is legal). No edit-proxy peer registration is
-    // involved — the cross-DM signal works regardless of MCP server state,
-    // peer-role bookkeeping, or restart cycles.
+    // StudioTestService:EndTest is legal). The cross-DM signal works independently
+    // of MCP server state, peer-role bookkeeping, or restart cycles.
     const { instanceId } = this._resolveSingleTarget('edit', instance_id);
     let response: Record<string, unknown>;
     let stopRequestError: string | undefined;
@@ -4491,7 +4489,7 @@ export class RobloxStudioTools {
       return { content: [{ type: 'text', text: JSON.stringify(response) }] };
     }
 
-    const targets = resolved.targets.filter((t) => t.targetRole !== 'edit-proxy');
+    const targets = resolved.targets;
 
     const responses = await Promise.allSettled(
       targets.map(async (t) => ({
@@ -4539,7 +4537,7 @@ export class RobloxStudioTools {
       return { content: [{ type: 'text', text: JSON.stringify(response) }] };
     }
 
-    const targets = resolved.targets.filter((t) => t.targetRole !== 'edit-proxy');
+    const targets = resolved.targets;
 
     const responses = await Promise.allSettled(
       targets.map(async (t) => ({

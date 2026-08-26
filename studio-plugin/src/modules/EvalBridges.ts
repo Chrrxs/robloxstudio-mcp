@@ -141,7 +141,7 @@ interface InstallResult {
 	error?: string;
 }
 
-function findLegacyEditBridges(): { server?: Instance; client?: Instance } {
+function findEditBridgeArtifacts(): { server?: Instance; client?: Instance } {
 	const sps = getStarterPlayerScripts();
 	return {
 		server: ServerScriptService.FindFirstChild(SERVER_SCRIPT_NAME),
@@ -156,9 +156,9 @@ function destroyIfPresent(parent: Instance, name: string): void {
 	}
 }
 
-export function cleanupLegacyEditBridges(): void {
+export function cleanupEditBridgeArtifacts(): void {
 	if (RunService.IsRunning()) return;
-	const { server, client } = findLegacyEditBridges();
+	const { server, client } = findEditBridgeArtifacts();
 	if (server) {
 		pcall(() => server.Destroy());
 	}

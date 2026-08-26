@@ -1,6 +1,5 @@
 import { HttpService, ServerStorage } from "@rbxts/services";
 
-const LEGACY_SETTING_KEY_PREFIX = "MCP_SERVER_URL_";
 const SETTING_KEY_PREFIX = "MCP_LAST_SUCCESSFUL_SERVER_URL_";
 const GLOBAL_SETTING_KEY = "MCP_LAST_SUCCESSFUL_SERVER_URL_GLOBAL_V1";
 
@@ -61,9 +60,6 @@ function settingKey(instanceId: string): string {
 	return SETTING_KEY_PREFIX + instanceId;
 }
 
-function legacySettingKey(instanceId: string): string {
-	return LEGACY_SETTING_KEY_PREFIX + instanceId;
-}
 
 function readSettingString(key: string): string | undefined {
 	if (!pluginRef) return undefined;
@@ -85,7 +81,6 @@ function rememberServerUrl(serverUrl: string): void {
 	writeSettingString(GLOBAL_SETTING_KEY, normalized);
 	for (const instanceId of computeInstanceIds({ createAnonymous: true })) {
 		writeSettingString(settingKey(instanceId), normalized);
-		writeSettingString(legacySettingKey(instanceId), normalized);
 	}
 }
 
@@ -100,10 +95,6 @@ function readServerUrl(): string | undefined {
 	}
 	const globalRemembered = readSettingString(GLOBAL_SETTING_KEY);
 	if (globalRemembered !== undefined) return globalRemembered;
-	for (const instanceId of computeInstanceIds()) {
-		const legacyRemembered = readSettingString(legacySettingKey(instanceId));
-		if (legacyRemembered !== undefined) return legacyRemembered;
-	}
 
 	return undefined;
 }

@@ -69,7 +69,7 @@ function init(p: Plugin): void {
 	pluginRef = p;
 }
 
-// Mirror of Communication.computeInstanceId(). Duplicated here because
+// Mirror of PluginSession's place identity rules. Duplicated here because
 // StopPlayMonitor runs in both edit and play-server DMs, and both must
 // agree on the place identifier (published places: placeId; unpublished:
 // UUID on ServerStorage's __MCPPlaceId attribute, travels with the .rbxl
@@ -192,16 +192,9 @@ function startMonitor(): void {
 	task.spawn(() => {
 		while (true) {
 			for (const myKey of settingKeys()) {
-				const value = readSetting(myKey);
-				if (value === true) {
-					// Legacy boolean requests are ambiguous and may be stale from
-					// a prior crashed session. New stop requests use token payloads.
-					writeSetting(myKey, false);
-				} else {
-					const payload = decodePayload(value);
-					if (payload) {
-						handleStopRequest(myKey, payload);
-					}
+				const payload = decodePayload(readSetting(myKey));
+				if (payload) {
+					handleStopRequest(myKey, payload);
 				}
 			}
 			task.wait(POLL_INTERVAL_SEC);

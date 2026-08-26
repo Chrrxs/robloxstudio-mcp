@@ -10,14 +10,34 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 
+const SMOKE_TEST_CLAIM_OWNER = 'smoke-test';
+
+function claimQueuedRequest(bridge: BridgeService, physicalSessionId: string) {
+  const queued = bridge.claimNextRequestForPhysical(
+    physicalSessionId,
+    SMOKE_TEST_CLAIM_OWNER,
+  );
+  if (!queued) return null;
+  return {
+    requestId: queued.requestId,
+    request: {
+      endpoint: queued.endpoint,
+      data: queued.data as Record<string, unknown>,
+    },
+  };
+}
+
 const READY = {
   pluginSessionId: 'session-1',
+  physicalSessionId: 'session-1',
   instanceId: 'place:test',
   role: 'edit',
   placeId: 0,
   placeName: 'TestPlace',
   dataModelName: 'TestPlace',
   isRunning: false,
+  pluginVersion: 'test-version',
+  pluginVariant: 'main',
 };
 
 const ZERO_NETWORK_STATE = {
@@ -159,7 +179,7 @@ describe('Smoke', () => {
   test('BridgeService instantiable', () => {
     const bridge = new BridgeService();
     expect(bridge).toBeDefined();
-    expect(bridge.getPendingRequest('place:nope', 'edit')).toBeNull();
+    expect(claimQueuedRequest(bridge, 'session-1')).toBeNull();
   });
 
   test('get_connected_instances returns one compact routing row per place', async () => {
@@ -168,6 +188,7 @@ describe('Smoke', () => {
 
     bridge.registerInstance({
       pluginSessionId: 'place-one-edit',
+      physicalSessionId: 'place-one-edit',
       instanceId: 'place:1',
       role: 'edit',
       placeId: 1,
@@ -177,6 +198,7 @@ describe('Smoke', () => {
     });
     bridge.registerInstance({
       pluginSessionId: 'place-one-server',
+      physicalSessionId: 'place-one-server',
       instanceId: 'place:1',
       role: 'server',
       placeId: 1,
@@ -186,6 +208,7 @@ describe('Smoke', () => {
     });
     bridge.registerInstance({
       pluginSessionId: 'place-one-client',
+      physicalSessionId: 'place-one-server',
       instanceId: 'place:1',
       role: 'client',
       placeId: 1,
@@ -195,6 +218,7 @@ describe('Smoke', () => {
     });
     bridge.registerInstance({
       pluginSessionId: 'place-two-edit',
+      physicalSessionId: 'place-two-edit',
       instanceId: 'anon:2',
       role: 'edit',
       placeId: 0,
@@ -323,11 +347,12 @@ describe('Smoke', () => {
 
   test('clearAllPendingRequests rejects all pending', async () => {
     const bridge = new BridgeService();
+    bridge.registerInstance(READY);
     const p1 = bridge.sendRequest('/test1', {}, 'place:test', 'edit');
     const p2 = bridge.sendRequest('/test2', {}, 'place:test', 'edit');
-    expect(bridge.getPendingRequest('place:test', 'edit')).toBeTruthy();
+    expect(claimQueuedRequest(bridge, 'session-1')).toBeTruthy();
     bridge.clearAllPendingRequests();
-    expect(bridge.getPendingRequest('place:test', 'edit')).toBeNull();
+    expect(claimQueuedRequest(bridge, 'session-1')).toBeNull();
     await expect(p1).rejects.toThrow('Connection closed');
     await expect(p2).rejects.toThrow('Connection closed');
   });
@@ -335,7 +360,11 @@ describe('Smoke', () => {
   test('Disconnect rejects pending requests for that (instanceId, role)', async () => {
     const bridge = new BridgeService();
     const tools = new RobloxStudioTools(bridge);
-    const app = createHttpServer(tools, bridge);
+    const app = createHttpServer(tools, bridge, undefined, {
+      name: 'robloxstudio-mcp',
+      version: READY.pluginVersion,
+      tools: [],
+    });
 
     await request(app).post('/ready').send(READY).expect(200);
     const pending = bridge.sendRequest('/test', {}, 'place:test', 'edit');
@@ -347,7 +376,11 @@ describe('Smoke', () => {
   test('Connection state lifecycle', async () => {
     const bridge = new BridgeService();
     const tools = new RobloxStudioTools(bridge);
-    const app = createHttpServer(tools, bridge) as any;
+    const app = createHttpServer(tools, bridge, undefined, {
+      name: 'robloxstudio-mcp',
+      version: READY.pluginVersion,
+      tools: [],
+    });
     expect(app.isPluginConnected()).toBe(false);
     await request(app).post('/ready').send(READY).expect(200);
     expect(app.isPluginConnected()).toBe(true);
@@ -1188,6 +1221,7 @@ describe('Smoke', () => {
       bridge.registerInstance({
         ...READY,
         pluginSessionId: 'session-async',
+        physicalSessionId: 'session-async',
         instanceId: 'anon:async',
         placeName: 'place.rbxl',
         dataModelName: 'place.rbxl',
@@ -1725,6 +1759,7 @@ describe('Smoke', () => {
     bridge.registerInstance({
       ...READY,
       pluginSessionId: 'session-server',
+      physicalSessionId: 'session-server',
       instanceId: 'anon:external',
       role: 'server',
       placeName: 'ExternalPlace',
@@ -2302,6 +2337,7 @@ describe('Smoke', () => {
     bridge.registerInstance(READY);
     bridge.registerInstance({
       pluginSessionId: 'server-1',
+      physicalSessionId: 'server-1',
       instanceId: 'place:test',
       role: 'server',
       placeId: 0,
@@ -2316,7 +2352,7 @@ describe('Smoke', () => {
       log_message: '"probe"',
     }, 'server', 'place:test');
 
-    const pending = bridge.getPendingRequest('place:test', 'server');
+    const pending = claimQueuedRequest(bridge, 'server-1');
     expect(pending?.request).toMatchObject({
       endpoint: '/api/breakpoints',
       data: {
@@ -2341,6 +2377,7 @@ describe('Smoke', () => {
     bridge.registerInstance(READY);
     bridge.registerInstance({
       pluginSessionId: 'client-1',
+      physicalSessionId: 'server-1',
       instanceId: 'place:test',
       role: 'client',
       placeId: 0,
@@ -2355,7 +2392,7 @@ describe('Smoke', () => {
       output_path: outputPath,
     }, 'place:test');
 
-    const pending = bridge.getPendingRequest('place:test', 'client-1');
+    const pending = claimQueuedRequest(bridge, 'server-1');
     expect(pending?.request).toMatchObject({
       endpoint: '/api/capture-script-profiler',
       data: {
@@ -2391,6 +2428,7 @@ describe('Smoke', () => {
     bridge.registerInstance(READY);
     bridge.registerInstance({
       pluginSessionId: 'server-1',
+      physicalSessionId: 'server-1',
       instanceId: 'place:test',
       role: 'server',
       placeId: 0,
@@ -2419,7 +2457,7 @@ describe('Smoke', () => {
       },
     }, 'place:test');
 
-    const pending = bridge.getPendingRequest('place:test', 'server');
+    const pending = claimQueuedRequest(bridge, 'server-1');
     expect(pending?.request).toMatchObject({
       endpoint: '/api/capture-micro-profiler',
       data: {
@@ -2532,7 +2570,7 @@ describe('Smoke', () => {
       timeout_ms: 60000,
     }, 'place:test');
 
-    const pending = bridge.getPendingRequest('place:test', 'edit');
+    const pending = claimQueuedRequest(bridge, 'session-1');
     expect(pending?.request).toMatchObject({
       endpoint: '/api/generate-model',
       data: {
@@ -2564,7 +2602,7 @@ describe('Smoke', () => {
       schema_groups: ['Body', 'Front Left Wheel', 'Front Right Wheel', 'Rear Left Wheel', 'Rear Right Wheel'],
     }, 'place:test');
 
-    const pending = bridge.getPendingRequest('place:test', 'edit');
+    const pending = claimQueuedRequest(bridge, 'session-1');
     expect(pending?.request.endpoint).toBe('/api/generate-model');
     expect(pending?.request.data.schema_groups).toEqual([
       'Body',
@@ -2659,7 +2697,7 @@ describe('Smoke', () => {
     bridge.registerInstance(READY);
 
     const resultPromise = tools.getScriptSource('game.ServerScriptService.Manager', undefined, undefined, 'place:test');
-    const pending = bridge.getPendingRequest('place:test', 'edit');
+    const pending = claimQueuedRequest(bridge, 'session-1');
     expect(pending?.request.endpoint).toBe('/api/get-script-source');
     bridge.resolveRequest(pending!.requestId, {
       success: true,
@@ -2694,6 +2732,7 @@ describe('Smoke', () => {
     bridge.registerInstance(READY);
     bridge.registerInstance({
       pluginSessionId: 'server-1',
+      physicalSessionId: 'server-1',
       instanceId: 'place:test',
       role: 'server',
       placeId: 0,
@@ -2703,6 +2742,7 @@ describe('Smoke', () => {
     });
     bridge.registerInstance({
       pluginSessionId: 'client-1',
+      physicalSessionId: 'server-1',
       instanceId: 'place:test',
       role: 'client',
       placeId: 0,
@@ -2712,7 +2752,7 @@ describe('Smoke', () => {
     });
 
     const result = await tools.startPlaytest('play', undefined, 'place:test');
-    expect(bridge.getPendingRequest('place:test', 'edit')).toBeNull();
+    expect(claimQueuedRequest(bridge, 'session-1')).toBeNull();
     const body = JSON.parse(result.content[0].text);
     expect(body).toMatchObject({
       success: false,
@@ -2731,7 +2771,7 @@ describe('Smoke', () => {
     bridge.registerInstance(READY);
 
     const resultPromise = tools.startPlaytest('play');
-    const pending = bridge.getPendingRequest('place:test', 'edit');
+    const pending = claimQueuedRequest(bridge, 'session-1');
     expect(pending).toBeTruthy();
     bridge.resolveRequest(pending!.requestId, { success: true, message: 'started' });
 
@@ -2746,6 +2786,7 @@ describe('Smoke', () => {
 
     bridge.registerInstance({
       pluginSessionId: 'server-1',
+      physicalSessionId: 'server-1',
       instanceId: 'place:test',
       role: 'server',
       placeId: 0,
@@ -2759,6 +2800,7 @@ describe('Smoke', () => {
 
     bridge.registerInstance({
       pluginSessionId: 'client-1',
+      physicalSessionId: 'server-1',
       instanceId: 'place:test',
       role: 'client',
       placeId: 0,
@@ -2784,7 +2826,7 @@ describe('Smoke', () => {
     bridge.registerInstance(READY);
 
     const resultPromise = tools.startPlaytest('run');
-    const pending = bridge.getPendingRequest('place:test', 'edit');
+    const pending = claimQueuedRequest(bridge, 'session-1');
     expect(pending).toBeTruthy();
     bridge.resolveRequest(pending!.requestId, { success: true, message: 'started' });
 
@@ -2799,6 +2841,7 @@ describe('Smoke', () => {
 
     bridge.registerInstance({
       pluginSessionId: 'server-1',
+      physicalSessionId: 'server-1',
       instanceId: 'place:test',
       role: 'server',
       placeId: 0,
@@ -2824,6 +2867,7 @@ describe('Smoke', () => {
     bridge.registerInstance(READY);
     bridge.registerInstance({
       pluginSessionId: 'server-1',
+      physicalSessionId: 'server-1',
       instanceId: 'place:test',
       role: 'server',
       placeId: 0,
@@ -2833,6 +2877,7 @@ describe('Smoke', () => {
     });
     bridge.registerInstance({
       pluginSessionId: 'client-1',
+      physicalSessionId: 'server-1',
       instanceId: 'place:test',
       role: 'client',
       placeId: 0,
@@ -2842,7 +2887,7 @@ describe('Smoke', () => {
     });
 
     const resultPromise = tools.stopPlaytest();
-    const pending = bridge.getPendingRequest('place:test', 'edit');
+    const pending = claimQueuedRequest(bridge, 'session-1');
     expect(pending).toBeTruthy();
     bridge.resolveRequest(pending!.requestId, { success: true, message: 'stopping' });
 
@@ -2874,6 +2919,7 @@ describe('Smoke', () => {
     bridge.registerInstance(READY);
     bridge.registerInstance({
       pluginSessionId: 'server-1',
+      physicalSessionId: 'server-1',
       instanceId: 'place:test',
       role: 'server',
       placeId: 0,
@@ -2883,6 +2929,7 @@ describe('Smoke', () => {
     });
     bridge.registerInstance({
       pluginSessionId: 'client-1',
+      physicalSessionId: 'server-1',
       instanceId: 'place:test',
       role: 'client',
       placeId: 0,
@@ -2897,7 +2944,7 @@ describe('Smoke', () => {
     });
 
     const resultPromise = tools.stopPlaytest();
-    const pending = bridge.getPendingRequest('place:test', 'edit');
+    const pending = claimQueuedRequest(bridge, 'session-1');
     expect(pending).toBeTruthy();
     bridge.resolveRequest(pending!.requestId, { success: true, message: 'Playtest stopped.' });
 
@@ -2924,6 +2971,7 @@ describe('Smoke', () => {
     bridge.registerInstance(READY);
     bridge.registerInstance({
       pluginSessionId: 'server-1',
+      physicalSessionId: 'server-1',
       instanceId: 'place:test',
       role: 'server',
       placeId: 0,
@@ -2933,7 +2981,7 @@ describe('Smoke', () => {
     });
 
     const resultPromise = tools.stopPlaytest();
-    const pending = bridge.getPendingRequest('place:test', 'edit');
+    const pending = claimQueuedRequest(bridge, 'session-1');
     expect(pending).toBeTruthy();
     bridge.rejectRequest(pending!.requestId, new Error('edit peer timed out'));
 
@@ -2960,12 +3008,14 @@ describe('Smoke', () => {
     bridge.registerInstance({
       ...READY,
       pluginSessionId: 'edit-stale',
+      physicalSessionId: 'edit-stale',
       instanceId: 'anon:old-file-id',
       placeId: 0,
     });
     bridge.updateInstanceMetadata('edit-stale', { placeId: 12345 });
     bridge.registerInstance({
       pluginSessionId: 'server-1',
+      physicalSessionId: 'server-1',
       instanceId: 'place:12345',
       role: 'server',
       placeId: 12345,
@@ -2975,6 +3025,7 @@ describe('Smoke', () => {
     });
     bridge.registerInstance({
       pluginSessionId: 'client-1',
+      physicalSessionId: 'server-1',
       instanceId: 'place:12345',
       role: 'client',
       placeId: 12345,
@@ -2984,7 +3035,7 @@ describe('Smoke', () => {
     });
 
     const resultPromise = tools.stopPlaytest('anon:old-file-id');
-    const pending = bridge.getPendingRequest('place:12345', 'edit');
+    const pending = claimQueuedRequest(bridge, 'edit-stale');
     expect(pending).toBeTruthy();
     bridge.resolveRequest(pending!.requestId, { success: true, message: 'stopping' });
 
@@ -3016,11 +3067,12 @@ describe('Smoke', () => {
     bridge.registerInstance(READY);
 
     const resultPromise = tools.soloPlaytest('start', 'run', 1);
-    const pending = bridge.getPendingRequest('place:test', 'edit');
+    const pending = claimQueuedRequest(bridge, 'session-1');
     expect(pending).toBeTruthy();
     bridge.resolveRequest(pending!.requestId, { success: true, message: 'started' });
     bridge.registerInstance({
       pluginSessionId: 'server-1',
+      physicalSessionId: 'server-1',
       instanceId: 'place:test',
       role: 'server',
       placeId: 0,
@@ -3045,6 +3097,7 @@ describe('Smoke', () => {
     bridge.registerInstance(READY);
     bridge.registerInstance({
       pluginSessionId: 'server-1',
+      physicalSessionId: 'server-1',
       instanceId: 'place:test',
       role: 'server',
       placeId: 0,
@@ -3054,7 +3107,7 @@ describe('Smoke', () => {
     });
 
     const resultPromise = tools.soloPlaytest('stop', undefined, 1);
-    const pending = bridge.getPendingRequest('place:test', 'edit');
+    const pending = claimQueuedRequest(bridge, 'session-1');
     expect(pending).toBeTruthy();
     bridge.resolveRequest(pending!.requestId, { success: true, message: 'stopping' });
     bridge.unregisterInstance('server-1');
@@ -3102,7 +3155,7 @@ describe('Smoke', () => {
     bridge.registerInstance(READY);
 
     const resultPromise = tools.multiplayerPlaytest('start', 1, undefined, undefined, undefined, 2, 'place:test');
-    const pending = bridge.getPendingRequest('place:test', 'edit');
+    const pending = claimQueuedRequest(bridge, 'session-1');
     expect(pending?.request).toMatchObject({
       endpoint: '/api/multiplayer-test-start',
       data: { numPlayers: 1, testArgs: {} },
@@ -3113,6 +3166,7 @@ describe('Smoke', () => {
     });
     bridge.registerInstance({
       pluginSessionId: 'server-1',
+      physicalSessionId: 'server-1',
       instanceId: 'place:test',
       role: 'server',
       placeId: 0,
@@ -3122,6 +3176,7 @@ describe('Smoke', () => {
     });
     bridge.registerInstance({
       pluginSessionId: 'client-1',
+      physicalSessionId: 'server-1',
       instanceId: 'place:test',
       role: 'client',
       placeId: 0,
@@ -3152,7 +3207,7 @@ describe('Smoke', () => {
     bridge.registerInstance(READY);
 
     const resultPromise = tools.multiplayerPlaytest('start', 1, undefined, undefined, undefined, 0.1, 'place:test');
-    const pending = bridge.getPendingRequest('place:test', 'edit');
+    const pending = claimQueuedRequest(bridge, 'session-1');
     bridge.resolveRequest(pending!.requestId, {
       success: true,
       message: 'Multiplayer Studio test starting with 1 player(s).',
@@ -3232,6 +3287,7 @@ describe('Smoke', () => {
     bridge.registerInstance(READY);
     bridge.registerInstance({
       pluginSessionId: 'server-1',
+      physicalSessionId: 'server-1',
       instanceId: 'place:test',
       role: 'server',
       placeId: 0,
@@ -3241,7 +3297,7 @@ describe('Smoke', () => {
     });
 
     const wrapperPromise = tools.multiplayerPlaytest('end', undefined, undefined, undefined, 'done', 1, 'place:test');
-    const pending = bridge.getPendingRequest('place:test', 'server');
+    const pending = claimQueuedRequest(bridge, 'server-1');
     expect(pending?.request).toMatchObject({
       endpoint: '/api/multiplayer-test-end',
       data: { value: 'done' },
@@ -3294,6 +3350,7 @@ describe('Smoke', () => {
     bridge.registerInstance(READY);
     bridge.registerInstance({
       pluginSessionId: 'server-1',
+      physicalSessionId: 'server-1',
       instanceId: 'place:test',
       role: 'server',
       placeId: 0,
@@ -3303,8 +3360,8 @@ describe('Smoke', () => {
     });
 
     const resultPromise = tools.getSceneAnalysis('script_memory', 'all', 5, false, 'place:test');
-    const editPending = bridge.getPendingRequest('place:test', 'edit');
-    const serverPending = bridge.getPendingRequest('place:test', 'server');
+    const editPending = claimQueuedRequest(bridge, 'session-1');
+    const serverPending = claimQueuedRequest(bridge, 'server-1');
     expect(editPending?.request).toMatchObject({
       endpoint: '/api/get-scene-analysis',
       data: { mode: 'script_memory', topN: 5, raw: false },
@@ -3331,6 +3388,7 @@ describe('Smoke', () => {
     bridge.registerInstance(READY);
     bridge.registerInstance({
       pluginSessionId: 'server-1',
+      physicalSessionId: 'server-1',
       instanceId: 'place:test',
       role: 'server',
       placeId: 0,
@@ -3340,6 +3398,7 @@ describe('Smoke', () => {
     });
     bridge.registerInstance({
       pluginSessionId: 'client-1',
+      physicalSessionId: 'server-1',
       instanceId: 'place:test',
       role: 'client',
       placeId: 0,
@@ -3349,6 +3408,7 @@ describe('Smoke', () => {
     });
     bridge.registerInstance({
       pluginSessionId: 'client-2',
+      physicalSessionId: 'server-1',
       instanceId: 'place:test',
       role: 'client',
       placeId: 0,
@@ -3358,10 +3418,10 @@ describe('Smoke', () => {
     });
 
     const resultPromise = tools.setNetworkProfile('good', 'all-clients', undefined, 'place:test');
-    const editPending = bridge.getPendingRequest('place:test', 'edit');
-    const serverPending = bridge.getPendingRequest('place:test', 'server');
-    const client1Pending = bridge.getPendingRequest('place:test', 'client-1');
-    const client2Pending = bridge.getPendingRequest('place:test', 'client-2');
+    const client1Pending = claimQueuedRequest(bridge, 'server-1');
+    const client2Pending = claimQueuedRequest(bridge, 'server-1');
+    const editPending = claimQueuedRequest(bridge, 'session-1');
+    const serverPending = claimQueuedRequest(bridge, 'server-1');
 
     expect(editPending).toBeNull();
     expect(serverPending).toBeNull();
@@ -3423,6 +3483,7 @@ describe('Smoke', () => {
     bridge.registerInstance(READY);
     bridge.registerInstance({
       pluginSessionId: 'client-1',
+      physicalSessionId: 'server-1',
       instanceId: 'place:test',
       role: 'client',
       placeId: 0,
@@ -3432,6 +3493,7 @@ describe('Smoke', () => {
     });
     bridge.registerInstance({
       pluginSessionId: 'client-2',
+      physicalSessionId: 'server-1',
       instanceId: 'place:test',
       role: 'client',
       placeId: 0,
@@ -3441,8 +3503,8 @@ describe('Smoke', () => {
     });
 
     const resultPromise = tools.setNetworkProfile('good', 'all-clients', undefined, 'place:test');
-    const client1Pending = bridge.getPendingRequest('place:test', 'client-1');
-    const client2Pending = bridge.getPendingRequest('place:test', 'client-2');
+    const client1Pending = claimQueuedRequest(bridge, 'server-1');
+    const client2Pending = claimQueuedRequest(bridge, 'server-1');
     bridge.resolveRequest(client1Pending!.requestId, {
       success: true,
       returnValue: JSON.stringify({
@@ -3492,6 +3554,7 @@ describe('Smoke', () => {
     bridge.registerInstance(READY);
     bridge.registerInstance({
       pluginSessionId: 'client-1',
+      physicalSessionId: 'server-1',
       instanceId: 'place:test',
       role: 'client',
       placeId: 0,
@@ -3503,7 +3566,7 @@ describe('Smoke', () => {
     const resultPromise = tools.setNetworkProfile('custom', 'client-1', {
       InboundNetworkLossPercent: 0.5,
     }, 'place:test');
-    const pending = bridge.getPendingRequest('place:test', 'client-1');
+    const pending = claimQueuedRequest(bridge, 'server-1');
     expect(pending?.request).toMatchObject({ endpoint: '/api/execute-luau' });
     expect(pending?.request.data.code).toContain('\\"InboundNetworkLossPercent\\":0.5');
     bridge.resolveRequest(pending!.requestId, {
@@ -3529,6 +3592,7 @@ describe('Smoke', () => {
     bridge.registerInstance(READY);
     bridge.registerInstance({
       pluginSessionId: 'server-1',
+      physicalSessionId: 'server-1',
       instanceId: 'place:test',
       role: 'server',
       placeId: 0,
@@ -3538,6 +3602,7 @@ describe('Smoke', () => {
     });
     bridge.registerInstance({
       pluginSessionId: 'client-1',
+      physicalSessionId: 'server-1',
       instanceId: 'place:test',
       role: 'client',
       placeId: 0,
@@ -3547,9 +3612,9 @@ describe('Smoke', () => {
     });
 
     const resultPromise = tools.getSimulationState('both', 'edit-and-clients', 'place:test');
-    const editNetworkPending = bridge.getPendingRequest('place:test', 'edit');
-    const clientNetworkPending = bridge.getPendingRequest('place:test', 'client-1');
-    const serverPending = bridge.getPendingRequest('place:test', 'server');
+    const editNetworkPending = claimQueuedRequest(bridge, 'session-1');
+    const clientNetworkPending = claimQueuedRequest(bridge, 'server-1');
+    const serverPending = claimQueuedRequest(bridge, 'server-1');
     expect(serverPending).toBeNull();
     expect(editNetworkPending?.request).toMatchObject({ endpoint: '/api/execute-luau' });
     expect(clientNetworkPending?.request).toMatchObject({ endpoint: '/api/execute-luau' });
@@ -3566,8 +3631,8 @@ describe('Smoke', () => {
     });
 
     await new Promise((resolve) => setTimeout(resolve, 0));
-    const editDevicePending = bridge.getPendingRequest('place:test', 'edit');
-    const clientDevicePending = bridge.getPendingRequest('place:test', 'client-1');
+    const editDevicePending = claimQueuedRequest(bridge, 'session-1');
+    const clientDevicePending = claimQueuedRequest(bridge, 'server-1');
     expect(editDevicePending?.request).toMatchObject({ endpoint: '/api/execute-luau' });
     expect(clientDevicePending?.request).toMatchObject({ endpoint: '/api/execute-luau' });
     expect(editDevicePending?.request.data.code).toContain('StudioDeviceSimulatorService');
@@ -3612,7 +3677,7 @@ describe('Smoke', () => {
     bridge.registerInstance(READY);
 
     const networkOnlyPromise = tools.getSimulationState('network', 'edit', 'place:test');
-    const networkPending = bridge.getPendingRequest('place:test', 'edit');
+    const networkPending = claimQueuedRequest(bridge, 'session-1');
     expect(networkPending?.request).toMatchObject({ endpoint: '/api/execute-luau' });
     expect(networkPending?.request.data.code).toContain('NetworkSettings');
     expect(networkPending?.request.data.code).not.toContain('StudioDeviceSimulatorService');
@@ -3622,7 +3687,7 @@ describe('Smoke', () => {
     });
 
     await new Promise((resolve) => setTimeout(resolve, 0));
-    expect(bridge.getPendingRequest('place:test', 'edit')).toBeNull();
+    expect(claimQueuedRequest(bridge, 'session-1')).toBeNull();
     const networkOnly = JSON.parse((await networkOnlyPromise).content[0].text);
     expect(networkOnly).toMatchObject({
       include: 'network',
@@ -3631,7 +3696,7 @@ describe('Smoke', () => {
     expect(networkOnly.roles.edit.deviceSimulator).toBeUndefined();
 
     const deviceOnlyPromise = tools.getSimulationState('deviceSimulator', 'edit', 'place:test');
-    const devicePending = bridge.getPendingRequest('place:test', 'edit');
+    const devicePending = claimQueuedRequest(bridge, 'session-1');
     expect(devicePending?.request).toMatchObject({ endpoint: '/api/execute-luau' });
     expect(devicePending?.request.data.code).toContain('StudioDeviceSimulatorService');
     expect(devicePending?.request.data.code).not.toContain('NetworkSettings');
@@ -3654,6 +3719,7 @@ describe('Smoke', () => {
     bridge.registerInstance(READY);
     bridge.registerInstance({
       pluginSessionId: 'server-1',
+      physicalSessionId: 'server-1',
       instanceId: 'place:test',
       role: 'server',
       placeId: 0,
@@ -3663,6 +3729,7 @@ describe('Smoke', () => {
     });
     bridge.registerInstance({
       pluginSessionId: 'client-1',
+      physicalSessionId: 'server-1',
       instanceId: 'place:test',
       role: 'client',
       placeId: 0,
@@ -3672,9 +3739,9 @@ describe('Smoke', () => {
     });
 
     const resultPromise = tools.resetSimulationState(undefined, undefined, undefined, 'place:test');
-    const editNetworkPending = bridge.getPendingRequest('place:test', 'edit');
-    const clientNetworkPending = bridge.getPendingRequest('place:test', 'client-1');
-    const serverPending = bridge.getPendingRequest('place:test', 'server');
+    const editNetworkPending = claimQueuedRequest(bridge, 'session-1');
+    const clientNetworkPending = claimQueuedRequest(bridge, 'server-1');
+    const serverPending = claimQueuedRequest(bridge, 'server-1');
     expect(serverPending).toBeNull();
     expect(editNetworkPending?.request.data.code).toContain('NetworkSettings');
     expect(editNetworkPending?.request.data.code).toContain('ns[key] = value');
@@ -3691,8 +3758,8 @@ describe('Smoke', () => {
     });
 
     await new Promise((resolve) => setTimeout(resolve, 0));
-    const editDevicePending = bridge.getPendingRequest('place:test', 'edit');
-    const clientDevicePending = bridge.getPendingRequest('place:test', 'client-1');
+    const editDevicePending = claimQueuedRequest(bridge, 'session-1');
+    const clientDevicePending = claimQueuedRequest(bridge, 'server-1');
     expect(editDevicePending?.request.data.code).toContain('StopSimulationAsync');
     expect(clientDevicePending?.request.data.code).toContain('StopSimulationAsync');
 
@@ -3747,7 +3814,7 @@ describe('Smoke', () => {
     bridge.registerInstance(READY);
 
     const resultPromise = tools.resetSimulationState('edit', true, false, 'place:test');
-    const pending = bridge.getPendingRequest('place:test', 'edit');
+    const pending = claimQueuedRequest(bridge, 'session-1');
     expect(pending?.request).toMatchObject({ endpoint: '/api/execute-luau' });
     bridge.rejectRequest(pending!.requestId, new Error('network reset boom'));
 
@@ -3769,7 +3836,7 @@ describe('Smoke', () => {
       roles: {},
     });
     expect(body.warnings).toEqual([expect.stringContaining('No connected playtest client roles')]);
-    expect(bridge.getPendingRequest('place:test', 'edit')).toBeNull();
+    expect(claimQueuedRequest(bridge, 'session-1')).toBeNull();
   });
 
   test('simulation state tools reject server target and empty reset', async () => {
@@ -3788,7 +3855,7 @@ describe('Smoke', () => {
     bridge.registerInstance(READY);
 
     const resultPromise = tools.getDeviceSimulatorState(undefined, undefined, undefined, 'place:test');
-    const pending = bridge.getPendingRequest('place:test', 'edit');
+    const pending = claimQueuedRequest(bridge, 'session-1');
     expect(pending?.request).toMatchObject({ endpoint: '/api/execute-luau' });
     expect(pending?.request.data.code).toContain('StudioDeviceSimulatorService');
     expect(pending?.request.data.code).toContain('GetDeviceAsync');
@@ -3820,6 +3887,7 @@ describe('Smoke', () => {
     bridge.registerInstance(READY);
     bridge.registerInstance({
       pluginSessionId: 'server-1',
+      physicalSessionId: 'server-1',
       instanceId: 'place:test',
       role: 'server',
       placeId: 0,
@@ -3829,6 +3897,7 @@ describe('Smoke', () => {
     });
     bridge.registerInstance({
       pluginSessionId: 'client-1',
+      physicalSessionId: 'server-1',
       instanceId: 'place:test',
       role: 'client',
       placeId: 0,
@@ -3838,6 +3907,7 @@ describe('Smoke', () => {
     });
     bridge.registerInstance({
       pluginSessionId: 'client-2',
+      physicalSessionId: 'server-1',
       instanceId: 'place:test',
       role: 'client',
       placeId: 0,
@@ -3847,10 +3917,10 @@ describe('Smoke', () => {
     });
 
     const resultPromise = tools.setDeviceSimulator('all-clients', 'iphone_XR', 'LandscapeRight', undefined, undefined, undefined, undefined, 'place:test');
-    const editPending = bridge.getPendingRequest('place:test', 'edit');
-    const serverPending = bridge.getPendingRequest('place:test', 'server');
-    const client1Pending = bridge.getPendingRequest('place:test', 'client-1');
-    const client2Pending = bridge.getPendingRequest('place:test', 'client-2');
+    const client1Pending = claimQueuedRequest(bridge, 'server-1');
+    const client2Pending = claimQueuedRequest(bridge, 'server-1');
+    const editPending = claimQueuedRequest(bridge, 'session-1');
+    const serverPending = claimQueuedRequest(bridge, 'server-1');
 
     expect(editPending).toBeNull();
     expect(serverPending).toBeNull();
@@ -3895,6 +3965,7 @@ describe('Smoke', () => {
     bridge.registerInstance(READY);
     bridge.registerInstance({
       pluginSessionId: 'client-1',
+      physicalSessionId: 'server-1',
       instanceId: 'place:test',
       role: 'client',
       placeId: 0,
@@ -3904,6 +3975,7 @@ describe('Smoke', () => {
     });
     bridge.registerInstance({
       pluginSessionId: 'client-2',
+      physicalSessionId: 'server-1',
       instanceId: 'place:test',
       role: 'client',
       placeId: 0,
@@ -3913,8 +3985,8 @@ describe('Smoke', () => {
     });
 
     const resultPromise = tools.setDeviceSimulator('all-clients', 'iphone_XR', undefined, undefined, undefined, undefined, undefined, 'place:test');
-    const client1Pending = bridge.getPendingRequest('place:test', 'client-1');
-    const client2Pending = bridge.getPendingRequest('place:test', 'client-2');
+    const client1Pending = claimQueuedRequest(bridge, 'server-1');
+    const client2Pending = claimQueuedRequest(bridge, 'server-1');
     bridge.resolveRequest(client1Pending!.requestId, {
       success: true,
       returnValue: JSON.stringify({
@@ -3953,7 +4025,7 @@ describe('Smoke', () => {
       'place:test',
     );
 
-    const snapshotPending = bridge.getPendingRequest('place:test', 'edit');
+    const snapshotPending = claimQueuedRequest(bridge, 'session-1');
     expect(snapshotPending?.request).toMatchObject({ endpoint: '/api/execute-luau' });
     bridge.resolveRequest(snapshotPending!.requestId, {
       success: true,
@@ -3965,7 +4037,7 @@ describe('Smoke', () => {
     });
 
     await expect(resultPromise).rejects.toThrow(/cannot safely restore active custom device "custom_phone"/);
-    expect(bridge.getPendingRequest('place:test', 'edit')).toBeNull();
+    expect(claimQueuedRequest(bridge, 'session-1')).toBeNull();
   });
 
   test('capture_device_matrix rejects the tool call when an entry capture fails', async () => {
@@ -3983,14 +4055,14 @@ describe('Smoke', () => {
       'place:test',
     );
 
-    const snapshotPending = bridge.getPendingRequest('place:test', 'edit');
+    const snapshotPending = claimQueuedRequest(bridge, 'session-1');
     bridge.resolveRequest(snapshotPending!.requestId, {
       success: true,
       returnValue: JSON.stringify({ activeDeviceId: 'default', isSimulating: false, devices: [] }),
     });
 
     await new Promise((resolve) => setTimeout(resolve, 0));
-    const setPending = bridge.getPendingRequest('place:test', 'edit');
+    const setPending = claimQueuedRequest(bridge, 'session-1');
     bridge.resolveRequest(setPending!.requestId, {
       success: true,
       returnValue: JSON.stringify({
@@ -4002,12 +4074,12 @@ describe('Smoke', () => {
     });
 
     await new Promise((resolve) => setTimeout(resolve, 0));
-    const capturePending = bridge.getPendingRequest('place:test', 'edit');
+    const capturePending = claimQueuedRequest(bridge, 'session-1');
     expect(capturePending?.request).toMatchObject({ endpoint: '/api/capture-screenshot' });
     bridge.resolveRequest(capturePending!.requestId, { error: 'screenshot boom' });
 
     await new Promise((resolve) => setTimeout(resolve, 0));
-    const restorePending = bridge.getPendingRequest('place:test', 'edit');
+    const restorePending = claimQueuedRequest(bridge, 'session-1');
     expect(restorePending?.request.data.code).toContain('StopSimulationAsync');
     bridge.resolveRequest(restorePending!.requestId, {
       success: true,
@@ -4037,14 +4109,14 @@ describe('Smoke', () => {
       'place:test',
     );
 
-    const snapshotPending = bridge.getPendingRequest('place:test', 'edit');
+    const snapshotPending = claimQueuedRequest(bridge, 'session-1');
     bridge.resolveRequest(snapshotPending!.requestId, {
       success: true,
       returnValue: JSON.stringify({ activeDeviceId: 'default', isSimulating: false, devices: [] }),
     });
 
     await new Promise((resolve) => setTimeout(resolve, 0));
-    const setPending = bridge.getPendingRequest('place:test', 'edit');
+    const setPending = claimQueuedRequest(bridge, 'session-1');
     bridge.resolveRequest(setPending!.requestId, {
       success: true,
       returnValue: JSON.stringify({
@@ -4056,7 +4128,7 @@ describe('Smoke', () => {
     });
 
     await new Promise((resolve) => setTimeout(resolve, 0));
-    const capturePending = bridge.getPendingRequest('place:test', 'edit');
+    const capturePending = claimQueuedRequest(bridge, 'session-1');
     bridge.resolveRequest(capturePending!.requestId, {
       width: 1,
       height: 1,
@@ -4064,7 +4136,7 @@ describe('Smoke', () => {
     });
 
     await new Promise((resolve) => setTimeout(resolve, 0));
-    const restorePending = bridge.getPendingRequest('place:test', 'edit');
+    const restorePending = claimQueuedRequest(bridge, 'session-1');
     expect(restorePending?.request.data.code).toContain('StopSimulationAsync');
     bridge.rejectRequest(restorePending!.requestId, new Error('restore boom'));
 
@@ -4086,7 +4158,7 @@ describe('Smoke', () => {
       'place:test',
     );
 
-    const snapshotPending = bridge.getPendingRequest('place:test', 'edit');
+    const snapshotPending = claimQueuedRequest(bridge, 'session-1');
     expect(snapshotPending?.request).toMatchObject({ endpoint: '/api/execute-luau' });
     bridge.resolveRequest(snapshotPending!.requestId, {
       success: true,
@@ -4094,7 +4166,7 @@ describe('Smoke', () => {
     });
 
     await new Promise((resolve) => setTimeout(resolve, 0));
-    const setPending = bridge.getPendingRequest('place:test', 'edit');
+    const setPending = claimQueuedRequest(bridge, 'session-1');
     expect(setPending?.request).toMatchObject({ endpoint: '/api/execute-luau' });
     expect(setPending?.request.data.code).toContain('SetDeviceAsync');
     bridge.resolveRequest(setPending!.requestId, {
@@ -4108,7 +4180,7 @@ describe('Smoke', () => {
     });
 
     await new Promise((resolve) => setTimeout(resolve, 0));
-    const capturePending = bridge.getPendingRequest('place:test', 'edit');
+    const capturePending = claimQueuedRequest(bridge, 'session-1');
     expect(capturePending?.request).toMatchObject({ endpoint: '/api/capture-screenshot' });
     bridge.resolveRequest(capturePending!.requestId, {
       width: 1,
@@ -4117,7 +4189,7 @@ describe('Smoke', () => {
     });
 
     await new Promise((resolve) => setTimeout(resolve, 0));
-    const restorePending = bridge.getPendingRequest('place:test', 'edit');
+    const restorePending = claimQueuedRequest(bridge, 'session-1');
     expect(restorePending?.request).toMatchObject({ endpoint: '/api/execute-luau' });
     expect(restorePending?.request.data.code).toContain('StopSimulationAsync');
     bridge.resolveRequest(restorePending!.requestId, {
@@ -4152,7 +4224,7 @@ describe('Smoke', () => {
     const resultPromise = tools.captureScreenshot('place:test', 'jpeg', 80);
 
     await new Promise((resolve) => setTimeout(resolve, 0));
-    const capturePending = bridge.getPendingRequest('place:test', 'edit');
+    const capturePending = claimQueuedRequest(bridge, 'session-1');
     expect(capturePending?.request).toMatchObject({ endpoint: '/api/capture-screenshot' });
     bridge.resolveRequest(capturePending!.requestId, {
       width: 3,
@@ -4200,7 +4272,7 @@ describe('Smoke', () => {
       'place:test',
     );
 
-    const snapshotPending = bridge.getPendingRequest('place:test', 'edit');
+    const snapshotPending = claimQueuedRequest(bridge, 'session-1');
     bridge.resolveRequest(snapshotPending!.requestId, {
       success: true,
       returnValue: JSON.stringify({ activeDeviceId: 'default', isSimulating: false }),
@@ -4208,7 +4280,7 @@ describe('Smoke', () => {
 
     for (const label of ['a', 'b']) {
       await new Promise((resolve) => setTimeout(resolve, 0));
-      const setPending = bridge.getPendingRequest('place:test', 'edit');
+      const setPending = claimQueuedRequest(bridge, 'session-1');
       bridge.resolveRequest(setPending!.requestId, {
         success: true,
         returnValue: JSON.stringify({
@@ -4220,7 +4292,7 @@ describe('Smoke', () => {
       });
 
       await new Promise((resolve) => setTimeout(resolve, 0));
-      const capturePending = bridge.getPendingRequest('place:test', 'edit');
+      const capturePending = claimQueuedRequest(bridge, 'session-1');
       expect(capturePending?.request).toMatchObject({ endpoint: '/api/capture-screenshot' });
       bridge.resolveRequest(capturePending!.requestId, {
         width: noiseSide,

@@ -71,7 +71,7 @@ codex mcp add robloxstudio -- npx -y @chrrxs/robloxstudio-mcp@latest --auto-inst
 
 `@latest` floats the server package to the newest npm release. `--auto-install-plugin` copies the matching `.rbxmx` bundled with that package into Studio's Plugins folder when the server starts.
 
-If Studio shows a yellow plugin/server version mismatch banner, the connection remains usable. Restart the MCP server with `--auto-install-plugin`, then fully close and reopen Studio so it loads the matching plugin file.
+The plugin and server must have matching versions. If Studio cannot connect after an update, restart the MCP server with `--auto-install-plugin`, then fully close and reopen Studio so it loads the matching bundled plugin file.
 
 <details>
 <summary>Note for native Windows users</summary>
@@ -92,9 +92,9 @@ If you encounter issues, you may need to run it through `cmd`. Update your confi
 ## How It Works
 
 1. **AI calls tool** > MCP server queues request
-2. **Plugin polls** every 500ms for work
+2. **Plugin receives it** over a persistent server-sent event stream
 3. **Plugin executes** Studio API calls
-4. **Plugin responds** with extracted data
+4. **Plugin posts the response** with the extracted data
 5. **AI receives** comprehensive Studio information
 
 **Available Tools:** 37+ specialized tools for file trees, scripts, properties, attributes, tags, and more!
@@ -135,14 +135,14 @@ and network settings. Report suspected vulnerabilities through the
 
 ### Plugin Features
 - **Real-time status**: Visual connection indicators
-- **Smart polling**: Exponential backoff for failed connections
-- **Error recovery**: Automatic retry with timeout handling
+- **Persistent delivery**: One event stream per edit or play-server peer
+- **Multiplexed playtests**: Client routes share the play-server stream
+- **Error recovery**: Automatic reconnect, redelivery, and duplicate suppression
 - **Debug friendly**: Comprehensive logging in Output window
 
 ### Customization
 - **Server URL**: Modify the single plugin URL field (default: http://localhost:58741)
 - **Multiple Studio places**: Connect every place to the same MCP server, then use `get_connected_instances` and `instance_id` to choose the target game
-- **Poll interval**: 500ms default (editable in code)
 - **Timeout settings**: 30-second request timeouts
 
 ### Development Mode

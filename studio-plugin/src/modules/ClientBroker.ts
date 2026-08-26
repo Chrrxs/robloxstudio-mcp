@@ -1,4 +1,4 @@
-import { HttpService, Players, ReplicatedStorage, RunService, ServerStorage } from "@rbxts/services";
+import { HttpService, Players, ReplicatedStorage, RunService } from "@rbxts/services";
 import RuntimeLogBuffer from "./RuntimeLogBuffer";
 import MemoryHandlers from "./handlers/MemoryHandlers";
 import SceneAnalysisHandlers from "./handlers/SceneAnalysisHandlers";
@@ -10,8 +10,8 @@ import BreakpointHandlers from "./handlers/BreakpointHandlers";
 import ScriptProfilerHandlers from "./handlers/ScriptProfilerHandlers";
 import MicroProfilerHandlers from "./handlers/MicroProfilerHandlers";
 import LuauExec from "./LuauExec";
-import State from "./State";
 import HttpDiagnostics from "./HttpDiagnostics";
+import PluginSession from "./PluginSession";
 
 interface StudioTestServiceMultiplayer extends StudioTestService {
 	CanLeaveTest(): boolean;
@@ -21,53 +21,13 @@ interface StudioTestServiceMultiplayer extends StudioTestService {
 
 const StudioTestService = game.GetService("StudioTestService") as StudioTestServiceMultiplayer;
 
-// Mirror of Communication.computeInstanceId() — duplicated here because the
-// client broker runs in the play-server DM where it can't easily import from
-// the edit-side module, and the place identifier must match what the edit-DM
-// plugin reports. Both use the same algorithm against the shared DataModel.
-function computeInstanceId(): string {
-	if (game.PlaceId !== 0) {
-		return `place:${tostring(game.PlaceId)}`;
-	}
-	const existing = ServerStorage.GetAttribute("__MCPPlaceId");
-	if (typeIs(existing, "string") && existing !== "") {
-		return `anon:${existing as string}`;
-	}
-	const fresh = HttpService.GenerateGUID(false);
-	pcall(() => ServerStorage.SetAttribute("__MCPPlaceId", fresh));
-	return `anon:${fresh}`;
-}
-
-let cachedPlaceName: string | undefined;
-function resolvePlaceName(): string {
-	if (cachedPlaceName !== undefined) return cachedPlaceName;
-	if (game.PlaceId === 0) {
-		cachedPlaceName = game.Name;
-		return cachedPlaceName;
-	}
-	const MarketplaceService = game.GetService("MarketplaceService");
-	const [ok, info] = pcall(() => MarketplaceService.GetProductInfo(game.PlaceId));
-	if (ok && info !== undefined) {
-		const name = (info as { Name?: string }).Name;
-		if (typeIs(name, "string") && name !== "") {
-			cachedPlaceName = name;
-			return cachedPlaceName;
-		}
-	}
-	return game.Name;
-}
 
 // The client peer cannot reach the MCP HTTP server - Roblox forbids
 // HttpService:RequestAsync from the client DM even under PluginSecurity, and
 // HttpEnabled reads as false there regardless of identity. So the server peer
-// brokers execute_luau requests to the client via a RemoteFunction it places
-// in ReplicatedStorage; each player gets a proxy "client" registration on the
-// MCP side, polled and dispatched by the server peer.
-//
-// (Previously the server peer also registered an "edit-proxy" role to
-// intercept /api/stop-playtest and call StudioTestService:EndTest. That hack
-// is gone: stop now uses StopPlayMonitor with plugin:SetSetting cross-DM
-// signaling, which works regardless of MCP server state.)
+// brokers client-targeted requests through a RemoteFunction it places
+// in ReplicatedStorage; each player gets a logical proxy registration on the
+// MCP side, multiplexed over the play-server peer's physical event stream.
 
 const DEFAULT_MCP_URL = "http://localhost:58741";
 let mcpUrl = DEFAULT_MCP_URL;
@@ -75,17 +35,19 @@ const BROKER_NAME = "__MCPClientBroker";
 const BROKER_OWNER_ATTRIBUTE = "__MCPBrokerOwner";
 
 interface ProxyEntry {
+	player: Player;
+	remote: RemoteFunction;
 	pluginSessionId: string;
 	role: string;
+	registered: boolean;
+	registering: boolean;
+	retryAttempt: number;
+	generation: number;
 }
 
 interface BrokerEnvelope {
-	endpoint?: string;
+	endpoint: string;
 	data?: Record<string, unknown>;
-	// Backward-compat: older server-broker code (pre-v2.10) sent the raw
-	// {code} payload directly. If we see code at the top level and no
-	// endpoint, treat it as execute-luau.
-	code?: string;
 }
 
 
@@ -114,46 +76,6 @@ const CLIENT_BROKER_ALLOWED_ENDPOINTS = new Set<string>([
 	"/api/focus-viewport",
 ]);
 
-interface ReadyResponseBody {
-	assignedRole?: string;
-}
-
-interface PollResponseBody {
-	requestId?: string;
-	request?: {
-		endpoint: string;
-		data?: Record<string, unknown>;
-	};
-	// Server signals knownInstance=false when our proxy isn't in its
-	// in-memory instances map (typically after an MCP process restart).
-	// Triggers a re-register POST to /ready.
-	knownInstance?: boolean;
-	pollMode?: "long";
-}
-
-// Throttle re-ready calls per proxyId so a brief window of unknownInstance
-// polls doesn't cause a re-register stampede.
-const lastReadyByProxy = new Map<string, number>();
-
-function reRegisterProxy(proxyId: string, role: string): void {
-	const now = tick();
-	const last = lastReadyByProxy.get(proxyId) ?? 0;
-	if (now - last < 2) return;
-	lastReadyByProxy.set(proxyId, now);
-	pcall(() =>
-		postJson("/ready", {
-			pluginSessionId: proxyId,
-			instanceId: computeInstanceId(),
-			role,
-			placeId: game.PlaceId,
-			placeName: resolvePlaceName(),
-			dataModelName: game.Name,
-			isRunning: RunService.IsRunning(),
-			pluginVersion: State.CURRENT_VERSION,
-			pluginVariant: State.PLUGIN_VARIANT,
-		}),
-	);
-}
 
 function forkRole(): "edit" | "server" | "client" {
 	if (!RunService.IsRunning()) return "edit";
@@ -182,9 +104,6 @@ function setServerUrl(serverUrl: string | undefined): void {
 	}
 }
 
-function getServerUrl(): string {
-	return mcpUrl;
-}
 
 function handleExecuteLuau(data: Record<string, unknown> | undefined) {
 	const code = data && (data.code as string | undefined);
@@ -261,12 +180,9 @@ function setupClientBroker() {
 		return;
 	}
 	rf.OnClientInvoke = (payload: BrokerEnvelope | undefined) => {
-		// Two payload shapes in the wild:
-		// - {endpoint, data} from v2.10+ server-peer broker (this is the new
-		//   discriminated form that lets us dispatch on endpoint)
-		// - {code} from pre-v2.10 server-peer broker (raw execute-luau payload)
-		// The shapes coexist gracefully because we fall back to execute-luau
-		// when endpoint is missing.
+		if (!payload || !typeIs(payload.endpoint, "string")) {
+			return { error: "Client broker request is missing its endpoint." };
+		}
 		if (payload && payload.endpoint === "/api/get-runtime-logs") {
 			return handleGetRuntimeLogs(payload.data);
 		}
@@ -309,21 +225,26 @@ function setupClientBroker() {
 		if (payload && payload.endpoint === "/api/eval-runtime") {
 			return EvalRuntimeHandlers.evalRuntime(payload.data ?? {});
 		}
-		// Legacy: raw execute-luau payload at the top level.
-		return handleExecuteLuau(payload as Record<string, unknown> | undefined);
+		return { error: `Unsupported client broker endpoint: ${payload.endpoint}` };
 	};
 }
 
+const INITIAL_PROXY_RETRY_DELAY_SECONDS = 0.5;
+const MAX_PROXY_RETRY_DELAY_SECONDS = 5;
 const proxyByPlayer = new Map<Player, ProxyEntry>();
+const proxyBySessionId = new Map<string, ProxyEntry>();
 const proxyRegisterFailuresByPlayer = new Set<Player>();
+const pendingProxyDisconnects = new Set<string>();
 let serverBrokerStarted = false;
 
 function unregisterProxy(player: Player, entry?: ProxyEntry): void {
 	const proxy = entry ?? proxyByPlayer.get(player);
 	if (!proxy) return;
+	proxy.generation++;
 	proxyByPlayer.delete(player);
+	proxyBySessionId.delete(proxy.pluginSessionId);
 	proxyRegisterFailuresByPlayer.delete(player);
-	postJson("/disconnect", { pluginSessionId: proxy.pluginSessionId });
+	queueProxyDisconnect(proxy.pluginSessionId);
 }
 
 function disconnectAllProxies(): void {
@@ -331,113 +252,187 @@ function disconnectAllProxies(): void {
 		unregisterProxy(player, entry);
 	}
 	proxyByPlayer.clear();
+	proxyBySessionId.clear();
 	proxyRegisterFailuresByPlayer.clear();
 }
 
-function pollProxy(proxyId: string, player: Player, rf: RemoteFunction) {
-	while (player.Parent !== undefined && proxyByPlayer.has(player)) {
-		if (!RunService.IsRunning()) {
-			unregisterProxy(player);
-			break;
-		}
-
-		let nextPollDelay = 0.5;
-		const [ok, res] = pcall(() => {
-			const requestOptions = {
-				Url: `${mcpUrl}/poll?pluginSessionId=${proxyId}&pollMode=long`,
-				Method: "GET" as const,
-				Headers: { "Content-Type": "application/json" },
-				Timeout: State.POLL_REQUEST_TIMEOUT_SECONDS,
-			};
-			return HttpService.RequestAsync(requestOptions);
-		});
-
-		// RequestAsync may yield for the full long-poll window. Never apply a
-		// stale response to a player whose proxy was removed or replaced.
-		const currentProxy = proxyByPlayer.get(player);
-		if (player.Parent === undefined || currentProxy?.pluginSessionId !== proxyId) break;
-
-		if (ok && res && (res.Success || res.StatusCode === 503)) {
-			const [okJson, body] = pcall(() => HttpService.JSONDecode(res.Body) as PollResponseBody);
-			if (okJson && body) {
-				// Server lost our proxy registration (process restart, etc.) -
-				// re-register so the next poll cycle starts routing again.
-				if (body.knownInstance === false) {
-					reRegisterProxy(proxyId, "client");
-				}
-				if (body.request && body.requestId !== undefined) {
-					const request = body.request;
-					let response: unknown;
-					if (CLIENT_BROKER_ALLOWED_ENDPOINTS.has(request.endpoint)) {
-						// Forward as a discriminated envelope so the client-side
-						// OnClientInvoke knows which endpoint it's serving.
-						const envelope = { endpoint: request.endpoint, data: request.data };
-						const [okInvoke, invokeRes] = pcall(() => rf.InvokeClient(player, envelope));
-						if (okInvoke) {
-							response = invokeRes !== undefined ? invokeRes : { success: false, error: "nil response" };
-						} else {
-							response = { success: false, error: `InvokeClient failed: ${tostring(invokeRes)}` };
-						}
-					} else {
-						const allowed: string[] = [];
-						for (const ep of CLIENT_BROKER_ALLOWED_ENDPOINTS) allowed.push(ep);
-						response = {
-							error:
-								`Client-proxy does not forward ${tostring(request.endpoint)}. ` +
-								`Allowed: ${allowed.join(", ")}.`,
-						};
-					}
-					postJson("/response", { requestId: body.requestId, response });
-				}
-
-				if (res.Success && body.pollMode === "long" && body.knownInstance !== false && body.request === undefined) {
-					nextPollDelay = 0;
-				}
-			}
-		}
-
-		if (nextPollDelay > 0) {
-			task.wait(nextPollDelay);
-		} else {
-			// Yield one scheduler turn before replacing a completed long poll.
-			task.wait();
-		}
-	}
+function proxyRetryDelay(attempt: number): number {
+	return math.min(
+		INITIAL_PROXY_RETRY_DELAY_SECONDS * math.pow(2, math.max(attempt - 1, 0)),
+		MAX_PROXY_RETRY_DELAY_SECONDS,
+	);
 }
-
-function registerProxy(player: Player, rf: RemoteFunction) {
-	if (proxyByPlayer.has(player)) return;
-	const proxyId = HttpService.GenerateGUID(false);
-	const [ok, res] = postJson("/ready", {
-		pluginSessionId: proxyId,
-		instanceId: computeInstanceId(),
-		role: "client",
-		placeId: game.PlaceId,
-		placeName: resolvePlaceName(),
-		dataModelName: game.Name,
-		isRunning: RunService.IsRunning(),
-		pluginVersion: State.CURRENT_VERSION,
-		pluginVariant: State.PLUGIN_VARIANT,
-	});
-	if (!ok || !res || !res.Success) {
-		proxyRegisterFailuresByPlayer.add(player);
-		warn(`[robloxstudio-mcp] proxy register failed for ${player.Name}: ${formatPostJsonFailure("/ready", ok, res)}`);
+function deliverProxyDisconnect(pluginSessionId: string, attempt: number): void {
+	if (!pendingProxyDisconnects.has(pluginSessionId)) return;
+	const [ok, response] = postJson("/disconnect", { pluginSessionId });
+	if (ok && response && response.Success) {
+		pendingProxyDisconnects.delete(pluginSessionId);
 		return;
 	}
-	const body = HttpService.JSONDecode(res.Body) as ReadyResponseBody;
-	const assigned = body.assignedRole ?? "client";
-	proxyByPlayer.set(player, { pluginSessionId: proxyId, role: assigned });
-	if (proxyRegisterFailuresByPlayer.has(player)) {
-		proxyRegisterFailuresByPlayer.delete(player);
-		print(`[robloxstudio-mcp] proxy registered for ${player.Name} as ${assigned} via ${mcpUrl}`);
-	}
-	task.spawn(pollProxy, proxyId, player, rf);
+	task.delay(proxyRetryDelay(attempt + 1), () => {
+		deliverProxyDisconnect(pluginSessionId, attempt + 1);
+	});
 }
 
-// (Removed: startEditProxyLoop. The play-server DM no longer registers an
-// "edit-proxy" peer with the MCP server. stop_playtest now uses a cross-DM
-// plugin:SetSetting request consumed by StopPlayMonitor in the play-server DM,
-// which doesn't depend on MCP server state or peer registration at all.)
+function queueProxyDisconnect(pluginSessionId: string): void {
+	if (pendingProxyDisconnects.has(pluginSessionId)) return;
+	pendingProxyDisconnects.add(pluginSessionId);
+	task.spawn(deliverProxyDisconnect, pluginSessionId, 0);
+}
+
+
+function parseAssignedRole(body: string): string | undefined {
+	const [decodeOk, decoded] = pcall(() => HttpService.JSONDecode(body));
+	if (!decodeOk || !typeIs(decoded, "table")) return undefined;
+	const ready = decoded as Record<string, unknown>;
+	if (ready.success !== true) return undefined;
+	return typeIs(ready.assignedRole, "string") && ready.assignedRole !== ""
+		? ready.assignedRole
+		: undefined;
+}
+
+function scheduleProxyRetry(entry: ProxyEntry): void {
+	entry.retryAttempt++;
+	const expectedGeneration = entry.generation;
+	task.delay(proxyRetryDelay(entry.retryAttempt), () => {
+		if (
+			proxyByPlayer.get(entry.player) !== entry ||
+			entry.generation !== expectedGeneration ||
+			entry.registered ||
+			entry.registering ||
+			entry.player.Parent === undefined ||
+			!RunService.IsRunning()
+		) {
+			return;
+		}
+		registerProxyEntry(entry);
+	});
+}
+
+function failProxyRegistration(entry: ProxyEntry, detail: string): void {
+	entry.registered = false;
+	if (!proxyRegisterFailuresByPlayer.has(entry.player)) {
+		proxyRegisterFailuresByPlayer.add(entry.player);
+		warn(`[robloxstudio-mcp] proxy register failed for ${entry.player.Name}: ${detail}`);
+	}
+	scheduleProxyRetry(entry);
+}
+
+function registerProxyEntry(entry: ProxyEntry): void {
+	if (
+		entry.registering ||
+		proxyByPlayer.get(entry.player) !== entry ||
+		entry.player.Parent === undefined ||
+		!RunService.IsRunning()
+	) {
+		return;
+	}
+	entry.registering = true;
+	const expectedGeneration = entry.generation;
+	const requestedRole = entry.role === "client" ? "client" : entry.role;
+	const readyPayload = PluginSession.createReadyPayload(entry.pluginSessionId, requestedRole);
+	if (proxyByPlayer.get(entry.player) !== entry) return;
+	if (entry.generation !== expectedGeneration) {
+		if (!entry.registering) task.spawn(registerProxyEntry, entry);
+		return;
+	}
+	const [ok, res] = postJson("/ready", readyPayload);
+	if (proxyByPlayer.get(entry.player) !== entry) {
+		if (ok && res && res.Success) {
+			queueProxyDisconnect(entry.pluginSessionId);
+		}
+		return;
+	}
+	if (entry.generation !== expectedGeneration) {
+		if (!entry.registering) task.spawn(registerProxyEntry, entry);
+		return;
+	}
+	entry.registering = false;
+
+	if (!ok || !res || !res.Success) {
+		failProxyRegistration(entry, formatPostJsonFailure("/ready", ok, res));
+		return;
+	}
+	const assignedRole = parseAssignedRole(res.Body);
+	if (assignedRole === undefined) {
+		failProxyRegistration(entry, "invalid /ready response: expected success=true and a non-empty assignedRole");
+		return;
+	}
+	entry.role = assignedRole;
+	entry.registered = true;
+	entry.retryAttempt = 0;
+	if (proxyRegisterFailuresByPlayer.has(entry.player)) {
+		proxyRegisterFailuresByPlayer.delete(entry.player);
+		print(`[robloxstudio-mcp] proxy registered for ${entry.player.Name} as ${assignedRole} via ${mcpUrl}`);
+	}
+}
+
+function registerProxy(player: Player, rf: RemoteFunction): void {
+	if (proxyByPlayer.has(player)) return;
+	const entry: ProxyEntry = {
+		player,
+		remote: rf,
+		pluginSessionId: HttpService.GenerateGUID(false),
+		role: "client",
+		registered: false,
+		registering: false,
+		retryAttempt: 0,
+		generation: 0,
+	};
+	proxyByPlayer.set(player, entry);
+	proxyBySessionId.set(entry.pluginSessionId, entry);
+	task.spawn(registerProxyEntry, entry);
+}
+
+function refreshAllLogicalRegistrations(): void {
+	for (const [, entry] of proxyByPlayer) {
+		entry.generation++;
+		entry.registered = false;
+		entry.registering = false;
+		entry.retryAttempt = 0;
+		task.spawn(registerProxyEntry, entry);
+	}
+}
+
+function dispatchClientRequest(
+	logicalSessionId: string,
+	target: string,
+	endpoint: string,
+	data?: Record<string, unknown>,
+): unknown {
+	const entry = proxyBySessionId.get(logicalSessionId);
+	if (!entry || proxyByPlayer.get(entry.player) !== entry) {
+		return { error: `Client proxy ${target} (${logicalSessionId}) is not registered.` };
+	}
+	if (entry.role === "client") {
+		const [assignedClientRole] = target.match("^client%-%d+$");
+		if (assignedClientRole !== undefined) entry.role = target;
+	}
+	if (entry.role !== target) {
+		return {
+			error: `Client proxy ${logicalSessionId} is registered as ${entry.role}, not ${target}.`,
+		};
+	}
+	if (entry.player.Parent === undefined || !RunService.IsRunning()) {
+		unregisterProxy(entry.player, entry);
+		return { error: `Client proxy ${target} is no longer available.` };
+	}
+	if (!CLIENT_BROKER_ALLOWED_ENDPOINTS.has(endpoint)) {
+		const allowed: string[] = [];
+		for (const allowedEndpoint of CLIENT_BROKER_ALLOWED_ENDPOINTS) allowed.push(allowedEndpoint);
+		return {
+			error: `Client-proxy does not forward ${endpoint}. Allowed: ${allowed.join(", ")}.`,
+		};
+	}
+
+	const envelope = { endpoint, data };
+	const [invokeOk, invokeResult] = pcall(() => entry.remote.InvokeClient(entry.player, envelope));
+	if (!invokeOk) {
+		return { success: false, error: `InvokeClient failed: ${tostring(invokeResult)}` };
+	}
+	return invokeResult !== undefined ? invokeResult : { success: false, error: "nil response" };
+}
+
 
 function setupServerBroker() {
 	if (serverBrokerStarted) return;
@@ -466,11 +461,11 @@ function setupServerBroker() {
 }
 
 export = {
-	MCP_URL: DEFAULT_MCP_URL,
 	DEFAULT_MCP_URL,
-	getServerUrl,
 	setServerUrl,
 	disconnectAllProxies,
+	refreshAllLogicalRegistrations,
+	dispatchClientRequest,
 	forkRole,
 	setupClientBroker,
 	setupServerBroker,

@@ -4,18 +4,12 @@ export interface Connection {
 	port: number;
 	serverUrl: string;
 	isActive: boolean;
-	pollInterval: number;
-	lastPoll: number;
 	consecutiveFailures: number;
 	maxFailuresBeforeError: number;
-	lastSuccessfulConnection: number;
 	currentRetryDelay: number;
-	maxRetryDelay: number;
-	retryBackoffMultiplier: number;
 	lastHttpOk: boolean;
 	lastMcpOk: boolean;
 	mcpWaitStartTime?: number;
-	isPolling: boolean;
 	heartbeatConnection?: RBXScriptConnection;
 }
 
@@ -28,29 +22,36 @@ export interface RequestPayload {
 	data?: RequestData;
 }
 
-export interface PollResponse {
+export interface ReadyResponse {
+	success: true;
+	assignedRole: string;
+	instanceId: string;
+	serverVersion: string;
+}
+
+export interface StudioRequestEvent {
+	kind: "request";
+	requestId: string;
+	logicalSessionId: string;
+	target: string;
+	endpoint: string;
+	data?: RequestData;
+}
+
+export interface StudioStatusEvent {
+	kind: "status";
+	knownInstance: boolean;
 	mcpConnected: boolean;
 	serverVersion?: string;
 	pluginVersion?: string;
 	pluginVariant?: string;
-	versionMismatch?: boolean;
-	pollMode?: "long";
-	request?: RequestPayload;
-	requestId?: string;
-	// Server signals knownInstance=false when its in-memory instances map
-	// doesn't contain our pluginSessionId (typically after an MCP process
-	// restart). The plugin re-issues /ready when it sees this.
-	knownInstance?: boolean;
 }
 
-export interface ReadyResponse {
-	success: boolean;
-	assignedRole?: string;
-	instanceId?: string;
-	serverVersion?: string;
-	versionMismatch?: boolean;
-	error?: string;
-	message?: string;
+export interface TransportUpdate {
+	state: "connecting" | "open" | "retrying" | "waiting-duplicate";
+	attempt: number;
+	retryDelay: number;
+	detail?: string;
 }
 
 declare global {

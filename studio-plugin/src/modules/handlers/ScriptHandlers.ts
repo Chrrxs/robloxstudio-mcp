@@ -109,7 +109,7 @@ function setScriptSource(requestData: Record<string, unknown>) {
 		return { error: `Instance is not a script-like object: ${instance.ClassName}` };
 	}
 
-	// Communication has already JSON-decoded the poll payload; source text is exact at this boundary.
+	// Communication has already JSON-decoded the transport payload; source text is exact at this boundary.
 	const sourceToSet = newSource;
 	const recordingId = beginRecording(`Set script source: ${instance.Name}`);
 

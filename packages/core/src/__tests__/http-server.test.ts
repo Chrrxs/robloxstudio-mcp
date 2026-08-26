@@ -1,12 +1,7 @@
 import request from 'supertest';
-import { once } from 'node:events';
 import { TOOL_HANDLERS, createHttpServer, type RobloxStudioHttpApp } from '../http-server.js';
 import { RobloxStudioTools } from '../tools/index.js';
-import {
-  BridgeService,
-  type PendingPollOptions,
-  type PendingPollResult,
-} from '../bridge-service.js';
+import { BridgeService } from '../bridge-service.js';
 import { StudioInstanceManager } from '../studio-instance-manager.js';
 import { detectStudioPlatform } from '../studio-platform.js';
 import * as fs from 'fs';
@@ -14,44 +9,6 @@ import * as os from 'os';
 import * as path from 'path';
 
 class HttpTestBridgeService extends BridgeService {
-  private readonly pollEntries = new Map<string, () => void>();
-  private readonly pollExits = new Map<string, () => void>();
-
-  expectNextPollEntry(pluginSessionId: string): Promise<void> {
-    if (this.pollEntries.has(pluginSessionId)) {
-      throw new Error(`Already expecting poll entry for ${pluginSessionId}`);
-    }
-    // Promise.withResolvers is unavailable on the declared Node 20.0 minimum.
-    return new Promise((resolve) => {
-      this.pollEntries.set(pluginSessionId, resolve);
-    });
-  }
-
-  expectNextPollExit(pluginSessionId: string): Promise<void> {
-    if (this.pollExits.has(pluginSessionId)) {
-      throw new Error(`Already expecting poll exit for ${pluginSessionId}`);
-    }
-    return new Promise((resolve) => {
-      this.pollExits.set(pluginSessionId, resolve);
-    });
-  }
-
-  override async waitForPendingRequest(
-    pluginSessionId: string,
-    options: PendingPollOptions = {},
-  ): Promise<PendingPollResult> {
-    const entered = this.pollEntries.get(pluginSessionId);
-    this.pollEntries.delete(pluginSessionId);
-    entered?.();
-    try {
-      return await super.waitForPendingRequest(pluginSessionId, options);
-    } finally {
-      const exited = this.pollExits.get(pluginSessionId);
-      this.pollExits.delete(pluginSessionId);
-      exited?.();
-    }
-  }
-
   protected override notifyInstanceRegistered(): void {
     // HTTP route tests do not need managed-Studio lifecycle association.
   }
@@ -59,12 +16,21 @@ class HttpTestBridgeService extends BridgeService {
 
 const READY_BODY = {
   pluginSessionId: 'session-1',
+  physicalSessionId: 'session-1',
   instanceId: 'place:test',
   role: 'edit',
   placeId: 0,
   placeName: 'TestPlace',
   dataModelName: 'TestPlace',
   isRunning: false,
+  pluginVersion: 'test-version',
+  pluginVariant: 'main',
+};
+
+const TEST_SERVER_CONFIG = {
+  name: 'robloxstudio-mcp',
+  version: READY_BODY.pluginVersion,
+  tools: [],
 };
 
 describe('HTTP Server', () => {
@@ -74,7 +40,7 @@ describe('HTTP Server', () => {
   beforeEach(() => {
     bridge = new HttpTestBridgeService();
     tools = new RobloxStudioTools(bridge);
-    app = createHttpServer(tools, bridge);
+    app = createHttpServer(tools, bridge, undefined, TEST_SERVER_CONFIG);
   });
 
   afterEach(() => {
@@ -96,6 +62,7 @@ describe('HTTP Server', () => {
         },
         pluginConnected: false,
         mcpServerActive: false,
+        activeEventStreams: 0,
       });
     });
 
@@ -335,48 +302,163 @@ describe('HTTP Server', () => {
   });
 
   describe('Plugin Connection Management', () => {
+    test('does not expose the retired polling transport', async () => {
+      await request(app).get('/poll').expect(404);
+    });
+
     test('plugin ready notification', async () => {
       const response = await request(app).post('/ready').send(READY_BODY).expect(200);
       expect(response.body).toMatchObject({ success: true, assignedRole: 'edit', instanceId: 'place:test' });
       expect(app.isPluginConnected()).toBe(true);
     });
 
-    test('plugin ready records version metadata and exposes mismatch status', async () => {
-      const errorSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+    test('maps logical clients to a physical server session and rejects logical event streams', async () => {
+      await request(app).post('/ready').send({
+        ...READY_BODY,
+        pluginSessionId: 'server-session',
+        physicalSessionId: 'server-session',
+        role: 'server',
+        isRunning: true,
+      }).expect(200);
+      const clientReady = await request(app).post('/ready').send({
+        ...READY_BODY,
+        pluginSessionId: 'client-session',
+        physicalSessionId: 'server-session',
+        role: 'client',
+        isRunning: true,
+      }).expect(200);
+
+      expect(clientReady.body.assignedRole).toBe('client-1');
+      expect(bridge.getInstanceBySessionId('client-session')?.physicalSessionId).toBe('server-session');
+      const publicStatus = await request(app).get('/status').expect(200);
+      expect(publicStatus.body.instances[0]).not.toHaveProperty('physicalSessionId');
+      expect(publicStatus.body.instances[1]).not.toHaveProperty('physicalSessionId');
+      const logicalEvents = await request(app)
+        .get('/events?pluginSessionId=client-session')
+        .expect(409);
+      expect(logicalEvents.body).toEqual({
+        error: 'logical_session_has_no_event_stream',
+        physicalSessionId: 'server-session',
+      });
+      await request(app).get('/events?pluginSessionId=unknown-session').expect(404, {
+        error: 'unknown_session',
+        knownInstance: false,
+      });
+      await request(app)
+        .post('/disconnect')
+        .send({ pluginSessionId: 'server-session' })
+        .expect(200);
+      expect(bridge.getInstanceBySessionId('server-session')).toBeUndefined();
+      expect(bridge.getInstanceBySessionId('client-session')).toBeUndefined();
+    });
+
+    test('rejects logical clients without a matching physical server owner', async () => {
+      const missingOwner = await request(app).post('/ready').send({
+        ...READY_BODY,
+        pluginSessionId: 'client-session',
+        physicalSessionId: 'missing-server',
+        role: 'client',
+        isRunning: true,
+      }).expect(409);
+      expect(missingOwner.body).toMatchObject({
+        success: false,
+        error: 'physical_session_unavailable',
+      });
+      expect(bridge.getInstanceBySessionId('client-session')).toBeUndefined();
+
+      await request(app).post('/ready').send({
+        ...READY_BODY,
+        pluginSessionId: 'edit-session',
+        physicalSessionId: 'edit-session',
+      }).expect(200);
+      const nonServerOwner = await request(app).post('/ready').send({
+        ...READY_BODY,
+        pluginSessionId: 'client-session',
+        physicalSessionId: 'edit-session',
+        role: 'client',
+        isRunning: true,
+      }).expect(409);
+      expect(nonServerOwner.body.error).toBe('physical_session_unavailable');
+      expect(bridge.getInstanceBySessionId('client-session')).toBeUndefined();
+    });
+
+    test('rejects physical client and logical non-client roles', async () => {
+      const physicalClient = await request(app).post('/ready').send({
+        ...READY_BODY,
+        pluginSessionId: 'client-session',
+        physicalSessionId: 'client-session',
+        role: 'client',
+        isRunning: true,
+      }).expect(400);
+      expect(physicalClient.body).toMatchObject({
+        success: false,
+        error: 'invalid_session_topology',
+      });
+
+      await request(app).post('/ready').send({
+        ...READY_BODY,
+        pluginSessionId: 'server-session',
+        physicalSessionId: 'server-session',
+        role: 'server',
+        isRunning: true,
+      }).expect(200);
+      const logicalEdit = await request(app).post('/ready').send({
+        ...READY_BODY,
+        pluginSessionId: 'logical-edit',
+        physicalSessionId: 'server-session',
+        role: 'edit',
+      }).expect(400);
+      expect(logicalEdit.body).toMatchObject({
+        success: false,
+        error: 'invalid_session_topology',
+      });
+    });
+
+    test('rejects a plugin whose version does not match the bundled server', async () => {
       const versionedApp = createHttpServer(
         tools,
         bridge,
         undefined,
         { name: 'robloxstudio-mcp', version: '2.0.0', tools: [] },
       );
-      try {
-        await request(versionedApp).post('/ready').send({
-          ...READY_BODY,
-          pluginVersion: '1.9.0',
-          pluginVariant: 'main',
-        }).expect(200);
-        await request(versionedApp).post('/ready').send({
-          ...READY_BODY,
-          pluginVersion: '1.9.0',
-          pluginVariant: 'main',
-        }).expect(200);
+      const mismatch = await request(versionedApp).post('/ready').send({
+        ...READY_BODY,
+        pluginVersion: '1.9.0',
+      }).expect(426);
+      expect(mismatch.body).toMatchObject({
+        success: false,
+        error: 'plugin_version_mismatch',
+        pluginVersion: '1.9.0',
+        serverVersion: '2.0.0',
+      });
+      expect(bridge.getInstances()).toEqual([]);
 
-        const health = await request(versionedApp).get('/health').expect(200);
-        expect(health.body).toMatchObject({
-          serverVersion: '2.0.0',
-          versionMismatch: true,
-        });
-        expect(health.body.instances[0]).toMatchObject({
-          pluginVersion: '1.9.0',
-          pluginVariant: 'main',
-          serverVersion: '2.0.0',
-          versionMismatch: true,
-        });
-        expect(errorSpy).toHaveBeenCalledTimes(1);
-        expect(errorSpy.mock.calls[0][0]).toContain('[version-mismatch]');
-      } finally {
-        errorSpy.mockRestore();
-      }
+      await request(versionedApp).post('/ready').send({
+        ...READY_BODY,
+        pluginVersion: '2.0.0',
+      }).expect(200);
+      const health = await request(versionedApp).get('/health').expect(200);
+      expect(health.body).toMatchObject({
+        serverVersion: '2.0.0',
+        pluginConnected: true,
+      });
+      expect(health.body.instances[0]).toMatchObject({
+        pluginVersion: '2.0.0',
+        pluginVariant: 'main',
+        serverVersion: '2.0.0',
+      });
+      expect(health.body).not.toHaveProperty('versionMismatch');
+    });
+
+    test('rejects /ready when the server has no version contract', async () => {
+      const configlessApp = createHttpServer(tools, bridge);
+      const response = await request(configlessApp).post('/ready').send(READY_BODY).expect(503);
+      expect(response.body).toMatchObject({
+        success: false,
+        error: 'server_version_unavailable',
+      });
+      expect(bridge.getInstances()).toEqual([]);
+      await configlessApp.cleanup();
     });
 
     test('rejects /ready without required fields', async () => {
@@ -384,8 +466,8 @@ describe('HTTP Server', () => {
       expect(response.body).toMatchObject({
         success: false,
         error: 'missing_ready_fields',
-        message: '/ready missing required field(s): pluginSessionId, instanceId',
-        missingFields: ['pluginSessionId', 'instanceId'],
+        message: '/ready missing required field(s): pluginSessionId, physicalSessionId, instanceId, pluginVersion, pluginVariant',
+        missingFields: ['pluginSessionId', 'physicalSessionId', 'instanceId', 'pluginVersion', 'pluginVariant'],
         request: { role: 'client' },
       });
     });
@@ -394,7 +476,7 @@ describe('HTTP Server', () => {
       await request(app).post('/ready').send(READY_BODY).expect(200);
       const dup = await request(app)
         .post('/ready')
-        .send({ ...READY_BODY, pluginSessionId: 'session-2' })
+        .send({ ...READY_BODY, pluginSessionId: 'session-2', physicalSessionId: 'session-2' })
         .expect(409);
       expect(dup.body).toMatchObject({
         success: false,
@@ -428,6 +510,7 @@ describe('HTTP Server', () => {
       await request(app).post('/ready').send({
         ...READY_BODY,
         pluginSessionId: 'session-server',
+        physicalSessionId: 'session-server',
         role: 'server',
         isRunning: true,
       }).expect(200);
@@ -448,311 +531,30 @@ describe('HTTP Server', () => {
       const p2 = bridge.sendRequest('/api/test2', {}, 'place:test', 'edit');
       p1.catch(() => {});
       p2.catch(() => {});
-      expect(bridge.getPendingRequest('place:test', 'edit')).toBeTruthy();
+      expect(bridge.getPendingRequestCount()).toBe(2);
       await request(app).post('/disconnect').send({ pluginSessionId: 'session-1' }).expect(200);
-      expect(bridge.getPendingRequest('place:test', 'edit')).toBeNull();
+      expect(bridge.getPendingRequestCount()).toBe(0);
     });
 
     test('stale instance detection via unregister', () => {
-      bridge.registerInstance({ pluginSessionId: 'stale-1', instanceId: 'place:s', role: 'edit' });
+      bridge.registerInstance({
+        pluginSessionId: 'stale-1',
+        physicalSessionId: 'stale-1',
+        instanceId: 'place:s',
+        role: 'edit',
+      });
       expect(app.isPluginConnected()).toBe(true);
       bridge.unregisterInstance('stale-1');
       expect(app.isPluginConnected()).toBe(false);
     });
   });
 
-  describe('Polling Endpoint', () => {
-    test('503 when MCP server is not active', async () => {
-      await request(app).post('/ready').send(READY_BODY).expect(200);
-      const response = await request(app).get('/poll?pluginSessionId=session-1').expect(503);
-      expect(response.body).toMatchObject({
-        error: 'MCP server not connected',
-        pluginConnected: true,
-        mcpConnected: false,
-        request: null,
-        knownInstance: true,
-        versionMismatch: false,
-      });
-    });
-
-    test('returns pending request when MCP is active and tuple matches', async () => {
-      await request(app).post('/ready').send(READY_BODY).expect(200);
-      app.setMCPServerActive(true);
-      const pending = bridge.sendRequest('/api/test', { data: 'test' }, 'place:test', 'edit');
-      pending.catch(() => {});
-      const response = await request(app).get('/poll?pluginSessionId=session-1').expect(200);
-      expect(response.body).toMatchObject({
-        request: { endpoint: '/api/test', data: { data: 'test' } },
-        mcpConnected: true,
-        pluginConnected: true,
-        knownInstance: true,
-      });
-      expect(response.body.requestId).toBeTruthy();
-    });
-
-    test('keeps unnegotiated legacy polls in short-poll mode', async () => {
-      await request(app).post('/ready').send(READY_BODY).expect(200);
-      app.setMCPServerActive(true);
-
-      const response = await request(app)
-        .get('/poll?pluginSessionId=session-1')
-        .expect(200);
-      expect(response.body).toMatchObject({
-        request: null,
-        knownInstance: true,
-        mcpConnected: true,
-      });
-      expect(response.body.pollMode).toBeUndefined();
-    });
-
-    test('holds an idle poll until a matching request arrives', async () => {
-      await request(app).post('/ready').send(READY_BODY).expect(200);
-      app.setMCPServerActive(true);
-      const pollEntered = bridge.expectNextPollEntry('session-1');
-      const poll = request(app)
-        .get('/poll?pluginSessionId=session-1&pollMode=long')
-        .expect(200)
-        .then((response) => response);
-
-      await pollEntered;
-      const pending = bridge.sendRequest('/api/test', { delayed: true }, 'place:test', 'edit');
-      const response = await poll;
-      expect(response.body).toMatchObject({
-        request: { endpoint: '/api/test', data: { delayed: true } },
-        mcpConnected: true,
-        pluginConnected: true,
-        knownInstance: true,
-        pollMode: 'long',
-      });
-      bridge.resolveRequest(response.body.requestId, { ok: true });
-      await expect(pending).resolves.toEqual({ ok: true });
-    });
-
-    test('knownInstance=false when pluginSessionId is unknown (server restarted)', async () => {
-      app.setMCPServerActive(true);
-      const response = await request(app).get('/poll?pluginSessionId=unknown-session&pollMode=long').expect(200);
-      expect(response.body.knownInstance).toBe(false);
-      expect(response.body.request).toBeNull();
-      expect(response.body.pollMode).toBe('long');
-    });
-
-    test('releases a held poll when the MCP server becomes inactive', async () => {
-      await request(app).post('/ready').send(READY_BODY).expect(200);
-      app.setMCPServerActive(true);
-      const pollEntered = bridge.expectNextPollEntry('session-1');
-      const poll = request(app)
-        .get('/poll?pluginSessionId=session-1&pollMode=long')
-        .expect(503)
-        .then((response) => response);
-
-      await pollEntered;
-      app.setMCPServerActive(false);
-      const response = await poll;
-      expect(response.body).toMatchObject({
-        error: 'MCP server not connected',
-        mcpConnected: false,
-        request: null,
-      });
-    });
-
-    test('delivers a request that wins a same-turn MCP deactivation race', async () => {
-      await request(app).post('/ready').send(READY_BODY).expect(200);
-      app.setMCPServerActive(true);
-      const pollEntered = bridge.expectNextPollEntry('session-1');
-      const poll = request(app)
-        .get('/poll?pluginSessionId=session-1&pollMode=long')
-        .expect(200)
-        .then((response) => response);
-
-      await pollEntered;
-      const pending = bridge.sendRequest('/api/test', { claimed: true }, 'place:test', 'edit');
-      pending.catch(() => {});
-      app.setMCPServerActive(false);
-
-      const response = await poll;
-      expect(response.body).toMatchObject({
-        request: { endpoint: '/api/test', data: { claimed: true } },
-        mcpConnected: true,
-        knownInstance: true,
-        pollMode: 'long',
-      });
-      bridge.resolveRequest(response.body.requestId, { ok: true });
-      await expect(pending).resolves.toEqual({ ok: true });
-    });
-
-    test('isolates 12 concurrent held polls by Studio instance', async () => {
-      const instanceNumbers = Array.from({ length: 12 }, (_, index) => index + 1);
-      for (const number of instanceNumbers) {
-        await request(app).post('/ready').send({
-          ...READY_BODY,
-          pluginSessionId: `session-${number}`,
-          instanceId: `place:${number}`,
-        }).expect(200);
-      }
-      app.setMCPServerActive(true);
-      const pollEntries = instanceNumbers.map((number) =>
-        bridge.expectNextPollEntry(`session-${number}`));
-      const polls = instanceNumbers.map((number) => request(app)
-        .get(`/poll?pluginSessionId=session-${number}&pollMode=long`)
-        .expect(200)
-        .then((response) => response));
-
-      await Promise.all(pollEntries);
-      const toolCalls = [...instanceNumbers].reverse().map((number) => ({
-        number,
-        promise: bridge.sendRequest('/api/test', { instance: number }, `place:${number}`, 'edit'),
-      }));
-      const deliveries = await Promise.all(polls);
-
-      for (const [index, delivery] of deliveries.entries()) {
-        expect(delivery.body.request.data).toEqual({ instance: index + 1 });
-        bridge.resolveRequest(delivery.body.requestId, { ok: true });
-      }
-      await expect(Promise.all(toolCalls.map((call) => call.promise))).resolves.toHaveLength(12);
-    });
-
-    test('keeps a held poll across same-session anon-to-published /ready migration', async () => {
-      await request(app).post('/ready').send({
-        ...READY_BODY,
-        instanceId: 'anon:pending-place',
-        placeId: 0,
-      }).expect(200);
-      app.setMCPServerActive(true);
-      const pollEntered = bridge.expectNextPollEntry('session-1');
-      const poll = request(app)
-        .get('/poll?pluginSessionId=session-1&pollMode=long')
-        .expect(200)
-        .then((response) => response);
-
-      await pollEntered;
-      const pending = bridge.sendRequest('/api/test', { migrated: true }, 'place:52', 'edit');
-      pending.catch(() => {});
-      const ready = await request(app).post('/ready').send({
-        ...READY_BODY,
-        instanceId: 'anon:pending-place',
-        placeId: 52,
-      }).expect(200);
-      expect(ready.body.instanceId).toBe('place:52');
-
-      const delivery = await poll;
-      expect(delivery.body.request.data).toEqual({ migrated: true });
-      bridge.resolveRequest(delivery.body.requestId, { ok: true });
-      await expect(pending).resolves.toEqual({ ok: true });
-    });
-
-    test('aborting an idle HTTP poll does not consume later work', async () => {
-      await request(app).post('/ready').send(READY_BODY).expect(200);
-      app.setMCPServerActive(true);
-      const server = app.listen(0, '127.0.0.1');
-      await once(server, 'listening');
-      const address = server.address();
-      if (!address || typeof address === 'string') throw new Error('expected TCP server address');
-      const pollUrl = `http://127.0.0.1:${address.port}/poll?pluginSessionId=session-1&pollMode=long`;
-
-      try {
-        const controller = new AbortController();
-        let sawAbort = false;
-        const pollEntered = bridge.expectNextPollEntry('session-1');
-        const pollExited = bridge.expectNextPollExit('session-1');
-        const abortedCompletion = fetch(pollUrl, { signal: controller.signal }).then(
-          () => {
-            throw new Error('aborted poll unexpectedly completed');
-          },
-          () => {
-            sawAbort = true;
-          },
-        );
-
-        await pollEntered;
-        controller.abort();
-        await abortedCompletion;
-        expect(sawAbort).toBe(true);
-        await pollExited;
-
-        const pending = bridge.sendRequest('/api/test', { afterAbort: true }, 'place:test', 'edit');
-        pending.catch(() => {});
-        const delivery = await request(app)
-          .get('/poll?pluginSessionId=session-1&pollMode=long')
-          .expect(200);
-        expect(delivery.body.request.data).toEqual({ afterAbort: true });
-        bridge.resolveRequest(delivery.body.requestId, { ok: true });
-        await expect(pending).resolves.toEqual({ ok: true });
-      } finally {
-        const closed = once(server, 'close');
-        server.closeAllConnections();
-        server.close();
-        await closed;
-      }
-    });
-
-
-    test('MCP lifecycle cancellation is scoped per HTTP app', async () => {
-      const legacyApp = createHttpServer(tools, bridge);
-      await request(app).post('/ready').send({
-        ...READY_BODY,
-        pluginSessionId: 'primary-session',
-        instanceId: 'place:primary',
-      }).expect(200);
-      await request(app).post('/ready').send({
-        ...READY_BODY,
-        pluginSessionId: 'legacy-session',
-        instanceId: 'place:legacy',
-      }).expect(200);
-      app.setMCPServerActive(true);
-      legacyApp.setMCPServerActive(true);
-
-      const pollEntries = [
-        bridge.expectNextPollEntry('primary-session'),
-        bridge.expectNextPollEntry('legacy-session'),
-      ];
-      const primaryPoll = request(app)
-        .get('/poll?pluginSessionId=primary-session&pollMode=long')
-        .expect(503)
-        .then((response) => response);
-      const legacyPoll = request(legacyApp)
-        .get('/poll?pluginSessionId=legacy-session&pollMode=long')
-        .expect(200)
-        .then((response) => response);
-      await Promise.all(pollEntries);
-
-      app.setMCPServerActive(false);
-      const primaryResponse = await primaryPoll;
-      expect(primaryResponse.body.mcpConnected).toBe(false);
-
-      const pending = bridge.sendRequest('/api/test', { app: 'legacy' }, 'place:legacy', 'edit');
-      pending.catch(() => {});
-      const legacyResponse = await legacyPoll;
-      expect(legacyResponse.body.request.data).toEqual({ app: 'legacy' });
-      bridge.resolveRequest(legacyResponse.body.requestId, { ok: true });
-      await expect(pending).resolves.toEqual({ ok: true });
-      legacyApp.setMCPServerActive(false);
-    });
-    test('re-snapshots registration when a held poll loses its session', async () => {
-      await request(app).post('/ready').send(READY_BODY).expect(200);
-      app.setMCPServerActive(true);
-      const pollEntered = bridge.expectNextPollEntry('session-1');
-      const poll = request(app)
-        .get('/poll?pluginSessionId=session-1&pollMode=long')
-        .expect(200)
-        .then((response) => response);
-
-      await pollEntered;
-      await request(app)
-        .post('/disconnect')
-        .send({ pluginSessionId: 'session-1' })
-        .expect(200);
-      const response = await poll;
-      expect(response.body).toMatchObject({
-        knownInstance: false,
-        request: null,
-      });
-    });
-  });
 
   describe('Response Handling', () => {
     test('handles successful response', async () => {
+      await request(app).post('/ready').send(READY_BODY).expect(200);
       const requestPromise = bridge.sendRequest('/api/test', {}, 'place:test', 'edit');
-      const pending = bridge.getPendingRequest('place:test', 'edit');
+      const pending = bridge.claimNextRequestForPhysical('session-1', 'test-success-response');
       const response = await request(app)
         .post('/response')
         .send({ requestId: pending!.requestId, response: { result: 'success' } })
@@ -763,9 +565,10 @@ describe('HTTP Server', () => {
     });
 
     test('handles error response', async () => {
+      await request(app).post('/ready').send(READY_BODY).expect(200);
       const requestPromise = bridge.sendRequest('/api/test', {}, 'place:test', 'edit');
       requestPromise.catch(() => {});
-      const pending = bridge.getPendingRequest('place:test', 'edit');
+      const pending = bridge.claimNextRequestForPhysical('session-1', 'test-error-response');
       await request(app)
         .post('/response')
         .send({ requestId: pending!.requestId, error: 'Test error message' })

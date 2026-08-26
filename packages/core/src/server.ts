@@ -67,12 +67,13 @@ export class RobloxStudioMCPServer {
     let promotionInterval: ReturnType<typeof setInterval> | undefined;
 
     // Try to bind as primary on basePort only — secondary sessions must NOT
-    // claim a different "primary" port, because the plugin only polls basePort.
-    // A successful bind on basePort+1..+4 would create a fake primary whose
-    // bridge queue nothing ever reads from, hanging tool calls until they time
-    // out. The intended multi-session pattern is: first session = primary,
-    // every subsequent session = proxy forwarding to basePort. This matches the
-    // official Roblox Studio MCP (Roblox/studio-rust-mcp-server, main.rs:43).
+    // claim a different "primary" port, because Studio connects its delivery
+    // stream to basePort. A successful bind on basePort+1..+4 would create a
+    // fake primary whose bridge queue has no Studio consumer, hanging tool
+    // calls until they time out. The intended multi-session pattern is: first
+    // session = primary, every subsequent session = proxy forwarding to
+    // basePort. This matches the official Roblox Studio MCP
+    // (Roblox/studio-rust-mcp-server, main.rs:43).
     try {
       primaryApp = createHttpServer(this.tools, this.bridge, this.allowedToolNames, this.config, security);
       const result = await listenWithRetry(primaryApp, host, basePort, 1);
@@ -81,6 +82,7 @@ export class RobloxStudioMCPServer {
       console.error(`HTTP server listening on ${host}:${boundPort} for Studio plugin (primary mode)`);
       console.error(`Streamable HTTP MCP endpoint: http://localhost:${boundPort}/mcp`);
     } catch (error) {
+      await primaryApp?.cleanup().catch(() => {});
       if (process.env.ROBLOX_STUDIO_REQUIRE_PRIMARY === '1') {
         console.error(
           `Port ${basePort} is unavailable and ROBLOX_STUDIO_REQUIRE_PRIMARY=1; refusing proxy mode`,
@@ -99,14 +101,15 @@ export class RobloxStudioMCPServer {
 
       // Periodically try to promote to primary if the port frees up.
       // Single-attempt bind for the same reason as the initial bind above —
-      // only basePort has a real plugin polling it, so promoting to basePort+1
-      // would create another fake primary.
+      // only basePort receives the real Studio delivery stream, so promoting
+      // to basePort+1 would create another fake primary.
       //
       // Build the candidate primary infrastructure on local vars first; only
       // swap this.bridge / this.tools AFTER the bind succeeds. The previous
       // version swapped synchronously before the await, leaving a brief window
       // each interval where tool calls would land on a regular BridgeService
-      // with no plugin polling it (queue with no consumer → 30s timeout).
+      // with no downstream Studio consumer (queue with no consumer → 30s
+      // timeout).
       const promotionIntervalMs = parseInt(process.env.ROBLOX_STUDIO_PROXY_PROMOTION_INTERVAL_MS || '5000');
       promotionInterval = setInterval(async () => {
         const candidateBridge = new BridgeService();
@@ -131,26 +134,12 @@ export class RobloxStudioMCPServer {
           console.error(`Promoted from proxy to primary on port ${boundPort}`);
           if (promotionInterval) clearInterval(promotionInterval);
         } catch {
+          await candidateApp.cleanup().catch(() => {});
           // basePort still taken — discard the candidate, leave proxy bridge live.
         }
       }, promotionIntervalMs);
     }
 
-    // Legacy port 3002 for old plugins
-    const LEGACY_PORT = 3002;
-    let legacyHandle: http.Server | undefined;
-    let legacyApp: RobloxStudioHttpApp | undefined;
-    if (boundPort !== LEGACY_PORT && bridgeMode === 'primary') {
-      legacyApp = createHttpServer(this.tools, this.bridge, this.allowedToolNames, this.config, security);
-      try {
-        const result = await listenWithRetry(legacyApp, host, LEGACY_PORT, 1);
-        legacyHandle = result.server;
-        console.error(`Legacy HTTP server also listening on ${host}:${LEGACY_PORT} for old plugins`);
-        legacyApp.setMCPServerActive(true);
-      } catch {
-        console.error(`Legacy port ${LEGACY_PORT} in use, skipping backward-compat listener`);
-      }
-    }
 
     // The v2 entry negotiates 2026-07-28 while retaining one factory-backed
     // compatibility path for 2025 clients.
@@ -182,7 +171,6 @@ export class RobloxStudioMCPServer {
 
     const activityInterval = setInterval(() => {
       if (primaryApp) primaryApp.trackMCPActivity();
-      if (legacyApp) legacyApp.trackMCPActivity();
 
       if (bridgeMode === 'primary' && primaryApp) {
         const pluginConnected = primaryApp.isPluginConnected();
@@ -211,18 +199,13 @@ export class RobloxStudioMCPServer {
       clearInterval(cleanupInterval);
       if (promotionInterval) clearInterval(promotionInterval);
       primaryApp?.setMCPServerActive(false);
-      legacyApp?.setMCPServerActive(false);
       this.bridge.clearAllPendingRequests();
       if (this.bridge instanceof ProxyBridgeService) {
         this.bridge.stop();
       }
       await stdioHandle.close().catch(() => {});
-      await Promise.all([
-        primaryApp?.closeMcpHandler(),
-        legacyApp?.closeMcpHandler(),
-      ]).catch(() => {});
+      await primaryApp?.cleanup().catch(() => {});
       if (httpHandle) httpHandle.close();
-      if (legacyHandle) legacyHandle.close();
       process.exit(0);
     };
 

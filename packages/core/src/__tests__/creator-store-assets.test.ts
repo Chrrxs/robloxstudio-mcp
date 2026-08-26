@@ -6,6 +6,23 @@ import { OpenCloudClient } from '../opencloud-client.js';
 import { RobloxStudioTools } from '../tools/index.js';
 import { TOOL_DEFINITIONS } from '../tools/definitions.js';
 
+const CREATOR_STORE_TEST_CLAIM_OWNER = 'creator-store-assets-test';
+
+function claimQueuedRequest(bridge: BridgeService, physicalSessionId: string) {
+  const queued = bridge.claimNextRequestForPhysical(
+    physicalSessionId,
+    CREATOR_STORE_TEST_CLAIM_OWNER,
+  );
+  if (!queued) return null;
+  return {
+    requestId: queued.requestId,
+    request: {
+      endpoint: queued.endpoint,
+      data: queued.data as Record<string, unknown>,
+    },
+  };
+}
+
 function textBody(result: { content: Array<{ type: string; text?: string }> }): Record<string, unknown> {
   const text = result.content[0]?.text;
   if (!text) throw new Error('Expected a text tool result');
@@ -386,6 +403,7 @@ describe('Creator Store asset search', () => {
     });
     bridge.registerInstance({
       pluginSessionId: 'creator-store-test',
+      physicalSessionId: 'creator-store-test',
       instanceId: 'place:test',
       role: 'edit',
       placeId: 0,
@@ -395,7 +413,7 @@ describe('Creator Store asset search', () => {
     });
 
     const previewPromise = tools.previewAsset(101, true, 8, 'place:test', false);
-    const previewRequest = bridge.getPendingRequest('place:test', 'edit');
+    const previewRequest = claimQueuedRequest(bridge, 'creator-store-test');
     expect(previewRequest?.request).toEqual({
       endpoint: '/api/preview-asset',
       data: { assetId: 101, includeProperties: true, maxDepth: 8 },
@@ -421,7 +439,7 @@ describe('Creator Store asset search', () => {
       { x: 1, y: 2, z: 3 },
       'place:test',
     );
-    const insertRequest = bridge.getPendingRequest('place:test', 'edit');
+    const insertRequest = claimQueuedRequest(bridge, 'creator-store-test');
     expect(insertRequest?.request).toEqual({
       endpoint: '/api/insert-asset',
       data: {
@@ -464,6 +482,7 @@ describe('Creator Store asset search', () => {
     });
     bridge.registerInstance({
       pluginSessionId: 'creator-store-audio-test',
+      physicalSessionId: 'creator-store-audio-test',
       instanceId: 'place:audio-test',
       role: 'edit',
       placeId: 0,
@@ -480,7 +499,7 @@ describe('Creator Store asset search', () => {
       true,
       2,
     );
-    const previewRequest = bridge.getPendingRequest('place:audio-test', 'edit');
+    const previewRequest = claimQueuedRequest(bridge, 'creator-store-audio-test');
     bridge.resolveRequest(previewRequest!.requestId, {
       success: true,
       summary: {
@@ -554,7 +573,7 @@ describe('Creator Store asset search', () => {
       false,
       2,
     );
-    const metadataOnlyRequest = bridge.getPendingRequest('place:audio-test', 'edit');
+    const metadataOnlyRequest = claimQueuedRequest(bridge, 'creator-store-audio-test');
     bridge.resolveRequest(metadataOnlyRequest!.requestId, {
       success: true,
       summary: {
@@ -588,6 +607,7 @@ describe('Creator Store asset search', () => {
     });
     bridge.registerInstance({
       pluginSessionId: 'creator-store-hierarchy-cap-test',
+      physicalSessionId: 'creator-store-hierarchy-cap-test',
       instanceId: 'place:hierarchy-cap-test',
       role: 'edit',
       placeId: 0,
@@ -603,7 +623,7 @@ describe('Creator Store asset search', () => {
       'place:hierarchy-cap-test',
       false,
     );
-    const previewRequest = bridge.getPendingRequest('place:hierarchy-cap-test', 'edit');
+    const previewRequest = claimQueuedRequest(bridge, 'creator-store-hierarchy-cap-test');
     bridge.resolveRequest(previewRequest!.requestId, {
       success: true,
       hierarchy: Array.from({ length: 120 }, (_, index) => ({
@@ -653,6 +673,7 @@ describe('Creator Store asset search', () => {
     });
     bridge.registerInstance({
       pluginSessionId: 'creator-store-direct-audio-test',
+      physicalSessionId: 'creator-store-direct-audio-test',
       instanceId: 'place:direct-audio-test',
       role: 'edit',
       placeId: 0,
@@ -669,7 +690,7 @@ describe('Creator Store asset search', () => {
       true,
       1,
     );
-    const previewRequest = bridge.getPendingRequest('place:direct-audio-test', 'edit');
+    const previewRequest = claimQueuedRequest(bridge, 'creator-store-direct-audio-test');
     bridge.resolveRequest(previewRequest!.requestId, {
       success: true,
       hierarchy: [],

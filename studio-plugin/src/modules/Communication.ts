@@ -1,8 +1,8 @@
-import { HttpService, RunService, ServerStorage } from "@rbxts/services";
+import { HttpService, RunService } from "@rbxts/services";
 import State from "./State";
 import Utils from "./Utils";
 import UI from "./UI";
-import { cleanupLegacyEditBridges } from "./EvalBridges";
+import { cleanupEditBridgeArtifacts } from "./EvalBridges";
 import QueryHandlers from "./handlers/QueryHandlers";
 import PropertyHandlers from "./handlers/PropertyHandlers";
 import ScriptHandlers from "./handlers/ScriptHandlers";
@@ -22,78 +22,20 @@ import GenerateModelHandlers from "./handlers/GenerateModelHandlers";
 import EvalRuntimeHandlers from "./handlers/EvalRuntimeHandlers";
 import ClientBroker from "./ClientBroker";
 import ServerUrlSettings from "./ServerUrlSettings";
-import HttpDiagnostics from "./HttpDiagnostics";
-import { Connection, RequestPayload, PollResponse, ReadyResponse } from "../types";
-
-// Per-plugin-load random GUID. Used as the /poll URL param so the server
-// can tell our polls apart from any other plugin's polls. Not user-facing —
-// MCP tools and the LLM operate on instanceId (the place identifier).
-const pluginSessionId = HttpService.GenerateGUID(false);
-
-// Place-level identifier shared by every plugin running in DataModels of
-// the same place file (edit DM + playtest server DM + playtest clients).
-// Format: "place:<PlaceId>" when published, "anon:<UUID>" for unpublished
-// places where the UUID lives on ServerStorage's __MCPPlaceId attribute
-// and travels with the .rbxl.
-const MCP_PLACE_ID_ATTRIBUTE = "__MCPPlaceId";
-
-function computeInstanceId(): string {
-	if (game.PlaceId !== 0) {
-		return `place:${tostring(game.PlaceId)}`;
-	}
-	const existing = ServerStorage.GetAttribute(MCP_PLACE_ID_ATTRIBUTE);
-	if (typeIs(existing, "string") && existing !== "") {
-		return `anon:${existing as string}`;
-	}
-	const fresh = HttpService.GenerateGUID(false);
-	pcall(() => ServerStorage.SetAttribute(MCP_PLACE_ID_ATTRIBUTE, fresh));
-	return `anon:${fresh}`;
-}
+import PluginSession from "./PluginSession";
+import StudioEventStream from "./StudioEventStream";
+import {
+	RequestPayload,
+	ReadyResponse,
+	StudioRequestEvent,
+	StudioStatusEvent,
+	TransportUpdate,
+} from "../types";
 
 let assignedRole: string | undefined;
-let hasVersionMismatch = false;
-let lastVersionMismatchWarningKey: string | undefined;
 let lastReadyInstanceId: string | undefined;
-const readyFailureLogKeys = new Set<string>();
-let retryingDuplicateReady = false;
-let pollEpoch = 0;
 
-// Cache the published place name from MarketplaceService:GetProductInfo so
-// /ready can carry a friendly identifier (e.g. "Natural Disasters") distinct
-// from game.Name (the DataModel name, often "Place1" in edit). We only fetch
-// once per plugin load; the published name doesn't change mid-session.
-let cachedPlaceName: string | undefined;
-let cachedPlaceNamePlaceId: number | undefined;
-
-function resolvePlaceName(): string {
-	if (cachedPlaceName !== undefined && cachedPlaceNamePlaceId === game.PlaceId) return cachedPlaceName;
-	cachedPlaceName = undefined;
-	cachedPlaceNamePlaceId = game.PlaceId;
-	if (game.PlaceId === 0) {
-		cachedPlaceName = game.Name;
-		return cachedPlaceName;
-	}
-	const MarketplaceService = game.GetService("MarketplaceService");
-	const [ok, info] = pcall(() => MarketplaceService.GetProductInfo(game.PlaceId));
-	if (ok && info !== undefined) {
-		const name = (info as { Name?: string }).Name;
-		if (typeIs(name, "string") && name !== "") {
-			cachedPlaceName = name;
-			return cachedPlaceName;
-		}
-	}
-	// Don't cache failures — could be transient (offline, rate-limited).
-	// Next /ready will retry. Return game.Name as fallback.
-	return game.Name;
-}
-
-function detectRole(): string {
-	if (!RunService.IsRunning()) return "edit";
-	if (RunService.IsServer()) return "server";
-	return "client";
-}
-
-const initialRole = detectRole();
+const initialRole = PluginSession.getRole();
 
 type Handler = (data: Record<string, unknown>) => unknown;
 
@@ -168,30 +110,6 @@ function processRequest(request: RequestPayload): unknown {
 	}
 }
 
-function sendResponse(conn: Connection, requestId: string, responseData: unknown) {
-	const responseUrl = `${conn.serverUrl}/response`;
-	const [encodeOk, encoded] = pcall(() => HttpService.JSONEncode({ requestId, response: responseData }));
-	const body = encodeOk
-		? encoded
-		: HttpService.JSONEncode({
-			requestId,
-			error: `Plugin response serialization failed: ${tostring(encoded)}`,
-		});
-	if (!encodeOk) {
-		warn(`[robloxstudio-mcp] Failed to serialize response ${requestId}: ${tostring(encoded)}`);
-	}
-
-	const [requestOk, requestResult] = pcall(() => HttpService.RequestAsync({
-		Url: responseUrl,
-		Method: "POST",
-		Headers: { "Content-Type": "application/json" },
-		Body: body,
-	}));
-	if (!requestOk || !requestResult.Success) {
-		warn(`[robloxstudio-mcp] Failed to deliver response ${requestId}: ${HttpDiagnostics.formatRequestFailure(responseUrl, requestOk, requestResult)}`);
-	}
-}
-
 function getConnectionStatus(): string {
 	const conn = State.getActiveConnection();
 	if (!conn.isActive) return "disconnected";
@@ -200,316 +118,130 @@ function getConnectionStatus(): string {
 	return "connecting";
 }
 
-// Throttle for re-issuing /ready after the server reports knownInstance=false.
-// Without this, every poll during the brief window where the server has just
-// restarted but hasn't seen our re-ready yet would fire a duplicate /ready.
-let lastReadyPostAt = 0;
+function dispatchStreamRequest(request: StudioRequestEvent): unknown {
+	if (request.logicalSessionId !== PluginSession.id) {
+		return ClientBroker.dispatchClientRequest(
+			request.logicalSessionId,
+			request.target,
+			request.endpoint,
+			request.data,
+		);
+	}
+	const localRole = assignedRole ?? PluginSession.getRole();
+	if (request.target !== localRole) {
+		return {
+			error: `Physical plugin session is registered as ${localRole}, not ${request.target}.`,
+		};
+	}
+	return processRequest({ endpoint: request.endpoint, data: request.data });
+}
 
-// game.Name and game.PlaceId can both settle after plugin load. PlaceId also
-// changes when an unpublished file is published while MCP is already active.
-// Re-fire /ready so the bridge can migrate anon:<uuid> to place:<PlaceId>.
+function handleReady(response: ReadyResponse): void {
+	const conn = State.getActiveConnection();
+	if (!conn.isActive) return;
+	assignedRole = response.assignedRole;
+	lastReadyInstanceId = response.instanceId;
+	ServerUrlSettings.rememberServerUrl(conn.serverUrl);
+	ClientBroker.refreshAllLogicalRegistrations();
+}
+
+function handleStatus(status: StudioStatusEvent): void {
+	const conn = State.getActiveConnection();
+	if (!conn.isActive) return;
+	conn.lastHttpOk = true;
+	conn.lastMcpOk = status.mcpConnected;
+	conn.consecutiveFailures = 0;
+	conn.currentRetryDelay = 0.5;
+	if (status.mcpConnected) {
+		conn.mcpWaitStartTime = undefined;
+	} else if (conn.mcpWaitStartTime === undefined) {
+		conn.mcpWaitStartTime = tick();
+	}
+
+
+	UI.updateUIState();
+	UI.updateToolbarIcon();
+}
+
+function handleHeartbeat(_timestamp: number): void {
+	if (!State.getActiveConnection().isActive) return;
+	UI.updateUIState();
+}
+
+function handleTransportUpdate(update: TransportUpdate): void {
+	const conn = State.getActiveConnection();
+	if (!conn.isActive) return;
+
+	if (update.state === "open") {
+		conn.lastHttpOk = true;
+		conn.lastMcpOk = false;
+		conn.consecutiveFailures = 0;
+		conn.currentRetryDelay = 0.5;
+		conn.mcpWaitStartTime = tick();
+	} else {
+		conn.lastHttpOk = false;
+		conn.lastMcpOk = false;
+		conn.consecutiveFailures = update.attempt;
+		if (update.retryDelay > 0) conn.currentRetryDelay = update.retryDelay;
+		conn.mcpWaitStartTime = undefined;
+	}
+
+	UI.updateUIState();
+	UI.updateToolbarIcon();
+	if (update.state === "waiting-duplicate") {
+		const ui = UI.getElements();
+		ui.statusLabel.Text = "Waiting for previous instance";
+		ui.statusLabel.TextColor3 = Color3.fromRGB(245, 158, 11);
+		ui.detailStatusLabel.Text = update.detail ?? "The previous plugin instance is still active.";
+		ui.detailStatusLabel.TextColor3 = Color3.fromRGB(245, 158, 11);
+	}
+}
+
 let nameChangeConn: RBXScriptConnection | undefined;
 let placeIdChangeConn: RBXScriptConnection | undefined;
-function ensureIdentityWatcher(conn: Connection): void {
+
+function ensureIdentityWatchers(): void {
 	if (!nameChangeConn) {
-		const [okSig, signal] = pcall(() => game.GetPropertyChangedSignal("Name"));
-		if (okSig && signal) {
-			nameChangeConn = signal.Connect(() => {
-				// sendReady has its own 2s throttle, so rapid burst changes coalesce.
-				sendReady(conn);
-			});
+		const [signalOk, signal] = pcall(() => game.GetPropertyChangedSignal("Name"));
+		if (signalOk && signal) {
+			nameChangeConn = signal.Connect(() => StudioEventStream.refresh());
 		}
 	}
 	if (!placeIdChangeConn) {
-		const [okSig, signal] = pcall(() => game.GetPropertyChangedSignal("PlaceId"));
-		if (okSig && signal) {
+		const [signalOk, signal] = pcall(() => game.GetPropertyChangedSignal("PlaceId"));
+		if (signalOk && signal) {
 			placeIdChangeConn = signal.Connect(() => {
-				cachedPlaceName = undefined;
-				cachedPlaceNamePlaceId = undefined;
-				sendReady(conn);
+				PluginSession.invalidatePlaceName();
+				lastReadyInstanceId = PluginSession.getInstanceId();
+				StudioEventStream.refresh();
 			});
 		}
 	}
 }
 
-function sendReady(conn: Connection): void {
-	const now = tick();
-	// Normal identity refreshes stay conservatively throttled. Once a stale
-	// predecessor causes 409, retry once per second so takeover follows the
-	// server's short inactivity lease without another two seconds of jitter.
-	const readyInterval = retryingDuplicateReady ? 1 : 2;
-	if (now - lastReadyPostAt < readyInterval) return;
-	lastReadyPostAt = now;
-	const instanceId = computeInstanceId();
-	task.spawn(() => {
-		const [readyOk, readyResult] = pcall(() => {
-			return HttpService.RequestAsync({
-				Url: `${conn.serverUrl}/ready`,
-				Method: "POST",
-				Headers: { "Content-Type": "application/json" },
-				Body: HttpService.JSONEncode({
-					pluginSessionId,
-					instanceId,
-					role: detectRole(),
-					placeId: game.PlaceId,
-					placeName: resolvePlaceName(),
-					dataModelName: game.Name,
-					isRunning: RunService.IsRunning(),
-					pluginVersion: State.CURRENT_VERSION,
-					pluginVariant: State.PLUGIN_VARIANT,
-					pluginReady: true,
-					timestamp: tick(),
-				}),
-			});
-		});
-		const readyUrl = `${conn.serverUrl}/ready`;
-		const readyRole = detectRole();
-		const readyLogKey = `${conn.serverUrl}|${instanceId}|${readyRole}`;
-		if (!readyOk) {
-			const shouldLog = !readyFailureLogKeys.has(readyLogKey);
-			readyFailureLogKeys.add(readyLogKey);
-			if (shouldLog) {
-				warn(`[robloxstudio-mcp] /ready failed for ${instanceId}/${readyRole}: ${HttpDiagnostics.formatRequestFailure(readyUrl, readyOk, readyResult)}`);
-			}
-			return;
-		}
-		if (!readyResult.Success) {
-			const reason = HttpDiagnostics.formatRequestFailure(readyUrl, true, readyResult);
-			const shouldLog = !readyFailureLogKeys.has(readyLogKey);
-			readyFailureLogKeys.add(readyLogKey);
-			// A predecessor can remain registered briefly when Studio exits before
-			// its asynchronous /disconnect completes. Keep polling and retrying
-			// /ready: the server will take us over once the predecessor has stopped
-			// polling, while a genuinely active duplicate continues to hold routing.
-			if (readyResult.StatusCode === 409) {
-				retryingDuplicateReady = true;
-				const ui = UI.getElements();
-				ui.statusLabel.Text = "Waiting for previous instance";
-				ui.statusLabel.TextColor3 = Color3.fromRGB(245, 158, 11);
-				ui.detailStatusLabel.Text = reason;
-				ui.detailStatusLabel.TextColor3 = Color3.fromRGB(245, 158, 11);
-				if (shouldLog) {
-					warn(`[robloxstudio-mcp] /ready rejected for ${instanceId}/${readyRole}: ${reason}`);
-				}
-				return;
-			}
-			if (shouldLog) {
-				warn(`[robloxstudio-mcp] /ready rejected for ${instanceId}/${readyRole}: ${reason}`);
-			}
-			return;
-		}
-		retryingDuplicateReady = false;
-		const [parseOk, readyData] = pcall(
-			() => HttpService.JSONDecode(readyResult.Body) as ReadyResponse,
-		);
-		if (parseOk && readyData.assignedRole) {
-			assignedRole = readyData.assignedRole;
-		}
-		lastReadyInstanceId = parseOk && typeIs(readyData.instanceId, "string") && readyData.instanceId !== ""
-			? readyData.instanceId
-			: instanceId;
-		ServerUrlSettings.rememberServerUrl(conn.serverUrl);
-		const connectedRole = assignedRole ?? detectRole();
-		if (readyFailureLogKeys.has(readyLogKey)) {
-			readyFailureLogKeys.delete(readyLogKey);
-			print(`[robloxstudio-mcp] /ready connected for ${instanceId}/${connectedRole} via ${conn.serverUrl}`);
-		}
-	});
-}
-
-function pollForRequests() {
-	const conn = State.getActiveConnection();
-	if (!conn.isActive) return;
-	if (conn.isPolling) return;
-
-	const epoch = pollEpoch;
-	conn.isPolling = true;
-
-	const [success, result] = pcall(() => {
-		const requestOptions = {
-			Url: `${conn.serverUrl}/poll?pluginSessionId=${pluginSessionId}&pollMode=long`,
-			Method: "GET" as const,
-			Headers: { "Content-Type": "application/json" },
-			Timeout: State.POLL_REQUEST_TIMEOUT_SECONDS,
-		};
-		return HttpService.RequestAsync(requestOptions);
-	});
-
-	// A held request can finish after deactivate/reactivate. Only the current
-	// lifecycle epoch may mutate connection state or clear a newer poll's lock.
-	if (epoch !== pollEpoch || !conn.isActive) return;
-	conn.isPolling = false;
-
-	const ui = UI.getElements();
-	UI.updateToolbarIcon();
-
-	if (success && (result.Success || result.StatusCode === 503)) {
-		conn.consecutiveFailures = 0;
-		conn.currentRetryDelay = 0.5;
-		conn.lastSuccessfulConnection = tick();
-
-		const data = HttpService.JSONDecode(result.Body) as PollResponse;
-		conn.lastPoll = tick();
-		if (result.Success && data.pollMode === "long" && data.knownInstance !== false && data.request === undefined) {
-			// The server held this request until work or timeout, so immediately
-			// replace it instead of reintroducing the legacy 500 ms idle gap.
-			conn.lastPoll = 0;
-		}
-		const mcpConnected = data.mcpConnected === true;
-		conn.lastHttpOk = true;
-		conn.lastMcpOk = mcpConnected;
-		const serverVersion = data.serverVersion ?? "unknown";
-		if (data.versionMismatch === true) {
-			hasVersionMismatch = true;
-			const warningKey = `${State.CURRENT_VERSION}:${serverVersion}`;
-			if (lastVersionMismatchWarningKey !== warningKey) {
-				lastVersionMismatchWarningKey = warningKey;
-				warn(`[robloxstudio-mcp] Version mismatch: Studio plugin v${State.CURRENT_VERSION} / MCP v${serverVersion}. Run npx -y @chrrxs/robloxstudio-mcp@latest --auto-install-plugin and restart Studio.`);
-			}
-			UI.showBanner("version-mismatch", `Plugin v${State.CURRENT_VERSION} / MCP v${serverVersion} mismatch`);
-		} else if (hasVersionMismatch) {
-			hasVersionMismatch = false;
-			UI.hideBanner("version-mismatch");
-		}
-
-		// Server tells us when its in-memory instances map doesn't have us
-		// (e.g. after an MCP process restart). Re-issue /ready immediately so
-		// target=server/client-N start routing again. The throttle inside
-		// sendReady() prevents duplicate registrations while the server
-		// catches up.
-		if (data.knownInstance === false) {
-			sendReady(conn);
-		}
-
-		const el = ui;
-		el.step1Dot.BackgroundColor3 = Color3.fromRGB(34, 197, 94);
-		el.step1Label.Text = "HTTP server (OK)";
-
-		if (mcpConnected && !el.statusLabel.Text.find("Connected")[0]) {
-			el.statusLabel.Text = "Connected";
-			el.statusLabel.TextColor3 = Color3.fromRGB(34, 197, 94);
-			el.statusIndicator.BackgroundColor3 = Color3.fromRGB(34, 197, 94);
-			el.statusPulse.BackgroundColor3 = Color3.fromRGB(34, 197, 94);
-			el.statusText.Text = "ONLINE";
-			el.detailStatusLabel.Text = "HTTP: OK  MCP: OK";
-			el.detailStatusLabel.TextColor3 = Color3.fromRGB(34, 197, 94);
-			el.step2Dot.BackgroundColor3 = Color3.fromRGB(34, 197, 94);
-			el.step2Label.Text = "MCP bridge (OK)";
-			el.step3Dot.BackgroundColor3 = Color3.fromRGB(34, 197, 94);
-			el.step3Label.Text = "Commands (OK)";
-			conn.mcpWaitStartTime = undefined;
-			el.troubleshootLabel.Visible = false;
-			UI.stopPulseAnimation();
-		} else if (!mcpConnected) {
-			el.statusLabel.Text = "Waiting for MCP server";
-			el.statusLabel.TextColor3 = Color3.fromRGB(245, 158, 11);
-			el.statusIndicator.BackgroundColor3 = Color3.fromRGB(245, 158, 11);
-			el.statusPulse.BackgroundColor3 = Color3.fromRGB(245, 158, 11);
-			el.statusText.Text = "WAITING";
-			el.detailStatusLabel.Text = "HTTP: OK  MCP: ...";
-			el.detailStatusLabel.TextColor3 = Color3.fromRGB(245, 158, 11);
-			el.step2Dot.BackgroundColor3 = Color3.fromRGB(245, 158, 11);
-			el.step2Label.Text = "MCP bridge (waiting...)";
-			el.step3Dot.BackgroundColor3 = Color3.fromRGB(245, 158, 11);
-			el.step3Label.Text = "Commands (waiting...)";
-			if (conn.mcpWaitStartTime === undefined) {
-				conn.mcpWaitStartTime = tick();
-			}
-			const elapsed = tick() - (conn.mcpWaitStartTime ?? tick());
-			el.troubleshootLabel.Visible = elapsed > 8;
-			UI.startPulseAnimation();
-		}
-
-		if (data.request && mcpConnected) {
-			task.spawn(() => {
-				const [ok, response] = pcall(() => processRequest(data.request!));
-				if (ok) {
-					sendResponse(conn, data.requestId!, response);
-				} else {
-					sendResponse(conn, data.requestId!, { error: tostring(response) });
-				}
-			});
-		}
-	} else if (conn.isActive) {
-		conn.lastPoll = tick();
-		conn.consecutiveFailures++;
-
-		if (conn.consecutiveFailures > 1) {
-			conn.currentRetryDelay = math.min(
-				conn.currentRetryDelay * conn.retryBackoffMultiplier,
-				conn.maxRetryDelay,
-			);
-		}
-
-
-		const el = ui;
-		if (conn.consecutiveFailures >= conn.maxFailuresBeforeError) {
-			el.statusLabel.Text = "Server unavailable";
-			el.statusLabel.TextColor3 = Color3.fromRGB(239, 68, 68);
-			el.statusIndicator.BackgroundColor3 = Color3.fromRGB(239, 68, 68);
-			el.statusPulse.BackgroundColor3 = Color3.fromRGB(239, 68, 68);
-			el.statusText.Text = "ERROR";
-			el.detailStatusLabel.Text = "HTTP: X  MCP: X";
-			el.detailStatusLabel.TextColor3 = Color3.fromRGB(239, 68, 68);
-			el.step1Dot.BackgroundColor3 = Color3.fromRGB(239, 68, 68);
-			el.step1Label.Text = "HTTP server (error)";
-			el.step2Dot.BackgroundColor3 = Color3.fromRGB(239, 68, 68);
-			el.step2Label.Text = "MCP bridge (error)";
-			el.step3Dot.BackgroundColor3 = Color3.fromRGB(239, 68, 68);
-			el.step3Label.Text = "Commands (error)";
-			conn.mcpWaitStartTime = undefined;
-			el.troubleshootLabel.Visible = false;
-			UI.stopPulseAnimation();
-		} else if (conn.consecutiveFailures > 5) {
-			const waitTime = math.ceil(conn.currentRetryDelay);
-			el.statusLabel.Text = `Retrying (${waitTime}s)`;
-			el.statusLabel.TextColor3 = Color3.fromRGB(245, 158, 11);
-			el.statusIndicator.BackgroundColor3 = Color3.fromRGB(245, 158, 11);
-			el.statusPulse.BackgroundColor3 = Color3.fromRGB(245, 158, 11);
-			el.statusText.Text = "RETRY";
-			el.detailStatusLabel.Text = "HTTP: ...  MCP: ...";
-			el.detailStatusLabel.TextColor3 = Color3.fromRGB(245, 158, 11);
-			el.step1Dot.BackgroundColor3 = Color3.fromRGB(245, 158, 11);
-			el.step1Label.Text = "HTTP server (retrying...)";
-			el.step2Dot.BackgroundColor3 = Color3.fromRGB(245, 158, 11);
-			el.step2Label.Text = "MCP bridge (retrying...)";
-			el.step3Dot.BackgroundColor3 = Color3.fromRGB(245, 158, 11);
-			el.step3Label.Text = "Commands (retrying...)";
-			conn.mcpWaitStartTime = undefined;
-			el.troubleshootLabel.Visible = false;
-			UI.startPulseAnimation();
-		} else if (conn.consecutiveFailures > 1) {
-			el.statusLabel.Text = `Connecting (attempt ${conn.consecutiveFailures})`;
-			el.statusLabel.TextColor3 = Color3.fromRGB(245, 158, 11);
-			el.statusIndicator.BackgroundColor3 = Color3.fromRGB(245, 158, 11);
-			el.statusPulse.BackgroundColor3 = Color3.fromRGB(245, 158, 11);
-			el.statusText.Text = "CONNECTING";
-			el.detailStatusLabel.Text = "HTTP: ...  MCP: ...";
-			el.detailStatusLabel.TextColor3 = Color3.fromRGB(245, 158, 11);
-			el.step1Dot.BackgroundColor3 = Color3.fromRGB(245, 158, 11);
-			el.step1Label.Text = "HTTP server (connecting...)";
-			el.step2Dot.BackgroundColor3 = Color3.fromRGB(245, 158, 11);
-			el.step2Label.Text = "MCP bridge (connecting...)";
-			el.step3Dot.BackgroundColor3 = Color3.fromRGB(245, 158, 11);
-			el.step3Label.Text = "Commands (connecting...)";
-			conn.mcpWaitStartTime = undefined;
-			el.troubleshootLabel.Visible = false;
-			UI.startPulseAnimation();
-		}
+function disconnectIdentityWatchers(): void {
+	if (nameChangeConn) {
+		nameChangeConn.Disconnect();
+		nameChangeConn = undefined;
+	}
+	if (placeIdChangeConn) {
+		placeIdChangeConn.Disconnect();
+		placeIdChangeConn = undefined;
 	}
 }
 
 
 function activatePlugin() {
 	const conn = State.getActiveConnection();
+	if (conn.isActive) return;
 	const ui = UI.getElements();
 
-	pollEpoch++;
-	conn.isPolling = false;
-	conn.lastPoll = 0;
 	conn.isActive = true;
 	conn.consecutiveFailures = 0;
 	conn.currentRetryDelay = 0.5;
+	conn.lastHttpOk = false;
+	conn.lastMcpOk = false;
+	conn.mcpWaitStartTime = undefined;
 
 	const normalizedUrl = ServerUrlSettings.normalizeServerUrl(ui.urlInput.Text);
 	conn.serverUrl = normalizedUrl !== "" ? normalizedUrl : conn.serverUrl;
@@ -517,69 +249,62 @@ function activatePlugin() {
 	ui.urlInput.Text = conn.serverUrl;
 	const port = ServerUrlSettings.extractPort(conn.serverUrl);
 	if (port !== undefined) conn.port = port;
+	ClientBroker.setServerUrl(conn.serverUrl);
+	lastReadyInstanceId = PluginSession.getInstanceId();
 	UI.updateUIState();
+
+	StudioEventStream.start({
+		serverUrl: conn.serverUrl,
+		dispatchRequest: dispatchStreamRequest,
+		onStatus: handleStatus,
+		onHeartbeat: handleHeartbeat,
+		onReady: handleReady,
+		onTransportUpdate: handleTransportUpdate,
+	});
 
 	if (!conn.heartbeatConnection) {
 		conn.heartbeatConnection = RunService.Heartbeat.Connect(() => {
-			const now = tick();
 			if (initialRole === "server" && !RunService.IsRunning()) {
 				ClientBroker.disconnectAllProxies();
 				deactivatePlugin();
 				return;
 			}
-			const currentInstanceId = computeInstanceId();
+			const currentInstanceId = PluginSession.getInstanceId();
 			if (lastReadyInstanceId !== undefined && currentInstanceId !== lastReadyInstanceId) {
-				cachedPlaceName = undefined;
-				cachedPlaceNamePlaceId = undefined;
-				sendReady(conn);
-			}
-			const currentInterval = conn.consecutiveFailures > 5 ? conn.currentRetryDelay : conn.pollInterval;
-			if (now - conn.lastPoll > currentInterval) {
-				conn.lastPoll = now;
-				pollForRequests();
+				lastReadyInstanceId = currentInstanceId;
+				PluginSession.invalidatePlaceName();
+				StudioEventStream.refresh();
 			}
 		});
 	}
 
-	// Initial /ready; pollForRequests will also re-fire ready if the server
-	// later reports knownInstance=false (process restart, etc).
-	sendReady(conn);
-
-	// Remove legacy edit-mode eval bridge scripts from older plugin builds.
-	// Current bridges are created only in running play DataModels.
 	if (!RunService.IsRunning()) {
-		task.spawn(cleanupLegacyEditBridges);
+		task.spawn(cleanupEditBridgeArtifacts);
 	}
-
-	// Watch identity fields so stale name or anon instance ids are refreshed.
-	ensureIdentityWatcher(conn);
+	ensureIdentityWatchers();
 }
 
 function deactivatePlugin() {
 	const conn = State.getActiveConnection();
-	pollEpoch++;
-	conn.isPolling = false;
+	if (!conn.isActive) return;
 	conn.isActive = false;
+	conn.lastHttpOk = false;
 	conn.lastMcpOk = false;
+	conn.mcpWaitStartTime = undefined;
 
-	UI.updateUIState();
-
-	pcall(() => {
-		HttpService.RequestAsync({
-			Url: `${conn.serverUrl}/disconnect`,
-			Method: "POST",
-			Headers: { "Content-Type": "application/json" },
-			Body: HttpService.JSONEncode({ pluginSessionId, timestamp: tick() }),
-		});
-	});
-
+	StudioEventStream.stop();
+	disconnectIdentityWatchers();
+	if (initialRole === "server") ClientBroker.disconnectAllProxies();
 	if (conn.heartbeatConnection) {
 		conn.heartbeatConnection.Disconnect();
 		conn.heartbeatConnection = undefined;
 	}
 
+	lastReadyInstanceId = undefined;
+	assignedRole = undefined;
 	conn.consecutiveFailures = 0;
 	conn.currentRetryDelay = 0.5;
+	UI.updateUIState();
 }
 
 function deactivateAll() {
@@ -604,9 +329,7 @@ function checkForUpdates() {
 			if (ok && data?.version) {
 				const latestVersion = data.version;
 				if (Utils.compareVersions(State.CURRENT_VERSION, latestVersion) < 0) {
-					if (!hasVersionMismatch) {
-						UI.showBanner("update", `v${latestVersion} available - github.com/chrrxs/robloxstudio-mcp`);
-					}
+					UI.showBanner("update", `v${latestVersion} available - github.com/chrrxs/robloxstudio-mcp`);
 				}
 			}
 		}

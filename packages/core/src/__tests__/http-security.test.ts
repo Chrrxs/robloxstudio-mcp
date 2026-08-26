@@ -90,8 +90,8 @@ describe('HTTP security', () => {
       expect(health.status).toBe(200);
       const status = await request(app).get('/status');
       expect(status.status).toBe(200);
-      const poll = await request(app).get('/poll');
-      expect(poll.status).toBe(503); // no MCP active — but not 401
+      const events = await request(app).get('/events?pluginSessionId=unknown-session');
+      expect(events.status).toBe(404); // unknown session — but not 401
       const disconnect = await request(app).post('/disconnect').send({});
       expect(disconnect.status).toBe(200);
     });

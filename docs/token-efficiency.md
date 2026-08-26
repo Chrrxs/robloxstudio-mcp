@@ -32,8 +32,8 @@ guide only when needed, and the guide is not part of the tool catalog.
 - Modern 2026-07-28 clients receive JSON once, in `structuredContent`.
 - Legacy 2025 clients receive one JSON text projection for compatibility.
 - Human-readable Markdown and image/audio content remain content blocks.
-- Known bundle, plugin-session, version-mismatch, debug, and diagnostic metadata
-  fields are removed at the protocol boundary.
+- Known bundle, plugin-session, debug, and diagnostic metadata fields are
+  removed at the protocol boundary.
 - `get_connected_instances` returns each place once as `{ id, name, roles }`
   instead of repeating full plugin diagnostics for every edit/server/client peer.
 - Tool errors expose a short stable code, an actionable message, and only the
