@@ -10,7 +10,9 @@ import {
 
 const INITIAL_RECONNECT_DELAY_SECONDS = 0.5;
 const MAX_RECONNECT_DELAY_SECONDS = 5;
-const MAX_COMPLETED_RESPONSES = 256;
+const INITIAL_RESPONSE_RETRY_DELAY_SECONDS = 0.5;
+const MAX_RESPONSE_RETRY_DELAY_SECONDS = 5;
+const MAX_TERMINAL_RESPONSES = 256;
 const STREAM_SILENCE_TIMEOUT_SECONDS = 20;
 
 
@@ -28,6 +30,15 @@ type DecodedEvent =
 	| StudioStatusEvent
 	| { kind: "heartbeat"; timestamp: number };
 
+type ResponseDisposition = "accepted" | "already_settled" | "unknown";
+
+interface PendingResponse {
+	body: string;
+	retryAttempt: number;
+	posting: boolean;
+	retryToken: number;
+}
+
 let options: StudioEventStreamOptions | undefined;
 let active = false;
 let generation = 0;
@@ -36,8 +47,9 @@ let streamClient: WebStreamClient | undefined;
 let streamConnections: RBXScriptConnection[] = [];
 let lastValidEventAt = 0;
 const inFlightRequestIds = new Set<string>();
-const completedResponses = new Map<string, string>();
-const completedResponseOrder: string[] = [];
+const pendingResponses = new Map<string, PendingResponse>();
+const terminalResponseIds = new Set<string>();
+const terminalResponseOrder: string[] = [];
 const readyFailureLogKeys = new Set<string>();
 
 function decodeMessage(message: string): DecodedEvent | undefined {
@@ -110,29 +122,125 @@ function closeCurrentStream(): void {
 	}
 }
 
-function postEncodedResponse(body: string, requestId: string): void {
-	const currentOptions = options;
-	if (!active || currentOptions === undefined) return;
-	const expectedGeneration = generation;
-	const responseUrl = `${currentOptions.serverUrl}/response`;
-	const [requestOk, requestResult] = pcall(() =>
-		HttpService.RequestAsync({
-			Url: responseUrl,
-			Method: "POST",
-			Headers: { "Content-Type": "application/json" },
-			Body: body,
-		}),
+function responseRetryDelay(attempt: number): number {
+	return math.min(
+		INITIAL_RESPONSE_RETRY_DELAY_SECONDS * math.pow(2, math.max(attempt - 1, 0)),
+		MAX_RESPONSE_RETRY_DELAY_SECONDS,
 	);
-	let failure: string | undefined;
-	if (!requestOk) {
-		failure = HttpDiagnostics.formatRequestFailure(responseUrl, false, requestResult);
-	} else if (!requestResult.Success) {
-		failure = HttpDiagnostics.formatRequestFailure(responseUrl, true, requestResult);
+}
+
+function parseResponseDisposition(success: boolean, body: string): ResponseDisposition | undefined {
+	const [decodeOk, decoded] = pcall(() => HttpService.JSONDecode(body));
+	if (!decodeOk || !typeIs(decoded, "table")) return undefined;
+	const acknowledgement = decoded as Record<string, unknown>;
+	const disposition = acknowledgement.disposition;
+	if (
+		disposition === "accepted" ||
+		disposition === "already_settled" ||
+		disposition === "unknown"
+	) {
+		return disposition;
 	}
-	if (failure === undefined) return;
-	warn(`[robloxstudio-mcp] Failed to deliver response ${requestId}: ${failure}`);
-	if (active && generation === expectedGeneration && options === currentOptions) {
-		scheduleReconnect(expectedGeneration, `Response delivery failed: ${failure}`);
+	if (success && acknowledgement.success === true && disposition === undefined) {
+		return "accepted";
+	}
+	return undefined;
+}
+
+function rememberTerminalResponse(requestId: string): void {
+	if (terminalResponseIds.has(requestId)) return;
+	terminalResponseIds.add(requestId);
+	terminalResponseOrder.push(requestId);
+	while (terminalResponseOrder.size() > MAX_TERMINAL_RESPONSES) {
+		const oldest = terminalResponseOrder.shift();
+		if (oldest !== undefined) terminalResponseIds.delete(oldest);
+	}
+}
+
+function settleResponse(
+	requestId: string,
+	entry: PendingResponse,
+	disposition: ResponseDisposition,
+): void {
+	if (pendingResponses.get(requestId) !== entry) return;
+	pendingResponses.delete(requestId);
+	rememberTerminalResponse(requestId);
+	if (disposition === "unknown") {
+		warn(
+			`[robloxstudio-mcp] Server no longer recognizes response ${requestId}; dropping stored result`,
+		);
+	}
+}
+
+function postPendingResponse(requestId: string, entry: PendingResponse): void {
+	const currentOptions = options;
+	if (
+		!active ||
+		currentOptions === undefined ||
+		pendingResponses.get(requestId) !== entry ||
+		entry.posting
+	) {
+		return;
+	}
+	entry.posting = true;
+	entry.retryToken++;
+
+	task.spawn(() => {
+		if (
+			!active ||
+			options !== currentOptions ||
+			pendingResponses.get(requestId) !== entry
+		) {
+			entry.posting = false;
+			return;
+		}
+		const responseUrl = `${currentOptions.serverUrl}/response`;
+		const [requestOk, requestResult] = pcall(() =>
+			HttpService.RequestAsync({
+				Url: responseUrl,
+				Method: "POST",
+				Headers: { "Content-Type": "application/json" },
+				Body: entry.body,
+			}),
+		);
+		if (pendingResponses.get(requestId) !== entry) return;
+		entry.posting = false;
+
+		let failure: string;
+		if (!requestOk) {
+			failure = HttpDiagnostics.formatRequestFailure(responseUrl, false, requestResult);
+		} else {
+			const disposition = parseResponseDisposition(requestResult.Success, requestResult.Body);
+			if (disposition !== undefined) {
+				settleResponse(requestId, entry, disposition);
+				return;
+			}
+			failure = requestResult.Success
+				? "Invalid /response acknowledgement"
+				: HttpDiagnostics.formatRequestFailure(responseUrl, true, requestResult);
+		}
+
+		warn(`[robloxstudio-mcp] Failed to deliver response ${requestId}: ${failure}`);
+		entry.retryAttempt++;
+		if (!active || pendingResponses.get(requestId) !== entry) return;
+		const retryToken = ++entry.retryToken;
+		const delay = responseRetryDelay(entry.retryAttempt);
+		task.delay(delay, () => {
+			if (
+				!active ||
+				pendingResponses.get(requestId) !== entry ||
+				entry.retryToken !== retryToken
+			) {
+				return;
+			}
+			postPendingResponse(requestId, entry);
+		});
+	});
+}
+
+function resumePendingResponses(): void {
+	for (const [requestId, entry] of pendingResponses) {
+		postPendingResponse(requestId, entry);
 	}
 }
 
@@ -146,24 +254,14 @@ function encodeResponse(requestId: string, response: unknown): string {
 	});
 }
 
-function rememberCompletedResponse(requestId: string, body: string): void {
-	if (!completedResponses.has(requestId)) {
-		completedResponseOrder.push(requestId);
-	}
-	completedResponses.set(requestId, body);
-	while (completedResponseOrder.size() > MAX_COMPLETED_RESPONSES) {
-		const oldest = completedResponseOrder.shift();
-		if (oldest !== undefined) completedResponses.delete(oldest);
-	}
-}
-
 function dispatchRequest(request: StudioRequestEvent): void {
-	const completed = completedResponses.get(request.requestId);
-	if (completed !== undefined) {
-		task.spawn(() => postEncodedResponse(completed, request.requestId));
+	if (
+		terminalResponseIds.has(request.requestId) ||
+		pendingResponses.has(request.requestId) ||
+		inFlightRequestIds.has(request.requestId)
+	) {
 		return;
 	}
-	if (inFlightRequestIds.has(request.requestId)) return;
 	const dispatchOptions = options;
 	if (!active || dispatchOptions === undefined) return;
 	inFlightRequestIds.add(request.requestId);
@@ -171,10 +269,15 @@ function dispatchRequest(request: StudioRequestEvent): void {
 	task.spawn(() => {
 		const [dispatchOk, response] = pcall(() => dispatchOptions.dispatchRequest(request));
 		const responseData = dispatchOk ? response : { error: tostring(response) };
-		const body = encodeResponse(request.requestId, responseData);
-		rememberCompletedResponse(request.requestId, body);
+		const entry: PendingResponse = {
+			body: encodeResponse(request.requestId, responseData),
+			retryAttempt: 0,
+			posting: false,
+			retryToken: 0,
+		};
+		pendingResponses.set(request.requestId, entry);
 		inFlightRequestIds.delete(request.requestId);
-		postEncodedResponse(body, request.requestId);
+		postPendingResponse(request.requestId, entry);
 	});
 }
 
@@ -352,6 +455,7 @@ function connect(expectedGeneration: number): void {
 				}
 				reconnectAttempt = 0;
 				reportTransport({ state: "open", attempt: 0, retryDelay: 0 });
+				resumePendingResponses();
 			}),
 			createdClient.MessageReceived.Connect((message) => {
 				if (!active || generation !== expectedGeneration || streamClient !== createdClient) return;

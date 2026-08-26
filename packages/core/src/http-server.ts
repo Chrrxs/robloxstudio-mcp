@@ -625,14 +625,23 @@ export function createHttpServer(tools: RobloxStudioTools, bridge: BridgeService
 
   app.post('/response', (req, res) => {
     const { requestId, response, error } = req.body;
-
-    if (error) {
-      bridge.rejectRequest(requestId, error);
-    } else {
-      bridge.resolveRequest(requestId, response);
+    if (typeof requestId !== 'string' || requestId.length === 0) {
+      res.status(400).json({
+        success: false,
+        error: 'invalid_request_id',
+      });
+      return;
     }
 
-    res.json({ success: true });
+    const disposition = error !== undefined
+      ? bridge.rejectRequest(requestId, error)
+      : bridge.resolveRequest(requestId, response);
+    if (disposition === 'unknown') {
+      res.status(404).json({ success: false, disposition });
+      return;
+    }
+
+    res.json({ success: true, disposition });
   });
 
 

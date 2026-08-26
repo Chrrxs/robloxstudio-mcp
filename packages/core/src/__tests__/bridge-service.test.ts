@@ -49,8 +49,59 @@ describe('BridgeService', () => {
         endpoint: '/api/test',
         data: { hello: 'world' },
       });
-      bridge.resolveRequest(delivery!.requestId, { ok: true });
+      expect(bridge.resolveRequest(delivery!.requestId, { ok: true })).toBe('accepted');
+      expect(bridge.rejectRequest(delivery!.requestId, 'late duplicate')).toBe('already_settled');
       await expect(response).resolves.toEqual({ ok: true });
+    });
+
+    test('settles an error once and reports repeated settlement', async () => {
+      register(bridge, { pluginSessionId: 'edit', instanceId: 'place:1', role: 'edit' });
+      const response = bridge.sendRequest('/api/test', {}, 'place:1', 'edit');
+      response.catch(() => {});
+      const delivery = bridge.claimNextRequestForPhysical('edit', 'test-error');
+
+      expect(bridge.rejectRequest(delivery!.requestId, 'failed')).toBe('accepted');
+      expect(bridge.resolveRequest(delivery!.requestId, { tooLate: true })).toBe('already_settled');
+      await expect(response).rejects.toBe('failed');
+    });
+
+    test('reports unknown for a request ID that was never issued', () => {
+      expect(bridge.resolveRequest('never-issued', { ok: true })).toBe('unknown');
+      expect(bridge.rejectRequest('never-issued', 'failed')).toBe('unknown');
+    });
+
+    test('expires accepted request IDs after 60 seconds', async () => {
+      register(bridge, { pluginSessionId: 'edit', instanceId: 'place:1', role: 'edit' });
+      const response = bridge.sendRequest('/api/test', {}, 'place:1', 'edit', 120_000);
+      const delivery = bridge.claimNextRequestForPhysical('edit', 'test-expiry');
+
+      expect(bridge.resolveRequest(delivery!.requestId, { ok: true })).toBe('accepted');
+      await expect(response).resolves.toEqual({ ok: true });
+      jest.advanceTimersByTime(59_999);
+      expect(bridge.resolveRequest(delivery!.requestId, { duplicate: true })).toBe('already_settled');
+      jest.advanceTimersByTime(1);
+      expect(bridge.resolveRequest(delivery!.requestId, { duplicate: true })).toBe('unknown');
+    });
+
+    test('retains only the 4096 most recently accepted request IDs', async () => {
+      register(bridge, { pluginSessionId: 'edit', instanceId: 'place:1', role: 'edit' });
+      const responses: Promise<unknown>[] = [];
+      let oldestRequestId = '';
+      let newestRequestId = '';
+      for (let index = 0; index < 4097; index += 1) {
+        const response = bridge.sendRequest('/api/test', { index }, 'place:1', 'edit');
+        responses.push(response);
+        const delivery = bridge.claimNextRequestForPhysical('edit', `test-cap-${index}`)!;
+        if (index === 0) oldestRequestId = delivery.requestId;
+        newestRequestId = delivery.requestId;
+        if (bridge.resolveRequest(delivery.requestId, { index }) !== 'accepted') {
+          throw new Error(`Request ${index} was not accepted`);
+        }
+      }
+      await expect(Promise.all(responses)).resolves.toHaveLength(4097);
+
+      expect(bridge.resolveRequest(oldestRequestId, {})).toBe('unknown');
+      expect(bridge.resolveRequest(newestRequestId, {})).toBe('already_settled');
     });
 
     test('does not claim requests for a different role or physical session', async () => {
@@ -125,10 +176,11 @@ describe('BridgeService', () => {
     test('keeps request timeout semantics after delivery', async () => {
       register(bridge, { pluginSessionId: 'edit', instanceId: 'place:1', role: 'edit' });
       const response = bridge.sendRequest('/api/slow', {}, 'place:1', 'edit');
-      bridge.claimNextRequestForPhysical('edit', 'stream');
+      const delivery = bridge.claimNextRequestForPhysical('edit', 'stream')!;
 
       jest.advanceTimersByTime(31_000);
       await expect(response).rejects.toThrow('Request timeout');
+      expect(bridge.resolveRequest(delivery.requestId, {})).toBe('unknown');
     });
 
     test('migrates queued work when an anonymous session becomes published', async () => {
@@ -148,11 +200,15 @@ describe('BridgeService', () => {
       const second = bridge.sendRequest('/api/b', {}, 'place:1', 'edit');
       first.catch(() => {});
       second.catch(() => {});
+      const firstDelivery = bridge.claimNextRequestForPhysical('edit', 'shutdown-1')!;
+      const secondDelivery = bridge.claimNextRequestForPhysical('edit', 'shutdown-2')!;
 
       bridge.clearAllPendingRequests();
       await expect(first).rejects.toThrow('Connection closed');
       await expect(second).rejects.toThrow('Connection closed');
       expect(bridge.getPendingRequestCount()).toBe(0);
+      expect(bridge.resolveRequest(firstDelivery.requestId, {})).toBe('unknown');
+      expect(bridge.rejectRequest(secondDelivery.requestId, 'late')).toBe('unknown');
     });
   });
 
@@ -340,6 +396,7 @@ describe('BridgeService', () => {
     test('fast relaunch takes over an inactive predecessor and rejects its pending requests', async () => {
       register(bridge, { pluginSessionId: 'old-session', instanceId: 'anon:relaunch', role: 'edit' });
       const pending = bridge.sendRequest('/api/test', { generation: 'old' }, 'anon:relaunch', 'edit');
+      const delivery = bridge.claimNextRequestForPhysical('old-session', 'old-delivery')!;
 
       jest.advanceTimersByTime(3_001);
       const relaunched = bridge.registerInstance({
@@ -354,6 +411,7 @@ describe('BridgeService', () => {
       expect(bridge.getInstanceBySessionId('new-session')).toBeDefined();
       expect(bridge.getPendingRequestCount()).toBe(0);
       await expect(pending).rejects.toThrow(/disconnected/);
+      expect(bridge.resolveRequest(delivery.requestId, {})).toBe('unknown');
     });
 
     test('recent stream activity prevents an active duplicate from being taken over', () => {
@@ -577,8 +635,10 @@ describe('BridgeService', () => {
     test('unregisterInstance rejects requests targeting the removed (instanceId, role)', async () => {
       register(bridge, { pluginSessionId: 'p1', instanceId: 'place:1', role: 'edit' });
       const req = bridge.sendRequest('/api/test', {}, 'place:1', 'edit');
+      const delivery = bridge.claimNextRequestForPhysical('p1', 'disconnecting-delivery')!;
       bridge.unregisterInstance('p1');
       await expect(req).rejects.toThrow(/disconnected/);
+      expect(bridge.resolveRequest(delivery.requestId, {})).toBe('unknown');
     });
 
     test('unregisterInstance leaves requests alone if another plugin still holds the tuple', async () => {

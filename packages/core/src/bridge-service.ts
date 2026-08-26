@@ -30,6 +30,8 @@ export interface PluginInstance {
   connectedAt: number;
 }
 
+export type SettlementDisposition = 'accepted' | 'already_settled' | 'unknown';
+
 interface PendingRequest {
   id: string;
   endpoint: string;
@@ -138,6 +140,8 @@ const STALE_INSTANCE_MS = 30000;
 // a Studio close/relaunch does not strand the replacement for stale cleanup.
 const DUPLICATE_TAKEOVER_MS = 3000;
 const INSTANCE_ALIAS_TTL_MS = 5 * 60 * 1000;
+const ACCEPTED_REQUEST_TOMBSTONE_TTL_MS = 60_000;
+const MAX_ACCEPTED_REQUEST_TOMBSTONES = 4096;
 
 interface InstanceAlias {
   targetInstanceId: string;
@@ -151,6 +155,7 @@ function publishedInstanceId(placeId: number | undefined): string | undefined {
 
 export class BridgeService implements StudioTransportQueue {
   private pendingRequests: Map<string, PendingRequest> = new Map();
+  private acceptedRequestIds: Map<string, number> = new Map();
   // Keyed by pluginSessionId (the per-plugin GUID).
   private instances: Map<string, PluginInstance> = new Map();
   private instanceAliases: Map<string, InstanceAlias> = new Map();
@@ -736,21 +741,44 @@ export class BridgeService implements StudioTransportQueue {
     }
   }
 
-  resolveRequest(requestId: string, response: any) {
-    const request = this.pendingRequests.get(requestId);
-    if (request) {
-      clearTimeout(request.timeoutId);
-      this.pendingRequests.delete(requestId);
-      request.resolve(response);
-    }
+  resolveRequest(requestId: string, response: unknown): SettlementDisposition {
+    return this.settleRequest(requestId, (request) => request.resolve(response));
   }
 
-  rejectRequest(requestId: string, error: any) {
+  rejectRequest(requestId: string, error: unknown): SettlementDisposition {
+    return this.settleRequest(requestId, (request) => request.reject(error));
+  }
+
+  private settleRequest(
+    requestId: string,
+    settle: (request: PendingRequest) => void,
+  ): SettlementDisposition {
+    const now = Date.now();
+    this.pruneAcceptedRequestIds(now);
+
     const request = this.pendingRequests.get(requestId);
-    if (request) {
-      clearTimeout(request.timeoutId);
-      this.pendingRequests.delete(requestId);
-      request.reject(error);
+    if (!request) {
+      return this.acceptedRequestIds.has(requestId) ? 'already_settled' : 'unknown';
+    }
+
+    clearTimeout(request.timeoutId);
+    this.pendingRequests.delete(requestId);
+    this.acceptedRequestIds.set(requestId, now);
+    this.pruneAcceptedRequestIds(now);
+    settle(request);
+    return 'accepted';
+  }
+
+  private pruneAcceptedRequestIds(now: number): void {
+    for (const [requestId, acceptedAt] of this.acceptedRequestIds) {
+      if (now - acceptedAt < ACCEPTED_REQUEST_TOMBSTONE_TTL_MS) break;
+      this.acceptedRequestIds.delete(requestId);
+    }
+
+    while (this.acceptedRequestIds.size > MAX_ACCEPTED_REQUEST_TOMBSTONES) {
+      const oldestRequestId = this.acceptedRequestIds.keys().next().value;
+      if (oldestRequestId === undefined) break;
+      this.acceptedRequestIds.delete(oldestRequestId);
     }
   }
 

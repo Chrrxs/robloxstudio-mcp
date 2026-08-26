@@ -551,29 +551,55 @@ describe('HTTP Server', () => {
 
 
   describe('Response Handling', () => {
-    test('handles successful response', async () => {
+    test('acknowledges accepted and repeated successful responses', async () => {
       await request(app).post('/ready').send(READY_BODY).expect(200);
       const requestPromise = bridge.sendRequest('/api/test', {}, 'place:test', 'edit');
-      const pending = bridge.claimNextRequestForPhysical('session-1', 'test-success-response');
-      const response = await request(app)
+      const pending = bridge.claimNextRequestForPhysical('session-1', 'test-success-response')!;
+
+      const accepted = await request(app)
         .post('/response')
-        .send({ requestId: pending!.requestId, response: { result: 'success' } })
+        .send({ requestId: pending.requestId, response: { result: 'success' } })
         .expect(200);
-      expect(response.body).toEqual({ success: true });
-      const result = await requestPromise;
-      expect(result).toEqual({ result: 'success' });
+      expect(accepted.body).toEqual({ success: true, disposition: 'accepted' });
+
+      const repeated = await request(app)
+        .post('/response')
+        .send({ requestId: pending.requestId, response: { result: 'duplicate' } })
+        .expect(200);
+      expect(repeated.body).toEqual({ success: true, disposition: 'already_settled' });
+      await expect(requestPromise).resolves.toEqual({ result: 'success' });
     });
 
-    test('handles error response', async () => {
+    test('treats an empty-string error as an accepted rejection', async () => {
       await request(app).post('/ready').send(READY_BODY).expect(200);
       const requestPromise = bridge.sendRequest('/api/test', {}, 'place:test', 'edit');
       requestPromise.catch(() => {});
-      const pending = bridge.claimNextRequestForPhysical('session-1', 'test-error-response');
-      await request(app)
+      const pending = bridge.claimNextRequestForPhysical('session-1', 'test-error-response')!;
+
+      const response = await request(app)
         .post('/response')
-        .send({ requestId: pending!.requestId, error: 'Test error message' })
+        .send({ requestId: pending.requestId, error: '' })
         .expect(200);
-      await expect(requestPromise).rejects.toEqual('Test error message');
+      expect(response.body).toEqual({ success: true, disposition: 'accepted' });
+      await expect(requestPromise).rejects.toBe('');
+    });
+
+    test('reports an unknown settlement with HTTP 404', async () => {
+      const response = await request(app)
+        .post('/response')
+        .send({ requestId: 'never-issued', response: { result: 'late' } })
+        .expect(404);
+      expect(response.body).toEqual({ success: false, disposition: 'unknown' });
+    });
+
+    test('rejects malformed request IDs with HTTP 400', async () => {
+      for (const body of [{}, { requestId: '' }, { requestId: 42 }, { requestId: null }]) {
+        const response = await request(app).post('/response').send(body).expect(400);
+        expect(response.body).toEqual({
+          success: false,
+          error: 'invalid_request_id',
+        });
+      }
     });
   });
 
