@@ -4,6 +4,8 @@ const CaptureService = game.GetService("CaptureService");
 const AssetService = game.GetService("AssetService");
 
 const MAX_TILE_SIZE = 1024;
+const MAX_RAW_PIXEL_BYTES = 36 * 1024 * 1024;
+const MAX_CREATED_IMAGE_DIM = 2048;
 const BASE64_CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 const PAD_BYTE = string.byte("=")[0];
 
@@ -119,16 +121,43 @@ function readContentToBase64(contentId: string): unknown {
 		};
 	}
 
-	const editableImage = editableResult as EditableImage;
-	const imgSize = editableImage.Size;
-	const w = math.floor(imgSize.X);
-	const h = math.floor(imgSize.Y);
+	let sourceImage = editableResult as EditableImage;
+	const imgSize = sourceImage.Size;
+	const nativeW = math.floor(imgSize.X);
+	const nativeH = math.floor(imgSize.Y);
+	let w = nativeW;
+	let h = nativeH;
+
+	if (nativeW * nativeH * 4 > MAX_RAW_PIXEL_BYTES) {
+		const scale = math.min(
+			math.sqrt(MAX_RAW_PIXEL_BYTES / (nativeW * nativeH * 4)),
+			MAX_CREATED_IMAGE_DIM / math.max(nativeW, nativeH),
+		);
+		w = math.max(1, math.floor(nativeW * scale));
+		h = math.max(1, math.floor(nativeH * scale));
+		const [scaleOk, scaledResult] = pcall(() => {
+			const target = AssetService.CreateEditableImage({ Size: new Vector2(w, h) });
+			target.DrawImageTransformed(new Vector2(0, 0), new Vector2(w / nativeW, h / nativeH), 0, sourceImage, {
+				CombineType: Enum.ImageCombineType.AlphaBlend,
+				SamplingMode: Enum.ResamplerMode.Default,
+				PivotPoint: new Vector2(0, 0),
+			});
+			return target;
+		});
+		sourceImage.Destroy();
+		if (!scaleOk) {
+			return {
+				error: `Screenshot is ${nativeW}x${nativeH} (too large to transfer raw) and downscaling failed: ${tostring(scaledResult)}`,
+			};
+		}
+		sourceImage = scaledResult as EditableImage;
+	}
 
 	const [readOk, pixelBuffer] = pcall(() => {
-		return readPixelsTiled(editableImage, w, h);
+		return readPixelsTiled(sourceImage, w, h);
 	});
 
-	editableImage.Destroy();
+	sourceImage.Destroy();
 
 	if (!readOk) {
 		return { error: `Failed to read pixel data: ${tostring(pixelBuffer)}` };
@@ -136,7 +165,7 @@ function readContentToBase64(contentId: string): unknown {
 
 	const base64Data = encodeBase64(pixelBuffer as buffer);
 
-	return { success: true, width: w, height: h, data: base64Data };
+	return { success: true, width: w, height: h, data: base64Data, nativeWidth: nativeW, nativeHeight: nativeH };
 }
 
 // Edit-mode single shot: capture and read back in the same (edit) context.

@@ -4143,4 +4143,98 @@ describe('Smoke', () => {
     });
     expect(result.content.some((item) => item.type === 'image')).toBe(true);
   });
+
+  test('capture_screenshot reports the coordinate multiplier when Studio downscales the capture', async () => {
+    const bridge = new BridgeService();
+    const tools = new RobloxStudioTools(bridge);
+    bridge.registerInstance(READY);
+
+    const resultPromise = tools.captureScreenshot('place:test', 'jpeg', 80);
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const capturePending = bridge.getPendingRequest('place:test', 'edit');
+    expect(capturePending?.request).toMatchObject({ endpoint: '/api/capture-screenshot' });
+    bridge.resolveRequest(capturePending!.requestId, {
+      width: 3,
+      height: 1,
+      nativeWidth: 4,
+      nativeHeight: 2,
+      data: Buffer.alloc(12, 255).toString('base64'),
+    });
+
+    const result = await resultPromise;
+    const firstContent = result.content[0];
+    if (firstContent.type !== 'text' || firstContent.text === undefined) throw new Error('Expected screenshot metadata text first');
+    const meta = JSON.parse(firstContent.text);
+    expect(meta).toMatchObject({ width: 3, height: 1, format: 'jpeg' });
+    expect(meta.message).toContain('downscaled from the 4x2 viewport');
+    expect(meta.message).toContain('multiply x read off this image by 1.3333 and y by 2.0000');
+  });
+
+  test('capture_device_matrix keeps the total inline image payload within the aggregate budget', async () => {
+    const bridge = new BridgeService();
+    const tools = new RobloxStudioTools(bridge);
+    bridge.registerInstance(READY);
+
+    const noiseSide = 2000;
+    const noise = Buffer.alloc(noiseSide * noiseSide * 4);
+    let seed = 0x12345678;
+    for (let i = 0; i < noise.length; i += 4) {
+      seed = (seed * 1664525 + 1013904223) >>> 0;
+      noise[i] = seed >>> 24;
+      seed = (seed * 1664525 + 1013904223) >>> 0;
+      noise[i + 1] = seed >>> 24;
+      seed = (seed * 1664525 + 1013904223) >>> 0;
+      noise[i + 2] = seed >>> 24;
+      noise[i + 3] = 255;
+    }
+    const noiseB64 = noise.toString('base64');
+
+    const resultPromise = tools.captureDeviceMatrix(
+      [{ label: 'a', deviceId: 'iphone_XR' }, { label: 'b', deviceId: 'ipad' }],
+      'edit',
+      'jpeg',
+      100,
+      0,
+      false,
+      'place:test',
+    );
+
+    const snapshotPending = bridge.getPendingRequest('place:test', 'edit');
+    bridge.resolveRequest(snapshotPending!.requestId, {
+      success: true,
+      returnValue: JSON.stringify({ activeDeviceId: 'default', isSimulating: false }),
+    });
+
+    for (const label of ['a', 'b']) {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      const setPending = bridge.getPendingRequest('place:test', 'edit');
+      bridge.resolveRequest(setPending!.requestId, {
+        success: true,
+        returnValue: JSON.stringify({
+          success: true,
+          applied: { deviceId: label },
+          before: { activeDeviceId: 'default', isSimulating: false },
+          after: { activeDeviceId: label, isSimulating: true },
+        }),
+      });
+
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      const capturePending = bridge.getPendingRequest('place:test', 'edit');
+      expect(capturePending?.request).toMatchObject({ endpoint: '/api/capture-screenshot' });
+      bridge.resolveRequest(capturePending!.requestId, {
+        width: noiseSide,
+        height: noiseSide,
+        data: noiseB64,
+      });
+    }
+
+    const result = await resultPromise;
+    const images = result.content.filter(
+      (item): item is { type: 'image'; data: string; mimeType: string } => item.type === 'image',
+    );
+    expect(images).toHaveLength(2);
+    const totalBytes = images.reduce((sum, item) => sum + Math.ceil((item.data.length * 3) / 4), 0);
+    expect(totalBytes).toBeLessThanOrEqual(8_000_000);
+  });
 });

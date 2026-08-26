@@ -29,6 +29,8 @@ type RawImageCaptureResponse = {
   error?: string;
   width?: number;
   height?: number;
+  nativeWidth?: number;
+  nativeHeight?: number;
   data?: string;
   instancePath?: string;
   instanceName?: string;
@@ -73,6 +75,7 @@ type GenerateModelImage =
   { kind: 'asset'; asset_id: number };
 
 const MAX_INLINE_IMAGE_BYTES = 6_000_000;
+const MAX_MATRIX_IMAGE_BYTES = 8_000_000;
 const DEFAULT_ASSET_AUDIO_PREVIEWS = 3;
 const MAX_ASSET_AUDIO_PREVIEWS = 5;
 const MAX_INLINE_AUDIO_PREVIEW_BYTES = 3_000_000;
@@ -2256,6 +2259,7 @@ export class RobloxStudioTools {
     const entrySummaries = summary.entries as Array<Record<string, unknown>>;
     const content: ToolContent[] = [];
     const failures: string[] = [];
+    let imageBudget = MAX_MATRIX_IMAGE_BYTES;
 
     try {
       for (let i = 0; i < matrixEntries.length; i++) {
@@ -2280,8 +2284,10 @@ export class RobloxStudioTools {
           entrySummary.applied = applied;
           if (settleMs > 0) await sleep(settleMs);
 
-          const capture = await this._captureViewportImage(resolved.instanceId, resolved.role, format, quality);
+          const entryBudget = Math.max(1, Math.floor(imageBudget / (matrixEntries.length - i)));
+          const capture = await this._captureViewportImage(resolved.instanceId, resolved.role, format, quality, entryBudget);
           if (capture.success) {
+            imageBudget -= Math.ceil((capture.data.length * 3) / 4);
             entrySummary.screenshot = {
               width: capture.width,
               height: capture.height,
@@ -4707,6 +4713,7 @@ export class RobloxStudioTools {
     targetRole: string,
     format?: string,
     quality?: number,
+    maxBytes: number = MAX_INLINE_IMAGE_BYTES,
   ): Promise<EncodedViewportCapture> {
     let response: RawImageCaptureResponse;
     if (targetRole.startsWith('client-')) {
@@ -4766,32 +4773,47 @@ export class RobloxStudioTools {
     let usedQ = q;
     let note = '';
 
-    if (buffer.length > MAX_INLINE_IMAGE_BYTES) {
+    if (buffer.length > maxBytes) {
       if (fmt === 'png') {
         const mb = (buffer.length / 1048576).toFixed(1);
         return {
           success: false,
           error:
-            `PNG screenshot is ${mb}MB, over the ~${(MAX_INLINE_IMAGE_BYTES / 1048576).toFixed(0)}MB inline image limit. ` +
+            `PNG screenshot is ${mb}MB, over the ~${(maxBytes / 1048576).toFixed(1)}MB inline image limit. ` +
             `Use the default jpeg format (optionally with a "quality" value) or make the Studio window smaller for a lossless capture.`,
         };
       }
-      while (buffer.length > MAX_INLINE_IMAGE_BYTES && usedQ > 25) {
+      while (buffer.length > maxBytes && usedQ > 25) {
         usedQ = Math.max(25, usedQ - 20);
         buffer = encodeImageFromRgbaResponse(response, 'jpeg', usedQ).buffer;
+      }
+      if (buffer.length > maxBytes) {
+        return {
+          success: false,
+          error:
+            `JPEG screenshot is still ${(buffer.length / 1048576).toFixed(1)}MB at q${usedQ}, over the ` +
+            `${(maxBytes / 1048576).toFixed(1)}MB inline budget. Make the Studio window smaller or capture fewer images per call.`,
+        };
       }
       note = ` — auto-reduced to q${usedQ} to fit the inline size limit; enlarge the Studio window or capture a smaller region for finer detail`;
     }
 
     // Explicit coordinate contract: the image is returned at native viewport
-    // resolution and is never downscaled, so its pixel grid IS the coordinate
-    // space simulate_mouse_input expects. Stating the dimensions removes any
-    // ambiguity about what (x, y) mean.
-
+    // resolution whenever it fits the transport cap, so its pixel grid IS the
+    // coordinate space simulate_mouse_input expects. Oversized captures are
+    // downscaled in Studio before transfer; the message then tells the caller
+    // how to map image coordinates back to viewport coordinates.
+    const nativeW = response.nativeWidth ?? w;
+    const nativeH = response.nativeHeight ?? h;
     const message =
-      `Screenshot ${w}x${h}px (${fmt}${fmt === 'jpeg' ? ` q${usedQ}` : ''})${note}. ` +
-      `For simulate_mouse_input, x/y are pixel coordinates in this exact image with (0,0) at the ` +
-      `top-left; it is not downscaled, so use coordinates as you read them off the image.`;
+      nativeW !== w || nativeH !== h
+        ? `Screenshot ${w}x${h}px (${fmt}${fmt === 'jpeg' ? ` q${usedQ}` : ''})${note}, downscaled from the ` +
+          `${nativeW}x${nativeH} viewport to fit transport limits. For simulate_mouse_input, multiply x read off ` +
+          `this image by ${(nativeW / w).toFixed(4)} and y by ${(nativeH / h).toFixed(4)} to get viewport pixel ` +
+          `coordinates ((0,0) at the top-left).`
+        : `Screenshot ${w}x${h}px (${fmt}${fmt === 'jpeg' ? ` q${usedQ}` : ''})${note}. ` +
+          `For simulate_mouse_input, x/y are pixel coordinates in this exact image with (0,0) at the ` +
+          `top-left; it is not downscaled, so use coordinates as you read them off the image.`;
 
     return {
       success: true,
@@ -4823,6 +4845,7 @@ export class RobloxStudioTools {
             format: capture.format,
             mimeType: capture.mimeType,
             ...(capture.quality === undefined ? {} : { quality: capture.quality }),
+            message: capture.message,
           }),
         },
         {
