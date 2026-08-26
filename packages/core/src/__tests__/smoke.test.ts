@@ -4176,12 +4176,17 @@ describe('Smoke', () => {
     const tools = new RobloxStudioTools(bridge);
     bridge.registerInstance(READY);
 
-    const noiseSide = 1400;
+    const noiseSide = 2000;
     const noise = Buffer.alloc(noiseSide * noiseSide * 4);
     let seed = 0x12345678;
-    for (let i = 0; i < noise.length; i++) {
+    for (let i = 0; i < noise.length; i += 4) {
       seed = (seed * 1664525 + 1013904223) >>> 0;
-      noise[i] = seed & 0xff;
+      noise[i] = seed >>> 24;
+      seed = (seed * 1664525 + 1013904223) >>> 0;
+      noise[i + 1] = seed >>> 24;
+      seed = (seed * 1664525 + 1013904223) >>> 0;
+      noise[i + 2] = seed >>> 24;
+      noise[i + 3] = 255;
     }
     const noiseB64 = noise.toString('base64');
 
