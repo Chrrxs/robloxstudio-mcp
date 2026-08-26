@@ -1,7 +1,19 @@
-import { existsSync, unlinkSync } from 'fs';
+import {
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  unlinkSync,
+  writeFileSync,
+} from 'fs';
 import { execSync } from 'child_process';
-import { join } from 'path';
+import { randomUUID } from 'crypto';
+import { basename, join } from 'path';
 import { homedir } from 'os';
+import { isUtf8 } from 'buffer';
+import { SaxesParser } from 'saxes';
 import { getStudioPlatformCapabilities } from './studio-platform.js';
 
 // Shared helpers for the per-package install-plugin.ts in
@@ -142,3 +154,286 @@ export function handleVariantConflict({
 	      `Delete ${otherAssetName} manually or use the default CLI installer behavior to replace it.\n`,
 	  );
 	}
+
+export type PluginVariant = 'main' | 'inspector';
+
+export interface InstallPluginAssetOptions {
+  pluginsFolder: string;
+  assetName: string;
+  otherAssetName: string;
+  source: Buffer;
+  expectedVersion: string;
+  expectedVariant: PluginVariant;
+  rawPort?: string;
+  replaceVariant?: boolean;
+  log?: (message: string) => void;
+  warn?: (message: string) => void;
+}
+
+export interface PluginInstallResult {
+  destination: string;
+  installed: boolean;
+}
+
+const PLUGIN_INSTALL_LOCK_NAME = '.robloxstudio-mcp-plugin-install.lock';
+
+function errorCode(error: unknown): string | undefined {
+  return (error as NodeJS.ErrnoException).code;
+}
+
+function acquirePluginInstallLock(
+  pluginsFolder: string,
+  warn: (message: string) => void,
+): () => void {
+  const lockPath = join(pluginsFolder, PLUGIN_INSTALL_LOCK_NAME);
+  const ownerPath = join(lockPath, 'owner.json');
+  const owner = {
+    pid: process.pid,
+    token: randomUUID(),
+    createdAt: Date.now(),
+  };
+
+  try {
+    mkdirSync(lockPath);
+  } catch (error) {
+    if (errorCode(error) !== 'EEXIST') throw error;
+    throw new Error(
+      `Another Studio plugin installation is already in progress: ${lockPath}. ` +
+        'If no installer is running, remove that lock directory and retry.',
+    );
+  }
+
+  try {
+    writeFileSync(ownerPath, `${JSON.stringify(owner)}\n`, {
+      encoding: 'utf8',
+      flag: 'wx',
+    });
+  } catch (error) {
+    try {
+      rmSync(lockPath, { recursive: true, force: true });
+    } catch (cleanupError) {
+      warn(`[install-plugin] Could not clean failed install lock ${lockPath}: ${cleanupError}`);
+    }
+    throw error;
+  }
+
+  return () => {
+    try {
+      const currentOwner = JSON.parse(readFileSync(ownerPath, 'utf8')) as {
+        pid?: unknown;
+        token?: unknown;
+      };
+      if (currentOwner.pid === owner.pid && currentOwner.token === owner.token) {
+        rmSync(lockPath, { recursive: true, force: true });
+      }
+    } catch (error) {
+      if (errorCode(error) !== 'ENOENT') {
+        warn(`[install-plugin] Could not release install lock ${lockPath}: ${error}`);
+      }
+    }
+  };
+}
+
+function assertAssetFileName(name: string, field: string): void {
+  if (name === '' || basename(name) !== name) {
+    throw new Error(`${field} must be a file name, received ${JSON.stringify(name)}`);
+  }
+}
+
+function embeddedPluginValue(
+  source: string,
+  name: 'CURRENT_VERSION' | 'PLUGIN_VARIANT',
+  assetName: string,
+): string {
+  const pattern = new RegExp(`\\blocal\\s+${name}\\s*=\\s*"([^"]+)"\\s*;?`, 'g');
+  const matches = [...source.matchAll(pattern)];
+  if (matches.length !== 1) {
+    throw new Error(
+      `${assetName} must contain exactly one embedded ${name}; found ${matches.length}.`,
+    );
+  }
+  return matches[0][1];
+}
+
+interface ParsedPluginElement {
+  name: string;
+  attributes: Record<string, string>;
+}
+
+const PLUGIN_SOURCE_CLASSES: Record<string, true> = {
+  Script: true,
+  ModuleScript: true,
+  LocalScript: true,
+};
+
+function parsePluginScriptSources(source: Buffer, assetName: string): string[] {
+  if (!isUtf8(source)) {
+    throw new Error(`${assetName} is not valid UTF-8 Roblox XML.`);
+  }
+
+  const text = source.toString('utf8');
+  const elementStack: ParsedPluginElement[] = [];
+  const scriptSources: string[] = [];
+  let rootName: string | undefined;
+  let currentSource: { depth: number; text: string } | undefined;
+  const parser = new SaxesParser({ fragment: false, xmlns: false });
+
+  parser.on('doctype', () => {
+    throw new Error('DOCTYPE declarations are not allowed in plugin artifacts.');
+  });
+  parser.on('opentag', (tag) => {
+    if (elementStack.length === 0) rootName = tag.name;
+
+    if (
+      currentSource === undefined &&
+      tag.name === 'string' &&
+      tag.attributes.name === 'Source'
+    ) {
+      const nearestItem = [...elementStack]
+        .reverse()
+        .find((element) => element.name === 'Item');
+      const sourceClass = nearestItem?.attributes.class;
+      if (
+        sourceClass !== undefined &&
+        PLUGIN_SOURCE_CLASSES[sourceClass] === true
+      ) {
+        currentSource = { depth: elementStack.length, text: '' };
+      }
+    }
+
+    elementStack.push({ name: tag.name, attributes: tag.attributes });
+  });
+  parser.on('text', (value) => {
+    if (currentSource !== undefined) currentSource.text += value;
+  });
+  parser.on('cdata', (value) => {
+    if (currentSource !== undefined) currentSource.text += value;
+  });
+  parser.on('closetag', (tag) => {
+    if (
+      currentSource !== undefined &&
+      tag.name === 'string' &&
+      elementStack.length === currentSource.depth + 1
+    ) {
+      scriptSources.push(currentSource.text);
+      currentSource = undefined;
+    }
+    elementStack.pop();
+  });
+
+  try {
+    parser.write(text).close();
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    throw new Error(`${assetName} is not well-formed Roblox XML: ${detail}`, {
+      cause: error,
+    });
+  }
+
+  if (rootName !== 'roblox' || scriptSources.length === 0) {
+    throw new Error(
+      `${assetName} is not a Roblox XML model containing a Script source.`,
+    );
+  }
+  return scriptSources;
+}
+
+function assertPluginAssetIdentity(
+  source: Buffer,
+  assetName: string,
+  expectedVersion: string,
+  expectedVariant: PluginVariant,
+): void {
+  const pluginSource = parsePluginScriptSources(source, assetName).join('\n');
+  const actualVersion = embeddedPluginValue(
+    pluginSource,
+    'CURRENT_VERSION',
+    assetName,
+  );
+  if (actualVersion !== expectedVersion) {
+    throw new Error(
+      `${assetName} embeds version ${actualVersion}; expected ${expectedVersion}.`,
+    );
+  }
+
+  const actualVariant = embeddedPluginValue(pluginSource, 'PLUGIN_VARIANT', assetName);
+  if (actualVariant !== expectedVariant) {
+    throw new Error(
+      `${assetName} embeds variant ${actualVariant}; expected ${expectedVariant}.`,
+    );
+  }
+}
+
+function installedFileMatches(source: Buffer, destination: string): boolean {
+  if (!existsSync(destination)) return false;
+  if (!lstatSync(destination).isFile()) return false;
+  const installed = readFileSync(destination);
+  return installed.length === source.length && installed.equals(source);
+}
+
+/**
+ * Configures, validates, and commits a plugin artifact without exposing a
+ * partially written live file. The conflicting variant is touched only after
+ * the requested target is known to be valid and present.
+ */
+export function installPluginAsset({
+  pluginsFolder,
+  assetName,
+  otherAssetName,
+  source,
+  expectedVersion,
+  expectedVariant,
+  rawPort,
+  replaceVariant = true,
+  log = console.log,
+  warn = console.warn,
+}: InstallPluginAssetOptions): PluginInstallResult {
+  assertAssetFileName(assetName, 'assetName');
+  assertAssetFileName(otherAssetName, 'otherAssetName');
+  if (assetName === otherAssetName) {
+    throw new Error('assetName and otherAssetName must identify different files.');
+  }
+
+  const configured = configurePluginAssetForPort(source, rawPort);
+  assertPluginAssetIdentity(configured, assetName, expectedVersion, expectedVariant);
+
+  mkdirSync(pluginsFolder, { recursive: true });
+  const destination = join(pluginsFolder, assetName);
+  const releaseLock = acquirePluginInstallLock(pluginsFolder, warn);
+
+  try {
+    let installed = false;
+
+    if (!installedFileMatches(configured, destination)) {
+      const staged = join(
+        pluginsFolder,
+        `.${assetName}.${process.pid}.${randomUUID()}.tmp`,
+      );
+      try {
+        writeFileSync(staged, configured, { flag: 'wx' });
+        renameSync(staged, destination);
+        installed = true;
+      } finally {
+        try {
+          unlinkSync(staged);
+        } catch (error) {
+          if (errorCode(error) !== 'ENOENT') {
+            warn(`[install-plugin] Could not remove staging file ${staged}: ${error}`);
+          }
+        }
+      }
+    }
+
+    handleVariantConflict({
+      pluginsFolder,
+      otherAssetName,
+      replace: replaceVariant,
+      log,
+      warn,
+    });
+
+    return { destination, installed };
+  } finally {
+    releaseLock();
+  }
+}
