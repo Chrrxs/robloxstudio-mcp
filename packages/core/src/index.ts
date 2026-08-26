@@ -15,7 +15,13 @@ export {
   configurePluginAssetForPort,
   getPluginsFolder,
   handleVariantConflict,
+  installPluginAsset,
   isWSL,
+} from './install-plugin-helpers.js';
+export type {
+  InstallPluginAssetOptions,
+  PluginInstallResult,
+  PluginVariant,
 } from './install-plugin-helpers.js';
 export { RobloxCookieClient } from './roblox-cookie-client.js';
 export {

@@ -1,9 +1,21 @@
 #!/usr/bin/env node
 
-import { readFileSync, readdirSync, writeFileSync, copyFileSync, existsSync, mkdirSync, statSync, unlinkSync } from 'fs';
+import {
+  readFileSync,
+  readdirSync,
+  writeFileSync,
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  unlinkSync,
+  renameSync,
+  rmSync,
+  constants,
+} from 'fs';
 import { fileURLToPath } from 'url';
 import { dirname, join, basename } from 'path';
 import { homedir } from 'os';
+import { randomUUID } from 'crypto';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const rootDir = join(__dirname, '..');
@@ -256,20 +268,92 @@ function resolvePluginsDir() {
   }
 }
 
+const PLUGIN_INSTALL_LOCK_NAME = '.robloxstudio-mcp-plugin-install.lock';
+
+function acquirePluginInstallLock(pluginsDir) {
+  const lockPath = join(pluginsDir, PLUGIN_INSTALL_LOCK_NAME);
+  const ownerPath = join(lockPath, 'owner.json');
+  const owner = {
+    pid: process.pid,
+    token: randomUUID(),
+    createdAt: Date.now(),
+  };
+
+  try {
+    mkdirSync(lockPath);
+  } catch (error) {
+    if (error?.code !== 'EEXIST') throw error;
+    throw new Error(
+      `Another Studio plugin installation is already in progress: ${lockPath}. ` +
+        'If no installer is running, remove that lock directory and retry.',
+    );
+  }
+
+  try {
+    writeFileSync(ownerPath, `${JSON.stringify(owner)}\n`, {
+      encoding: 'utf8',
+      flag: 'wx',
+    });
+  } catch (error) {
+    try {
+      rmSync(lockPath, { recursive: true, force: true });
+    } catch (cleanupError) {
+      console.warn(`[build-plugin] Could not clean failed install lock ${lockPath}: ${cleanupError}`);
+    }
+    throw error;
+  }
+
+  return () => {
+    try {
+      const currentOwner = JSON.parse(readFileSync(ownerPath, 'utf8'));
+      if (currentOwner.pid === owner.pid && currentOwner.token === owner.token) {
+        rmSync(lockPath, { recursive: true, force: true });
+      }
+    } catch (error) {
+      if (error?.code !== 'ENOENT') {
+        console.warn(`[build-plugin] Could not release install lock ${lockPath}: ${error}`);
+      }
+    }
+  };
+}
+
 if (process.argv.includes('--build-only')) {
   console.log('Skipped Studio install (--build-only).');
 } else {
   const pluginsDir = resolvePluginsDir();
   if (pluginsDir) {
     mkdirSync(pluginsDir, { recursive: true });
-    const otherInstallPath = join(pluginsDir, otherVariant.outputName);
-    if (existsSync(otherInstallPath)) {
-      unlinkSync(otherInstallPath);
-      console.log(`Removed conflicting ${otherVariant.outputName} from ${pluginsDir}`);
-    }
     const installPath = join(pluginsDir, variant.outputName);
-    copyFileSync(outputPath, installPath);
-    console.log(`Installed to ${installPath}`);
+    const tempInstallPath = join(pluginsDir, `.${variant.outputName}.${randomUUID()}.tmp`);
+    let releaseInstallLock;
+    try {
+      copyFileSync(outputPath, tempInstallPath, constants.COPYFILE_EXCL);
+      releaseInstallLock = acquirePluginInstallLock(pluginsDir);
+      renameSync(tempInstallPath, installPath);
+
+      const otherInstallPath = join(pluginsDir, otherVariant.outputName);
+      if (existsSync(otherInstallPath)) {
+        try {
+          unlinkSync(otherInstallPath);
+          console.log(`Removed conflicting ${otherVariant.outputName} from ${pluginsDir}`);
+        } catch (error) {
+          console.warn(
+            `[build-plugin] Could not remove conflicting ${otherInstallPath}: ${error}. ` +
+              'Continuing with both variants present.',
+          );
+        }
+      }
+      console.log(`Installed to ${installPath}`);
+    } finally {
+      try {
+        unlinkSync(tempInstallPath);
+      } catch (error) {
+        if (error?.code !== 'ENOENT') {
+          console.warn(`[build-plugin] Could not remove staging file ${tempInstallPath}: ${error}`);
+        }
+      }
+      releaseInstallLock?.();
+    }
   } else {
     console.log(
       `Skipped install: no Studio plugins folder resolvable on ${process.platform}. ` +

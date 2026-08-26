@@ -1,12 +1,11 @@
-import { createWriteStream, existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'fs';
+import { existsSync, readFileSync } from 'fs';
 import { dirname, join } from 'path';
 import { fileURLToPath } from 'url';
 import { get } from 'https';
 import { IncomingMessage } from 'http';
 import {
-  configurePluginAssetForPort,
   getPluginsFolder,
-  handleVariantConflict,
+  installPluginAsset,
 } from '@chrrxs/robloxstudio-mcp-core';
 
 const REPO = 'chrrxs/robloxstudio-mcp';
@@ -14,6 +13,7 @@ const ASSET_NAME = 'MCPInspectorPlugin.rbxmx';
 const OTHER_VARIANT = 'MCPPlugin.rbxmx';
 const TIMEOUT_MS = 30_000;
 const MAX_REDIRECTS = 5;
+const MAX_ASSET_BYTES = 64 * 1024 * 1024;
 
 interface InstallOptions {
   sourcePath?: string;
@@ -30,33 +30,37 @@ function httpsGet(url: string): Promise<IncomingMessage> {
   });
 }
 
-async function download(url: string, dest: string, redirects = 0): Promise<void> {
+async function download(url: string, redirects = 0): Promise<Buffer> {
   const res = await httpsGet(url);
 
   if (res.statusCode === 301 || res.statusCode === 302) {
     if (redirects >= MAX_REDIRECTS) throw new Error(`Too many redirects (max ${MAX_REDIRECTS})`);
     const location = res.headers.location;
     if (!location) throw new Error('Redirect with no location header');
-    return download(location, dest, redirects + 1);
+    for await (const _chunk of res) {
+      // Drain the response before following the redirect.
+    }
+    return download(location, redirects + 1);
   }
 
   if (res.statusCode !== 200) {
     throw new Error(`Download failed: HTTP ${res.statusCode}`);
   }
 
-  return new Promise((resolve, reject) => {
-    const file = createWriteStream(dest);
-    const cleanup = (err: Error) => {
-      file.close(() => {
-        try { unlinkSync(dest); } catch { /* already gone */ }
-        reject(err);
-      });
-    };
-    res.pipe(file);
-    file.on('finish', () => { file.close(); resolve(); });
-    file.on('error', cleanup);
-    res.on('error', cleanup);
-  });
+  const chunks: Buffer[] = [];
+  let totalBytes = 0;
+  for await (const chunk of res) {
+    const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    totalBytes += bytes.length;
+    if (totalBytes > MAX_ASSET_BYTES) {
+      res.destroy();
+      throw new Error(
+        `${ASSET_NAME} download exceeds the ${MAX_ASSET_BYTES}-byte limit.`,
+      );
+    }
+    chunks.push(bytes);
+  }
+  return Buffer.concat(chunks, totalBytes);
 }
 
 async function fetchJson(url: string): Promise<unknown> {
@@ -69,28 +73,6 @@ async function fetchJson(url: string): Promise<unknown> {
     chunks.push(chunk as Buffer);
   }
   return JSON.parse(Buffer.concat(chunks).toString());
-}
-
-function prepareInstall({
-  replaceVariant,
-  log,
-  warn,
-}: Required<Pick<InstallOptions, 'replaceVariant' | 'log' | 'warn'>>): string {
-  const pluginsFolder = getPluginsFolder();
-
-  if (!existsSync(pluginsFolder)) {
-    mkdirSync(pluginsFolder, { recursive: true });
-  }
-
-  handleVariantConflict({
-    pluginsFolder,
-    otherAssetName: OTHER_VARIANT,
-    replace: replaceVariant,
-    log,
-    warn,
-  });
-
-  return pluginsFolder;
 }
 
 function bundledAssetPath(): string | null {
@@ -116,48 +98,31 @@ function packageVersion(): string {
   return pkg.version;
 }
 
-function bundledPluginVersion(source: string): string | null {
-  const match = readFileSync(source, 'utf8').match(/local CURRENT_VERSION = "([^"]+)"/);
-  return match ? match[1] : null;
-}
-
-function assertBundledPluginVersion(source: string): void {
-  const expected = packageVersion();
-  const actual = bundledPluginVersion(source);
-  if (actual !== expected) {
-    throw new Error(
-      `Bundled ${ASSET_NAME} version ${actual ?? 'unknown'} does not match package version ${expected}. ` +
-      'Run npm run build:plugin:inspector before starting with --auto-install-plugin.',
-    );
-  }
-}
-
-function filesMatch(expected: Buffer, actualPath: string): boolean {
-  if (!existsSync(actualPath)) return false;
-  const actual = readFileSync(actualPath);
-  return expected.length === actual.length && expected.equals(actual);
-}
-
 export async function installBundledPlugin(options: InstallOptions = {}): Promise<void> {
   const log = options.log ?? console.log;
   const warn = options.warn ?? console.warn;
   const replaceVariant = options.replaceVariant ?? true;
-  const source = resolvePluginAssetPath(options.sourcePath);
-  if (!source) {
+  const sourcePath = resolvePluginAssetPath(options.sourcePath);
+  if (!sourcePath) {
     throw new Error(
       `Bundled ${ASSET_NAME} not found. Run npm run build:plugin:inspector in this worktree first.`,
     );
   }
-  assertBundledPluginVersion(source);
 
-  const pluginsFolder = prepareInstall({ replaceVariant, log, warn });
-  const dest = join(pluginsFolder, ASSET_NAME);
-  const configured = configurePluginAssetForPort(readFileSync(source));
-
-  if (filesMatch(configured, dest)) return;
-
-  writeFileSync(dest, configured);
-  log(`Installed ${ASSET_NAME} to ${dest}`);
+  const result = await installPluginAsset({
+    pluginsFolder: getPluginsFolder(),
+    assetName: ASSET_NAME,
+    otherAssetName: OTHER_VARIANT,
+    source: readFileSync(sourcePath),
+    expectedVersion: packageVersion(),
+    expectedVariant: 'inspector',
+    replaceVariant,
+    log,
+    warn,
+  });
+  if (result.installed) {
+    log(`Installed ${ASSET_NAME} to ${result.destination}`);
+  }
 }
 
 export async function installPlugin(options: InstallOptions = {}): Promise<void> {
@@ -168,18 +133,24 @@ export async function installPlugin(options: InstallOptions = {}): Promise<void>
   if (options.sourcePath !== undefined && !bundled) {
     throw new Error(`Plugin asset not found at explicit path ${options.sourcePath}.`);
   }
-  const pluginsFolder = prepareInstall({ replaceVariant, log, warn });
 
   if (bundled) {
-    assertBundledPluginVersion(bundled);
-    const dest = join(pluginsFolder, ASSET_NAME);
-    const configured = configurePluginAssetForPort(readFileSync(bundled));
-    if (filesMatch(configured, dest)) {
+    const result = await installPluginAsset({
+      pluginsFolder: getPluginsFolder(),
+      assetName: ASSET_NAME,
+      otherAssetName: OTHER_VARIANT,
+      source: readFileSync(bundled),
+      expectedVersion: packageVersion(),
+      expectedVariant: 'inspector',
+      replaceVariant,
+      log,
+      warn,
+    });
+    if (result.installed) {
+      log(`Installed bundled ${ASSET_NAME} to ${result.destination}`);
+    } else {
       log(`${ASSET_NAME} already installed.`);
-      return;
     }
-    writeFileSync(dest, configured);
-    log(`Installed bundled ${ASSET_NAME} to ${dest}`);
     return;
   }
 
@@ -194,11 +165,22 @@ export async function installPlugin(options: InstallOptions = {}): Promise<void>
     throw new Error(`${ASSET_NAME} not found in release ${release.tag_name}`);
   }
 
-  const dest = join(pluginsFolder, ASSET_NAME);
   log(`Downloading ${ASSET_NAME} from ${release.tag_name}...`);
-  await download(asset.browser_download_url, dest);
-  const downloaded = readFileSync(dest);
-  const configured = configurePluginAssetForPort(downloaded);
-  if (configured !== downloaded) writeFileSync(dest, configured);
-  log(`Installed to ${dest}`);
+  const downloaded = await download(asset.browser_download_url);
+  const result = await installPluginAsset({
+    pluginsFolder: getPluginsFolder(),
+    assetName: ASSET_NAME,
+    otherAssetName: OTHER_VARIANT,
+    source: downloaded,
+    expectedVersion: release.tag_name.replace(/^v/, ''),
+    expectedVariant: 'inspector',
+    replaceVariant,
+    log,
+    warn,
+  });
+  if (result.installed) {
+    log(`Installed to ${result.destination}`);
+  } else {
+    log(`${ASSET_NAME} already installed.`);
+  }
 }
