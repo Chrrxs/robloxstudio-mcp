@@ -4,6 +4,7 @@ import * as path from 'path';
 import {
   configurePluginAssetForPort,
   installPluginAsset,
+  repairStaleStudioPluginDirectorySetting,
 } from '../install-plugin-helpers.js';
 
 describe('Studio plugin installation', () => {
@@ -237,4 +238,48 @@ describe('Studio plugin installation', () => {
       'MCPPlugin.rbxmx',
     ]);
   });
+
+  test('repairs the stale relative plugin directory left by the release gate', () => {
+    const directory = createPluginsFolder();
+    const settingsPath = path.join(directory, 'GlobalSettings_13.xml');
+    fs.writeFileSync(settingsPath, [
+      '<Settings>',
+      '  <Content name="Studio">',
+      '    <QDir name="PluginsDir">RsmcpIsolatedPlugins</QDir>',
+      '    <string name="Untouched">preserve me</string>',
+      '  </Content>',
+      '</Settings>',
+    ].join('\n'));
+
+    expect(repairStaleStudioPluginDirectorySetting({
+      settingsPath,
+      studioPluginsDirectory: 'C:/Users/Test/AppData/Local/Roblox/Plugins',
+    })).toBe(true);
+    expect(fs.readFileSync(settingsPath, 'utf8')).toContain(
+      '<QDir name="PluginsDir">C:/Users/Test/AppData/Local/Roblox/Plugins</QDir>',
+    );
+    expect(fs.readFileSync(settingsPath, 'utf8')).toContain(
+      '<string name="Untouched">preserve me</string>',
+    );
+    expect(repairStaleStudioPluginDirectorySetting({
+      settingsPath,
+      studioPluginsDirectory: 'C:/Users/Test/AppData/Local/Roblox/Plugins',
+    })).toBe(false);
+  });
+
+  test('preserves an intentional custom Studio plugin directory', () => {
+    const directory = createPluginsFolder();
+    const settingsPath = path.join(directory, 'GlobalSettings_13.xml');
+    fs.writeFileSync(
+      settingsPath,
+      '<Settings><QDir name="PluginsDir">D:/Custom/Plugins</QDir></Settings>',
+    );
+
+    expect(repairStaleStudioPluginDirectorySetting({
+      settingsPath,
+      studioPluginsDirectory: 'C:/Users/Test/AppData/Local/Roblox/Plugins',
+    })).toBe(false);
+    expect(fs.readFileSync(settingsPath, 'utf8')).toContain('D:/Custom/Plugins');
+  });
+
 });

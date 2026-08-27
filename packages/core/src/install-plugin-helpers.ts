@@ -5,6 +5,7 @@ import {
   readFileSync,
   renameSync,
   rmSync,
+  statSync,
   unlinkSync,
   writeFileSync,
 } from 'fs';
@@ -69,24 +70,29 @@ export function isWSL(): boolean {
   return getStudioPlatformCapabilities().isWsl;
 }
 
-function getWindowsUserPluginsDir(): string | null {
+interface WindowsUserLocalAppData {
+  linuxPath: string;
+  windowsPath: string;
+}
+
+function getWindowsUserLocalAppData(): WindowsUserLocalAppData | null {
   // Resolve Windows %LOCALAPPDATA% from the WSL side and translate it via
   // wslpath. cmd.exe spams a "UNC paths are not supported" warning to stderr
   // when the CWD is on the Linux side - silence it with stdio: 'ignore'.
   try {
-    const localAppData = execSync('cmd.exe /c "echo %LOCALAPPDATA%"', {
+    const windowsPath = execSync('cmd.exe /c "echo %LOCALAPPDATA%"', {
       stdio: ['ignore', 'pipe', 'ignore'],
     })
       .toString()
       .trim();
-    if (!localAppData || localAppData.includes('%')) return null;
-    const linuxPath = execSync(`wslpath -u '${localAppData.replace(/'/g, "'\\''")}'`, {
+    if (!windowsPath || windowsPath.includes('%')) return null;
+    const linuxPath = execSync(`wslpath -u '${windowsPath.replace(/'/g, "'\\''")}'`, {
       stdio: ['ignore', 'pipe', 'ignore'],
     })
       .toString()
       .trim();
     if (!linuxPath) return null;
-    return join(linuxPath, 'Roblox', 'Plugins');
+    return { linuxPath, windowsPath };
   } catch {
     return null;
   }
@@ -106,8 +112,8 @@ export function getPluginsFolder(): string {
   }
 
   if (isWSL()) {
-    const win = getWindowsUserPluginsDir();
-    if (win) return win;
+    const localAppData = getWindowsUserLocalAppData();
+    if (localAppData) return join(localAppData.linuxPath, 'Roblox', 'Plugins');
     console.warn(
       '[install-plugin] WSL detected but could not resolve Windows %LOCALAPPDATA%. ' +
         'Falling back to ~/Documents/Roblox/Plugins/ - you will likely need to copy the rbxmx ' +
@@ -117,6 +123,101 @@ export function getPluginsFolder(): string {
   }
 
   return join(homedir(), 'Documents', 'Roblox', 'Plugins');
+}
+
+const STALE_TEST_PLUGINS_DIRECTORY = 'RsmcpIsolatedPlugins';
+
+function pluginDirectorySettingPattern(): RegExp {
+  return /(<QDir\b[^>]*\bname="PluginsDir"[^>]*>)([\s\S]*?)(<\/QDir>)/gu;
+}
+
+function escapeXmlText(value: string): string {
+  return value
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;');
+}
+
+export interface RepairStaleStudioPluginDirectoryOptions {
+  settingsPath: string;
+  studioPluginsDirectory: string;
+}
+
+/**
+ * Repairs the relative PluginsDir sentinel used by the live test harness.
+ * Other custom Studio plugin directories are user-owned and remain untouched.
+ */
+export function repairStaleStudioPluginDirectorySetting({
+  settingsPath,
+  studioPluginsDirectory,
+}: RepairStaleStudioPluginDirectoryOptions): boolean {
+  if (!existsSync(settingsPath)) return false;
+  if (studioPluginsDirectory === '') {
+    throw new Error('studioPluginsDirectory must be a non-empty path.');
+  }
+
+  const contents = readFileSync(settingsPath, 'utf8');
+  const matches = [...contents.matchAll(pluginDirectorySettingPattern())];
+  if (matches.length !== 1) {
+    throw new Error(
+      `Expected exactly one Studio.PluginsDir QDir in ${settingsPath}; found ${matches.length}.`,
+    );
+  }
+  if (matches[0][2] !== STALE_TEST_PLUGINS_DIRECTORY) return false;
+
+  const studioPath = escapeXmlText(studioPluginsDirectory);
+  const updated = contents.replace(
+    pluginDirectorySettingPattern(),
+    (_match, open, _value, close) => `${open}${studioPath}${close}`,
+  );
+  const temporaryPath = `${settingsPath}.rsmcp-install-${process.pid}-${randomUUID()}.tmp`;
+  try {
+    writeFileSync(temporaryPath, updated, {
+      encoding: 'utf8',
+      mode: statSync(settingsPath).mode,
+    });
+    renameSync(temporaryPath, settingsPath);
+  } finally {
+    rmSync(temporaryPath, { force: true });
+  }
+  return true;
+}
+
+function repairDefaultStudioPluginDirectorySetting(
+  pluginsFolder: string,
+  log: (message: string) => void,
+): void {
+  // Explicit overrides pair with an isolated Studio working directory. The
+  // caller owns that relationship, so never rewrite the global Studio setting.
+  if (process.env.MCP_PLUGINS_DIR) return;
+
+  let settingsPath: string;
+  let defaultPluginsFolder: string;
+  let studioPluginsDirectory: string;
+
+  if (process.platform === 'win32') {
+    const localAppData = process.env.LOCALAPPDATA || join(homedir(), 'AppData', 'Local');
+    defaultPluginsFolder = join(localAppData, 'Roblox', 'Plugins');
+    settingsPath = join(localAppData, 'Roblox', 'GlobalSettings_13.xml');
+    studioPluginsDirectory = defaultPluginsFolder.replaceAll('\\', '/');
+  } else if (isWSL()) {
+    const localAppData = getWindowsUserLocalAppData();
+    if (!localAppData) return;
+    defaultPluginsFolder = join(localAppData.linuxPath, 'Roblox', 'Plugins');
+    settingsPath = join(localAppData.linuxPath, 'Roblox', 'GlobalSettings_13.xml');
+    studioPluginsDirectory = [
+      localAppData.windowsPath.replace(/[\\/]+$/u, ''),
+      'Roblox',
+      'Plugins',
+    ].join('/').replaceAll('\\', '/');
+  } else {
+    return;
+  }
+
+  if (pluginsFolder !== defaultPluginsFolder) return;
+  if (repairStaleStudioPluginDirectorySetting({ settingsPath, studioPluginsDirectory })) {
+    log(`Restored Studio PluginsDir to ${studioPluginsDirectory}.`);
+  }
 }
 
 export interface VariantConflictOptions {
@@ -431,6 +532,8 @@ export function installPluginAsset({
       log,
       warn,
     });
+
+    repairDefaultStudioPluginDirectorySetting(pluginsFolder, log);
 
     return { destination, installed };
   } finally {
