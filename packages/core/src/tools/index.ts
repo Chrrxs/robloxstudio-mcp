@@ -86,6 +86,7 @@ const MAX_SEARCH_ASSET_DESCRIPTION_LENGTH = 240;
 const ROBLOX_CREATOR_USER_ID = 1;
 const MAX_DEVICE_MATRIX_ENTRIES = 6;
 const MAX_NETWORK_PACKET_LOSS_PERCENT = 0.5;
+const GREP_SCRIPTS_TIMEOUT_MS = 120_000;
 const STUDIO_ASSISTANT_SOURCE_IMAGE_LABEL = 'Studio Assistant Source Image';
 const CREATOR_STORE_SEARCH_TYPES = new Set<string>([
   'Audio',
@@ -1722,7 +1723,7 @@ export class RobloxStudioTools {
     const response = await this._callSingle('/api/grep-scripts', {
       pattern,
       ...(options ?? {}),
-    }, undefined, instance_id);
+    }, undefined, instance_id, GREP_SCRIPTS_TIMEOUT_MS);
     return {
       content: [
         {

@@ -1,6 +1,8 @@
 import { BridgeService, PluginInstance, PublicPluginInstance, toPublic } from './bridge-service.js';
 import { randomUUID } from 'crypto';
 
+const PROXY_RESPONSE_GRACE_MS = 5_000;
+
 export class ProxyBridgeService extends BridgeService {
   private primaryBaseUrl: string;
   private authToken?: string;
@@ -99,9 +101,16 @@ export class ProxyBridgeService extends BridgeService {
     data: any,
     targetInstanceId: string,
     targetRole: string,
+    timeoutMs = this.proxyRequestTimeout,
   ): Promise<any> {
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), this.proxyRequestTimeout);
+    const effectiveTimeoutMs = Math.max(1, timeoutMs);
+    // The primary starts its request timer after this fetch begins. Leave room
+    // for its terminal response to travel back before aborting the proxy hop.
+    const timeoutId = setTimeout(
+      () => controller.abort(),
+      effectiveTimeoutMs + PROXY_RESPONSE_GRACE_MS,
+    );
 
     try {
       const response = await fetch(`${this.primaryBaseUrl}/proxy`, {
@@ -113,6 +122,7 @@ export class ProxyBridgeService extends BridgeService {
           targetInstanceId,
           targetRole,
           proxyInstanceId: this.proxyInstanceId,
+          timeoutMs: effectiveTimeoutMs,
         }),
         signal: controller.signal,
       });

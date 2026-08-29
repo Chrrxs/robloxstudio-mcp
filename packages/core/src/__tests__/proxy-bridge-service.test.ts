@@ -131,4 +131,41 @@ describe('ProxyBridgeService', () => {
       fetchMock.mockRestore();
     }
   });
+
+  test('forwards request-specific timeouts to the primary bridge', async () => {
+    const timeoutSpy = jest.spyOn(globalThis, 'setTimeout');
+    const fetchMock = jest.spyOn(globalThis, 'fetch').mockImplementation(async (input: any, init?: any) => {
+      const url = String(input);
+      if (url === 'http://primary/instances') {
+        return { ok: true, json: async () => ({ instances: [] }) } as any;
+      }
+      if (url === 'http://primary/proxy') {
+        expect(JSON.parse(String(init.body))).toMatchObject({
+          endpoint: '/api/grep-scripts',
+          targetInstanceId: 'place:test',
+          targetRole: 'edit',
+          timeoutMs: 120_000,
+        });
+        return { ok: true, json: async () => ({ response: { results: [] } }) } as any;
+      }
+      throw new Error(`unexpected fetch ${url}`);
+    });
+
+    const proxy = new ProxyBridgeService('http://primary');
+    try {
+      await proxy.waitForInitialRefresh();
+      await expect(proxy.sendRequest(
+        '/api/grep-scripts',
+        { pattern: 'needle' },
+        'place:test',
+        'edit',
+        120_000,
+      )).resolves.toEqual({ results: [] });
+      expect(timeoutSpy).toHaveBeenCalledWith(expect.any(Function), 125_000);
+    } finally {
+      proxy.stop();
+      fetchMock.mockRestore();
+      timeoutSpy.mockRestore();
+    }
+  });
 });

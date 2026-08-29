@@ -557,7 +557,27 @@ function findFirstPattern(line: string, alternatives: string[]): [number | undef
 	return [bestStart, bestEnd];
 }
 
-function grepScripts(requestData: Record<string, unknown>) {
+const GREP_CLOCK_CHECK_INTERVAL = 64;
+const GREP_MAX_COOPERATIVE_SLICE_SECONDS = 0.004;
+let grepScriptsInFlight = false;
+
+function createGrepCheckpoint(): () => void {
+	let operationsSinceClockCheck = 0;
+	let sliceStartedAt = os.clock();
+
+	return () => {
+		operationsSinceClockCheck++;
+		if (operationsSinceClockCheck < GREP_CLOCK_CHECK_INTERVAL) return;
+
+		operationsSinceClockCheck = 0;
+		if (os.clock() - sliceStartedAt < GREP_MAX_COOPERATIVE_SLICE_SECONDS) return;
+
+		task.wait();
+		sliceStartedAt = os.clock();
+	};
+}
+
+function runGrepScripts(requestData: Record<string, unknown>) {
 	const pattern = requestData.pattern as string;
 	if (!pattern) return { error: "pattern is required" };
 
@@ -583,6 +603,11 @@ function grepScripts(requestData: Record<string, unknown>) {
 	const searchPattern = caseSensitive ? pattern : pattern.lower();
 	// Pre-split top-level "|" alternation once (pattern mode only).
 	const patternAlternatives = usePattern ? splitLuaAlternation(searchPattern) : undefined;
+	function sourceCanMatch(source: string): boolean {
+		if (usePattern) return true;
+		const candidate = caseSensitive ? source : source.lower();
+		return string.find(candidate, searchPattern, 1, true)[0] !== undefined;
+	}
 
 	interface LineMatch {
 		line: number;
@@ -604,9 +629,11 @@ function grepScripts(requestData: Record<string, unknown>) {
 	let totalMatches = 0;
 	let scriptsSearched = 0;
 	let hitLimit = false;
+	const checkpoint = createGrepCheckpoint();
 
 	function searchInstance(instance: Instance) {
 		if (hitLimit) return;
+		checkpoint();
 
 		if (instance.IsA("LuaSourceContainer")) {
 			// Apply class filter
@@ -616,73 +643,79 @@ function grepScripts(requestData: Record<string, unknown>) {
 
 			scriptsSearched++;
 			const source = readScriptSource(instance);
-			const [lines] = Utils.splitLines(source);
-			const scriptMatches: LineMatch[] = [];
-			let scriptMatchCount = 0;
 
-			for (let i = 0; i < lines.size(); i++) {
-				if (hitLimit) break;
-				if (maxResultsPerScript > 0 && scriptMatchCount >= maxResultsPerScript) break;
+			if (sourceCanMatch(source)) {
+				checkpoint();
+				const [lines] = Utils.splitLines(source);
+				checkpoint();
+				const scriptMatches: LineMatch[] = [];
+				let scriptMatchCount = 0;
 
-				const line = lines[i];
-				const searchLine = caseSensitive ? line : line.lower();
+				for (let i = 0; i < lines.size(); i++) {
+					checkpoint();
+					if (hitLimit) break;
+					if (maxResultsPerScript > 0 && scriptMatchCount >= maxResultsPerScript) break;
 
-				let matchStart: number | undefined;
-				let matchEnd: number | undefined;
+					const line = lines[i];
+					const searchLine = caseSensitive ? line : line.lower();
 
-				if (usePattern) {
-					[matchStart, matchEnd] = findFirstPattern(searchLine, patternAlternatives!);
-				} else {
-					[matchStart, matchEnd] = string.find(searchLine, searchPattern, 1, true);
-				}
+					let matchStart: number | undefined;
+					let matchEnd: number | undefined;
 
-				if (matchStart !== undefined) {
-					scriptMatchCount++;
-					totalMatches++;
-
-					if (totalMatches > maxResults) {
-						hitLimit = true;
-						break;
+					if (usePattern) {
+						[matchStart, matchEnd] = findFirstPattern(searchLine, patternAlternatives!);
+					} else {
+						[matchStart, matchEnd] = string.find(searchLine, searchPattern, 1, true);
 					}
 
-					if (!filesOnly) {
-						// Gather context lines
-						const before: string[] = [];
-						const after: string[] = [];
+					if (matchStart !== undefined) {
+						scriptMatchCount++;
+						totalMatches++;
 
-						if (contextLines > 0) {
-							const beforeStart = math.max(0, i - contextLines);
-							for (let j = beforeStart; j < i; j++) {
-								before.push(lines[j]);
-							}
-							const afterEnd = math.min(lines.size() - 1, i + contextLines);
-							for (let j = i + 1; j <= afterEnd; j++) {
-								after.push(lines[j]);
-							}
+						if (totalMatches > maxResults) {
+							hitLimit = true;
+							break;
 						}
 
-						scriptMatches.push({
-							line: i + 1, // 1-indexed
-							column: matchStart,
-							text: line,
-							before,
-							after,
-						});
+						if (!filesOnly) {
+							// Gather context lines
+							const before: string[] = [];
+							const after: string[] = [];
+
+							if (contextLines > 0) {
+								const beforeStart = math.max(0, i - contextLines);
+								for (let j = beforeStart; j < i; j++) {
+									before.push(lines[j]);
+								}
+								const afterEnd = math.min(lines.size() - 1, i + contextLines);
+								for (let j = i + 1; j <= afterEnd; j++) {
+									after.push(lines[j]);
+								}
+							}
+
+							scriptMatches.push({
+								line: i + 1, // 1-indexed
+								column: matchStart,
+								text: line,
+								before,
+								after,
+							});
+						}
 					}
 				}
-			}
 
-			if (scriptMatchCount > 0) {
-				const scriptResult: ScriptResult = {
-					instancePath: getInstancePath(instance),
-					name: instance.Name,
-					className: instance.ClassName,
-					matches: scriptMatches,
-				};
-				if (instance.IsA("BaseScript")) {
-					scriptResult.enabled = instance.Enabled;
+				if (scriptMatchCount > 0) {
+					const scriptResult: ScriptResult = {
+						instancePath: getInstancePath(instance),
+						name: instance.Name,
+						className: instance.ClassName,
+						matches: scriptMatches,
+					};
+					if (instance.IsA("BaseScript")) {
+						scriptResult.enabled = instance.Enabled;
+					}
+					results.push(scriptResult);
 				}
-				results.push(scriptResult);
 			}
 		}
 
@@ -703,6 +736,21 @@ function grepScripts(requestData: Record<string, unknown>) {
 		truncated: hitLimit,
 		options: { caseSensitive, contextLines, usePattern, filesOnly, maxResults, maxResultsPerScript },
 	};
+}
+
+function grepScripts(requestData: Record<string, unknown>) {
+	if (grepScriptsInFlight) {
+		return {
+			error: "plugin_busy",
+			message: "Another grep_scripts request is already running in this Studio DataModel. Retry after it completes.",
+		};
+	}
+
+	grepScriptsInFlight = true;
+	const [ok, result] = pcall(() => runGrepScripts(requestData));
+	grepScriptsInFlight = false;
+	if (!ok) error(result, 0);
+	return result;
 }
 
 export = {

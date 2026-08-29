@@ -646,10 +646,18 @@ export function createHttpServer(tools: RobloxStudioTools, bridge: BridgeService
 
 
   app.post('/proxy', async (req, res) => {
-    const { endpoint, data, targetInstanceId, targetRole, proxyInstanceId } = req.body;
+    const { endpoint, data, targetInstanceId, targetRole, proxyInstanceId, timeoutMs } = req.body;
 
     if (!endpoint || !targetInstanceId || !targetRole) {
       res.status(400).json({ error: 'endpoint, targetInstanceId, and targetRole are required' });
+      return;
+    }
+
+    if (
+      timeoutMs !== undefined &&
+      (!Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 300_000)
+    ) {
+      res.status(400).json({ error: 'timeoutMs must be an integer between 1 and 300000' });
       return;
     }
 
@@ -658,7 +666,7 @@ export function createHttpServer(tools: RobloxStudioTools, bridge: BridgeService
     }
 
     try {
-      const response = await bridge.sendRequest(endpoint, data, targetInstanceId, targetRole);
+      const response = await bridge.sendRequest(endpoint, data, targetInstanceId, targetRole, timeoutMs);
       res.json({ response });
     } catch (err: any) {
       res.status(500).json({ error: err.message || 'Proxy request failed' });

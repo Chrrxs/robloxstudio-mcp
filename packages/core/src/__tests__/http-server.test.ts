@@ -525,6 +525,37 @@ describe('HTTP Server', () => {
       expect(app.isPluginConnected()).toBe(false);
     });
 
+    test('forwards a validated proxy timeout to the Studio bridge', async () => {
+      const sendRequest = jest.spyOn(bridge, 'sendRequest').mockResolvedValue({ results: [] });
+
+      const response = await request(app).post('/proxy').send({
+        endpoint: '/api/grep-scripts',
+        data: { pattern: 'needle' },
+        targetInstanceId: 'place:test',
+        targetRole: 'edit',
+        timeoutMs: 120_000,
+      }).expect(200);
+
+      expect(response.body).toEqual({ response: { results: [] } });
+      expect(sendRequest).toHaveBeenCalledWith(
+        '/api/grep-scripts',
+        { pattern: 'needle' },
+        'place:test',
+        'edit',
+        120_000,
+      );
+    });
+
+    test('rejects invalid proxy timeouts', async () => {
+      await request(app).post('/proxy').send({
+        endpoint: '/api/grep-scripts',
+        data: { pattern: 'needle' },
+        targetInstanceId: 'place:test',
+        targetRole: 'edit',
+        timeoutMs: 0,
+      }).expect(400, { error: 'timeoutMs must be an integer between 1 and 300000' });
+    });
+
     test('disconnect rejects pending requests targeting that tuple', async () => {
       await request(app).post('/ready').send(READY_BODY).expect(200);
       const p1 = bridge.sendRequest('/api/test1', {}, 'place:test', 'edit');
