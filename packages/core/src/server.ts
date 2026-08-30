@@ -149,10 +149,10 @@ export class RobloxStudioMCPServer {
         getTools: () => this.tools,
         allowedTools: this.allowedToolNames,
         era: context.era,
-        invoke: async (tools, name, args) => {
+        invoke: async (tools, name, args, invocation) => {
           const handler = TOOL_HANDLERS[name];
           if (!handler) throw new Error(`Unknown tool: ${name}`);
-          return handler(tools, args);
+          return handler(tools, args, invocation);
         },
       }),
       { onerror: (error) => console.error('[mcp:stdio]', error) },

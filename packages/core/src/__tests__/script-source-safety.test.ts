@@ -53,6 +53,26 @@ async function loadPluginModule<T>(
 }
 
 describe('script source update safety', () => {
+  test('reads the edit-time source used by Studio search', async () => {
+    const getEditorSource = jest.fn(() => 'unsaved editor source');
+    const script = { Source: 'saved source' };
+    const utils = await loadPluginModule<{
+      readScriptSource(target: object): string;
+    }>('studio-plugin/src/modules/Utils.ts', {
+      game: {
+        GetService: () => ({
+          GetEditorSource: getEditorSource,
+          FindScriptDocument: () => undefined,
+        }),
+      },
+      pcall: robloxPcall,
+      warn: jest.fn(),
+    });
+
+    expect(utils.readScriptSource(script)).toBe('unsaved editor source');
+    expect(getEditorSource).toHaveBeenCalledWith(script);
+  });
+
   test('applyScriptSource leaves the original instance intact when both in-place writes fail', async () => {
     const parent = { name: 'parent' };
     const destroy = jest.fn();

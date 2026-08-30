@@ -9,13 +9,21 @@ export class StudioHttpClient {
 
   async request(
     endpoint: string,
-    data: any,
+    data: unknown,
     targetInstanceId: string,
     targetRole: string,
     timeoutMs?: number,
+    signal?: AbortSignal,
   ): Promise<any> {
     try {
-      const response = await this.bridge.sendRequest(endpoint, data, targetInstanceId, targetRole, timeoutMs);
+      const response = await this.bridge.sendRequest(
+        endpoint,
+        data,
+        targetInstanceId,
+        targetRole,
+        timeoutMs,
+        signal,
+      );
       return response;
     } catch (error) {
       if (error instanceof Error && error.message === 'Request timeout') {

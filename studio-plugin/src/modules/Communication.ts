@@ -24,9 +24,10 @@ import ClientBroker from "./ClientBroker";
 import ServerUrlSettings from "./ServerUrlSettings";
 import PluginSession from "./PluginSession";
 import StudioEventStream from "./StudioEventStream";
-import {
+import type {
 	RequestPayload,
 	ReadyResponse,
+	StudioRequestContext,
 	StudioRequestEvent,
 	StudioStatusEvent,
 	TransportUpdate,
@@ -37,7 +38,7 @@ let lastReadyInstanceId: string | undefined;
 
 const initialRole = PluginSession.getRole();
 
-type Handler = (data: Record<string, unknown>) => unknown;
+type Handler = (data: Record<string, unknown>, context: StudioRequestContext) => unknown;
 
 const routeMap: Record<string, Handler> = {
 
@@ -98,13 +99,13 @@ const routeMap: Record<string, Handler> = {
 	"/api/get-scene-analysis": SceneAnalysisHandlers.getSceneAnalysis,
 };
 
-function processRequest(request: RequestPayload): unknown {
+function processRequest(request: RequestPayload, context: StudioRequestContext): unknown {
 	const endpoint = request.endpoint;
 	const data = request.data ?? {};
 
 	const handler = routeMap[endpoint];
 	if (handler) {
-		return handler(data as Record<string, unknown>);
+		return handler(data as Record<string, unknown>, context);
 	} else {
 		return { error: `Unknown endpoint: ${endpoint}` };
 	}
@@ -118,7 +119,7 @@ function getConnectionStatus(): string {
 	return "connecting";
 }
 
-function dispatchStreamRequest(request: StudioRequestEvent): unknown {
+function dispatchStreamRequest(request: StudioRequestEvent, context: StudioRequestContext): unknown {
 	if (request.logicalSessionId !== PluginSession.id) {
 		return ClientBroker.dispatchClientRequest(
 			request.logicalSessionId,
@@ -133,7 +134,7 @@ function dispatchStreamRequest(request: StudioRequestEvent): unknown {
 			error: `Physical plugin session is registered as ${localRole}, not ${request.target}.`,
 		};
 	}
-	return processRequest({ endpoint: request.endpoint, data: request.data });
+	return processRequest({ endpoint: request.endpoint, data: request.data }, context);
 }
 
 function handleReady(response: ReadyResponse): void {

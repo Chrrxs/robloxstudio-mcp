@@ -89,6 +89,8 @@ describe('SseStudioTransport', () => {
 
     const serverResponse = bridge.sendRequest('/api/server', { scope: 'server' }, 'place:1', 'server');
     const clientResponse = bridge.sendRequest('/api/client', { scope: 'client' }, 'place:1', 'client-2');
+    serverResponse.catch(() => {});
+    clientResponse.catch(() => {});
     const events = sink.events();
     expect(events).toHaveLength(3);
     expect(events[0]).toEqual(STATUS);
@@ -99,6 +101,7 @@ describe('SseStudioTransport', () => {
       target: 'server',
       endpoint: '/api/server',
       data: { scope: 'server' },
+      remainingMs: 30_000,
     });
     expect(events[2]).toEqual({
       kind: 'request',
@@ -107,6 +110,7 @@ describe('SseStudioTransport', () => {
       target: 'client-2',
       endpoint: '/api/client',
       data: { scope: 'client' },
+      remainingMs: 30_000,
     });
 
     if (events[1].kind !== 'request' || events[2].kind !== 'request') {
@@ -190,6 +194,30 @@ describe('SseStudioTransport', () => {
     jest.advanceTimersByTime(30_000);
     await timedOut;
     expect(bridge.getPendingRequestCount()).toBe(0);
+  });
+
+  test('notifies Studio when a claimed request times out and redelivers cancellation after reconnect', async () => {
+    register(bridge, 'edit-session', 'place:1', 'edit');
+    const sink = new FakeEventStreamSink();
+    transport.open('edit-session', sink, () => STATUS);
+    const response = bridge.sendRequest('/api/slow', {}, 'place:1', 'edit', 1000);
+    const timedOut = expect(response).rejects.toThrow('Request timeout');
+    const requestEvent = sink.events().find((event) => event.kind === 'request');
+    if (!requestEvent || requestEvent.kind !== 'request') throw new Error('expected request event');
+
+    jest.advanceTimersByTime(1000);
+
+    const cancellation = {
+      kind: 'cancel',
+      requestId: requestEvent.requestId,
+      reason: 'timeout',
+    };
+    expect(sink.events()).toContainEqual(cancellation);
+    await timedOut;
+
+    const replacementSink = new FakeEventStreamSink();
+    transport.open('edit-session', replacementSink, () => STATUS);
+    expect(replacementSink.events().filter((event) => event.kind === 'cancel')).toEqual([cancellation]);
   });
 
   test('does not claim additional requests while the response is backpressured', () => {

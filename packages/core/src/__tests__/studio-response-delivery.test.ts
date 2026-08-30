@@ -34,10 +34,16 @@ interface MockWebStreamClient {
   Close(): void;
 }
 
+interface StudioRequestContext {
+  requestId: string;
+  deadlineAt: number;
+  isCancelled(): boolean;
+}
+
 interface StudioEventStreamModule {
   start(options: {
     serverUrl: string;
-    dispatchRequest(request: Record<string, unknown>): unknown;
+    dispatchRequest(request: Record<string, unknown>, context: StudioRequestContext): unknown;
     onStatus(status: Record<string, unknown>): void;
     onHeartbeat(timestamp: number): void;
     onReady(response: Record<string, unknown>): void;
@@ -82,9 +88,14 @@ async function createHarness(
   responseBodies: string[];
   dispatchRequest: jest.Mock;
   emitRequest(requestId: string): void;
+  emitCancel(requestId: string): void;
+  deferSpawns(): void;
+  flushSpawns(): void;
 }> {
   const scheduled: ScheduledTask[] = [];
   const responseBodies: string[] = [];
+  const spawned: Array<() => void> = [];
+  let spawnsDeferred = false;
   let responseAttempt = 0;
   const stream: MockWebStreamClient = {
     Opened: createSignal(),
@@ -179,10 +190,14 @@ async function createHarness(
       floor: Math.floor,
     },
     task: {
-      spawn: (callback: () => void) => callback(),
+      spawn: (callback: () => void) => {
+        if (spawnsDeferred) spawned.push(callback);
+        else callback();
+      },
       delay: (delay: number, callback: () => void) => scheduled.push({ delay, callback }),
     },
     tick: () => 0,
+    os: { clock: () => 10 },
     pcall: robloxPcall,
     typeIs: (value: unknown, expected: string) => {
       if (expected === 'table') return value !== null && typeof value === 'object';
@@ -227,6 +242,13 @@ async function createHarness(
     scheduled,
     responseBodies,
     dispatchRequest,
+    deferSpawns() {
+      spawnsDeferred = true;
+    },
+    flushSpawns() {
+      spawnsDeferred = false;
+      while (spawned.length > 0) spawned.shift()?.();
+    },
     emitRequest(requestId: string) {
       stream.MessageReceived.fire(JSON.stringify({
         kind: 'request',
@@ -235,10 +257,60 @@ async function createHarness(
         target: 'edit',
         endpoint: '/test',
         data: {},
+        remainingMs: 1000,
+      }));
+    },
+    emitCancel(requestId: string) {
+      stream.MessageReceived.fire(JSON.stringify({
+        kind: 'cancel',
+        requestId,
+        reason: 'aborted',
       }));
     },
   };
 }
+
+describe('Studio request lifecycle', () => {
+  test('cancels in-flight work and suppresses its late response', async () => {
+    const harness = await createHarness(() => ({
+      Success: true,
+      StatusCode: 200,
+      Body: JSON.stringify({ success: true }),
+    }));
+    harness.dispatchRequest.mockImplementation((
+      _request: Record<string, unknown>,
+      context: StudioRequestContext,
+    ) => {
+      expect(context.requestId).toBe('cancelled-request');
+      expect(context.deadlineAt).toBe(11);
+      expect(context.isCancelled()).toBe(false);
+      harness.emitCancel('cancelled-request');
+      expect(context.isCancelled()).toBe(true);
+      return { success: true };
+    });
+
+    harness.emitRequest('cancelled-request');
+
+    expect(harness.dispatchRequest).toHaveBeenCalledTimes(1);
+    expect(harness.responseBodies).toHaveLength(0);
+  });
+
+  test('does not dispatch queued work after the event stream stops', async () => {
+    const harness = await createHarness(() => ({
+      Success: true,
+      StatusCode: 200,
+      Body: JSON.stringify({ success: true }),
+    }));
+    harness.deferSpawns();
+    harness.emitRequest('stopped-request');
+
+    harness.module.stop();
+    harness.flushSpawns();
+
+    expect(harness.dispatchRequest).not.toHaveBeenCalled();
+    expect(harness.responseBodies).toHaveLength(0);
+  });
+});
 
 describe('Studio response delivery', () => {
   test('retries the exact encoded response after a lost acknowledgement without redispatching', async () => {

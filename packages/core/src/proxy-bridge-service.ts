@@ -1,5 +1,8 @@
-import { BridgeService, PluginInstance, PublicPluginInstance, toPublic } from './bridge-service.js';
+import { BridgeService, toPublic } from './bridge-service.js';
+import type { PluginInstance, PublicPluginInstance } from './bridge-service.js';
 import { randomUUID } from 'crypto';
+
+const PROXY_RESPONSE_GRACE_MS = 5_000;
 
 export class ProxyBridgeService extends BridgeService {
   private primaryBaseUrl: string;
@@ -96,12 +99,25 @@ export class ProxyBridgeService extends BridgeService {
 
   override async sendRequest(
     endpoint: string,
-    data: any,
+    data: unknown,
     targetInstanceId: string,
     targetRole: string,
-  ): Promise<any> {
+    timeoutMs = this.proxyRequestTimeout,
+    signal?: AbortSignal,
+  ): Promise<unknown> {
+    if (signal?.aborted) throw new Error('Request aborted');
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), this.proxyRequestTimeout);
+    const effectiveTimeoutMs = Math.max(1, timeoutMs);
+    let timedOut = false;
+    const abortFromCaller = () => controller.abort();
+    signal?.addEventListener('abort', abortFromCaller, { once: true });
+    if (signal?.aborted) controller.abort();
+    // The primary starts its request timer after this fetch begins. Leave room
+    // for its terminal response to travel back before aborting the proxy hop.
+    const timeoutId = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, effectiveTimeoutMs + PROXY_RESPONSE_GRACE_MS);
 
     try {
       const response = await fetch(`${this.primaryBaseUrl}/proxy`, {
@@ -113,28 +129,36 @@ export class ProxyBridgeService extends BridgeService {
           targetInstanceId,
           targetRole,
           proxyInstanceId: this.proxyInstanceId,
+          timeoutMs: effectiveTimeoutMs,
         }),
         signal: controller.signal,
       });
-
-      clearTimeout(timeoutId);
 
       if (!response.ok) {
         const body = await response.text();
         throw new Error(`Proxy request failed (${response.status}): ${body}`);
       }
 
-      const result = await response.json() as { response?: any; error?: string };
-      if (result.error) {
+      const result: unknown = await response.json();
+      if (!result || typeof result !== 'object' || Array.isArray(result)) {
+        throw new Error('Proxy returned an invalid response');
+      }
+      if ('error' in result && typeof result.error === 'string' && result.error.length > 0) {
         throw new Error(result.error);
       }
-      return result.response;
-    } catch (err: any) {
-      clearTimeout(timeoutId);
-      if (err.name === 'AbortError') {
+      return 'response' in result ? result.response : undefined;
+    } catch (error) {
+      const isAbortError = error instanceof Error
+        ? error.name === 'AbortError'
+        : !!error && typeof error === 'object' && 'name' in error && error.name === 'AbortError';
+      if (isAbortError) {
+        if (!timedOut && signal?.aborted) throw new Error('Request aborted');
         throw new Error('Proxy request timeout');
       }
-      throw err;
+      throw error;
+    } finally {
+      clearTimeout(timeoutId);
+      signal?.removeEventListener('abort', abortFromCaller);
     }
   }
 

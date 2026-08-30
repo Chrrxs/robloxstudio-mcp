@@ -54,6 +54,18 @@ describe('BridgeService', () => {
       await expect(response).resolves.toEqual({ ok: true });
     });
 
+    test('reports the remaining request lifetime when Studio claims work', async () => {
+      register(bridge, { pluginSessionId: 'edit', instanceId: 'place:1', role: 'edit' });
+      const response = bridge.sendRequest('/api/slow', {}, 'place:1', 'edit', 2000);
+      jest.advanceTimersByTime(250);
+
+      const delivery = bridge.claimNextRequestForPhysical('edit', 'deadline-delivery');
+
+      expect(delivery).toMatchObject({ remainingMs: 1750 });
+      bridge.resolveRequest(delivery!.requestId, { ok: true });
+      await expect(response).resolves.toEqual({ ok: true });
+    });
+
     test('settles an error once and reports repeated settlement', async () => {
       register(bridge, { pluginSessionId: 'edit', instanceId: 'place:1', role: 'edit' });
       const response = bridge.sendRequest('/api/test', {}, 'place:1', 'edit');
@@ -181,6 +193,30 @@ describe('BridgeService', () => {
       jest.advanceTimersByTime(31_000);
       await expect(response).rejects.toThrow('Request timeout');
       expect(bridge.resolveRequest(delivery.requestId, {})).toBe('unknown');
+    });
+
+    test('cancels claimed Studio work when its caller aborts', async () => {
+      register(bridge, { pluginSessionId: 'edit', instanceId: 'place:1', role: 'edit' });
+      const controller = new AbortController();
+      const response = bridge.sendRequest('/api/slow', {}, 'place:1', 'edit', 120_000, controller.signal);
+      response.catch(() => {});
+      const delivery = bridge.claimNextRequestForPhysical('edit', 'stream');
+      if (!delivery) throw new Error('expected request delivery');
+
+      controller.abort();
+
+      await expect(response).rejects.toThrow('Request aborted');
+      expect(bridge.claimNextCancellationForPhysical('edit', 'cancel-stream')).toEqual({
+        requestId: delivery.requestId,
+        reason: 'aborted',
+      });
+      expect(bridge.resolveRequest(delivery.requestId, {})).toBe('unknown');
+      jest.advanceTimersByTime(30_000);
+      bridge.releaseDeliveryClaims('cancel-stream');
+      expect(bridge.claimNextCancellationForPhysical('edit', 'replacement-stream')).toEqual({
+        requestId: delivery.requestId,
+        reason: 'aborted',
+      });
     });
 
     test('migrates queued work when an anonymous session becomes published', async () => {
@@ -634,10 +670,13 @@ describe('BridgeService', () => {
 
     test('unregisterInstance rejects requests targeting the removed (instanceId, role)', async () => {
       register(bridge, { pluginSessionId: 'p1', instanceId: 'place:1', role: 'edit' });
-      const req = bridge.sendRequest('/api/test', {}, 'place:1', 'edit');
+      const controller = new AbortController();
+      const removeAbortListener = jest.spyOn(controller.signal, 'removeEventListener');
+      const req = bridge.sendRequest('/api/test', {}, 'place:1', 'edit', 30_000, controller.signal);
       const delivery = bridge.claimNextRequestForPhysical('p1', 'disconnecting-delivery')!;
       bridge.unregisterInstance('p1');
       await expect(req).rejects.toThrow(/disconnected/);
+      expect(removeAbortListener).toHaveBeenCalledWith('abort', expect.any(Function));
       expect(bridge.resolveRequest(delivery.requestId, {})).toBe('unknown');
     });
 

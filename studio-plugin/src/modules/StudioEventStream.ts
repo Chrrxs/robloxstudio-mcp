@@ -1,8 +1,10 @@
 import { HttpService } from "@rbxts/services";
 import HttpDiagnostics from "./HttpDiagnostics";
 import PluginSession from "./PluginSession";
-import {
+import type {
 	ReadyResponse,
+	StudioCancelEvent,
+	StudioRequestContext,
 	StudioRequestEvent,
 	StudioStatusEvent,
 	TransportUpdate,
@@ -18,7 +20,7 @@ const STREAM_SILENCE_TIMEOUT_SECONDS = 20;
 
 interface StudioEventStreamOptions {
 	serverUrl: string;
-	dispatchRequest: (request: StudioRequestEvent) => unknown;
+	dispatchRequest: (request: StudioRequestEvent, context: StudioRequestContext) => unknown;
 	onStatus: (status: StudioStatusEvent) => void;
 	onHeartbeat: (timestamp: number) => void;
 	onReady: (response: ReadyResponse) => void;
@@ -27,6 +29,7 @@ interface StudioEventStreamOptions {
 
 type DecodedEvent =
 	| StudioRequestEvent
+	| StudioCancelEvent
 	| StudioStatusEvent
 	| { kind: "heartbeat"; timestamp: number };
 
@@ -39,6 +42,10 @@ interface PendingResponse {
 	retryToken: number;
 }
 
+interface InFlightRequest {
+	cancelled: boolean;
+}
+
 let options: StudioEventStreamOptions | undefined;
 let active = false;
 let generation = 0;
@@ -46,7 +53,7 @@ let reconnectAttempt = 0;
 let streamClient: WebStreamClient | undefined;
 let streamConnections: RBXScriptConnection[] = [];
 let lastValidEventAt = 0;
-const inFlightRequestIds = new Set<string>();
+const inFlightRequests = new Map<string, InFlightRequest>();
 const pendingResponses = new Map<string, PendingResponse>();
 const terminalResponseIds = new Set<string>();
 const terminalResponseOrder: string[] = [];
@@ -84,12 +91,32 @@ function decodeMessage(message: string): DecodedEvent | undefined {
 		};
 	}
 
+	if (envelope.kind === "cancel") {
+		if (
+			!typeIs(envelope.requestId, "string") ||
+			(
+				envelope.reason !== "timeout" &&
+				envelope.reason !== "aborted" &&
+				envelope.reason !== "connection_closed"
+			)
+		) {
+			return undefined;
+		}
+		return {
+			kind: "cancel",
+			requestId: envelope.requestId,
+			reason: envelope.reason,
+		};
+	}
+
 	if (envelope.kind === "request") {
 		if (
 			!typeIs(envelope.requestId, "string") ||
 			!typeIs(envelope.logicalSessionId, "string") ||
 			!typeIs(envelope.target, "string") ||
-			!typeIs(envelope.endpoint, "string")
+			!typeIs(envelope.endpoint, "string") ||
+			!typeIs(envelope.remainingMs, "number") ||
+			envelope.remainingMs < 0
 		) {
 			return undefined;
 		}
@@ -104,6 +131,7 @@ function decodeMessage(message: string): DecodedEvent | undefined {
 			target: envelope.target,
 			endpoint: envelope.endpoint,
 			data,
+			remainingMs: envelope.remainingMs,
 		};
 	}
 
@@ -254,20 +282,49 @@ function encodeResponse(requestId: string, response: unknown): string {
 	});
 }
 
+function cancelRequest(event: StudioCancelEvent): void {
+	const inFlight = inFlightRequests.get(event.requestId);
+	if (inFlight !== undefined) inFlight.cancelled = true;
+	const pending = pendingResponses.get(event.requestId);
+	if (pending !== undefined) {
+		pending.retryToken++;
+		pendingResponses.delete(event.requestId);
+	}
+	rememberTerminalResponse(event.requestId);
+}
+
 function dispatchRequest(request: StudioRequestEvent): void {
 	if (
 		terminalResponseIds.has(request.requestId) ||
 		pendingResponses.has(request.requestId) ||
-		inFlightRequestIds.has(request.requestId)
+		inFlightRequests.has(request.requestId)
 	) {
 		return;
 	}
 	const dispatchOptions = options;
 	if (!active || dispatchOptions === undefined) return;
-	inFlightRequestIds.add(request.requestId);
+	const inFlight: InFlightRequest = { cancelled: false };
+	const context: StudioRequestContext = {
+		requestId: request.requestId,
+		deadlineAt: os.clock() + request.remainingMs / 1000,
+		isCancelled: () => inFlight.cancelled,
+	};
+	inFlightRequests.set(request.requestId, inFlight);
 
 	task.spawn(() => {
-		const [dispatchOk, response] = pcall(() => dispatchOptions.dispatchRequest(request));
+		if (inFlight.cancelled || terminalResponseIds.has(request.requestId)) {
+			if (inFlightRequests.get(request.requestId) === inFlight) {
+				inFlightRequests.delete(request.requestId);
+			}
+			return;
+		}
+		const [dispatchOk, response] = pcall(() => dispatchOptions.dispatchRequest(request, context));
+		if (inFlight.cancelled || terminalResponseIds.has(request.requestId)) {
+			if (inFlightRequests.get(request.requestId) === inFlight) {
+				inFlightRequests.delete(request.requestId);
+			}
+			return;
+		}
 		const responseData = dispatchOk ? response : { error: tostring(response) };
 		const entry: PendingResponse = {
 			body: encodeResponse(request.requestId, responseData),
@@ -276,7 +333,7 @@ function dispatchRequest(request: StudioRequestEvent): void {
 			retryToken: 0,
 		};
 		pendingResponses.set(request.requestId, entry);
-		inFlightRequestIds.delete(request.requestId);
+		inFlightRequests.delete(request.requestId);
 		postPendingResponse(request.requestId, entry);
 	});
 }
@@ -469,6 +526,10 @@ function connect(expectedGeneration: number): void {
 					);
 					return;
 				}
+				if (event.kind === "cancel") {
+					cancelRequest(event);
+					return;
+				}
 				if (event.kind === "request") {
 					dispatchRequest(event);
 					return;
@@ -515,6 +576,11 @@ function stop(): void {
 	const currentOptions = options;
 	active = false;
 	generation++;
+	for (const [, inFlight] of inFlightRequests) {
+		inFlight.cancelled = true;
+	}
+	inFlightRequests.clear();
+	pendingResponses.clear();
 	closeCurrentStream();
 	readyFailureLogKeys.clear();
 	options = undefined;

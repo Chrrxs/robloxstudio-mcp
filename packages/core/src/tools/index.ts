@@ -86,6 +86,8 @@ const MAX_SEARCH_ASSET_DESCRIPTION_LENGTH = 240;
 const ROBLOX_CREATOR_USER_ID = 1;
 const MAX_DEVICE_MATRIX_ENTRIES = 6;
 const MAX_NETWORK_PACKET_LOSS_PERCENT = 0.5;
+const GREP_SCRIPTS_TIMEOUT_MS = 120_000;
+const MAX_GREP_PATTERN_UTF8_BYTES = 4096;
 const STUDIO_ASSISTANT_SOURCE_IMAGE_LABEL = 'Studio Assistant Source Image';
 const CREATOR_STORE_SEARCH_TYPES = new Set<string>([
   'Audio',
@@ -1062,10 +1064,11 @@ export class RobloxStudioTools {
   // the LLM can recover via the embedded data.instances list.
   private async _callSingle(
     endpoint: string,
-    data: any,
+    data: unknown,
     target: string | undefined,
     instance_id: string | undefined,
     timeoutMs?: number,
+    signal?: AbortSignal,
   ): Promise<any> {
     // Pass target through as-is so resolveTarget can tell "caller didn't
     // specify" (target=undefined → multiple_instances_connected) apart
@@ -1084,7 +1087,10 @@ export class RobloxStudioTools {
         },
       });
     }
-    return this.client.request(endpoint, data, r.targetInstanceId, r.targetRole, timeoutMs);
+    if (signal === undefined) {
+      return this.client.request(endpoint, data, r.targetInstanceId, r.targetRole, timeoutMs);
+    }
+    return this.client.request(endpoint, data, r.targetInstanceId, r.targetRole, timeoutMs, signal);
   }
 
   // Resolves which connected place a tool should target and whether a playtest
@@ -1714,15 +1720,19 @@ export class RobloxStudioTools {
       path?: string;
       classFilter?: string;
     },
-    instance_id?: string
+    instance_id?: string,
+    signal?: AbortSignal,
   ) {
     if (!pattern) {
       throw new Error('Pattern is required for grep_scripts');
     }
+    if (Buffer.byteLength(pattern, 'utf8') > MAX_GREP_PATTERN_UTF8_BYTES) {
+      throw new Error(`Pattern must not exceed ${MAX_GREP_PATTERN_UTF8_BYTES} UTF-8 bytes`);
+    }
     const response = await this._callSingle('/api/grep-scripts', {
       pattern,
       ...(options ?? {}),
-    }, undefined, instance_id);
+    }, undefined, instance_id, GREP_SCRIPTS_TIMEOUT_MS, signal);
     return {
       content: [
         {

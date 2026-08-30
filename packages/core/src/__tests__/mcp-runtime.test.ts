@@ -1,3 +1,4 @@
+import { EventEmitter, once } from 'node:events';
 import { Client, InMemoryTransport, StreamableHTTPClientTransport } from '@modelcontextprotocol/client';
 import { serveStdio } from '@modelcontextprotocol/server/stdio';
 import type { Server as HttpServer } from 'node:http';
@@ -310,6 +311,81 @@ describe('MCP v2 tool runtime', () => {
       await client.close();
       await server.close();
     }
+  });
+
+  test('passes live client cancellation to the tool invocation context', async () => {
+    const definition = TOOL_DEFINITIONS.find((tool) => tool.name === 'get_place_info')!;
+    const fakeTools = {} as RobloxStudioTools;
+    const lifecycle = new EventEmitter();
+    const started = once(lifecycle, 'started');
+    const handlerAborted = once(lifecycle, 'handler-aborted');
+    let invocationSignal: AbortSignal | undefined;
+    const server = createToolServer({
+      config: { name: 'test-server', version: '3.0.0', tools: [definition] },
+      getTools: () => fakeTools,
+      era: 'modern',
+      invoke: async (_tools, _name, _args, context) => {
+        invocationSignal = context.signal;
+        context.signal.addEventListener('abort', () => lifecycle.emit('handler-aborted'), { once: true });
+        lifecycle.emit('started');
+        await once(lifecycle, 'release');
+        return { content: [{ type: 'text', text: JSON.stringify({ placeId: 123 }) }] };
+      },
+    });
+    const client = new Client({ name: 'test-client', version: '1.0.0' });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await server.connect(serverTransport);
+    await client.connect(clientTransport);
+    const controller = new AbortController();
+
+    try {
+      const call = client.callTool(
+        { name: 'get_place_info', arguments: {} },
+        { signal: controller.signal },
+      );
+      call.catch(() => {});
+      await started;
+      expect(invocationSignal?.aborted).toBe(false);
+
+      controller.abort();
+
+      await handlerAborted;
+      expect(invocationSignal?.aborted).toBe(true);
+      lifecycle.emit('release');
+      await expect(call).rejects.toThrow();
+    } finally {
+      lifecycle.emit('release');
+      await client.close().catch(() => {});
+      await server.close().catch(() => {});
+    }
+  });
+
+  test('forwards the invocation signal through the grep tool adapter', async () => {
+    const grepScripts = jest.fn(async () => ({ content: [] }));
+    const tools = { grepScripts } as unknown as RobloxStudioTools;
+    const controller = new AbortController();
+
+    await TOOL_HANDLERS.grep_scripts(
+      tools,
+      { pattern: 'needle', instance_id: 'place:test' },
+      { signal: controller.signal },
+    );
+
+    expect(grepScripts).toHaveBeenCalledWith(
+      'needle',
+      {
+        caseSensitive: undefined,
+        usePattern: undefined,
+        contextLines: undefined,
+        maxResults: undefined,
+        maxResultsPerScript: undefined,
+        filesOnly: undefined,
+        path: undefined,
+        classFilter: undefined,
+      },
+      'place:test',
+      controller.signal,
+    );
   });
 
   test.each([

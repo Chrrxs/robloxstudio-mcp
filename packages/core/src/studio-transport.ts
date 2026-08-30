@@ -9,12 +9,24 @@ export interface StudioQueuedRequest {
   target: string;
   endpoint: string;
   data: unknown;
+  remainingMs: number;
+}
+
+export type StudioCancellationReason = 'timeout' | 'aborted' | 'connection_closed';
+
+export interface StudioRequestCancellation {
+  requestId: string;
+  reason: StudioCancellationReason;
 }
 
 export interface StudioTransportQueue {
   claimNextRequestForPhysical(physicalSessionId: string, claimOwner: string): StudioQueuedRequest | null;
   releaseDeliveryClaims(claimOwner: string): void;
   onRequestAvailable(listener: (physicalSessionId: string) => void): () => void;
+  claimNextCancellationForPhysical(
+    physicalSessionId: string,
+    claimOwner: string,
+  ): StudioRequestCancellation | null;
   onSessionClosed(listener: (session: StudioSession) => void): () => void;
   setDeliveryActive(physicalSessionId: string, owner: string, active: boolean): void;
   updateInstanceActivity(pluginSessionId: string): void;
@@ -28,6 +40,11 @@ export interface StudioRequestEvent {
   target: string;
   endpoint: string;
   data: unknown;
+  remainingMs: number;
+}
+
+export interface StudioCancelEvent extends StudioRequestCancellation {
+  kind: 'cancel';
 }
 
 export interface StudioStatusEvent {
@@ -44,7 +61,11 @@ export interface StudioHeartbeatEvent {
   timestamp: number;
 }
 
-export type StudioServerEvent = StudioRequestEvent | StudioStatusEvent | StudioHeartbeatEvent;
+export type StudioServerEvent =
+  | StudioRequestEvent
+  | StudioCancelEvent
+  | StudioStatusEvent
+  | StudioHeartbeatEvent;
 
 export interface EventStreamSink {
   write(chunk: string): boolean;
@@ -205,6 +226,15 @@ export class SseStudioTransport {
     }
 
     while (!stream.closed && !stream.blocked) {
+      const cancellation = this.queue.claimNextCancellationForPhysical(
+        stream.physicalSessionId,
+        stream.claimOwner,
+      );
+      if (!cancellation) break;
+      if (!this.write(stream, { kind: 'cancel', ...cancellation })) return;
+    }
+
+    while (!stream.closed && !stream.blocked) {
       const request = this.queue.claimNextRequestForPhysical(stream.physicalSessionId, stream.claimOwner);
       if (!request) return;
       const event: StudioRequestEvent = {
@@ -214,6 +244,7 @@ export class SseStudioTransport {
         target: request.target,
         endpoint: request.endpoint,
         data: request.data === undefined ? null : request.data,
+        remainingMs: request.remainingMs,
       };
       if (!this.write(stream, event)) return;
     }

@@ -1,4 +1,7 @@
 import Utils from "../Utils";
+import CooperativeJobRunner from "../CooperativeJobRunner";
+import ScriptSearch from "../ScriptSearch";
+import type { StudioRequestContext } from "../../types";
 
 const { getInstancePath, getInstanceByPath, readScriptSource } = Utils;
 
@@ -500,209 +503,61 @@ function getProjectStructure(requestData: Record<string, unknown>) {
 	return result;
 }
 
-// Split a Lua pattern on TOP-LEVEL "|" into alternatives. Lua patterns have no
-// alternation operator, so "foo|bar" would otherwise be matched as the literal
-// text "foo|bar" and silently never hit. "%|" stays a literal pipe, and "%bxy"
-// keeps both balanced-match delimiter characters.
-function splitLuaAlternation(pattern: string): string[] {
-	const parts: string[] = [];
-	let current = "";
-	let i = 1;
-	const n = pattern.size();
-	let inCharClass = false;
-	while (i <= n) {
-		const c = string.sub(pattern, i, i);
-		if (c === "%") {
-			if (string.sub(pattern, i + 1, i + 1) === "b") {
-				current += string.sub(pattern, i, math.min(i + 3, n));
-				i += 4;
-				continue;
-			}
-			// Preserve an escape pair (e.g. %|, %., %d) intact.
-			current += string.sub(pattern, i, i + 1);
-			i += 2;
-		} else if (c === "[") {
-			inCharClass = true;
-			current += c;
-			i += 1;
-		} else if (c === "]") {
-			inCharClass = false;
-			current += c;
-			i += 1;
-		} else if (c === "|" && !inCharClass) {
-			parts.push(current);
-			current = "";
-			i += 1;
-		} else {
-			current += c;
-			i += 1;
-		}
-	}
-	parts.push(current);
-	return parts;
+interface ScriptSnapshot {
+	instancePath: string;
+	name: string;
+	className: string;
+	enabled?: boolean;
+	source: string;
 }
 
-// Return the earliest match across alternatives (mirrors regex alternation).
-function findFirstPattern(line: string, alternatives: string[]): [number | undefined, number | undefined] {
-	let bestStart: number | undefined;
-	let bestEnd: number | undefined;
-	for (const alt of alternatives) {
-		if (alt === "") continue;
-		const [s, e] = string.find(line, alt);
-		if (s !== undefined && (bestStart === undefined || s < bestStart)) {
-			bestStart = s;
-			bestEnd = e as number;
+const scriptSearch = ScriptSearch.createScriptSearch({
+	resolveRoot(path: string): Instance | undefined {
+		return getInstanceByPath(path);
+	},
+	getChildren(instance: Instance): Instance[] {
+		return instance.GetChildren();
+	},
+	readScript(instance: Instance, classFilter?: string): ScriptSnapshot | undefined {
+		if (
+			!instance.IsA("LuaSourceContainer") ||
+			(classFilter !== undefined && instance.ClassName !== classFilter)
+		) {
+			return undefined;
 		}
-	}
-	return [bestStart, bestEnd];
-}
+		const snapshot: ScriptSnapshot = {
+			instancePath: getInstancePath(instance),
+			name: instance.Name,
+			className: instance.ClassName,
+			source: readScriptSource(instance),
+		};
+		if (instance.IsA("BaseScript")) snapshot.enabled = instance.Enabled;
+		return snapshot;
+	},
+});
 
-function grepScripts(requestData: Record<string, unknown>) {
-	const pattern = requestData.pattern as string;
-	if (!pattern) return { error: "pattern is required" };
-
-	const usePattern = (requestData.usePattern as boolean) ?? false;
-	if (usePattern && requestData.caseSensitive === false) {
+function grepScripts(
+	requestData: Record<string, unknown>,
+	execution: StudioRequestContext,
+): unknown {
+	const result = CooperativeJobRunner.runExclusive(
+		"script-source-search",
+		execution,
+		(control) => scriptSearch.search(requestData, control),
+	);
+	if (result.error === "plugin_busy") {
 		return {
-			error: "Case-insensitive Lua pattern search is not supported. Omit caseSensitive or pass caseSensitive: true with usePattern: true, or use literal search.",
+			...result,
+			message: "Another grep_scripts request is already running in this Studio DataModel. Retry after it completes.",
 		};
 	}
-
-	const caseSensitive = usePattern ? true : ((requestData.caseSensitive as boolean) ?? false);
-	const contextLines = (requestData.contextLines as number) ?? 0;
-	const maxResults = (requestData.maxResults as number) ?? 100;
-	const maxResultsPerScript = (requestData.maxResultsPerScript as number) ?? 0;
-	const filesOnly = (requestData.filesOnly as boolean) ?? false;
-	const searchPath = (requestData.path as string) ?? "";
-	const classFilter = requestData.classFilter as string | undefined;
-
-	const startInstance = searchPath !== "" ? getInstanceByPath(searchPath) : game;
-	if (!startInstance) return { error: `Path not found: ${searchPath}` };
-
-	// Prepare pattern for matching
-	const searchPattern = caseSensitive ? pattern : pattern.lower();
-	// Pre-split top-level "|" alternation once (pattern mode only).
-	const patternAlternatives = usePattern ? splitLuaAlternation(searchPattern) : undefined;
-
-	interface LineMatch {
-		line: number;
-		column: number;
-		text: string;
-		before: string[];
-		after: string[];
+	if (result.error === "deadline_exceeded") {
+		return {
+			...result,
+			message: "grep_scripts exceeded its bridge deadline before the scan completed.",
+		};
 	}
-
-	interface ScriptResult {
-		instancePath: string;
-		name: string;
-		className: string;
-		enabled?: boolean;
-		matches: LineMatch[];
-	}
-
-	const results: ScriptResult[] = [];
-	let totalMatches = 0;
-	let scriptsSearched = 0;
-	let hitLimit = false;
-
-	function searchInstance(instance: Instance) {
-		if (hitLimit) return;
-
-		if (instance.IsA("LuaSourceContainer")) {
-			// Apply class filter
-			if (classFilter) {
-				if (!instance.ClassName.lower().find(classFilter.lower())[0]) return;
-			}
-
-			scriptsSearched++;
-			const source = readScriptSource(instance);
-			const [lines] = Utils.splitLines(source);
-			const scriptMatches: LineMatch[] = [];
-			let scriptMatchCount = 0;
-
-			for (let i = 0; i < lines.size(); i++) {
-				if (hitLimit) break;
-				if (maxResultsPerScript > 0 && scriptMatchCount >= maxResultsPerScript) break;
-
-				const line = lines[i];
-				const searchLine = caseSensitive ? line : line.lower();
-
-				let matchStart: number | undefined;
-				let matchEnd: number | undefined;
-
-				if (usePattern) {
-					[matchStart, matchEnd] = findFirstPattern(searchLine, patternAlternatives!);
-				} else {
-					[matchStart, matchEnd] = string.find(searchLine, searchPattern, 1, true);
-				}
-
-				if (matchStart !== undefined) {
-					scriptMatchCount++;
-					totalMatches++;
-
-					if (totalMatches > maxResults) {
-						hitLimit = true;
-						break;
-					}
-
-					if (!filesOnly) {
-						// Gather context lines
-						const before: string[] = [];
-						const after: string[] = [];
-
-						if (contextLines > 0) {
-							const beforeStart = math.max(0, i - contextLines);
-							for (let j = beforeStart; j < i; j++) {
-								before.push(lines[j]);
-							}
-							const afterEnd = math.min(lines.size() - 1, i + contextLines);
-							for (let j = i + 1; j <= afterEnd; j++) {
-								after.push(lines[j]);
-							}
-						}
-
-						scriptMatches.push({
-							line: i + 1, // 1-indexed
-							column: matchStart,
-							text: line,
-							before,
-							after,
-						});
-					}
-				}
-			}
-
-			if (scriptMatchCount > 0) {
-				const scriptResult: ScriptResult = {
-					instancePath: getInstancePath(instance),
-					name: instance.Name,
-					className: instance.ClassName,
-					matches: scriptMatches,
-				};
-				if (instance.IsA("BaseScript")) {
-					scriptResult.enabled = instance.Enabled;
-				}
-				results.push(scriptResult);
-			}
-		}
-
-		for (const child of instance.GetChildren()) {
-			if (hitLimit) return;
-			searchInstance(child);
-		}
-	}
-
-	searchInstance(startInstance);
-
-	return {
-		results,
-		pattern,
-		totalMatches: hitLimit ? `>${maxResults}` : totalMatches,
-		scriptsSearched,
-		scriptsMatched: results.size(),
-		truncated: hitLimit,
-		options: { caseSensitive, contextLines, usePattern, filesOnly, maxResults, maxResultsPerScript },
-	};
+	return result;
 }
 
 export = {

@@ -407,37 +407,44 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
   {
     name: 'grep_scripts',
     category: 'read',
-    description: 'Use to locate text or Lua pattern matches across script sources.',
+    description: 'Use to search script sources.',
     inputSchema: {
       type: 'object',
       properties: {
         pattern: {
           type: 'string',
-          description: 'Literal text, or a Lua pattern when usePattern is true.'
+          maxLength: 4096,
+          description: 'Literal or Lua pattern; max 4096 UTF-8 bytes.'
         },
         caseSensitive: {
           type: 'boolean',
-          description: 'Literal match casing; patterns are always case-sensitive.'
+          description: 'Lua patterns are always case-sensitive.'
         },
         usePattern: {
           type: 'boolean',
-          description: 'Use Lua patterns with top-level | alternation; not PCRE.'
+          description: 'Enable Lua pattern with top-level | (not PCRE).'
         },
         contextLines: {
-          type: 'number',
-          description: 'Lines before and after each match; defaults to 0.'
+          type: 'integer',
+          minimum: 0,
+          maximum: 100,
+          description: 'Surrounding lines (0-100; default 0).'
         },
         maxResults: {
-          type: 'number',
-          description: 'Total match limit; defaults to 100.'
+          type: 'integer',
+          minimum: 1,
+          maximum: 10000,
+          description: 'Default 100.'
         },
         maxResultsPerScript: {
-          type: 'number',
-          description: 'Match limit per script.'
+          type: 'integer',
+          minimum: 0,
+          maximum: 10000,
+          description: 'Per-script cap; 0 is unlimited.'
         },
         filesOnly: {
           type: 'boolean',
-          description: 'Return only script paths; defaults to false.'
+          description: 'Paths only; default false.'
         },
         path: {
           type: 'string',

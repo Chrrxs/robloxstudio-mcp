@@ -1,3 +1,5 @@
+import { EventEmitter, once } from 'node:events';
+import { request as nodeRequest } from 'node:http';
 import request from 'supertest';
 import { TOOL_HANDLERS, createHttpServer, type RobloxStudioHttpApp } from '../http-server.js';
 import { RobloxStudioTools } from '../tools/index.js';
@@ -288,7 +290,7 @@ describe('HTTP Server', () => {
       });
       expect(grepScripts).toHaveBeenLastCalledWith('foo|bar', expect.objectContaining({
         usePattern: undefined,
-      }), 'place:test');
+      }), 'place:test', undefined);
 
       await TOOL_HANDLERS.grep_scripts(fakeTools, {
         pattern: 'foo|bar',
@@ -297,7 +299,7 @@ describe('HTTP Server', () => {
       });
       expect(grepScripts).toHaveBeenLastCalledWith('foo|bar', expect.objectContaining({
         usePattern: true,
-      }), 'place:test');
+      }), 'place:test', undefined);
     });
   });
 
@@ -523,6 +525,98 @@ describe('HTTP Server', () => {
       expect(response.body).toMatchObject({ success: true });
       expect(response.body.removed.map((inst: { role: string }) => inst.role).sort()).toEqual(['edit', 'server']);
       expect(app.isPluginConnected()).toBe(false);
+    });
+
+    test('forwards a validated proxy timeout to the Studio bridge', async () => {
+      const sendRequest = jest.spyOn(bridge, 'sendRequest').mockResolvedValue({ results: [] });
+
+      const response = await request(app).post('/proxy').send({
+        endpoint: '/api/grep-scripts',
+        data: { pattern: 'needle' },
+        targetInstanceId: 'place:test',
+        targetRole: 'edit',
+        timeoutMs: 120_000,
+      }).expect(200);
+
+      expect(response.body).toEqual({ response: { results: [] } });
+      expect(sendRequest).toHaveBeenCalledWith(
+        '/api/grep-scripts',
+        { pattern: 'needle' },
+        'place:test',
+        'edit',
+        120_000,
+        expect.any(AbortSignal),
+      );
+    });
+
+    test('aborts the primary Studio request when a proxy connection closes', async () => {
+      const lifecycle = new EventEmitter();
+      const started = once(lifecycle, 'started');
+      const aborted = once(lifecycle, 'aborted');
+      const finished = once(lifecycle, 'finished');
+      jest.spyOn(bridge, 'sendRequest').mockImplementation(async (
+        _endpoint,
+        _data,
+        _targetInstanceId,
+        _targetRole,
+        _timeoutMs,
+        signal,
+      ) => {
+        if (!signal) throw new Error('expected bridge signal');
+        signal.addEventListener('abort', () => lifecycle.emit('aborted'), { once: true });
+        lifecycle.emit('started');
+        await once(lifecycle, 'release');
+        lifecycle.emit('finished');
+        if (signal.aborted) throw new Error('Request aborted');
+        return { results: [] };
+      });
+      const server = app.listen(0, '127.0.0.1');
+      await once(server, 'listening');
+      const address = server.address();
+      if (!address || typeof address === 'string') throw new Error('expected TCP server address');
+      const body = JSON.stringify({
+        endpoint: '/api/grep-scripts',
+        data: { pattern: 'needle' },
+        targetInstanceId: 'place:test',
+        targetRole: 'edit',
+        timeoutMs: 120_000,
+      });
+      const proxyRequest = nodeRequest({
+        hostname: '127.0.0.1',
+        port: address.port,
+        path: '/proxy',
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Content-Length': Buffer.byteLength(body),
+        },
+      });
+      proxyRequest.on('error', () => {});
+      proxyRequest.end(body);
+
+      try {
+        await started;
+        proxyRequest.destroy();
+        await aborted;
+        lifecycle.emit('release');
+        await finished;
+      } finally {
+        lifecycle.emit('release');
+        const closed = once(server, 'close');
+        server.close();
+        await closed;
+        await app.cleanup();
+      }
+    });
+
+    test('rejects invalid proxy timeouts', async () => {
+      await request(app).post('/proxy').send({
+        endpoint: '/api/grep-scripts',
+        data: { pattern: 'needle' },
+        targetInstanceId: 'place:test',
+        targetRole: 'edit',
+        timeoutMs: 0,
+      }).expect(400, { error: 'timeoutMs must be an integer between 1 and 300000' });
     });
 
     test('disconnect rejects pending requests targeting that tuple', async () => {

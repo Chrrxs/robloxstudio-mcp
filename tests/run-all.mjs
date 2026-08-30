@@ -38,6 +38,7 @@ const FULL_TESTS = [
   'eval-context-routing.mjs',
   'runtime-bridge-lifecycle.mjs',
   'micro-profiler-responsiveness.mjs',
+  'studio-grep-responsiveness.mjs',
   'execute-luau-error-preservation.mjs',
   'proxy-mode-peer-fanout.mjs',
   'execute-luau-output-capture.mjs',

@@ -7,6 +7,7 @@ import { BridgeService, RoutingFailure, toPublic } from './bridge-service.js';
 import type { RegisterInstanceResult } from './bridge-service.js';
 import type { ToolDefinition } from './tools/definitions.js';
 import { createToolHttpHandler, normalizeToolResult, publicToolErrorBody } from './mcp-runtime.js';
+import type { ToolInvocationContext } from './mcp-runtime.js';
 import { tokensMatch } from './auth.js';
 import { StudioLaunchPreDispatchError } from './studio-instance-manager.js';
 import {
@@ -40,7 +41,11 @@ interface StreamableHttpConfig {
   tools: ToolDefinition[];
 }
 
-export type ToolHandler = (tools: RobloxStudioTools, body: any) => Promise<any>;
+export type ToolHandler = (
+  tools: RobloxStudioTools,
+  body: any,
+  context?: ToolInvocationContext,
+) => Promise<any>;
 
 type ParsedLineRange = {
   startLine?: number;
@@ -105,7 +110,7 @@ export const TOOL_HANDLERS: Record<string, ToolHandler> = {
   get_instance_properties: (tools, body) => tools.getInstanceProperties(body.instancePath, body.excludeSource, body.instance_id),
   get_project_structure: (tools, body) => tools.getProjectStructure(body.path, body.maxDepth, body.scriptsOnly, body.instance_id),
   set_properties: (tools, body) => tools.setProperties(body.instancePath, body.properties, body.instance_id),
-  grep_scripts: (tools, body) => tools.grepScripts(body.pattern, {
+  grep_scripts: (tools, body, context) => tools.grepScripts(body.pattern, {
     caseSensitive: body.caseSensitive,
     usePattern: body.usePattern,
     contextLines: body.contextLines,
@@ -114,7 +119,7 @@ export const TOOL_HANDLERS: Record<string, ToolHandler> = {
     filesOnly: body.filesOnly,
     path: body.path,
     classFilter: body.classFilter,
-  }, body.instance_id),
+  }, body.instance_id, context?.signal),
   get_script_source: (tools, body) => {
     const { startLine, endLine } = optionalLineRange(body, 'get_script_source');
     return tools.getScriptSource(body.instancePath, startLine, endLine, body.instance_id);
@@ -646,10 +651,18 @@ export function createHttpServer(tools: RobloxStudioTools, bridge: BridgeService
 
 
   app.post('/proxy', async (req, res) => {
-    const { endpoint, data, targetInstanceId, targetRole, proxyInstanceId } = req.body;
+    const { endpoint, data, targetInstanceId, targetRole, proxyInstanceId, timeoutMs } = req.body;
 
     if (!endpoint || !targetInstanceId || !targetRole) {
       res.status(400).json({ error: 'endpoint, targetInstanceId, and targetRole are required' });
+      return;
+    }
+
+    if (
+      timeoutMs !== undefined &&
+      (!Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 300_000)
+    ) {
+      res.status(400).json({ error: 'timeoutMs must be an integer between 1 and 300000' });
       return;
     }
 
@@ -657,11 +670,29 @@ export function createHttpServer(tools: RobloxStudioTools, bridge: BridgeService
       proxyInstances.add(proxyInstanceId);
     }
 
+    const controller = new AbortController();
+    const abort = () => controller.abort();
+    req.once('aborted', abort);
+    res.once('close', abort);
     try {
-      const response = await bridge.sendRequest(endpoint, data, targetInstanceId, targetRole);
+      const response = await bridge.sendRequest(
+        endpoint,
+        data,
+        targetInstanceId,
+        targetRole,
+        timeoutMs,
+        controller.signal,
+      );
       res.json({ response });
-    } catch (err: any) {
-      res.status(500).json({ error: err.message || 'Proxy request failed' });
+    } catch (error) {
+      if (!res.headersSent && !res.destroyed) {
+        res.status(500).json({
+          error: error instanceof Error ? error.message : 'Proxy request failed',
+        });
+      }
+    } finally {
+      req.removeListener('aborted', abort);
+      res.removeListener('close', abort);
     }
   });
 
@@ -673,10 +704,10 @@ export function createHttpServer(tools: RobloxStudioTools, bridge: BridgeService
         config: serverConfig,
         getTools: () => tools,
         allowedTools,
-        invoke: async (currentTools, name, args) => {
+        invoke: async (currentTools, name, args, context) => {
           const handler = TOOL_HANDLERS[name];
           if (!handler) throw new Error(`Unknown tool: ${name}`);
-          return handler(currentTools, args);
+          return handler(currentTools, args, context);
         },
       })
     : undefined;
@@ -735,30 +766,31 @@ export function createHttpServer(tools: RobloxStudioTools, bridge: BridgeService
  * Attempt to bind an Express app to a port, using an explicit http.Server
  * so that EADDRINUSE errors are properly caught.
  */
-export function listenWithRetry(
+export async function listenWithRetry(
   app: express.Express,
   host: string,
   startPort: number,
   maxAttempts: number = 5
 ): Promise<{ server: http.Server; port: number }> {
-  return new Promise(async (resolve, reject) => {
-    for (let i = 0; i < maxAttempts; i++) {
-      const port = startPort + i;
-      try {
-        const server = await bindPort(app, host, port);
-        resolve({ server, port });
-        return;
-      } catch (err: any) {
-        if (err.code === 'EADDRINUSE') {
-          console.error(`Port ${port} in use, trying next...`);
-          continue;
-        }
-        reject(err);
-        return;
+  for (let i = 0; i < maxAttempts; i++) {
+    const port = startPort + i;
+    try {
+      const server = await bindPort(app, host, port);
+      return { server, port };
+    } catch (error) {
+      if (
+        error !== null &&
+        typeof error === 'object' &&
+        'code' in error &&
+        error.code === 'EADDRINUSE'
+      ) {
+        console.error(`Port ${port} in use, trying next...`);
+        continue;
       }
+      throw error;
     }
-    reject(new Error(`All ports ${startPort}-${startPort + maxAttempts - 1} are in use. Stop some MCP server instances and retry.`));
-  });
+  }
+  throw new Error(`All ports ${startPort}-${startPort + maxAttempts - 1} are in use. Stop some MCP server instances and retry.`);
 }
 
 function bindPort(app: express.Express, host: string, port: number): Promise<http.Server> {

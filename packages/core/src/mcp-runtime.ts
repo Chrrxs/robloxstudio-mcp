@@ -15,6 +15,10 @@ import type { ToolDefinition } from './tools/definitions.js';
 
 export type ProtocolEra = McpRequestContext['era'];
 
+export interface ToolInvocationContext {
+  signal: AbortSignal;
+}
+
 export interface McpRuntimeConfig {
   name: string;
   version: string;
@@ -24,7 +28,12 @@ export interface McpRuntimeConfig {
 export interface McpRuntimeOptions {
   config: McpRuntimeConfig;
   getTools: () => RobloxStudioTools;
-  invoke: (tools: RobloxStudioTools, name: string, args: Record<string, unknown>) => Promise<unknown>;
+  invoke: (
+    tools: RobloxStudioTools,
+    name: string,
+    args: Record<string, unknown>,
+    context: ToolInvocationContext,
+  ) => Promise<unknown>;
   allowedTools?: ReadonlySet<string>;
   era: ProtocolEra;
 }
@@ -310,9 +319,14 @@ export function createToolServer(options: McpRuntimeOptions): McpServer {
           : {}),
         annotations: publicDefinition.annotations,
       },
-      async (args) => {
+      async (args, context) => {
         try {
-          const raw = await options.invoke(options.getTools(), definition.name, args as Record<string, unknown>);
+          const raw = await options.invoke(
+            options.getTools(),
+            definition.name,
+            args as Record<string, unknown>,
+            { signal: context.mcpReq.signal },
+          );
           return normalizeToolResult(raw, options.era);
         } catch (error) {
           return normalizeToolResult({

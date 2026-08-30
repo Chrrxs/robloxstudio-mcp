@@ -29,6 +29,14 @@ export interface ReadyResponse {
 	serverVersion: string;
 }
 
+export type StudioCancellationReason = "timeout" | "aborted" | "connection_closed";
+
+export interface StudioRequestContext {
+	requestId: string;
+	deadlineAt: number;
+	isCancelled: () => boolean;
+}
+
 export interface StudioRequestEvent {
 	kind: "request";
 	requestId: string;
@@ -36,6 +44,13 @@ export interface StudioRequestEvent {
 	target: string;
 	endpoint: string;
 	data?: RequestData;
+	remainingMs: number;
+}
+
+export interface StudioCancelEvent {
+	kind: "cancel";
+	requestId: string;
+	reason: StudioCancellationReason;
 }
 
 export interface StudioStatusEvent {

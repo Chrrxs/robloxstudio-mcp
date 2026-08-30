@@ -183,22 +183,12 @@ function getInstanceByPath(path: string): Instance | undefined {
 function splitLines(source: string): LuaTuple<[string[], boolean]> {
 	const normalized = ((source ?? "") as string).gsub("\r\n", "\n")[0].gsub("\r", "\n")[0];
 	const endsWithNewline = normalized.sub(-1) === "\n";
+	const lines = normalized.split("\n");
 
-	const lines: string[] = [];
-	let start = 1;
-
-	while (true) {
-		const [newlinePos] = string.find(normalized, "\n", start, true);
-		if (newlinePos !== undefined) {
-			lines.push(string.sub(normalized, start, newlinePos - 1));
-			start = newlinePos + 1;
-		} else {
-			const remainder = string.sub(normalized, start);
-			if (remainder !== "" || !endsWithNewline) {
-				lines.push(remainder);
-			}
-			break;
-		}
+	// split() includes a final empty field for a trailing newline. Keep the
+	// existing splitLines contract, which tracks that newline separately.
+	if (endsWithNewline && lines[lines.size() - 1] === "") {
+		lines.pop();
 	}
 
 	if (lines.size() === 0) {
@@ -217,15 +207,16 @@ function joinLines(lines: string[], hadTrailingNewline: boolean): string {
 }
 
 function readScriptSource(instance: LuaSourceContainer): string {
-	const [ok, result] = pcall(() => {
+	const [editorOk, editorSource] = pcall(() => ScriptEditorService.GetEditorSource(instance));
+	if (editorOk) return editorSource;
+
+	const [documentOk, documentSource] = pcall(() => {
 		const doc = ScriptEditorService.FindScriptDocument(instance);
-		if (doc) {
-			return doc.GetText();
-		}
+		if (doc) return doc.GetText();
 		return undefined;
 	});
-	if (ok && result !== undefined) {
-		return result;
+	if (documentOk && documentSource !== undefined) {
+		return documentSource;
 	}
 	// @rbxts/types does not expose PluginSecurity Source reads.
 	const readableScript = instance as unknown as { Source: string };

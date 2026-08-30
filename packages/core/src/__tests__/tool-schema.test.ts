@@ -137,13 +137,25 @@ describe('Tool schema compatibility', () => {
     expect(TOOL_GUIDE_MARKDOWN).toContain('An empty paths array in set mode clears it');
   });
 
-  test('grep_scripts exposes one explicit pattern-mode switch', () => {
+  test('grep_scripts exposes one bounded pattern-mode contract', () => {
     const grep = TOOL_DEFINITIONS.find(tool => tool.name === 'grep_scripts')!;
-    const props = (grep.inputSchema as { properties?: Record<string, any> }).properties ?? {};
+    const props = (grep.inputSchema as {
+      properties?: Record<string, {
+        type?: string;
+        description?: string;
+        minimum?: number;
+        maximum?: number;
+        maxLength?: number;
+      }>;
+    }).properties ?? {};
 
     expect(props.usePattern).toMatchObject({ type: 'boolean' });
     expect(props.isRegex).toBeUndefined();
     expect(props.caseSensitive.description).toContain('patterns are always case-sensitive');
+    expect(props.pattern).toMatchObject({ maxLength: 4096 });
+    expect(props.contextLines).toMatchObject({ minimum: 0, maximum: 100 });
+    expect(props.maxResults).toMatchObject({ minimum: 1, maximum: 10_000 });
+    expect(props.maxResultsPerScript).toMatchObject({ minimum: 0, maximum: 10_000 });
   });
 
   test('get_script_source exposes only line_range for range selection', () => {

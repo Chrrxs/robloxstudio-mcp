@@ -1,6 +1,8 @@
 import { randomUUID } from 'crypto';
 import type {
+  StudioCancellationReason,
   StudioQueuedRequest,
+  StudioRequestCancellation,
   StudioSession,
   StudioTransportQueue,
 } from './studio-transport.js';
@@ -35,15 +37,24 @@ export type SettlementDisposition = 'accepted' | 'already_settled' | 'unknown';
 interface PendingRequest {
   id: string;
   endpoint: string;
-  data: any;
+  data: unknown;
   targetInstanceId: string;
   targetRole: string;
   timestamp: number;
   claimOwner?: string;
-  resolve: (value: any) => void;
-  reject: (error: any) => void;
+  lastDeliveryPhysicalSessionId?: string;
+  resolve: (value: unknown) => void;
+  reject: (error: unknown) => void;
   timeoutId: ReturnType<typeof setTimeout>;
   timeoutMs: number;
+  abortSignal?: AbortSignal;
+  abortListener?: () => void;
+}
+
+interface PendingCancellation extends StudioRequestCancellation {
+  physicalSessionId: string;
+  createdAt: number;
+  claimOwner?: string;
 }
 
 
@@ -142,6 +153,8 @@ const DUPLICATE_TAKEOVER_MS = 3000;
 const INSTANCE_ALIAS_TTL_MS = 5 * 60 * 1000;
 const ACCEPTED_REQUEST_TOMBSTONE_TTL_MS = 60_000;
 const MAX_ACCEPTED_REQUEST_TOMBSTONES = 4096;
+const CANCELLATION_TOMBSTONE_TTL_MS = 60_000;
+const MAX_CANCELLATION_TOMBSTONES = 4096;
 
 interface InstanceAlias {
   targetInstanceId: string;
@@ -156,6 +169,7 @@ function publishedInstanceId(placeId: number | undefined): string | undefined {
 export class BridgeService implements StudioTransportQueue {
   private pendingRequests: Map<string, PendingRequest> = new Map();
   private acceptedRequestIds: Map<string, number> = new Map();
+  private pendingCancellations: Map<string, PendingCancellation> = new Map();
   // Keyed by pluginSessionId (the per-plugin GUID).
   private instances: Map<string, PluginInstance> = new Map();
   private instanceAliases: Map<string, InstanceAlias> = new Map();
@@ -196,12 +210,10 @@ export class BridgeService implements StudioTransportQueue {
     return () => this.requestAvailableListeners.delete(listener);
   }
 
-
   onSessionClosed(listener: (session: StudioSession) => void): () => void {
     this.sessionClosedListeners.add(listener);
     return () => this.sessionClosedListeners.delete(listener);
   }
-
 
   setDeliveryActive(physicalSessionId: string, owner: string, active: boolean): void {
     let owners = this.deliveryOwnersByPhysicalSession.get(physicalSessionId);
@@ -227,6 +239,21 @@ export class BridgeService implements StudioTransportQueue {
         // Delivery observers cannot break request queue ownership.
       }
     }
+  }
+
+  private notifyRequestCancelled(request: PendingRequest, reason: StudioCancellationReason): void {
+    const physicalSessionId = request.lastDeliveryPhysicalSessionId;
+    if (!physicalSessionId || this.pendingCancellations.has(request.id)) return;
+    const now = Date.now();
+    this.prunePendingCancellations(now);
+    this.pendingCancellations.set(request.id, {
+      requestId: request.id,
+      reason,
+      physicalSessionId,
+      createdAt: now,
+    });
+    this.prunePendingCancellations(now);
+    this.notifyRequestAvailable(physicalSessionId);
   }
 
 
@@ -420,13 +447,12 @@ export class BridgeService implements StudioTransportQueue {
     for (const child of logicalChildren) this.unregisterInstance(child.pluginSessionId);
     // Reject any pending requests targeted at this (instanceId, role) tuple
     // if no other plugin handles it.
-    for (const [id, req] of this.pendingRequests.entries()) {
+    for (const req of Array.from(this.pendingRequests.values())) {
       const stillHasHandler = Array.from(this.instances.values()).some(
         (i) => i.instanceId === req.targetInstanceId && i.role === req.targetRole,
       );
       if (!stillHasHandler) {
-        clearTimeout(req.timeoutId);
-        this.pendingRequests.delete(id);
+        this.removePendingRequest(req);
         req.reject(new Error(`Target (${req.targetInstanceId}, ${req.targetRole}) disconnected`));
       }
     }
@@ -651,22 +677,28 @@ export class BridgeService implements StudioTransportQueue {
 
   async sendRequest(
     endpoint: string,
-    data: any,
+    data: unknown,
     targetInstanceId: string,
     targetRole: string,
     timeoutMs = this.requestTimeout,
-  ): Promise<any> {
+    signal?: AbortSignal,
+  ): Promise<unknown> {
     const requestId = randomUUID();
     const effectiveTimeoutMs = Math.max(1, timeoutMs);
+    if (signal?.aborted) throw new Error('Request aborted');
 
     return new Promise((resolve, reject) => {
-      const timeoutId = setTimeout(() => {
-        if (this.pendingRequests.has(requestId)) {
-          this.pendingRequests.delete(requestId);
-          reject(new Error('Request timeout'));
-        }
-      }, effectiveTimeoutMs);
-
+      const cancelPending = (reason: StudioCancellationReason, error: Error): void => {
+        const pending = this.pendingRequests.get(requestId);
+        if (!pending || !this.removePendingRequest(pending)) return;
+        this.notifyRequestCancelled(pending, reason);
+        pending.reject(error);
+      };
+      const timeoutId = setTimeout(
+        () => cancelPending('timeout', new Error('Request timeout')),
+        effectiveTimeoutMs,
+      );
+      const abortListener = () => cancelPending('aborted', new Error('Request aborted'));
       const request: PendingRequest = {
         id: requestId,
         endpoint,
@@ -678,13 +710,29 @@ export class BridgeService implements StudioTransportQueue {
         reject,
         timeoutId,
         timeoutMs: effectiveTimeoutMs,
+        abortSignal: signal,
+        abortListener,
       };
 
       this.pendingRequests.set(requestId, request);
-      for (const physicalSessionId of this.physicalSessionsForTarget(targetInstanceId, targetRole)) {
-        this.notifyRequestAvailable(physicalSessionId);
+      signal?.addEventListener('abort', abortListener, { once: true });
+      if (signal?.aborted) abortListener();
+      if (this.pendingRequests.has(requestId)) {
+        for (const physicalSessionId of this.physicalSessionsForTarget(targetInstanceId, targetRole)) {
+          this.notifyRequestAvailable(physicalSessionId);
+        }
       }
     });
+  }
+
+  private removePendingRequest(request: PendingRequest): boolean {
+    if (this.pendingRequests.get(request.id) !== request) return false;
+    clearTimeout(request.timeoutId);
+    if (request.abortSignal && request.abortListener) {
+      request.abortSignal.removeEventListener('abort', request.abortListener);
+    }
+    this.pendingRequests.delete(request.id);
+    return true;
   }
 
 
@@ -715,13 +763,31 @@ export class BridgeService implements StudioTransportQueue {
     }
     if (!oldestRequest) return null;
     oldestRequest.claimOwner = claimOwner;
+    oldestRequest.lastDeliveryPhysicalSessionId = physicalSessionId;
     return {
       requestId: oldestRequest.id,
       logicalSessionId,
       target: oldestRequest.targetRole,
       endpoint: oldestRequest.endpoint,
       data: oldestRequest.data,
+      remainingMs: Math.max(1, oldestRequest.timeoutMs - (Date.now() - oldestRequest.timestamp)),
     };
+  }
+
+
+  claimNextCancellationForPhysical(
+    physicalSessionId: string,
+    claimOwner: string,
+  ): StudioRequestCancellation | null {
+    this.prunePendingCancellations(Date.now());
+    for (const cancellation of this.pendingCancellations.values()) {
+      if (cancellation.physicalSessionId !== physicalSessionId || cancellation.claimOwner !== undefined) {
+        continue;
+      }
+      cancellation.claimOwner = claimOwner;
+      return { requestId: cancellation.requestId, reason: cancellation.reason };
+    }
+    return null;
   }
 
   releaseDeliveryClaims(claimOwner: string): void {
@@ -735,6 +801,11 @@ export class BridgeService implements StudioTransportQueue {
       )) {
         physicalSessionIds.add(physicalSessionId);
       }
+    }
+    for (const cancellation of this.pendingCancellations.values()) {
+      if (cancellation.claimOwner !== claimOwner) continue;
+      cancellation.claimOwner = undefined;
+      physicalSessionIds.add(cancellation.physicalSessionId);
     }
     for (const physicalSessionId of physicalSessionIds) {
       this.notifyRequestAvailable(physicalSessionId);
@@ -761,8 +832,7 @@ export class BridgeService implements StudioTransportQueue {
       return this.acceptedRequestIds.has(requestId) ? 'already_settled' : 'unknown';
     }
 
-    clearTimeout(request.timeoutId);
-    this.pendingRequests.delete(requestId);
+    this.removePendingRequest(request);
     this.acceptedRequestIds.set(requestId, now);
     this.pruneAcceptedRequestIds(now);
     settle(request);
@@ -782,22 +852,34 @@ export class BridgeService implements StudioTransportQueue {
     }
   }
 
+  private prunePendingCancellations(now: number): void {
+    for (const [requestId, cancellation] of this.pendingCancellations) {
+      if (now - cancellation.createdAt < CANCELLATION_TOMBSTONE_TTL_MS) break;
+      this.pendingCancellations.delete(requestId);
+    }
+
+    while (this.pendingCancellations.size > MAX_CANCELLATION_TOMBSTONES) {
+      const oldestRequestId = this.pendingCancellations.keys().next().value;
+      if (oldestRequestId === undefined) break;
+      this.pendingCancellations.delete(oldestRequestId);
+    }
+  }
+
   cleanupOldRequests() {
     const now = Date.now();
-    for (const [id, request] of this.pendingRequests.entries()) {
-      if (now - request.timestamp > request.timeoutMs) {
-        clearTimeout(request.timeoutId);
-        this.pendingRequests.delete(id);
+    for (const request of this.pendingRequests.values()) {
+      if (now - request.timestamp > request.timeoutMs && this.removePendingRequest(request)) {
+        this.notifyRequestCancelled(request, 'timeout');
         request.reject(new Error('Request timeout'));
       }
     }
   }
 
   clearAllPendingRequests() {
-    for (const [, request] of this.pendingRequests.entries()) {
-      clearTimeout(request.timeoutId);
+    for (const request of Array.from(this.pendingRequests.values())) {
+      this.removePendingRequest(request);
       request.reject(new Error('Connection closed'));
     }
-    this.pendingRequests.clear();
+    this.pendingCancellations.clear();
   }
 }
