@@ -44,6 +44,7 @@ const REQUEST_TTL_SEC = 12.0;
 
 let pluginRef: Plugin | undefined;
 let endTestIssued = false;
+let transportLifecycle: StopTransportLifecycle | undefined;
 
 interface StopPayload {
 	kind?: string;
@@ -63,6 +64,11 @@ interface StopConsumptionResult {
 	ok: boolean;
 	consumed: boolean;
 	error?: string;
+}
+
+interface StopTransportLifecycle {
+	beforeEndTest: () => void;
+	afterEndTestFailure: () => void;
 }
 
 function init(p: Plugin): void {
@@ -177,14 +183,28 @@ function handleStopRequest(key: string, request: StopPayload): void {
 	}
 
 	endTestIssued = true;
+	const lifecycle = transportLifecycle;
+	if (lifecycle !== undefined) {
+		const [closeOk, closeError] = pcall(lifecycle.beforeEndTest);
+		if (!closeOk) {
+			warn(`[robloxstudio-mcp] Failed to close the play-server transport before EndTest: ${tostring(closeError)}`);
+		}
+	}
 	const [endOk, endErr] = pcall(() => StudioTestService.EndTest("stopped_by_mcp"));
 	writeResult(key, request, endOk, endOk ? undefined : tostring(endErr));
 	if (!endOk) {
 		endTestIssued = false;
+		if (lifecycle !== undefined) {
+			const [restoreOk, restoreError] = pcall(lifecycle.afterEndTestFailure);
+			if (!restoreOk) {
+				warn(`[robloxstudio-mcp] Failed to restore the play-server transport after EndTest failed: ${tostring(restoreError)}`);
+			}
+		}
 	}
 }
 
-function startMonitor(): void {
+function startMonitor(lifecycle: StopTransportLifecycle): void {
+	transportLifecycle = lifecycle;
 	if (!pluginRef) {
 		warn("[robloxstudio-mcp] StopPlayMonitor.startMonitor called before init; skipping");
 		return;

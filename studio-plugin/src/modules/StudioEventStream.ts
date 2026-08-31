@@ -48,6 +48,7 @@ interface InFlightRequest {
 
 let options: StudioEventStreamOptions | undefined;
 let active = false;
+let shutdownSuspended = false;
 let generation = 0;
 let reconnectAttempt = 0;
 let streamClient: WebStreamClient | undefined;
@@ -148,6 +149,17 @@ function closeCurrentStream(): void {
 	if (current !== undefined) {
 		pcall(() => current.Close());
 	}
+}
+
+function disconnectSession(currentOptions: StudioEventStreamOptions): void {
+	pcall(() =>
+		HttpService.RequestAsync({
+			Url: `${currentOptions.serverUrl}/disconnect`,
+			Method: "POST",
+			Headers: { "Content-Type": "application/json" },
+			Body: HttpService.JSONEncode({ pluginSessionId: PluginSession.id, timestamp: tick() }),
+		}),
+	);
 }
 
 function responseRetryDelay(attempt: number): number {
@@ -555,9 +567,10 @@ function connect(expectedGeneration: number): void {
 }
 
 function start(newOptions: StudioEventStreamOptions): void {
-	if (active) stop();
+	if (active || shutdownSuspended) stop();
 	options = newOptions;
 	active = true;
+	shutdownSuspended = false;
 	reconnectAttempt = 0;
 	generation++;
 	connect(generation);
@@ -571,10 +584,35 @@ function refresh(): void {
 	connect(generation);
 }
 
+// EndTest can tear down a play DataModel without giving Plugin.Unloading a
+// usable execution window. Release the native WebStreamClient before the
+// yielding unregister request, but retain local request state and connection
+// options so a failed EndTest can register again and reconnect.
+function suspendForShutdown(): void {
+	const currentOptions = options;
+	if (!active || currentOptions === undefined) return;
+	active = false;
+	shutdownSuspended = true;
+	generation++;
+	reconnectAttempt = 0;
+	closeCurrentStream();
+	disconnectSession(currentOptions);
+}
+
+function resumeAfterShutdownFailure(): void {
+	if (!shutdownSuspended || options === undefined) return;
+	shutdownSuspended = false;
+	active = true;
+	generation++;
+	reconnectAttempt = 0;
+	connect(generation);
+}
+
 function stop(): void {
-	if (!active) return;
+	if (!active && !shutdownSuspended) return;
 	const currentOptions = options;
 	active = false;
+	shutdownSuspended = false;
 	generation++;
 	for (const [, inFlight] of inFlightRequests) {
 		inFlight.cancelled = true;
@@ -586,19 +624,14 @@ function stop(): void {
 	options = undefined;
 	reconnectAttempt = 0;
 	if (currentOptions !== undefined) {
-		pcall(() =>
-			HttpService.RequestAsync({
-				Url: `${currentOptions.serverUrl}/disconnect`,
-				Method: "POST",
-				Headers: { "Content-Type": "application/json" },
-				Body: HttpService.JSONEncode({ pluginSessionId: PluginSession.id, timestamp: tick() }),
-			}),
-		);
+		disconnectSession(currentOptions);
 	}
 }
 
 export = {
 	start,
 	refresh,
+	suspendForShutdown,
+	resumeAfterShutdownFailure,
 	stop,
 };

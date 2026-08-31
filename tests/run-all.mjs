@@ -37,6 +37,7 @@ const FULL_TESTS = [
   'eval-bridge-error-preservation.mjs',
   'eval-context-routing.mjs',
   'runtime-bridge-lifecycle.mjs',
+  'play-cycle-event-stream-regression.mjs',
   'micro-profiler-responsiveness.mjs',
   'studio-grep-responsiveness.mjs',
   'execute-luau-error-preservation.mjs',
@@ -52,7 +53,15 @@ const FEATURE_TESTS = [
   'micro-profiler-responsiveness.mjs',
 ];
 const featureSmoke = process.argv.includes('--smoke');
-const TESTS = featureSmoke ? FEATURE_TESTS : FULL_TESTS;
+const requestedTestIndex = process.argv.indexOf('--test');
+const requestedTest = requestedTestIndex === -1 ? undefined : process.argv[requestedTestIndex + 1];
+if (requestedTestIndex !== -1 && !requestedTest) {
+  throw new Error('--test requires a test filename');
+}
+if (requestedTest && !FULL_TESTS.includes(requestedTest)) {
+  throw new Error(`Unknown Studio test ${JSON.stringify(requestedTest)}`);
+}
+const TESTS = requestedTest ? [requestedTest] : (featureSmoke ? FEATURE_TESTS : FULL_TESTS);
 
 // Studio takes a few seconds to fully tear down a play DM after StudioTestService:EndTest.
 // Without a gap, the next test's solo_playtest start collides with the previous test's
