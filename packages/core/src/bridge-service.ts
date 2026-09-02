@@ -227,6 +227,9 @@ const ACCEPTED_REQUEST_TOMBSTONE_TTL_MS = 60_000;
 const MAX_ACCEPTED_REQUEST_TOMBSTONES = 4096;
 const CANCELLATION_TOMBSTONE_TTL_MS = 60_000;
 const MAX_CANCELLATION_TOMBSTONES = 4096;
+// Node socket backpressure does not represent Studio's MessageReceived capacity.
+// Keep each consumer's outstanding execution window small enough to avoid flooding it.
+const MAX_OUTSTANDING_REQUESTS_PER_DELIVERY_OWNER = 4;
 
 function roleOrder(role: string): number {
   if (role === 'edit') return 0;
@@ -607,8 +610,10 @@ export class BridgeService implements StudioTransportQueue {
 
     for (const request of Array.from(this.pendingRequests.values())) {
       if (request.targetPeerId !== peerId) continue;
+      const deliveryTransportPeerId = request.lastDeliveryTransportPeerId;
       this.removePendingRequest(request);
       request.reject(new Error(`Target Peer "${peerId}" disconnected`));
+      if (deliveryTransportPeerId) this.notifyRequestAvailable(deliveryTransportPeerId);
     }
     for (const dependentPeerId of dependentPeerIds) {
       this.unregisterPeerInternal(dependentPeerId, visited, removedPeers);
@@ -966,6 +971,12 @@ export class BridgeService implements StudioTransportQueue {
     transportPeerId: string,
     claimOwner: string,
   ): StudioQueuedRequest | null {
+    let outstandingCount = 0;
+    for (const request of this.pendingRequests.values()) {
+      if (request.claimOwner === claimOwner) outstandingCount++;
+    }
+    if (outstandingCount >= MAX_OUTSTANDING_REQUESTS_PER_DELIVERY_OWNER) return null;
+
     let oldestRequest: PendingRequest | undefined;
     for (const request of this.pendingRequests.values()) {
       if (request.claimOwner !== undefined) continue;
@@ -1036,10 +1047,12 @@ export class BridgeService implements StudioTransportQueue {
     const request = this.pendingRequests.get(requestId);
     if (!request) return this.acceptedRequestIds.has(requestId) ? 'already_settled' : 'unknown';
 
+    const deliveryTransportPeerId = request.lastDeliveryTransportPeerId;
     this.removePendingRequest(request);
     this.acceptedRequestIds.set(requestId, now);
     this.pruneAcceptedRequestIds(now);
     settle(request);
+    if (deliveryTransportPeerId) this.notifyRequestAvailable(deliveryTransportPeerId);
     return 'accepted';
   }
 

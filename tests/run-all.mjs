@@ -40,6 +40,7 @@ const FULL_TESTS = [
   'play-cycle-event-stream-regression.mjs',
   'micro-profiler-responsiveness.mjs',
   'studio-grep-responsiveness.mjs',
+  'studio-plugin-connection-timeout-regression.mjs',
   'execute-luau-error-preservation.mjs',
   'proxy-mode-peer-fanout.mjs',
   'execute-luau-output-capture.mjs',

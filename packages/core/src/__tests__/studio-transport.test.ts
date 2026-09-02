@@ -214,6 +214,106 @@ describe('SseStudioTransport', () => {
     expect(replacementSink.events().filter((event) => event.kind === 'cancel')).toEqual([cancellation]);
   });
 
+  test('limits each Studio transport stream to four outstanding requests and refills on settlement', async () => {
+    register(bridge, 'edit-peer', 'instance:edit', 'edit');
+    const sink = new FakeEventStreamSink();
+    transport.open('edit-peer', sink, () => STATUS);
+
+    const responses = Array.from({ length: 6 }, (_, index) =>
+      bridge.sendRequest(`/api/request-${index}`, {}, 'edit-peer'));
+    for (const response of responses) response.catch(() => {});
+
+    let requests = sink.events().filter((event) => event.kind === 'request');
+    expect(requests).toHaveLength(4);
+    const first = requests[0];
+    const second = requests[1];
+    if (first.kind !== 'request' || second.kind !== 'request') {
+      throw new Error('expected request events');
+    }
+
+    bridge.resolveRequest(first.requestId, { ok: 0 });
+    requests = sink.events().filter((event) => event.kind === 'request');
+    expect(requests).toHaveLength(5);
+
+    bridge.resolveRequest(second.requestId, { ok: 1 });
+    requests = sink.events().filter((event) => event.kind === 'request');
+    expect(requests).toHaveLength(6);
+
+    for (const request of requests.slice(2)) {
+      if (request.kind === 'request') bridge.resolveRequest(request.requestId, { ok: true });
+    }
+    await expect(Promise.all(responses)).resolves.toHaveLength(6);
+  });
+
+  test('applies the outstanding-request window independently to each transport stream', async () => {
+    register(bridge, 'edit-a', 'instance:a', 'edit');
+    register(bridge, 'edit-b', 'instance:b', 'edit');
+    const sinkA = new FakeEventStreamSink();
+    const sinkB = new FakeEventStreamSink();
+    transport.open('edit-a', sinkA, () => STATUS);
+    transport.open('edit-b', sinkB, () => STATUS);
+
+    const responses = [
+      ...Array.from({ length: 5 }, (_, index) =>
+        bridge.sendRequest(`/api/a-${index}`, {}, 'edit-a')),
+      ...Array.from({ length: 5 }, (_, index) =>
+        bridge.sendRequest(`/api/b-${index}`, {}, 'edit-b')),
+    ];
+    for (const response of responses) response.catch(() => {});
+
+    expect(sinkA.events().filter((event) => event.kind === 'request')).toHaveLength(4);
+    expect(sinkB.events().filter((event) => event.kind === 'request')).toHaveLength(4);
+    for (const event of [...sinkA.events(), ...sinkB.events()]) {
+      if (event.kind === 'request') bridge.resolveRequest(event.requestId, { ok: true });
+    }
+
+    const requestsA = sinkA.events().filter((event) => event.kind === 'request');
+    const requestsB = sinkB.events().filter((event) => event.kind === 'request');
+    expect(requestsA).toHaveLength(5);
+    expect(requestsB).toHaveLength(5);
+    const finalA = requestsA[4];
+    const finalB = requestsB[4];
+    if (finalA.kind !== 'request' || finalB.kind !== 'request') {
+      throw new Error('expected final request events');
+    }
+    bridge.resolveRequest(finalA.requestId, { ok: true });
+    bridge.resolveRequest(finalB.requestId, { ok: true });
+    await expect(Promise.all(responses)).resolves.toHaveLength(10);
+  });
+
+  test('releases a delivery credit after timeout before sending queued work', async () => {
+    register(bridge, 'edit-peer', 'instance:edit', 'edit');
+    const sink = new FakeEventStreamSink();
+    transport.open('edit-peer', sink, () => STATUS);
+
+    const first = bridge.sendRequest('/api/request-0', {}, 'edit-peer', 1000);
+    const timedOut = expect(first).rejects.toThrow('Request timeout');
+    const remaining = Array.from({ length: 4 }, (_, index) =>
+      bridge.sendRequest(`/api/request-${index + 1}`, {}, 'edit-peer'));
+    for (const response of remaining) response.catch(() => {});
+    expect(sink.events().filter((event) => event.kind === 'request')).toHaveLength(4);
+
+    jest.advanceTimersByTime(1000);
+    await timedOut;
+
+    const events = sink.events();
+    const cancellationIndex = events.findIndex(
+      (event) => event.kind === 'cancel' && event.reason === 'timeout',
+    );
+    const queuedRequestIndex = events.findIndex(
+      (event) => event.kind === 'request' && event.endpoint === '/api/request-4',
+    );
+    expect(cancellationIndex).toBeGreaterThan(-1);
+    expect(queuedRequestIndex).toBeGreaterThan(cancellationIndex);
+
+    for (const event of events) {
+      if (event.kind === 'request' && event.endpoint !== '/api/request-0') {
+        bridge.resolveRequest(event.requestId, { ok: true });
+      }
+    }
+    await expect(Promise.all(remaining)).resolves.toHaveLength(4);
+  });
+
   test('does not claim additional requests while the response is backpressured', () => {
     register(bridge, 'edit-peer', 'instance:edit', 'edit');
     const sink = new FakeEventStreamSink();
