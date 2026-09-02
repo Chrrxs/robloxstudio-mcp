@@ -1,5 +1,7 @@
 import { HttpService, Players, RunService } from "@rbxts/services";
 import StopPlayMonitor from "../StopPlayMonitor";
+import PluginSession from "../PluginSession";
+import PeerRole from "../PeerRole";
 
 interface StudioTestServiceMultiplayer extends StudioTestService {
 	ExecuteMultiplayerTestAsync(numPlayers: number, testArgs: unknown): unknown;
@@ -30,9 +32,7 @@ interface MultiplayerSessionState {
 let multiplayerState: MultiplayerSessionState = { phase: "idle" };
 
 function detectPeerRole(): string {
-	if (!RunService.IsRunning()) return "edit";
-	if (RunService.IsServer()) return "server";
-	return "client";
+	return PeerRole.detect();
 }
 
 function getPlayersSnapshot() {
@@ -93,6 +93,7 @@ function startPlaytest(requestData: Record<string, unknown>) {
 	}
 
 	testRunning = true;
+	const topologyMarkerToken = PluginSession.prepareSharedTopology();
 
 	task.spawn(() => {
 		const [ok, result] = pcall(() => {
@@ -101,6 +102,7 @@ function startPlaytest(requestData: Record<string, unknown>) {
 			}
 			return StudioTestService.ExecuteRunModeAsync({});
 		});
+		PluginSession.clearTopologyMarker(topologyMarkerToken);
 
 		if (!ok) {
 			warn(`[robloxstudio-mcp] Playtest ended with error: ${result}`);
@@ -203,12 +205,14 @@ function multiplayerTestStart(requestData: Record<string, unknown>) {
 		testArgs,
 		startedAt: tick(),
 	};
+	const topologyMarkerToken = PluginSession.prepareMultiplayerTopology(testId);
 
 	task.spawn(() => {
 		multiplayerState.phase = "running";
 		const [ok, result] = pcall(() => {
 			return StudioTestService.ExecuteMultiplayerTestAsync(numPlayers, testArgs);
 		});
+		PluginSession.clearTopologyMarker(topologyMarkerToken);
 
 		multiplayerState.completedAt = tick();
 		multiplayerState.ok = ok;

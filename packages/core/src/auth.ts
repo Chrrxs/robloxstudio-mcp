@@ -4,7 +4,7 @@ import { join, dirname } from 'path';
 import { homedir } from 'os';
 
 // Shared-secret auth for the local HTTP surface. The token gates the
-// tool-invoking endpoints (/mcp, /mcp/*, /proxy, /instances,
+// tool-invoking endpoints (/mcp, /mcp/*, /proxy, /topology,
 // /unregister-instance-id) so that localhost malware and cross-origin web
 // pages can't drive Studio blind. Plugin-facing endpoints (/ready, /events,
 // /response, /disconnect) stay tokenless because Studio plugins cannot read

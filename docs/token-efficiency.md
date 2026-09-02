@@ -34,8 +34,9 @@ guide only when needed, and the guide is not part of the tool catalog.
 - Human-readable Markdown and image/audio content remain content blocks.
 - Known bundle, plugin-session, debug, and diagnostic metadata fields are
   removed at the protocol boundary.
-- `get_connected_instances` returns each place once as `{ id, name, roles }`
-  instead of repeating full plugin diagnostics for every edit/server/client peer.
+- `get_connected_instances` returns standalone and edit processes as compact
+  role-to-Peer maps. Temporary multiplayer processes appear only in their
+  group's `instances` map, keyed by role-suffixed compact Instance IDs.
 - Tool errors expose a short stable code, an actionable message, and only the
   recovery data a caller needs. Full diagnostics go to stderr.
 

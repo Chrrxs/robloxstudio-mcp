@@ -2,12 +2,13 @@ import { EventEmitter, once } from 'node:events';
 import { Client, InMemoryTransport, StreamableHTTPClientTransport } from '@modelcontextprotocol/client';
 import { serveStdio } from '@modelcontextprotocol/server/stdio';
 import type { Server as HttpServer } from 'node:http';
-import { BridgeService } from '../bridge-service.js';
+import { BridgeService, RoutingFailure } from '../bridge-service.js';
 import { createHttpServer, TOOL_HANDLERS } from '../http-server.js';
 import {
   createToolServer,
   normalizeToolResult,
   publicToolDefinition,
+  publicToolErrorBody,
   serverInstructions,
 } from '../mcp-runtime.js';
 import { getReadOnlyTools, TOOL_DEFINITIONS } from '../tools/definitions.js';
@@ -61,7 +62,7 @@ describe('MCP v2 tool runtime', () => {
           text: JSON.stringify({
             success: true,
             value: 42,
-            pluginSessionId: 'internal-session',
+            transportPeerId: 'internal-session',
             diagnostics: { elapsed: 10 },
           }),
         },
@@ -95,6 +96,54 @@ describe('MCP v2 tool runtime', () => {
       nested: { warnings: [] },
     });
   });
+  test('serializes routing choices as compact role-keyed Peer maps', () => {
+    const failure = new RoutingFailure({
+      code: 'multiple_instances_connected',
+      message: 'Pick an Instance.',
+      data: {
+        count: 2,
+        instances: [{
+          id: 'instance:abc-1ef',
+          multiplayerGroupId: 'test:group',
+          placeId: 123,
+          placeName: 'Compact Place',
+          peers: {
+            edit: 'peer:def-234',
+          },
+        }],
+        multiplayerGroups: [{
+          id: 'test:group',
+          controllerInstanceId: 'instance:abc-1ef',
+          instances: {
+            'instance:567-890-server': 'peer:567-890',
+          },
+        }],
+      },
+    });
+
+    expect(publicToolErrorBody('execute_luau', failure)).toEqual({
+      error: 'multiple_instances_connected',
+      message: 'Pick an Instance.',
+      count: 2,
+      instances: [{
+        instance_id: 'instance:abc-1ef',
+        multiplayer_group_id: 'test:group',
+        place_id: 123,
+        place_name: 'Compact Place',
+        peers: {
+          edit: 'peer:def-234',
+        },
+      }],
+      multiplayer_groups: [{
+        multiplayer_group_id: 'test:group',
+        controller_instance_id: 'instance:abc-1ef',
+        instances: {
+          'instance:567-890-server': 'peer:567-890',
+        },
+      }],
+    });
+  });
+
 
   test('keeps one JSON text projection for legacy clients', () => {
     const result = normalizeToolResult({
@@ -367,7 +416,7 @@ describe('MCP v2 tool runtime', () => {
 
     await TOOL_HANDLERS.grep_scripts(
       tools,
-      { pattern: 'needle', instance_id: 'place:test' },
+      { pattern: 'needle', instance_id: 'instance:test' },
       { signal: controller.signal },
     );
 
@@ -383,7 +432,7 @@ describe('MCP v2 tool runtime', () => {
         path: undefined,
         classFilter: undefined,
       },
-      'place:test',
+      'instance:test',
       controller.signal,
     );
   });

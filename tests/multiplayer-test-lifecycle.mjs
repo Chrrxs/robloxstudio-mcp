@@ -1,7 +1,13 @@
 #!/usr/bin/env node
 // Exercises the explicit StudioTestService multiplayer lifecycle tools.
 
-import { McpClient, runTest, assert, waitForEditPeer } from './lib/mcp-client.mjs';
+import {
+  McpClient,
+  runTest,
+  assert,
+  selectEditInstance,
+  waitForEditPeer,
+} from './lib/mcp-client.mjs';
 
 console.log('\n=== multiplayer_test lifecycle controls clients explicitly ===');
 
@@ -11,8 +17,7 @@ async function pickInstanceId(client) {
   await waitForEditPeer(client);
   if (process.env.MCP_INSTANCE_ID) return process.env.MCP_INSTANCE_ID;
   const connected = await client.callTool('get_connected_instances', {});
-  const instances = connected.instances ?? [];
-  const edit = instances.find((i) => i.roles?.includes('edit'));
+  const edit = selectEditInstance(connected, undefined);
   if (!edit) throw new Error(`No edit Studio instance connected: ${JSON.stringify(connected)}`);
   return edit.id;
 }

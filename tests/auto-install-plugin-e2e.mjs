@@ -8,7 +8,13 @@ import os from 'node:os';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
-import { BASE_PORT, McpClient, REPO_ROOT } from './lib/mcp-client.mjs';
+import {
+  BASE_PORT,
+  McpClient,
+  REPO_ROOT,
+  instancePeers,
+  selectEditInstance,
+} from './lib/mcp-client.mjs';
 import { acquireSuitePort, windowsPortIsAvailable } from './lib/test-port.mjs';
 import {
   closeStudioProcess,
@@ -467,12 +473,12 @@ async function waitForEditInstance(client, expected, instanceId, timeoutMs = 120
   while (Date.now() < deadline) {
     try {
       const connected = await client.callTool('get_connected_instances', {});
-      const instances = connected.instances ?? [];
-      const place = instances.find((inst) => inst.id === instanceId && inst.roles?.includes('edit'));
+      const place = selectEditInstance(connected, instanceId);
       if (place) {
         const statusResponse = await fetch(`http://127.0.0.1:${BASE_PORT}/status`);
         const status = await statusResponse.json();
-        const edit = status.instances?.find((inst) => inst.role === 'edit' && inst.instanceId === instanceId);
+        const edit = instancePeers(selectEditInstance(status, instanceId))
+          .find((peer) => peer.role === 'edit');
         if (!edit) {
           last = { connected, status };
           await delay(1000);

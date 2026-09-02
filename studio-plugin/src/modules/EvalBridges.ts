@@ -28,6 +28,7 @@
 // Runtime-created scripts disappear naturally when the playtest stops.
 
 import { Players, ReplicatedStorage, RunService, ServerScriptService, StarterPlayer } from "@rbxts/services";
+import PeerRole from "./PeerRole";
 
 const ScriptEditorService = game.GetService("ScriptEditorService");
 
@@ -245,8 +246,8 @@ function installClientRuntimeBridge(): InstallResult {
 }
 
 export function ensureRuntimeBridgeInstalled(): InstallResult {
-	if (!RunService.IsRunning()) {
-		return { installed: false, error: "Eval bridges are installed only in running play DataModels" };
+	if (PeerRole.detect() === "edit") {
+		return { installed: false, error: "Eval bridges are installed only in play DataModels" };
 	}
 	if (RunService.IsServer()) {
 		return installServerRuntimeBridge();

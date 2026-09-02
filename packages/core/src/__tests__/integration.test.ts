@@ -4,18 +4,18 @@ import { RobloxStudioTools } from '../tools/index.js';
 import { BridgeService } from '../bridge-service.js';
 
 interface ReadyOverrides {
-  pluginSessionId?: string;
-  physicalSessionId?: string;
+  peerId?: string;
+  transportPeerId?: string;
   instanceId?: string;
   role?: string;
 }
 
 function ready(overrides: ReadyOverrides = {}) {
-  const pluginSessionId = overrides.pluginSessionId ?? 'session-1';
+  const peerId = overrides.peerId ?? 'peer-1';
   return {
-    pluginSessionId,
-    physicalSessionId: overrides.physicalSessionId ?? pluginSessionId,
-    instanceId: 'place:test',
+    peerId,
+    transportPeerId: overrides.transportPeerId ?? peerId,
+    instanceId: 'instance:test',
     role: 'edit',
     placeId: 0,
     placeName: 'TestPlace',
@@ -23,6 +23,7 @@ function ready(overrides: ReadyOverrides = {}) {
     isRunning: false,
     pluginVersion: 'test-version',
     pluginVariant: 'main',
+    timestamp: Date.now(),
     ...overrides,
   };
 }
@@ -63,7 +64,7 @@ describe('Integration', () => {
       status = await request(app).get('/status').expect(200);
       expect(status.body.mcpServerActive).toBe(true);
 
-      await request(app).post('/disconnect').send({ pluginSessionId: 'session-1' }).expect(200);
+      await request(app).post('/disconnect').send({ peerId: 'peer-1' }).expect(200);
       status = await request(app).get('/status').expect(200);
       expect(status.body.pluginConnected).toBe(false);
     });
@@ -77,10 +78,9 @@ describe('Integration', () => {
       const responsePromise = bridge.sendRequest(
         '/api/test-endpoint',
         { testData: 'hello', value: 123 },
-        'place:test',
-        'edit',
+        'peer-1',
       );
-      const delivery = bridge.claimNextRequestForPhysical('session-1', 'integration-stream');
+      const delivery = bridge.claimNextRequestForTransport('peer-1', 'integration-stream');
       expect(delivery).toMatchObject({
         endpoint: '/api/test-endpoint',
         data: { testData: 'hello', value: 123 },
@@ -103,9 +103,9 @@ describe('Integration', () => {
 
     test('error responses propagate', async () => {
       await request(app).post('/ready').send(ready()).expect(200);
-      const responsePromise = bridge.sendRequest('/api/failing', {}, 'place:test', 'edit');
+      const responsePromise = bridge.sendRequest('/api/failing', {}, 'peer-1');
       responsePromise.catch(() => {});
-      const delivery = bridge.claimNextRequestForPhysical('session-1', 'integration-stream');
+      const delivery = bridge.claimNextRequestForTransport('peer-1', 'integration-stream');
 
       await request(app)
         .post('/response')
@@ -117,21 +117,21 @@ describe('Integration', () => {
   });
 
   describe('Disconnect Recovery', () => {
-    test('disconnect rejects pending requests and a new physical session resumes', async () => {
+    test('disconnect rejects pending requests and a new transport Peer resumes', async () => {
       await request(app).post('/ready').send(ready()).expect(200);
-      const first = bridge.sendRequest('/api/test1', {}, 'place:test', 'edit');
-      const second = bridge.sendRequest('/api/test2', {}, 'place:test', 'edit');
+      const first = bridge.sendRequest('/api/test1', {}, 'peer-1');
+      const second = bridge.sendRequest('/api/test2', {}, 'peer-1');
       first.catch(() => {});
       second.catch(() => {});
-      bridge.claimNextRequestForPhysical('session-1', 'old-stream');
+      bridge.claimNextRequestForTransport('peer-1', 'old-stream');
 
-      await request(app).post('/disconnect').send({ pluginSessionId: 'session-1' }).expect(200);
+      await request(app).post('/disconnect').send({ peerId: 'peer-1' }).expect(200);
       await expect(first).rejects.toThrow(/disconnected/);
       await expect(second).rejects.toThrow(/disconnected/);
 
-      await request(app).post('/ready').send(ready({ pluginSessionId: 'session-2' })).expect(200);
-      const resumed = bridge.sendRequest('/api/test3', {}, 'place:test', 'edit');
-      const delivery = bridge.claimNextRequestForPhysical('session-2', 'new-stream');
+      await request(app).post('/ready').send(ready({ peerId: 'peer-2' })).expect(200);
+      const resumed = bridge.sendRequest('/api/test3', {}, 'peer-2');
+      const delivery = bridge.claimNextRequestForTransport('peer-2', 'new-stream');
       expect(delivery?.endpoint).toBe('/api/test3');
 
       await request(app)
@@ -146,8 +146,8 @@ describe('Integration', () => {
     test('request times out after 30s', async () => {
       jest.useFakeTimers();
       await request(app).post('/ready').send(ready()).expect(200);
-      const responsePromise = bridge.sendRequest('/api/slow', {}, 'place:test', 'edit');
-      bridge.claimNextRequestForPhysical('session-1', 'integration-stream');
+      const responsePromise = bridge.sendRequest('/api/slow', {}, 'peer-1');
+      bridge.claimNextRequestForTransport('peer-1', 'integration-stream');
 
       jest.advanceTimersByTime(31_000);
       await expect(responsePromise).rejects.toThrow('Request timeout');
@@ -155,21 +155,21 @@ describe('Integration', () => {
     });
   });
 
-  describe('Multi-instance routing', () => {
-    test('two distinct physical sessions receive only their own requests', async () => {
+  describe('Multi-Instance routing', () => {
+    test('two distinct transport Peers receive only their own exact-target requests', async () => {
       await request(app).post('/ready').send(ready({
-        pluginSessionId: 's-a',
-        instanceId: 'place:A',
+        peerId: 'peer-a',
+        instanceId: 'instance:A',
       })).expect(200);
       await request(app).post('/ready').send(ready({
-        pluginSessionId: 's-b',
-        instanceId: 'place:B',
+        peerId: 'peer-b',
+        instanceId: 'instance:B',
       })).expect(200);
 
-      const responseA = bridge.sendRequest('/api/test', { who: 'A' }, 'place:A', 'edit');
-      const responseB = bridge.sendRequest('/api/test', { who: 'B' }, 'place:B', 'edit');
-      const deliveryA = bridge.claimNextRequestForPhysical('s-a', 'stream-a');
-      const deliveryB = bridge.claimNextRequestForPhysical('s-b', 'stream-b');
+      const responseA = bridge.sendRequest('/api/test', { who: 'A' }, 'peer-a');
+      const responseB = bridge.sendRequest('/api/test', { who: 'B' }, 'peer-b');
+      const deliveryA = bridge.claimNextRequestForTransport('peer-a', 'stream-a');
+      const deliveryB = bridge.claimNextRequestForTransport('peer-b', 'stream-b');
       expect(deliveryA?.data).toEqual({ who: 'A' });
       expect(deliveryB?.data).toEqual({ who: 'B' });
 

@@ -1,5 +1,6 @@
 import { StudioHttpClient } from './studio-client.js';
-import { BridgeService, RoutingFailure, type PublicPluginInstance } from '../bridge-service.js';
+import { BridgeService, RoutingFailure } from '../bridge-service.js';
+import type { PublicStudioPeer } from '../bridge-service.js';
 import {
   OpenCloudClient,
   type AssetSearchParams,
@@ -73,6 +74,24 @@ type SimulationInclude = 'network' | 'deviceSimulator' | 'both';
 
 type GenerateModelImage =
   { kind: 'asset'; asset_id: number };
+
+type StudioToolResponse = Record<string, unknown> & {
+  success?: boolean;
+  error?: string;
+  message?: string;
+  testId?: string;
+  testArgs?: unknown;
+  players?: unknown;
+  playerCount?: number;
+  session?: {
+    phase?: string;
+    testId?: string;
+    numPlayers?: number;
+    testArgs?: unknown;
+    result?: unknown;
+    error?: unknown;
+  };
+};
 
 const MAX_INLINE_IMAGE_BYTES = 6_000_000;
 const MAX_MATRIX_IMAGE_BYTES = 8_000_000;
@@ -957,10 +976,10 @@ export class RobloxStudioTools {
     this.openCloudClient = new OpenCloudClient();
     this.cookieClient = new RobloxCookieClient();
     this.instanceManager = new StudioInstanceManager();
-    this.bridge.onInstanceRegistered((instance) => {
+    this.bridge.onPeerRegistered((peer) => {
       const instanceManager = this.instanceManager;
       const association = this.managedConnectionAssociations.then(() =>
-        this._associateManagedEditConnection(instance, instanceManager),
+        this._associateManagedEditConnection(peer, instanceManager),
       );
       this.managedConnectionAssociations = association.catch((error) => {
         console.warn(
@@ -1038,30 +1057,79 @@ export class RobloxStudioTools {
     return { content: [{ type: 'text', text: result.content }] };
   }
 
-  private _parseTextResult(result: any): Record<string, any> {
-    const text = result?.content?.[0]?.text;
-    if (typeof text !== 'string') return {};
+  private _parseTextResult(result: unknown): Record<string, unknown> {
+    if (
+      result === null ||
+      typeof result !== 'object' ||
+      !('content' in result) ||
+      !Array.isArray(result.content)
+    ) {
+      return {};
+    }
+    const first = result.content[0];
+    if (first === null || typeof first !== 'object' || !('text' in first) || typeof first.text !== 'string') {
+      return {};
+    }
     try {
-      const parsed = JSON.parse(text);
-      return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+      const parsed: unknown = JSON.parse(first.text);
+      return parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed) ? { ...parsed } : {};
     } catch {
       return {};
     }
   }
 
-  private _briefRoles(instanceId: string, equivalentInstances = false): { roles: string[]; runtimeRoles: string[] } {
-    const roles = equivalentInstances ? this._rolesForEquivalentInstances(instanceId) : this._rolesForInstance(instanceId);
+  private _briefRoles(instanceId: string): { roles: string[]; runtimeRoles: string[] } {
+    const roles = this._rolesForScope(instanceId);
     return {
       roles,
       runtimeRoles: roles.filter((role) => role === 'server' || /^client-\d+$/.test(role)),
     };
   }
 
-  // Resolve (instance_id, target-role) → concrete (instanceId, role) and
-  // dispatch a single request. Throws RoutingFailure if the resolution is
-  // ambiguous, missing, or asks for fanout on a non-fanout-capable tool —
-  // the MCP transport layer surfaces it as a structured error result so
-  // the LLM can recover via the embedded data.instances list.
+  private _routingErrorData() {
+    const instances = this.bridge.getConnectedInstances();
+    const multiplayerGroups = this.bridge.getConnectedMultiplayerGroups();
+    return {
+      instances,
+      multiplayerGroups,
+      count: instances.length + multiplayerGroups.length,
+    };
+  }
+
+  private _peerForRoleInScope(instanceId: string, role: string) {
+    return this.bridge.getPeersInScope(instanceId).find((peer) => peer.role === role);
+  }
+
+  private _requestPeer(
+    endpoint: string,
+    data: unknown,
+    targetPeerId: string,
+    timeoutMs?: number,
+    signal?: AbortSignal,
+  ): Promise<StudioToolResponse> {
+    return this.client.request(endpoint, data, targetPeerId, timeoutMs, signal) as Promise<StudioToolResponse>;
+  }
+
+  private _request(
+    endpoint: string,
+    data: unknown,
+    instanceId: string,
+    role: string,
+    timeoutMs?: number,
+    signal?: AbortSignal,
+  ) {
+    const peer = this._peerForRoleInScope(instanceId, role);
+    if (!peer) {
+      throw new RoutingFailure({
+        code: 'target_role_not_present_on_instance',
+        message: `Routing scope for instance "${instanceId}" has no role "${role}".`,
+        data: this._routingErrorData(),
+      });
+    }
+    return this._requestPeer(endpoint, data, peer.peerId, timeoutMs, signal);
+  }
+
+  // Resolve an optional Studio process plus role to one exact Peer and dispatch.
   private async _callSingle(
     endpoint: string,
     data: unknown,
@@ -1069,127 +1137,107 @@ export class RobloxStudioTools {
     instance_id: string | undefined,
     timeoutMs?: number,
     signal?: AbortSignal,
-  ): Promise<any> {
-    // Pass target through as-is so resolveTarget can tell "caller didn't
-    // specify" (target=undefined → multiple_instances_connected) apart
-    // from "caller picked edit explicitly" (target='edit' → ambiguous_target).
-    // Tools that intrinsically need a specific role pass it as a string
-    // literal here; tools without a target arg pass undefined.
-    const r = this.bridge.resolveTarget({ instance_id, target });
-    if (!r.ok) throw new RoutingFailure(r.error);
-    if (r.mode !== 'single') {
+  ): Promise<StudioToolResponse> {
+    const resolved = this.bridge.resolveTarget({ instance_id, target });
+    if (!resolved.ok) throw new RoutingFailure(resolved.error);
+    if (resolved.mode !== 'single') {
       throw new RoutingFailure({
         code: 'target_role_not_present_on_instance',
         message: 'This tool does not support target=all. Pick a specific role or omit target.',
-        data: {
-          instances: this.bridge.getPublicInstances(),
-          count: this.bridge.getInstances().length,
-        },
+        data: this._routingErrorData(),
       });
     }
-    if (signal === undefined) {
-      return this.client.request(endpoint, data, r.targetInstanceId, r.targetRole, timeoutMs);
-    }
-    return this.client.request(endpoint, data, r.targetInstanceId, r.targetRole, timeoutMs, signal);
+    return this._requestPeer(endpoint, data, resolved.targetPeerId, timeoutMs, signal);
   }
 
-  // Resolves which connected place a tool should target and whether a playtest
-  // CLIENT peer is present on it. Used by capture/input to auto-route to the
-  // running client (where the live viewport + input pipeline are) without the
-  // caller having to pass target. Throws RoutingFailure with the standard
-  // instance list if the place is ambiguous (multiple connected, no instance_id).
+  // Prefer the first client role in the selected process/group scope for live
+  // viewport and input operations; otherwise retain the default Peer's Instance.
   private _resolveRuntime(instance_id?: string): { instanceId: string; clientRole?: string } {
-    const r = this.bridge.resolveTarget({ instance_id, target: undefined });
-    if (!r.ok) throw new RoutingFailure(r.error);
-    // resolveTarget(target=undefined) prefers the edit role and always returns
-    // a single target, so targetInstanceId is the resolved place.
-    const resolvedId = (r as { targetInstanceId: string }).targetInstanceId;
-    const equivalentIds = new Set(this.bridge.getEquivalentInstanceIds(resolvedId));
-    const instances = this.bridge
-      .getInstances()
-      .filter((i) => equivalentIds.has(i.instanceId));
-    // Prefer client-1 when several clients are connected (multi-client playtest).
-    const client = instances
-      .filter((inst) => inst.role.startsWith('client'))
-      .sort((a, b) => a.role.localeCompare(b.role))[0];
-    return { instanceId: client?.instanceId ?? resolvedId, clientRole: client?.role };
+    const resolved = this.bridge.resolveTarget({ instance_id, target: undefined });
+    if (!resolved.ok) throw new RoutingFailure(resolved.error);
+    if (resolved.mode !== 'single') {
+      throw new RoutingFailure({
+        code: 'target_role_not_present_on_instance',
+        message: 'A single runtime target is required.',
+        data: this._routingErrorData(),
+      });
+    }
+    const client = this.bridge.getPeersInScope(resolved.targetInstanceId)
+      .filter((peer) => /^client-\d+$/.test(peer.role))
+      .sort((a, b) => a.role.localeCompare(b.role) || a.peerId.localeCompare(b.peerId))[0];
+    return {
+      instanceId: client?.instanceId ?? resolved.targetInstanceId,
+      clientRole: client?.role,
+    };
   }
 
   private _resolveInstanceIdOnly(instance_id?: string): string {
-    const instances = this.bridge.getInstances();
-    const publicList = this.bridge.getPublicInstances();
-    const errorData = { instances: publicList, count: publicList.length };
-
     if (instance_id !== undefined) {
-      const resolvedInstanceId = this.bridge.resolveInstanceId(instance_id);
-      if (!instances.some((i) => i.instanceId === resolvedInstanceId)) {
+      const resolvedInstanceId = this.bridge.resolveConnectedInstanceId(instance_id);
+      if (resolvedInstanceId === undefined) {
         throw new RoutingFailure({
           code: 'unrecognized_instance_id',
-          message: `instance_id "${instance_id}" is not connected. Pass one from data.instances.`,
-          data: errorData,
+          message: `instance_id "${instance_id}" is not connected. Pass a connected top-level or grouped role-suffixed Instance ID.`,
+          data: this._routingErrorData(),
         });
       }
       return resolvedInstanceId;
     }
 
-    const distinct = Array.from(new Set(instances.map((i) => i.instanceId)));
-    if (distinct.length === 0) {
-      throw new RoutingFailure({
-        code: 'unrecognized_instance_id',
-        message: 'No Studio plugin is connected.',
-        data: errorData,
-      });
-    }
-    if (distinct.length > 1) {
+    const resolved = this.bridge.resolveTarget({ target: undefined });
+    if (!resolved.ok) throw new RoutingFailure(resolved.error);
+    if (resolved.mode !== 'single') {
       throw new RoutingFailure({
         code: 'multiple_instances_connected',
-        message: 'Multiple Studio places are connected. Pass instance_id to disambiguate.',
-        data: errorData,
+        message: 'Multiple Studio process scopes are connected. Pass instance_id to disambiguate.',
+        data: this._routingErrorData(),
       });
     }
-    return distinct[0];
+    return resolved.targetInstanceId;
   }
 
-  private _resolveSingleTarget(target: string, instance_id?: string): { instanceId: string; role: string } {
+  private _resolveSingleTarget(
+    target: string,
+    instance_id?: string,
+  ): { targetPeerId: string; instanceId: string; role: string } {
     const resolved = this.bridge.resolveTarget({ instance_id, target });
     if (!resolved.ok) throw new RoutingFailure(resolved.error);
     if (resolved.mode !== 'single') {
       throw new RoutingFailure({
         code: 'target_role_not_present_on_instance',
         message: 'Pick a specific target role for this tool.',
-        data: {
-          instances: this.bridge.getPublicInstances(),
-          count: this.bridge.getInstances().length,
-        },
+        data: this._routingErrorData(),
       });
     }
-    return { instanceId: resolved.targetInstanceId, role: resolved.targetRole };
+    return {
+      targetPeerId: resolved.targetPeerId,
+      instanceId: resolved.targetInstanceId,
+      role: resolved.targetRole,
+    };
   }
 
-  private _rolesForInstance(instanceId: string): string[] {
-    return this.bridge.getInstances()
-      .filter((i) => i.instanceId === instanceId)
-      .map((i) => i.role);
+
+  private _rolesForScope(instanceId: string): string[] {
+    return this.bridge.getPeersInScope(instanceId).map((peer) => peer.role);
   }
 
-  private _rolesForEquivalentInstances(instanceId: string): string[] {
-    const instanceIds = new Set(this.bridge.getEquivalentInstanceIds(instanceId));
-    return this.bridge.getInstances()
-      .filter((i) => instanceIds.has(i.instanceId))
-      .map((i) => i.role);
-  }
 
-  private _clientRolesForInstance(instanceId: string): string[] {
-    return this._rolesForInstance(instanceId)
+  private _clientRolesForScope(instanceId: string): string[] {
+    return this._rolesForScope(instanceId)
       .filter((role) => /^client-\d+$/.test(role))
       .sort((a, b) => Number(a.slice('client-'.length)) - Number(b.slice('client-'.length)));
   }
 
-  private _runtimeTargetsForEquivalentInstances(instanceId: string): { instanceId: string; role: string }[] {
-    const instanceIds = new Set(this.bridge.getEquivalentInstanceIds(instanceId));
-    return this.bridge.getInstances()
-      .filter((i) => instanceIds.has(i.instanceId) && (i.role === 'server' || /^client-\d+$/.test(i.role)))
-      .map((i) => ({ instanceId: i.instanceId, role: i.role }));
+  private _runtimeTargetsForScope(
+    instanceId: string,
+  ): { targetPeerId: string; instanceId: string; role: string }[] {
+    return this.bridge.getPeersInScope(instanceId)
+      .filter((peer) => peer.role === 'server' || /^client-\d+$/.test(peer.role))
+      .map((peer) => ({
+        targetPeerId: peer.peerId,
+        instanceId: peer.instanceId,
+        role: peer.role,
+      }));
   }
 
   private _compactSimulationResetResult(result: Record<string, unknown>): Record<string, unknown> {
@@ -1223,15 +1271,12 @@ export class RobloxStudioTools {
     const selectedTarget = target ?? 'edit';
     if (selectedTarget === 'all-clients') {
       const instanceId = this._resolveInstanceIdOnly(instance_id);
-      const roles = this._clientRolesForInstance(instanceId);
+      const roles = this._clientRolesForScope(instanceId);
       if (roles.length === 0) {
         throw new RoutingFailure({
           code: 'target_role_not_present_on_instance',
           message: `instance "${instanceId}" has no connected playtest client roles. Start a playtest first.`,
-          data: {
-            instances: this.bridge.getPublicInstances(),
-            count: this.bridge.getInstances().length,
-          },
+          data: this._routingErrorData(),
         });
       }
       return { instanceId, selectedTarget, roles };
@@ -1260,8 +1305,8 @@ export class RobloxStudioTools {
     }
 
     const instanceId = this._resolveInstanceIdOnly(instance_id);
-    const connectedRoles = this._rolesForInstance(instanceId);
-    const clientRoles = this._clientRolesForInstance(instanceId);
+    const connectedRoles = this._rolesForScope(instanceId);
+    const clientRoles = this._clientRolesForScope(instanceId);
     const warnings: string[] = [];
     let roles: string[];
 
@@ -1270,10 +1315,7 @@ export class RobloxStudioTools {
         throw new RoutingFailure({
           code: 'target_role_not_present_on_instance',
           message: `instance "${instanceId}" has no role "edit". Available roles: ${connectedRoles.join(', ') || 'none'}.`,
-          data: {
-            instances: this.bridge.getPublicInstances(),
-            count: this.bridge.getInstances().length,
-          },
+          data: this._routingErrorData(),
         });
       }
       roles = ['edit'];
@@ -1295,10 +1337,7 @@ export class RobloxStudioTools {
         throw new RoutingFailure({
           code: 'target_role_not_present_on_instance',
           message: `instance "${instanceId}" has no role "${selectedTarget}". Available client roles: ${clientRoles.join(', ') || 'none'}.`,
-          data: {
-            instances: this.bridge.getPublicInstances(),
-            count: this.bridge.getInstances().length,
-          },
+          data: this._routingErrorData(),
         });
       }
       roles = [selectedTarget];
@@ -1333,7 +1372,7 @@ export class RobloxStudioTools {
     operation: 'get' | 'reset',
   ): Promise<unknown> {
     const code = buildNetworkStateLuau(operation);
-    const response = await this.client.request('/api/execute-luau', { code }, instanceId, role);
+    const response = await this._request('/api/execute-luau', { code }, instanceId, role);
     return this._parseExecuteLuauJsonResponse(response, `network simulation ${operation}`);
   }
 
@@ -1344,7 +1383,7 @@ export class RobloxStudioTools {
     options: Record<string, unknown>,
   ): Promise<unknown> {
     const code = buildDeviceSimulatorLuau(operation, options);
-    const response = await this.client.request('/api/execute-luau', { code }, instanceId, role);
+    const response = await this._request('/api/execute-luau', { code }, instanceId, role);
     return this._parseExecuteLuauJsonResponse(response, `device simulator ${operation}`);
   }
 
@@ -1406,14 +1445,11 @@ export class RobloxStudioTools {
     instanceId: string,
     opts: { server?: boolean; clientCount?: number; absentRole?: string; noRuntime?: boolean },
     timeoutSec = 30,
-    equivalentInstances = false,
   ): Promise<{ ok: boolean; roles: string[]; timedOut: boolean }> {
     const deadline = Date.now() + timeoutSec * 1000;
     while (Date.now() < deadline) {
-      const roles = equivalentInstances ? this._rolesForEquivalentInstances(instanceId) : this._rolesForInstance(instanceId);
-      const clientRoles = equivalentInstances
-        ? roles.filter((role) => /^client-\d+$/.test(role))
-        : this._clientRolesForInstance(instanceId);
+      const roles = this._rolesForScope(instanceId);
+      const clientRoles = this._clientRolesForScope(instanceId);
       const hasServer = !opts.server || roles.includes('server');
       const hasClients = opts.clientCount === undefined || clientRoles.length >= opts.clientCount;
       const absent = opts.absentRole === undefined || !roles.includes(opts.absentRole);
@@ -1425,7 +1461,7 @@ export class RobloxStudioTools {
     }
     return {
       ok: false,
-      roles: equivalentInstances ? this._rolesForEquivalentInstances(instanceId) : this._rolesForInstance(instanceId),
+      roles: this._rolesForScope(instanceId),
       timedOut: true,
     };
   }
@@ -1440,8 +1476,8 @@ export class RobloxStudioTools {
     let exactSince: number | undefined;
 
     while (Date.now() < deadline) {
-      const roles = this._rolesForInstance(instanceId);
-      const clientCount = this._clientRolesForInstance(instanceId).length;
+      const roles = this._rolesForScope(instanceId);
+      const clientCount = this._clientRolesForScope(instanceId).length;
       if (clientCount > expectedClientCount) {
         return { ok: false, roles, timedOut: false, extraClients: true, clientCount };
       }
@@ -1456,8 +1492,8 @@ export class RobloxStudioTools {
       await sleep(250);
     }
 
-    const roles = this._rolesForInstance(instanceId);
-    const clientCount = this._clientRolesForInstance(instanceId).length;
+    const roles = this._rolesForScope(instanceId);
+    const clientCount = this._clientRolesForScope(instanceId).length;
     return { ok: false, roles, timedOut: true, extraClients: clientCount > expectedClientCount, clientCount };
   }
 
@@ -1466,17 +1502,15 @@ export class RobloxStudioTools {
     connectedAfter: number,
     requiredRoles: string[],
     timeoutSec = 60,
-    equivalentInstances = false,
   ): Promise<{ ok: boolean; roles: string[]; timedOut: boolean }> {
     const deadline = Date.now() + timeoutSec * 1000;
     while (Date.now() < deadline) {
-      const instanceIds = equivalentInstances ? new Set(this.bridge.getEquivalentInstanceIds(instanceId)) : new Set([instanceId]);
-      const instances = this.bridge.getInstances().filter((i) => instanceIds.has(i.instanceId));
-      const roles = instances.map((i) => i.role);
+      const peers = this.bridge.getPeersInScope(instanceId);
+      const roles = peers.map((peer) => peer.role);
       const freshRoles = new Set(
-        instances
-          .filter((i) => i.connectedAt >= connectedAfter)
-          .map((i) => i.role),
+        peers
+          .filter((peer) => peer.connectedAt >= connectedAfter)
+          .map((peer) => peer.role),
       );
       if (requiredRoles.every((role) => freshRoles.has(role))) {
         return { ok: true, roles, timedOut: false };
@@ -1485,7 +1519,7 @@ export class RobloxStudioTools {
     }
     return {
       ok: false,
-      roles: equivalentInstances ? this._rolesForEquivalentInstances(instanceId) : this._rolesForInstance(instanceId),
+      roles: this._rolesForScope(instanceId),
       timedOut: true,
     };
   }
@@ -1610,7 +1644,7 @@ export class RobloxStudioTools {
     };
   }
 
-  async setProperties(instancePath: string, properties: Record<string, any>, instance_id?: string) {
+  async setProperties(instancePath: string, properties: Record<string, unknown>, instance_id?: string) {
     if (!instancePath || !properties) {
       throw new Error('instancePath and properties are required for set_properties');
     }
@@ -1913,7 +1947,7 @@ export class RobloxStudioTools {
   async setNetworkProfile(profile: string, target?: string, overrides?: Record<string, unknown>, instance_id?: string) {
     const values = normalizeNetworkProfile(profile, overrides);
     const instanceId = this._resolveInstanceIdOnly(instance_id);
-    const clientRoles = this._clientRolesForInstance(instanceId);
+    const clientRoles = this._clientRolesForScope(instanceId);
     const selectedTarget = target ?? 'client-1';
 
     let targetRoles: string[];
@@ -1924,10 +1958,7 @@ export class RobloxStudioTools {
         throw new RoutingFailure({
           code: 'target_role_not_present_on_instance',
           message: `instance "${instanceId}" has no role "${selectedTarget}". Available client roles: ${clientRoles.join(', ') || 'none'}.`,
-          data: {
-            instances: this.bridge.getPublicInstances(),
-            count: this.bridge.getInstances().length,
-          },
+          data: this._routingErrorData(),
         });
       }
       targetRoles = [selectedTarget];
@@ -1939,17 +1970,14 @@ export class RobloxStudioTools {
       throw new RoutingFailure({
         code: 'target_role_not_present_on_instance',
         message: `instance "${instanceId}" has no connected playtest client roles. Start a playtest first.`,
-        data: {
-          instances: this.bridge.getPublicInstances(),
-          count: this.bridge.getInstances().length,
-        },
+        data: this._routingErrorData(),
       });
     }
 
     const code = buildNetworkProfileLuau(profile, values);
     const responses = await Promise.allSettled(
       targetRoles.map(async (role) => {
-        const response = await this.client.request('/api/execute-luau', { code }, instanceId, role);
+        const response = await this._request('/api/execute-luau', { code }, instanceId, role);
         const result = this._parseExecuteLuauJsonResponse(response, 'set_network_profile');
         return { role, result };
       }),
@@ -2374,157 +2402,311 @@ export class RobloxStudioTools {
     };
   }
 
-  async getRuntimeLogs(target?: string, since?: number, tail?: number, filter?: string, instance_id?: string) {
-    // Per-capture in-memory log buffer (see studio-plugin RuntimeLogBuffer.ts).
-    // target="all" (default) fans out to every connected role, merges by
-    // (ts, seq), and deduplicates same-message-and-level entries captured
-    // within 2 seconds in different buffers. Ordinary Studio playtests reflect
-    // logs across edit/server/client, so capturedBy is not a reliable origin;
-    // only StudioTestService multiplayer sessions get a peer attribution.
-    const tgt = target ?? 'all';
-    const data: Record<string, unknown> = {};
-    if (since !== undefined) data.since = since;
-    if (tail !== undefined) data.tail = tail;
-    if (filter !== undefined) data.filter = filter;
+  async getRuntimeLogs(
+    instance_id?: string,
+    multiplayer_group_id?: string,
+    cursor?: string,
+    cursor_by_instance?: Record<string, string>,
+    tail?: number,
+    filter?: string,
+  ) {
+    if (instance_id !== undefined && multiplayer_group_id !== undefined) {
+      throw new Error('get_runtime_logs accepts only one of instance_id or multiplayer_group_id.');
+    }
+    if (cursor !== undefined && cursor_by_instance !== undefined) {
+      throw new Error('get_runtime_logs accepts only one of cursor or cursor_by_instance.');
+    }
+    if (tail !== undefined && (!Number.isInteger(tail) || tail < 0)) {
+      throw new Error('get_runtime_logs tail must be a non-negative integer.');
+    }
 
-    // Resolve once. Single mode → one request and pass-through. Fanout
-    // mode → iterate the resolved (instanceId, role) tuples; results keyed
-    // by role within the selected instance, so duplicate roles across
-    // different places no longer collapse (the v2.11.x bug).
-    const resolved = this.bridge.resolveTarget({ instance_id, target: tgt });
-    if (!resolved.ok) throw new RoutingFailure(resolved.error);
+    const instances = this.bridge.getInstances();
+    const groups = this.bridge.getMultiplayerGroups();
+    let selectedGroup = multiplayer_group_id === undefined
+      ? undefined
+      : groups.find((group) => group.id === multiplayer_group_id);
+    let selectedInstanceId = instance_id === undefined
+      ? undefined
+      : this._resolveInstanceIdOnly(instance_id);
 
-    if (resolved.mode === 'single') {
-      const originPeerReliable = await this._isMultiplayerTestRunning(resolved.targetInstanceId);
-      const response = (await this.client.request(
-        '/api/get-runtime-logs',
-        data,
-        resolved.targetInstanceId,
-        resolved.targetRole,
-      )) as { capturedBy?: string; peer?: string; entries?: Array<{ capturedBy?: string; peer?: string }> } & Record<string, unknown>;
-      // The plugin-side handler can only report generic "client" because the
-      // client DM doesn't know its server-assigned client-N role. Normalize to
-      // the resolved capture buffer, but do not claim script-origin peer unless
-      // the selected place is running a StudioTestService multiplayer test.
-      response.capturedBy = resolved.targetRole;
-      delete response.peer;
-      response.originPeerReliable = originPeerReliable;
-      response.peerAttribution = originPeerReliable ? 'guaranteed_multiplayer' : 'unavailable_shared_logservice';
-      if (originPeerReliable) response.peer = resolved.targetRole;
-      if (Array.isArray(response.entries)) {
-        for (const e of response.entries) {
-          e.capturedBy = resolved.targetRole;
-          delete e.peer;
-          if (originPeerReliable) e.peer = resolved.targetRole;
+    if (multiplayer_group_id !== undefined && !selectedGroup) {
+      throw new RoutingFailure({
+        code: 'unrecognized_instance_id',
+        message: `multiplayer_group_id "${multiplayer_group_id}" is not connected.`,
+        data: this._routingErrorData(),
+      });
+    }
+    if (selectedInstanceId !== undefined && !instances.some((instance) => instance.id === selectedInstanceId)) {
+      throw new RoutingFailure({
+        code: 'unrecognized_instance_id',
+        message: `instance_id "${selectedInstanceId}" is not connected. Pass a connected top-level or grouped role-suffixed Instance ID.`,
+        data: this._routingErrorData(),
+      });
+    }
+
+    if (selectedGroup === undefined && selectedInstanceId === undefined) {
+      const groupedInstanceIds = new Set(groups.flatMap((group) => group.instanceIds));
+      const standaloneInstanceIds = instances
+        .map((instance) => instance.id)
+        .filter((id) => !groupedInstanceIds.has(id));
+      const scopeCount = groups.length + standaloneInstanceIds.length;
+      if (scopeCount === 0) {
+        throw new RoutingFailure({
+          code: 'unrecognized_instance_id',
+          message: 'No Studio plugin is connected.',
+          data: this._routingErrorData(),
+        });
+      }
+      if (scopeCount > 1) {
+        throw new RoutingFailure({
+          code: 'multiple_instances_connected',
+          message: 'Multiple Studio process scopes are connected. Pass instance_id or multiplayer_group_id.',
+          data: this._routingErrorData(),
+        });
+      }
+      if (groups.length === 1) {
+        selectedGroup = groups[0];
+      } else {
+        selectedInstanceId = standaloneInstanceIds[0];
+      }
+    }
+
+    if (selectedGroup !== undefined && cursor !== undefined) {
+      throw new Error('Use cursor_by_instance when reading a multiplayer group.');
+    }
+    if (selectedGroup === undefined && cursor_by_instance !== undefined) {
+      throw new Error('Use cursor when reading one Instance.');
+    }
+
+    type RuntimeLogCursorPayload = {
+      version: 1;
+      instanceId: string;
+      peers: Record<string, number>;
+    };
+    type RuntimeLogPeerSuccess = {
+      peerId: string;
+      role: string;
+      entries: unknown[];
+      totalDropped: number;
+      nextSince: number;
+    };
+    type RuntimeLogPeerError = {
+      peerId: string;
+      role: string;
+      error: string;
+    };
+    type RuntimeLogInstanceResult =
+      | {
+        instanceId: string;
+        entries: unknown[];
+        totalDropped: number;
+        nextCursor: string;
+        peerErrors?: RuntimeLogPeerError[];
+      }
+      | {
+        instanceId: string;
+        error: string;
+        nextCursor: string;
+        peerErrors: RuntimeLogPeerError[];
+      };
+
+    const decodeCursor = (value: string | undefined, instanceId: string): Record<string, number> => {
+      if (value === undefined) return {};
+      let decoded: unknown;
+      try {
+        decoded = JSON.parse(Buffer.from(value, 'base64url').toString('utf8'));
+      } catch {
+        throw new Error(`get_runtime_logs received an invalid cursor for Instance "${instanceId}".`);
+      }
+      if (typeof decoded !== 'object' || decoded === null || Array.isArray(decoded)) {
+        throw new Error(`get_runtime_logs received an invalid cursor for Instance "${instanceId}".`);
+      }
+      const payload = decoded as Record<string, unknown>;
+      if (
+        payload.version !== 1 ||
+        payload.instanceId !== instanceId ||
+        typeof payload.peers !== 'object' ||
+        payload.peers === null ||
+        Array.isArray(payload.peers)
+      ) {
+        throw new Error(`get_runtime_logs cursor does not belong to Instance "${instanceId}".`);
+      }
+      const peers = payload.peers as Record<string, unknown>;
+      const parsed: Record<string, number> = {};
+      for (const [peerId, nextSince] of Object.entries(peers)) {
+        if (typeof nextSince !== 'number' || !Number.isInteger(nextSince) || nextSince < 0) {
+          throw new Error(`get_runtime_logs received an invalid cursor for Instance "${instanceId}".`);
+        }
+        parsed[peerId] = nextSince;
+      }
+      return parsed;
+    };
+
+    const encodeCursor = (instanceId: string, peers: Record<string, number>): string => {
+      const orderedPeers: Record<string, number> = {};
+      for (const peerId of Object.keys(peers).sort()) orderedPeers[peerId] = peers[peerId];
+      const payload: RuntimeLogCursorPayload = {
+        version: 1,
+        instanceId,
+        peers: orderedPeers,
+      };
+      return Buffer.from(JSON.stringify(payload)).toString('base64url');
+    };
+
+    const roleRank = (role: string): number => {
+      if (role === 'edit') return 0;
+      if (role === 'server') return 1;
+      const client = /^client-(\d+)$/.exec(role);
+      return client ? 2 + Number(client[1]) : Number.MAX_SAFE_INTEGER;
+    };
+
+    const entryTimestamp = (entry: unknown): number => {
+      if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) return 0;
+      const record = entry as Record<string, unknown>;
+      return typeof record.ts === 'number' ? record.ts : 0;
+    };
+
+    const publicEntry = (entry: unknown): unknown => {
+      if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) return entry;
+      const record = entry as Record<string, unknown>;
+      const copy: Record<string, unknown> = { ...record };
+      delete copy.seq;
+      return copy;
+    };
+
+    const readInstance = async (
+      instanceId: string,
+      instanceCursor: string | undefined,
+    ): Promise<RuntimeLogInstanceResult> => {
+      const peers = this.bridge.getPeers()
+        .filter((peer) => peer.instanceId === instanceId)
+        .sort((a, b) => roleRank(a.role) - roleRank(b.role) || a.peerId.localeCompare(b.peerId));
+      const priorByPeer = decodeCursor(instanceCursor, instanceId);
+      const nextByPeer: Record<string, number> = {};
+      for (const peer of peers) {
+        const prior = priorByPeer[peer.peerId];
+        if (prior !== undefined) nextByPeer[peer.peerId] = prior;
+      }
+      if (peers.length === 0) {
+        return {
+          instanceId,
+          error: 'No connected Peer exists for this Instance.',
+          nextCursor: encodeCursor(instanceId, nextByPeer),
+          peerErrors: [],
+        };
+      }
+
+      const reads = await Promise.all(peers.map(async (peer): Promise<RuntimeLogPeerSuccess | RuntimeLogPeerError> => {
+        const data: Record<string, unknown> = {};
+        const peerSince = priorByPeer[peer.peerId];
+        if (peerSince !== undefined) data.since = peerSince;
+        if (tail !== undefined) data.tail = tail;
+        if (filter !== undefined) data.filter = filter;
+        try {
+          const responseValue: unknown = await this.client.request(
+            '/api/get-runtime-logs',
+            data,
+            peer.peerId,
+          );
+          if (typeof responseValue !== 'object' || responseValue === null || Array.isArray(responseValue)) {
+            return {
+              peerId: peer.peerId,
+              role: peer.role,
+              error: 'Studio returned an invalid runtime log response.',
+            };
+          }
+          const response = responseValue as Record<string, unknown>;
+          if (typeof response.error === 'string') {
+            return { peerId: peer.peerId, role: peer.role, error: response.error };
+          }
+          if (
+            !Array.isArray(response.entries) ||
+            typeof response.totalDropped !== 'number' ||
+            typeof response.nextSince !== 'number'
+          ) {
+            return {
+              peerId: peer.peerId,
+              role: peer.role,
+              error: 'Studio returned an invalid runtime log response.',
+            };
+          }
+          return {
+            peerId: peer.peerId,
+            role: peer.role,
+            entries: response.entries,
+            totalDropped: response.totalDropped,
+            nextSince: response.nextSince,
+          };
+        } catch (error) {
+          return { peerId: peer.peerId, role: peer.role, error: errorMessage(error) };
+        }
+      }));
+
+      const successful: RuntimeLogPeerSuccess[] = [];
+      const peerErrors: RuntimeLogPeerError[] = [];
+      for (const read of reads) {
+        if ('error' in read) {
+          peerErrors.push(read);
+        } else {
+          successful.push(read);
+          nextByPeer[read.peerId] = read.nextSince;
         }
       }
-      return {
-        content: [{ type: 'text', text: JSON.stringify(response) }],
-      };
-    }
-
-    const targets = resolved.targets;
-
-    type PeerResponse = {
-      capturedBy?: string;
-      entries?: Entry[];
-      totalDropped?: number;
-      nextSince?: number;
-      error?: string;
-    };
-    type Entry = {
-      seq: number;
-      ts: number;
-      level: string;
-      message: string;
-      data?: Record<string, unknown>;
-      capturedBy?: string;
-      peer?: string;
-    };
-    const originPeerReliable = targets.length > 0
-      ? await this._isMultiplayerTestRunning(targets[0].targetInstanceId)
-      : false;
-
-    const responses = await Promise.allSettled(
-      targets.map(async (t) => {
-        const r = (await this.client.request(
-          '/api/get-runtime-logs',
-          data,
-          t.targetInstanceId,
-          t.targetRole,
-        )) as PeerResponse;
-        return { ...r, capturedBy: t.targetRole };
-      }),
-    );
-
-    const merged: Entry[] = [];
-    const perCaptureNextSince: Record<string, number> = {};
-    const perCaptureErrors: Record<string, string> = {};
-    let totalDropped = 0;
-
-    for (const r of responses) {
-      if (r.status !== 'fulfilled') continue;
-      const v = r.value;
-      const capturedBy = v.capturedBy ?? 'unknown';
-      if (v.error) {
-        perCaptureErrors[capturedBy] = v.error;
-        continue;
+      const nextCursor = encodeCursor(instanceId, nextByPeer);
+      if (successful.length === 0) {
+        return {
+          instanceId,
+          error: 'Every connected Peer failed to read its runtime log buffer.',
+          nextCursor,
+          peerErrors,
+        };
       }
-      if (v.nextSince !== undefined) perCaptureNextSince[capturedBy] = v.nextSince;
-      totalDropped += v.totalDropped ?? 0;
-      for (const e of v.entries ?? []) {
-        const entry = { ...e };
-        delete entry.peer;
-        merged.push({ ...entry, capturedBy });
-      }
-    }
 
-    merged.sort((a, b) => (a.ts !== b.ts ? a.ts - b.ts : a.seq - b.seq));
-
-    // Cross-peer dedup. LogService reflects prints across peers in Studio
-    // Play, so the same message can land in multiple peers' buffers within
-    // ~250ms (client batch) + ~700ms (peer-listener startup skew). 2s window
-    // matches the LogBuffer primitive's heuristic.
-    const DEDUP_WINDOW = 2.0;
-    const deduped: Entry[] = [];
-    for (const e of merged) {
-      const isDup = deduped.some(
-        (d) =>
-          d.message === e.message &&
-          d.level === e.level &&
-          Math.abs(d.ts - e.ts) <= DEDUP_WINDOW &&
-          d.capturedBy !== e.capturedBy,
+      let insertionOrder = 0;
+      const merged = successful.flatMap((read) =>
+        read.entries.map((entry) => ({
+          entry: publicEntry(entry),
+          timestamp: entryTimestamp(entry),
+          insertionOrder: insertionOrder++,
+        }))
       );
-      if (!isDup) deduped.push(e);
-    }
-
-    // Re-apply tail post-merge since per-peer tail may have over-returned.
-    let final = deduped;
-    if (tail !== undefined && deduped.length > tail) {
-      final = deduped.slice(deduped.length - tail);
-    }
-    const finalEntries = originPeerReliable
-      ? final.map((e) => ({ ...e, peer: e.capturedBy }))
-      : final;
-
-    const body: Record<string, unknown> = {
-      entries: finalEntries,
-      totalDropped,
-      perCaptureNextSince,
-      originPeerReliable,
-      peerAttribution: originPeerReliable ? 'guaranteed_multiplayer' : 'unavailable_shared_logservice',
+      merged.sort((a, b) => a.timestamp - b.timestamp || a.insertionOrder - b.insertionOrder);
+      const allEntries = merged.map((item) => item.entry);
+      const entries = tail === undefined
+        ? allEntries
+        : tail === 0
+          ? []
+          : allEntries.slice(-tail);
+      const totalDropped = successful.reduce((total, read) => total + read.totalDropped, 0);
+      return {
+        instanceId,
+        entries,
+        totalDropped,
+        nextCursor,
+        ...(peerErrors.length > 0 ? { peerErrors } : {}),
+      };
     };
-    if (originPeerReliable) {
-      body.perPeerNextSince = perCaptureNextSince;
-    }
-    if (Object.keys(perCaptureErrors).length > 0) {
-      body.perCaptureErrors = perCaptureErrors;
-      if (originPeerReliable) body.perPeerErrors = perCaptureErrors;
+
+    if (selectedGroup) {
+      const connectedIds = new Set(instances.map((instance) => instance.id));
+      const instanceIds = selectedGroup.instanceIds.filter((id) => connectedIds.has(id));
+      const results = await Promise.all(instanceIds.map((instanceId) =>
+        readInstance(instanceId, cursor_by_instance?.[instanceId])
+      ));
+      const nextCursorByInstance: Record<string, string> = {};
+      for (const result of results) nextCursorByInstance[result.instanceId] = result.nextCursor;
+      return this._textResult({
+        multiplayerGroupId: selectedGroup.id,
+        instances: results,
+        nextCursorByInstance,
+      });
     }
 
-    return {
-      content: [{ type: 'text', text: JSON.stringify(body) }],
-    };
+    const result = await readInstance(selectedInstanceId as string, cursor);
+    if ('error' in result) {
+      throw new Error(`get_runtime_logs failed for Instance "${result.instanceId}": ${result.error}`);
+    }
+    return this._textResult(result);
   }
 
   async captureScriptProfiler(target?: string, request: Record<string, unknown> = {}, instance_id?: string) {
@@ -2546,20 +2728,16 @@ export class RobloxStudioTools {
       throw new RoutingFailure({
         code: 'target_role_not_present_on_instance',
         message: 'capture_script_profiler profiles one runtime peer at a time. Pick target="server" or a specific "client-N".',
-        data: {
-          instances: this.bridge.getPublicInstances(),
-          count: this.bridge.getInstances().length,
-        },
+        data: this._routingErrorData(),
       });
     }
 
     data.__mcp_instance_id = resolved.targetInstanceId;
     data.__mcp_target_role = resolved.targetRole;
-    const response = await this.client.request(
+    const response = await this._requestPeer(
       '/api/capture-script-profiler',
       data,
-      resolved.targetInstanceId,
-      resolved.targetRole,
+      resolved.targetPeerId,
     );
 
     const body: unknown = response !== null && typeof response === 'object' && !Array.isArray(response)
@@ -2622,20 +2800,16 @@ export class RobloxStudioTools {
       throw new RoutingFailure({
         code: 'target_role_not_present_on_instance',
         message: 'capture_micro_profiler profiles one runtime peer at a time. Pick target="server" or a specific "client-N".',
-        data: {
-          instances: this.bridge.getPublicInstances(),
-          count: this.bridge.getInstances().length,
-        },
+        data: this._routingErrorData(),
       });
     }
 
     data.__mcp_instance_id = resolved.targetInstanceId;
     data.__mcp_target_role = resolved.targetRole;
-    const response = await this.client.request(
+    const response = await this._requestPeer(
       '/api/capture-micro-profiler',
       data,
-      resolved.targetInstanceId,
-      resolved.targetRole,
+      resolved.targetPeerId,
     );
 
     const body: unknown = response !== null && typeof response === 'object' && !Array.isArray(response)
@@ -2693,15 +2867,11 @@ export class RobloxStudioTools {
       throw new RoutingFailure({
         code: 'target_role_not_present_on_instance',
         message: 'This tool does not support target=all. Pick a specific role or omit target.',
-        data: {
-          instances: this.bridge.getPublicInstances(),
-          count: this.bridge.getInstances().length,
-        },
+        data: this._routingErrorData(),
       });
     }
-    data.__mcp_instance_id = resolved.targetInstanceId;
     data.__mcp_target_role = resolved.targetRole;
-    const response = await this.client.request('/api/breakpoints', data, resolved.targetInstanceId, resolved.targetRole);
+    const response = await this._requestPeer('/api/breakpoints', data, resolved.targetPeerId);
     const body = response !== null && typeof response === 'object' && !Array.isArray(response)
       ? { ...response, target: resolved.targetRole }
       : response;
@@ -2728,22 +2898,12 @@ export class RobloxStudioTools {
     return value;
   }
 
-  private _publicInstanceKey(instance: PublicPluginInstance): string {
-    return `${instance.instanceId}:${instance.role}:${instance.connectedAt}`;
+  private _publicInstanceKey(peer: PublicStudioPeer): string {
+    return `${peer.peerId}:${peer.instanceId}:${peer.connectedAt}`;
   }
 
-  private async _isLatestPublishedPlaceOpen(placeId: number): Promise<boolean> {
-    const publishedInstanceId = `place:${placeId}`;
-    return this.bridge.getPublicInstances().some((instance) =>
-      instance.placeId === placeId || instance.instanceId === publishedInstanceId,
-    ) || (await this.instanceManager.list()).some((record) =>
-      record.closedAt === undefined &&
-      record.source === 'published_place' &&
-      record.placeId === placeId,
-    );
-  }
 
-  private _matchesManagedLaunch(record: ManagedStudioInstance, instance: PublicPluginInstance): boolean {
+  private _matchesManagedLaunch(record: ManagedStudioInstance, instance: PublicStudioPeer): boolean {
     if (record.source === 'published_place') {
       return record.placeId !== undefined && instance.placeId === record.placeId;
     }
@@ -2755,7 +2915,7 @@ export class RobloxStudioTools {
   }
 
   private async _associateManagedEditConnection(
-    instance: PublicPluginInstance,
+    instance: PublicStudioPeer,
     instanceManager: StudioInstanceManager,
   ): Promise<void> {
     if (instance.role !== 'edit') return;
@@ -2783,15 +2943,15 @@ export class RobloxStudioTools {
     record: ManagedStudioInstance,
     beforeKeys: Set<string>,
     timeoutMs: number,
-  ): Promise<PublicPluginInstance | undefined> {
+  ): Promise<PublicStudioPeer | undefined> {
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
       await this.instanceManager.refresh(record);
       if (record.state === 'failed' || record.state === 'exited' || record.closedAt !== undefined) {
         return undefined;
       }
-      const candidates = this.bridge.getPublicInstances()
-        .filter((instance) => instance.role === 'edit')
+      const candidates = this.bridge.getPublicPeers()
+        .filter((peer) => peer.role === 'edit')
         .filter((instance) => !beforeKeys.has(this._publicInstanceKey(instance)))
         .filter((instance) => instance.connectedAt >= record.launchedAt - 1000)
         .filter((instance) => this._matchesManagedLaunch(record, instance))
@@ -2805,7 +2965,7 @@ export class RobloxStudioTools {
 
   private _managedStatus(record: ManagedStudioInstance): Record<string, unknown> {
     const connected = record.instanceId
-      ? this.bridge.getPublicInstances().filter((instance) => instance.instanceId === record.instanceId)
+      ? this.bridge.getPublicPeers().filter((peer) => peer.instanceId === record.instanceId)
       : [];
     return {
       launch_id: record.recordId,
@@ -2920,7 +3080,7 @@ export class RobloxStudioTools {
       }
       if (instance_id) {
         const record = await this.instanceManager.get(instance_id);
-        const connected = this.bridge.getPublicInstances().filter((instance) => instance.instanceId === instance_id);
+        const connected = this.bridge.getPublicPeers().filter((peer) => peer.instanceId === instance_id);
         if (!record && connected.length === 0) {
           return this._textResult({ error: 'Instance is not connected or managed.', instance_id });
         }
@@ -2939,10 +3099,10 @@ export class RobloxStudioTools {
           .filter((record) => record.closedAt === undefined)
           .map((record) => this._managedStatus(record)),
         connected: this.bridge.getPublicInstances().map((instance) => ({
-          instance_id: instance.instanceId,
-          role: instance.role,
+          instance_id: instance.id,
           place_id: instance.placeId,
           place_name: instance.placeName,
+          roles: instance.peers.map((peer) => peer.role).sort(),
         })),
       });
     }
@@ -2988,8 +3148,8 @@ export class RobloxStudioTools {
           });
         }
 
-        const connected = this.bridge.getPublicInstances().filter((instance) => instance.instanceId === instance_id);
-        const edit = connected.find((instance) => instance.role === 'edit');
+        const connected = this.bridge.getPublicPeers().filter((peer) => peer.instanceId === instance_id);
+        const edit = connected.find((peer) => peer.role === 'edit');
         if (!edit) {
           return this._textResult({
             error: 'Instance is not connected or managed.',
@@ -3068,12 +3228,6 @@ export class RobloxStudioTools {
     const processEnvironment = parseStudioProcessEnvironmentPatch(request.process_environment);
     const studioWorkingDirectory = parseStudioWorkingDirectory(request.studio_working_directory);
 
-    if (launchSource === 'published_place' && placeId !== undefined && await this._isLatestPublishedPlaceOpen(placeId)) {
-      return this._textResult({
-        error: 'Place is already open.',
-        message: `place_id ${placeId} is already connected. Use the existing instance or launch a specific place_revision.`,
-      });
-    }
 
     const universeId = launchSource === 'published_place' || launchSource === 'place_revision'
       ? await this._deriveUniverseId(placeId as number)
@@ -3084,7 +3238,7 @@ export class RobloxStudioTools {
     const requireProcessIdentity = request.require_process_identity === true;
     const waitForConnection = !requireProcessIdentity && request.wait_for_connection !== false;
     const timeoutMs = this._optionalPositiveInteger(request.timeout_ms, 'timeout_ms') ?? 120000;
-    const beforeKeys = new Set(this.bridge.getPublicInstances().map((instance) => this._publicInstanceKey(instance)));
+    const beforeKeys = new Set(this.bridge.getPublicPeers().map((peer) => this._publicInstanceKey(peer)));
 
     const record = await this.instanceManager.launch({
       source: launchSource,
@@ -3140,7 +3294,7 @@ export class RobloxStudioTools {
 
     if (action === 'status') {
       const instanceId = this._resolveInstanceIdOnly(instance_id);
-      const { roles, runtimeRoles } = this._briefRoles(instanceId, true);
+      const { roles, runtimeRoles } = this._briefRoles(instanceId);
       return this._textResult({
         success: true,
         action,
@@ -3207,22 +3361,19 @@ export class RobloxStudioTools {
       throw new RoutingFailure({
         code: 'target_role_not_present_on_instance',
         message: 'This tool does not support target=all. Pick a specific role or omit target.',
-        data: {
-          instances: this.bridge.getPublicInstances(),
-          count: this.bridge.getInstances().length,
-        },
+        data: this._routingErrorData(),
       });
     }
-    const existingRuntime = this._runtimeTargetsForEquivalentInstances(resolved.targetInstanceId);
+    const existingRuntime = this._runtimeTargetsForScope(resolved.targetInstanceId);
     if (existingRuntime.length > 0) {
-      const roles = this._rolesForEquivalentInstances(resolved.targetInstanceId);
+      const roles = this._rolesForScope(resolved.targetInstanceId);
       return {
         content: [{
           type: 'text',
           text: JSON.stringify({
             success: false,
             error: 'Playtest already running.',
-            message: 'A playtest is already running for this Studio place. Stop the current playtest before starting another.',
+            message: 'A playtest is already running for this Studio process scope. Stop the current playtest before starting another.',
             runtimeReady: true,
             timedOut: false,
             roles,
@@ -3231,16 +3382,11 @@ export class RobloxStudioTools {
         }],
       };
     }
-    const response = await this.client.request(
-      '/api/start-playtest',
-      data,
-      resolved.targetInstanceId,
-      resolved.targetRole,
-    );
+    const response = await this._requestPeer('/api/start-playtest', data, resolved.targetPeerId);
     let wait: { ok: boolean; roles: string[]; timedOut: boolean } | undefined;
     if (response?.success === true) {
       const requiredRoles = mode === 'play' ? ['server', 'client-1'] : ['server'];
-      wait = await this._waitForRuntimeRolesFresh(resolved.targetInstanceId, startedAt, requiredRoles, timeout, true);
+      wait = await this._waitForRuntimeRolesFresh(resolved.targetInstanceId, startedAt, requiredRoles, timeout);
     }
     const body = wait
       ? {
@@ -3269,7 +3415,7 @@ export class RobloxStudioTools {
     let response: Record<string, unknown>;
     let stopRequestError: string | undefined;
     try {
-      response = await this.client.request('/api/stop-playtest', {}, instanceId, 'edit');
+      response = await this._request('/api/stop-playtest', {}, instanceId, 'edit');
     } catch (error) {
       stopRequestError = errorMessage(error);
       response = {
@@ -3280,11 +3426,11 @@ export class RobloxStudioTools {
     }
     let wait: { ok: boolean; roles: string[]; timedOut: boolean } | undefined;
     if (response?.success === true) {
-      wait = await this._waitForRuntimeRoles(instanceId, { noRuntime: true }, timeout, true);
-    } else if (this._runtimeTargetsForEquivalentInstances(instanceId).length > 0) {
+      wait = await this._waitForRuntimeRoles(instanceId, { noRuntime: true }, timeout);
+    } else if (this._runtimeTargetsForScope(instanceId).length > 0) {
       wait = {
         ok: false,
-        roles: this._rolesForEquivalentInstances(instanceId),
+        roles: this._rolesForScope(instanceId),
         timedOut: false,
       };
     }
@@ -3324,12 +3470,16 @@ export class RobloxStudioTools {
   }
 
   private async _buildMultiplayerState(instanceId: string): Promise<Record<string, unknown>> {
-    const peers = this.bridge.getPublicInstances()
-      .filter((i) => i.instanceId === instanceId)
+    const peers = this.bridge.getPublicPeers()
+      .filter((peer) => this.bridge.getInstanceIdsInScope(instanceId).includes(peer.instanceId))
       .sort((a, b) => a.role.localeCompare(b.role));
+    const multiplayerGroup = this.bridge.getMultiplayerGroups().find((group) =>
+      group.instanceIds.includes(instanceId)
+    );
 
     const body: Record<string, unknown> = {
       instanceId,
+      multiplayerGroupId: multiplayerGroup?.id,
       peers,
       peerCount: peers.length,
     };
@@ -3337,12 +3487,12 @@ export class RobloxStudioTools {
     const edit = peers.find((p) => p.role === 'edit');
     const server = peers.find((p) => p.role === 'server');
 
-    let editState: any | undefined;
-    let serverState: any | undefined;
+    let editState: StudioToolResponse | undefined;
+    let serverState: StudioToolResponse | undefined;
 
     if (edit) {
       try {
-        editState = await this.client.request('/api/multiplayer-test-state', {}, instanceId, 'edit');
+        editState = await this._request('/api/multiplayer-test-state', {}, instanceId, 'edit');
         body.edit = editState;
       } catch (err) {
         body.edit = { error: err instanceof Error ? err.message : String(err) };
@@ -3351,7 +3501,7 @@ export class RobloxStudioTools {
 
     if (server) {
       try {
-        serverState = await this.client.request('/api/multiplayer-test-state', {}, instanceId, 'server');
+        serverState = await this._request('/api/multiplayer-test-state', {}, instanceId, 'server');
         body.server = serverState;
       } catch (err) {
         body.server = { error: err instanceof Error ? err.message : String(err) };
@@ -3369,7 +3519,7 @@ export class RobloxStudioTools {
     body.error = session?.error;
     body.players = serverState?.players ?? [];
     body.playerCount = serverState?.playerCount ?? 0;
-    body.clientRoles = this._clientRolesForInstance(instanceId);
+    body.clientRoles = this._clientRolesForScope(instanceId);
 
     return body;
   }
@@ -3377,9 +3527,9 @@ export class RobloxStudioTools {
   private async _waitForMultiplayerEditDone(instanceId: string, timeoutSec = 30): Promise<boolean> {
     const deadline = Date.now() + timeoutSec * 1000;
     while (Date.now() < deadline) {
-      if (!this._rolesForInstance(instanceId).includes('edit')) return false;
+      if (!this._rolesForScope(instanceId).includes('edit')) return false;
       try {
-        const editState = await this.client.request('/api/multiplayer-test-state', {}, instanceId, 'edit');
+        const editState = await this._request('/api/multiplayer-test-state', {}, instanceId, 'edit');
         const phase = editState?.session?.phase;
         if (phase === 'completed' || phase === 'failed') return true;
       } catch {
@@ -3391,22 +3541,9 @@ export class RobloxStudioTools {
   }
 
   private async _isMultiplayerTestRunning(instanceId: string): Promise<boolean> {
-    const roles = this._rolesForInstance(instanceId);
-    const hasServer = roles.includes('server');
-    const clientCount = roles.filter((role) => role.startsWith('client-')).length;
-    if (roles.includes('edit')) {
-      try {
-        const editState = await this.client.request('/api/multiplayer-test-state', {}, instanceId, 'edit');
-        const phase = editState?.session?.phase;
-        if (phase === 'starting' || phase === 'running') return true;
-      } catch {
-        // Fall through to the runtime-shape heuristic below. Direct/manual
-        // StudioTestService multiplayer sessions do not update the edit peer's
-        // MCP-managed session state, but they still expose distinct server and
-        // client plugin peers.
-      }
-    }
-    return hasServer && clientCount >= 2;
+    return this.bridge.getMultiplayerGroups().some((group) =>
+      group.instanceIds.includes(instanceId)
+    );
   }
 
   private async _waitForMultiplayerStart(
@@ -3421,8 +3558,8 @@ export class RobloxStudioTools {
       const exact = await this._waitForExactClientCount(instanceId, clientCount, 0.25, 0);
       if (exact.ok || exact.extraClients) {
         if (exact.ok && connectedAfter !== undefined) {
-          const instances = this.bridge.getInstances().filter((inst) => inst.instanceId === instanceId);
-          const freshRoles = new Set(instances.filter((inst) => inst.connectedAt >= connectedAfter).map((inst) => inst.role));
+          const peers = this.bridge.getPeersInScope(instanceId);
+          const freshRoles = new Set(peers.filter((peer) => peer.connectedAt >= connectedAfter).map((peer) => peer.role));
           const freshClientCount = [...freshRoles].filter((role) => /^client-\d+$/.test(role)).length;
           if (!freshRoles.has('server') || freshClientCount !== clientCount) {
             await sleep(250);
@@ -3433,20 +3570,20 @@ export class RobloxStudioTools {
       }
       try {
         const remainingMs = Math.max(1, Math.min(1000, deadline - Date.now()));
-        const editState = await this.client.request('/api/multiplayer-test-state', {}, instanceId, 'edit', remainingMs);
+        const editState = await this._request('/api/multiplayer-test-state', {}, instanceId, 'edit', remainingMs);
         const session = editState?.session;
         if (typeof session?.phase === 'string') {
           lastPhase = session.phase;
         }
         if (session?.phase === 'failed') {
-          return { ok: false, roles: this._rolesForInstance(instanceId), timedOut: false, phase: session.phase, error: session.error };
+          return { ok: false, roles: this._rolesForScope(instanceId), timedOut: false, phase: session.phase, error: session.error };
         }
       } catch {
         // Keep waiting; normal startup is driven by runtime peers registering.
       }
       await sleep(250);
     }
-    return { ok: false, roles: this._rolesForInstance(instanceId), timedOut: true, phase: lastPhase };
+    return { ok: false, roles: this._rolesForScope(instanceId), timedOut: true, phase: lastPhase };
   }
 
   async multiplayerPlaytest(
@@ -3470,9 +3607,16 @@ export class RobloxStudioTools {
 
     const briefState = async (instanceId?: string) => {
       const state = await this._buildMultiplayerState(this._resolveInstanceIdOnly(instanceId));
+      const roles = Array.isArray(state.peers)
+        ? state.peers.flatMap((peer) =>
+            peer !== null && typeof peer === 'object' && 'role' in peer && typeof peer.role === 'string'
+              ? [peer.role]
+              : [])
+        : [];
       return {
         phase: state.phase,
-        roles: Array.isArray(state.peers) ? state.peers.map((peer: any) => peer.role).filter((role: unknown) => typeof role === 'string') : [],
+        multiplayerGroupId: typeof state.multiplayerGroupId === 'string' ? state.multiplayerGroupId : undefined,
+        roles,
         playerCount: typeof state.playerCount === 'number' ? state.playerCount : undefined,
         error: typeof state.error === 'string' ? state.error : undefined,
       };
@@ -3488,28 +3632,45 @@ export class RobloxStudioTools {
 
     if (action === 'start') {
       const body = this._parseTextResult(await this.multiplayerTestStart(numPlayers as number, testArgs, timeout, instance_id));
-      const state = body.state && typeof body.state === 'object' ? body.state as Record<string, any> : {};
+      const stateValue = body.state;
+      const state: Record<string, unknown> = stateValue !== null && typeof stateValue === 'object' && !Array.isArray(stateValue)
+        ? { ...stateValue }
+        : {};
+      const waitValue = body.wait;
+      const wait: Record<string, unknown> = waitValue !== null && typeof waitValue === 'object' && !Array.isArray(waitValue)
+        ? { ...waitValue }
+        : {};
       const launched = body.success === true && body.ready === true;
+      const multiplayerGroupId = typeof body.multiplayerGroupId === 'string'
+        ? body.multiplayerGroupId
+        : typeof body.testId === 'string'
+          ? body.testId
+          : undefined;
       return this._textResult(launched ? {
         success: true,
         action,
         message: 'Multiplayer playtest started.',
+        multiplayerGroupId,
         roles: Array.isArray(body.roles) ? body.roles : undefined,
         playerCount: typeof state.playerCount === 'number' ? state.playerCount : undefined,
       } : {
         success: false,
         action,
-        error: body.error ?? body.wait?.error ?? 'multiplayer_start_not_detected',
+        error: body.error ?? wait.error ?? 'multiplayer_start_not_detected',
         message: body.success === true
           ? 'Multiplayer playtest start was requested, but MCP did not detect the required server/client peers before timeout.'
           : body.message ?? 'Multiplayer playtest did not start.',
+        multiplayerGroupId,
         roles: Array.isArray(body.roles) ? body.roles : undefined,
       });
     }
 
     if (action === 'add_players') {
       const body = this._parseTextResult(await this.multiplayerTestAddPlayers(numPlayers as number, timeout, instance_id));
-      const state = body.state && typeof body.state === 'object' ? body.state as Record<string, any> : {};
+      const stateValue = body.state;
+      const state: Record<string, unknown> = stateValue !== null && typeof stateValue === 'object' && !Array.isArray(stateValue)
+        ? { ...stateValue }
+        : {};
       const success = body.success === true && body.ready === true;
       return this._textResult(success ? {
         success: true,
@@ -3545,9 +3706,13 @@ export class RobloxStudioTools {
     }
 
     const body = this._parseTextResult(await this.multiplayerTestEnd(value, timeout, instance_id));
+    const multiplayerGroupId = typeof body.multiplayerGroupId === 'string'
+      ? body.multiplayerGroupId
+      : undefined;
     return this._textResult(body.success === true && body.ended === true ? {
       success: true,
       action,
+      multiplayerGroupId,
       message: body.alreadyEnded === true
         ? 'Multiplayer playtest already ended.'
         : (body.teardownConfirmed === false
@@ -3557,6 +3722,7 @@ export class RobloxStudioTools {
     } : {
       success: false,
       action,
+      multiplayerGroupId,
       error: body.error ?? 'end_failed',
       message: body.message ?? 'Multiplayer playtest did not end.',
       roles: Array.isArray(body.roles) ? body.roles : undefined,
@@ -3569,13 +3735,13 @@ export class RobloxStudioTools {
       throw new Error('numPlayers must be an integer from 1 to 8');
     }
     const editTarget = this._resolveSingleTarget('edit', instance_id);
-    const existingRuntime = this._runtimeTargetsForEquivalentInstances(editTarget.instanceId);
+    const existingRuntime = this._runtimeTargetsForScope(editTarget.instanceId);
     if (existingRuntime.length > 0) {
-      const roles = this._rolesForEquivalentInstances(editTarget.instanceId);
+      const roles = this._rolesForScope(editTarget.instanceId);
       return this._textResult({
         success: false,
         error: 'Multiplayer playtest already running.',
-        message: 'A Studio runtime is already connected for this place. End the existing playtest before starting another multiplayer playtest.',
+        message: 'A Studio runtime is already connected for this process scope. End the existing playtest before starting another multiplayer playtest.',
         ready: true,
         timedOut: false,
         roles,
@@ -3584,29 +3750,38 @@ export class RobloxStudioTools {
     }
 
     const startedAt = Date.now();
-    const response = await this.client.request(
+    const response = await this._requestPeer(
       '/api/multiplayer-test-start',
       { numPlayers, testArgs: testArgs ?? {} },
-      editTarget.instanceId,
-      editTarget.role,
+      editTarget.targetPeerId,
     );
-    if (response?.error) {
-      return { content: [{ type: 'text', text: JSON.stringify(response) }] };
+    const groupId = typeof response?.testId === 'string' ? response.testId : undefined;
+    if (response?.error || response?.success !== true || groupId === undefined) {
+      if (groupId !== undefined) await this.bridge.removeMultiplayerGroupEverywhere(groupId);
+      return this._textResult({
+        ...response,
+        error: response?.error ?? 'Multiplayer start did not return a testId.',
+      });
     }
 
+    await this.bridge.createMultiplayerGroupEverywhere(groupId, editTarget.instanceId);
     const wait = await this._waitForMultiplayerStart(editTarget.instanceId, numPlayers, timeout ?? 60, startedAt);
     const launched = wait.ok;
     const state = await this._buildMultiplayerState(editTarget.instanceId);
-    const success = response.success === true && wait.ok;
+    const success = wait.ok;
+    const runtimeStillConnected = this._runtimeTargetsForScope(editTarget.instanceId).length > 0;
+    const definitelyFailed = state.phase === 'failed' && !runtimeStillConnected;
+    if (definitelyFailed) await this.bridge.removeMultiplayerGroupEverywhere(groupId);
     return {
       content: [{
         type: 'text',
         text: JSON.stringify({
           ...response,
+          multiplayerGroupId: groupId,
           success,
           ready: wait.ok,
           launched,
-          startRequested: response.success === true,
+          startRequested: true,
           timedOut: wait.timedOut,
           wait,
           roles: wait.roles,
@@ -3632,18 +3807,25 @@ export class RobloxStudioTools {
       throw new Error('numPlayers must be an integer from 1 to 8');
     }
     const serverTarget = this._resolveSingleTarget('server', instance_id);
-    const before = this._clientRolesForInstance(serverTarget.instanceId).length;
-    const response = await this.client.request(
+    const group = this.bridge.getMultiplayerGroups().find((candidate) =>
+      candidate.instanceIds.includes(serverTarget.instanceId)
+    );
+    const scopeInstanceId = group?.controllerInstanceId ?? serverTarget.instanceId;
+    const before = this._clientRolesForScope(scopeInstanceId).length;
+    const response = await this._requestPeer(
       '/api/multiplayer-test-add-players',
       { numPlayers, timeout: timeout ?? 10 },
-      serverTarget.instanceId,
-      serverTarget.role,
+      serverTarget.targetPeerId,
     );
     if (response?.error) {
       return { content: [{ type: 'text', text: JSON.stringify(response) }] };
     }
-    const wait = await this._waitForExactClientCount(serverTarget.instanceId, before + numPlayers, timeout ?? 30);
-    const state = await this._buildMultiplayerState(serverTarget.instanceId);
+    const wait = await this._waitForExactClientCount(
+      scopeInstanceId,
+      before + numPlayers,
+      timeout ?? 30,
+    );
+    const state = await this._buildMultiplayerState(scopeInstanceId);
     return {
       content: [{
         type: 'text',
@@ -3664,21 +3846,24 @@ export class RobloxStudioTools {
       throw new Error(`multiplayer_test_leave_client requires target=client-N (got: ${target})`);
     }
     const clientTarget = this._resolveSingleTarget(target, instance_id);
-    const response = await this.client.request(
+    const group = this.bridge.getMultiplayerGroups().find((candidate) =>
+      candidate.instanceIds.includes(clientTarget.instanceId)
+    );
+    const scopeInstanceId = group?.controllerInstanceId ?? clientTarget.instanceId;
+    const response = await this._requestPeer(
       '/api/multiplayer-test-leave-client',
       {},
-      clientTarget.instanceId,
-      clientTarget.role,
+      clientTarget.targetPeerId,
     );
     if (response?.error) {
       return { content: [{ type: 'text', text: JSON.stringify(response) }] };
     }
     const wait = await this._waitForRuntimeRoles(
-      clientTarget.instanceId,
+      scopeInstanceId,
       { absentRole: clientTarget.role },
       timeout ?? 30,
     );
-    const state = await this._buildMultiplayerState(clientTarget.instanceId);
+    const state = await this._buildMultiplayerState(scopeInstanceId);
     return {
       content: [{
         type: 'text',
@@ -3694,43 +3879,56 @@ export class RobloxStudioTools {
   }
 
   async multiplayerTestEnd(value?: unknown, timeout?: number, instance_id?: string) {
-    let serverTarget: { instanceId: string; role: string };
+    let serverTarget: { targetPeerId: string; instanceId: string; role: string };
     try {
       serverTarget = this._resolveSingleTarget('server', instance_id);
-    } catch (err) {
+    } catch (error) {
       const instanceId = this._resolveInstanceIdOnly(instance_id);
-      const hasRuntime = this._rolesForInstance(instanceId).some(
+      const group = this.bridge.getMultiplayerGroups().find((candidate) =>
+        candidate.instanceIds.includes(instanceId)
+      );
+      const hasRuntime = this._rolesForScope(instanceId).some(
         (role) => role === 'server' || /^client-\d+$/.test(role),
       );
       if (!hasRuntime) {
+        if (group) await this.bridge.removeMultiplayerGroupEverywhere(group.id);
         return this._textResult({
           success: true,
+          multiplayerGroupId: group?.id,
           ended: true,
           alreadyEnded: true,
           teardownConfirmed: true,
           message: 'No active multiplayer test to end (already ended).',
         });
       }
-      throw err;
+      throw error;
     }
-    const response = await this.client.request(
+
+    const group = this.bridge.getMultiplayerGroups().find((candidate) =>
+      candidate.instanceIds.includes(serverTarget.instanceId)
+    );
+    const scopeInstanceId = group?.controllerInstanceId ?? serverTarget.instanceId;
+    const response = await this._requestPeer(
       '/api/multiplayer-test-end',
       { value: value ?? 'ended_by_mcp' },
-      serverTarget.instanceId,
-      serverTarget.role,
+      serverTarget.targetPeerId,
     );
     if (response?.error) {
-      return this._textResult(response);
+      return this._textResult({
+        ...response,
+        multiplayerGroupId: group?.id,
+      });
     }
-    const editDone = await this._waitForMultiplayerEditDone(serverTarget.instanceId, timeout ?? 30);
+    const editDone = await this._waitForMultiplayerEditDone(scopeInstanceId, timeout ?? 30);
     const wait = await this._waitForRuntimeRoles(
-      serverTarget.instanceId,
+      scopeInstanceId,
       { noRuntime: true },
       timeout ?? 30,
     );
-    const state = await this._buildMultiplayerState(serverTarget.instanceId);
-    return this._textResult({
+    const state = await this._buildMultiplayerState(scopeInstanceId);
+    const result = this._textResult({
       ...response,
+      multiplayerGroupId: group?.id,
       ended: response.success === true,
       teardownConfirmed: wait.ok,
       editDone,
@@ -3738,28 +3936,15 @@ export class RobloxStudioTools {
       roles: wait.roles,
       state,
     });
+    if (wait.ok && group) await this.bridge.removeMultiplayerGroupEverywhere(group.id);
+    return result;
   }
 
   async getConnectedInstances() {
-    const places = new Map<string, { id: string; name: string; roles: string[] }>();
-
-    for (const peer of this.bridge.getPublicInstances()) {
-      let place = places.get(peer.instanceId);
-      if (!place) {
-        place = {
-          id: peer.instanceId,
-          name: peer.placeName || peer.dataModelName,
-          roles: [],
-        };
-        places.set(peer.instanceId, place);
-      }
-
-      if (!place.roles.includes(peer.role)) {
-        place.roles.push(peer.role);
-      }
-    }
-
-    return this._textResult({ instances: [...places.values()] });
+    return this._textResult({
+      instances: this.bridge.getConnectedInstances(),
+      multiplayerGroups: this.bridge.getConnectedMultiplayerGroups(),
+    });
   }
 
 
@@ -4490,12 +4675,7 @@ export class RobloxStudioTools {
     if (!resolved.ok) throw new RoutingFailure(resolved.error);
 
     if (resolved.mode === 'single') {
-      const response = await this.client.request(
-        '/api/get-memory-breakdown',
-        data,
-        resolved.targetInstanceId,
-        resolved.targetRole,
-      );
+      const response = await this._requestPeer('/api/get-memory-breakdown', data, resolved.targetPeerId);
       return { content: [{ type: 'text', text: JSON.stringify(response) }] };
     }
 
@@ -4504,12 +4684,7 @@ export class RobloxStudioTools {
     const responses = await Promise.allSettled(
       targets.map(async (t) => ({
         peer: t.targetRole,
-        result: await this.client.request(
-          '/api/get-memory-breakdown',
-          data,
-          t.targetInstanceId,
-          t.targetRole,
-        ),
+        result: await this._requestPeer('/api/get-memory-breakdown', data, t.targetPeerId),
       })),
     );
 
@@ -4538,12 +4713,7 @@ export class RobloxStudioTools {
     if (!resolved.ok) throw new RoutingFailure(resolved.error);
 
     if (resolved.mode === 'single') {
-      const response = await this.client.request(
-        '/api/get-scene-analysis',
-        data,
-        resolved.targetInstanceId,
-        resolved.targetRole,
-      );
+      const response = await this._requestPeer('/api/get-scene-analysis', data, resolved.targetPeerId);
       return { content: [{ type: 'text', text: JSON.stringify(response) }] };
     }
 
@@ -4552,12 +4722,7 @@ export class RobloxStudioTools {
     const responses = await Promise.allSettled(
       targets.map(async (t) => ({
         peer: t.targetRole,
-        result: await this.client.request(
-          '/api/get-scene-analysis',
-          data,
-          t.targetInstanceId,
-          t.targetRole,
-        ),
+        result: await this._requestPeer('/api/get-scene-analysis', data, t.targetPeerId),
       })),
     );
 

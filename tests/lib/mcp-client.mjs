@@ -194,7 +194,12 @@ export class McpClient {
       common shape used by the Roblox Studio MCP). Throws if no text content. */
   async callTool(name, args = {}, timeoutMs = 30_000) {
     const routedArgs = { ...args };
-    if (process.env.MCP_INSTANCE_ID && ROUTED_TOOLS.has(name) && routedArgs.instance_id === undefined) {
+    if (
+      process.env.MCP_INSTANCE_ID &&
+      ROUTED_TOOLS.has(name) &&
+      routedArgs.instance_id === undefined &&
+      routedArgs.multiplayer_group_id === undefined
+    ) {
       routedArgs.instance_id = process.env.MCP_INSTANCE_ID;
     }
     const res = await this.rpc('tools/call', { name, arguments: routedArgs }, timeoutMs);
@@ -253,29 +258,101 @@ export function assertNotContains(haystack, needle, msg) {
   console.log(`  ✓ ${msg}`);
 }
 
-export function selectEditInstance(connected, expectedInstanceId = process.env.MCP_INSTANCE_ID) {
-  const instances = connected?.instances ?? connected;
-  if (!Array.isArray(instances)) return undefined;
-  return instances.find((instance) => {
-    const id = instance?.id ?? instance?.instanceId;
-    const roles = Array.isArray(instance?.roles)
-      ? instance.roles
-      : (instance?.role ? [instance.role] : []);
-    return roles.includes('edit') && (!expectedInstanceId || id === expectedInstanceId);
+export function connectedInstances(connected) {
+  return Array.isArray(connected?.instances) ? connected.instances : [];
+}
+
+function connectedMultiplayerGroups(connected) {
+  return Array.isArray(connected?.multiplayerGroups) ? connected.multiplayerGroups : [];
+}
+
+export function instancePeers(instance) {
+  if (Array.isArray(instance?.peers)) return instance.peers;
+  if (instance?.peers === null || typeof instance?.peers !== 'object') return [];
+  return Object.entries(instance.peers)
+    .filter((entry) => typeof entry[1] === 'string')
+    .map(([role, peerId]) => ({
+      peerId,
+      instanceId: instance.id,
+      multiplayerGroupId: instance.multiplayerGroupId,
+      role,
+      placeId: instance.placeId,
+      placeName: instance.placeName,
+    }));
+}
+
+function groupedRuntimePeers(group) {
+  if (
+    group?.instances === null ||
+    typeof group?.instances !== 'object' ||
+    Array.isArray(group.instances)
+  ) {
+    return [];
+  }
+  return Object.entries(group.instances).flatMap(([connectedInstanceId, peerId]) => {
+    if (typeof peerId !== 'string') return [];
+    const roleMatch = connectedInstanceId.match(/-(server|client-\d+)$/);
+    if (!roleMatch) return [];
+    const role = roleMatch[1];
+    return [{
+      peerId,
+      instanceId: connectedInstanceId.slice(0, -(role.length + 1)),
+      connectedInstanceId,
+      multiplayerGroupId: group.id,
+      role,
+    }];
   });
+}
+
+function uniquePeers(peers) {
+  return [...new Map(peers.map((peer) => [peer.peerId, peer])).values()];
+}
+
+export function selectEditInstance(connected, expectedInstanceId = process.env.MCP_INSTANCE_ID) {
+  return connectedInstances(connected).find((instance) =>
+    instancePeers(instance).some((peer) => peer.role === 'edit') &&
+    (!expectedInstanceId || instance.id === expectedInstanceId));
+}
+
+export function routingPeers(connected, expectedInstanceId = process.env.MCP_INSTANCE_ID) {
+  const instances = connectedInstances(connected);
+  const groups = connectedMultiplayerGroups(connected);
+  if (!expectedInstanceId) {
+    return uniquePeers([
+      ...instances.flatMap(instancePeers),
+      ...groups.flatMap(groupedRuntimePeers),
+    ]);
+  }
+
+  const selected = instances.find((instance) => instance.id === expectedInstanceId);
+  const group = groups.find((candidate) =>
+    candidate.id === selected?.multiplayerGroupId ||
+    candidate.controllerInstanceId === selected?.id ||
+    groupedRuntimePeers(candidate).some((peer) =>
+      peer.connectedInstanceId === expectedInstanceId ||
+      peer.instanceId === expectedInstanceId));
+  if (!group) return selected ? instancePeers(selected) : [];
+
+  const legacyInstanceIds = Array.isArray(group.instanceIds)
+    ? new Set(group.instanceIds)
+    : undefined;
+  const groupInstances = instances.filter((instance) =>
+    instance.multiplayerGroupId === group.id ||
+    legacyInstanceIds?.has(instance.id));
+  return uniquePeers([
+    ...groupInstances.flatMap(instancePeers),
+    ...groupedRuntimePeers(group),
+  ]);
+}
+
+export function selectRoutingPeer(connected, role, expectedInstanceId = process.env.MCP_INSTANCE_ID) {
+  return routingPeers(connected, expectedInstanceId).find((peer) => peer.role === role);
 }
 
 async function getInstanceList(client) {
   try {
-    const inst = await client.callTool('get_connected_instances', {});
-    const list = inst.instances ?? inst;
-    if (!Array.isArray(list)) return [];
-    const peers = list.flatMap((place) => Array.isArray(place.roles)
-      ? place.roles.map((role) => ({ instanceId: place.id, role }))
-      : [{ instanceId: place.instanceId ?? place.id, role: place.role }]);
-    return process.env.MCP_INSTANCE_ID
-      ? peers.filter((peer) => peer.instanceId === process.env.MCP_INSTANCE_ID)
-      : peers;
+    const connected = await client.callTool('get_connected_instances', {});
+    return routingPeers(connected);
   } catch {
     return [];
   }
@@ -308,20 +385,22 @@ export async function startPlaytestAndWait(client, { timeoutSec = 30, pollMs = 5
     if (!list.some((i) => i.role === 'server')) break;
     await delay(pollMs);
   }
-  const staleIds = new Set(
-    (await getInstanceList(client)).filter((i) => i.role === 'server').map((i) => i.instanceId),
+  const stalePeerIds = new Set(
+    (await getInstanceList(client)).filter((peer) => peer.role === 'server').map((peer) => peer.peerId),
   );
 
   // 2. Kick off the playtest.
   const res = await client.callTool('solo_playtest', { action: 'start', mode: 'play' });
   if (!res.success) throw new Error(`solo_playtest start failed: ${JSON.stringify(res)}`);
 
-  // 3. Poll for a fresh (non-stale) server peer to register.
+  // 3. Poll for a fresh (non-stale) server Peer to register. Solo Peers share
+  //    one Instance ID, so freshness is a Peer identity concern.
   const deadline = Date.now() + timeoutSec * 1000;
   while (Date.now() < deadline) {
     await delay(pollMs);
     const list = await getInstanceList(client);
-    const freshServer = list.find((i) => i.role === 'server' && !staleIds.has(i.instanceId));
+    const freshServer = list.find((peer) =>
+      peer.role === 'server' && !stalePeerIds.has(peer.peerId));
     if (freshServer) {
       // Server peer is registered; give bridges a moment to finish wiring.
       await delay(1000);

@@ -1,11 +1,11 @@
 export interface StudioSession {
-  logicalSessionId: string;
-  physicalSessionId: string;
+  peerId: string;
+  transportPeerId: string;
 }
 
 export interface StudioQueuedRequest {
   requestId: string;
-  logicalSessionId: string;
+  peerId: string;
   target: string;
   endpoint: string;
   data: unknown;
@@ -20,23 +20,23 @@ export interface StudioRequestCancellation {
 }
 
 export interface StudioTransportQueue {
-  claimNextRequestForPhysical(physicalSessionId: string, claimOwner: string): StudioQueuedRequest | null;
+  claimNextRequestForTransport(transportPeerId: string, claimOwner: string): StudioQueuedRequest | null;
   releaseDeliveryClaims(claimOwner: string): void;
-  onRequestAvailable(listener: (physicalSessionId: string) => void): () => void;
-  claimNextCancellationForPhysical(
-    physicalSessionId: string,
+  onRequestAvailable(listener: (transportPeerId: string) => void): () => void;
+  claimNextCancellationForTransport(
+    transportPeerId: string,
     claimOwner: string,
   ): StudioRequestCancellation | null;
-  onSessionClosed(listener: (session: StudioSession) => void): () => void;
-  setDeliveryActive(physicalSessionId: string, owner: string, active: boolean): void;
-  updateInstanceActivity(pluginSessionId: string): void;
+  onPeerClosed(listener: (peer: StudioSession) => void): () => void;
+  setDeliveryActive(transportPeerId: string, owner: string, active: boolean): void;
+  updatePeerActivity(peerId: string): void;
 }
 
 
 export interface StudioRequestEvent {
   kind: 'request';
   requestId: string;
-  logicalSessionId: string;
+  peerId: string;
   target: string;
   endpoint: string;
   data: unknown;
@@ -49,7 +49,7 @@ export interface StudioCancelEvent extends StudioRequestCancellation {
 
 export interface StudioStatusEvent {
   kind: 'status';
-  knownInstance: boolean;
+  knownPeer: boolean;
   mcpConnected: boolean;
   serverVersion?: string;
   pluginVersion?: string;
@@ -75,12 +75,12 @@ export interface EventStreamSink {
 }
 
 export interface EventStreamHandle {
-  readonly physicalSessionId: string;
+  readonly transportPeerId: string;
   close(): void;
 }
 
 interface ActiveEventStream {
-  physicalSessionId: string;
+  transportPeerId: string;
   claimOwner: string;
   sink: EventStreamSink;
   status: () => StudioStatusEvent;
@@ -96,21 +96,21 @@ interface ActiveEventStream {
 const HEARTBEAT_INTERVAL_MS = 10_000;
 export const MAX_ACTIVE_EVENT_STREAMS = 64;
 
-/** Persistent SSE downstream adapter, multiplexed by physical Studio peer. */
+/** Persistent SSE downstream adapter, multiplexed by transport Peer. */
 export class SseStudioTransport {
   private readonly streams = new Map<string, ActiveEventStream>();
   private readonly unsubscribeRequestAvailable: () => void;
-  private readonly unsubscribeSessionClosed: () => void;
+  private readonly unsubscribePeerClosed: () => void;
   private nextGeneration = 0;
 
   constructor(private readonly queue: StudioTransportQueue) {
-    this.unsubscribeRequestAvailable = queue.onRequestAvailable((physicalSessionId) => {
-      const stream = this.streams.get(physicalSessionId);
+    this.unsubscribeRequestAvailable = queue.onRequestAvailable((transportPeerId) => {
+      const stream = this.streams.get(transportPeerId);
       if (stream) this.pump(stream);
     });
-    this.unsubscribeSessionClosed = queue.onSessionClosed((route) => {
-      if (route.logicalSessionId === route.physicalSessionId) {
-        this.closePhysical(route.physicalSessionId);
+    this.unsubscribePeerClosed = queue.onPeerClosed((route) => {
+      if (route.peerId === route.transportPeerId) {
+        this.closeTransport(route.transportPeerId);
       }
     });
   }
@@ -119,21 +119,21 @@ export class SseStudioTransport {
     return this.streams.size;
   }
 
-  canOpen(physicalSessionId: string): boolean {
-    return this.streams.has(physicalSessionId) || this.streams.size < MAX_ACTIVE_EVENT_STREAMS;
+  canOpen(transportPeerId: string): boolean {
+    return this.streams.has(transportPeerId) || this.streams.size < MAX_ACTIVE_EVENT_STREAMS;
   }
 
   open(
-    physicalSessionId: string,
+    transportPeerId: string,
     sink: EventStreamSink,
     status: () => StudioStatusEvent,
   ): EventStreamHandle | undefined {
-    if (!this.canOpen(physicalSessionId)) return undefined;
+    if (!this.canOpen(transportPeerId)) return undefined;
 
     this.nextGeneration += 1;
-    const claimOwner = `sse:${physicalSessionId}:${this.nextGeneration}`;
+    const claimOwner = `sse:${transportPeerId}:${this.nextGeneration}`;
     const stream: ActiveEventStream = {
-      physicalSessionId,
+      transportPeerId,
       claimOwner,
       sink,
       status,
@@ -148,18 +148,18 @@ export class SseStudioTransport {
       },
     };
 
-    this.queue.setDeliveryActive(physicalSessionId, claimOwner, true);
-    this.queue.updateInstanceActivity(physicalSessionId);
-    const replaced = this.streams.get(physicalSessionId);
+    this.queue.setDeliveryActive(transportPeerId, claimOwner, true);
+    this.queue.updatePeerActivity(transportPeerId);
+    const replaced = this.streams.get(transportPeerId);
     if (replaced) this.closeStream(replaced, true);
 
-    this.streams.set(physicalSessionId, stream);
+    this.streams.set(transportPeerId, stream);
     sink.on('close', stream.onClose);
     sink.on('error', stream.onClose);
     sink.on('drain', stream.onDrain);
     stream.heartbeatTimer = setInterval(() => {
       if (!stream.closed && !stream.blocked) {
-        this.queue.updateInstanceActivity(physicalSessionId);
+        this.queue.updatePeerActivity(transportPeerId);
         stream.statusPending = true;
         this.pump(stream);
         if (!stream.blocked) {
@@ -171,14 +171,14 @@ export class SseStudioTransport {
     this.pump(stream);
 
     return {
-      physicalSessionId,
+      transportPeerId,
       close: () => this.closeStream(stream, true),
     };
   }
 
-  refreshStatus(physicalSessionId?: string): void {
-    if (physicalSessionId !== undefined) {
-      const stream = this.streams.get(physicalSessionId);
+  refreshStatus(transportPeerId?: string): void {
+    if (transportPeerId !== undefined) {
+      const stream = this.streams.get(transportPeerId);
       if (stream) {
         stream.lastStatusJson = undefined;
         stream.statusPending = true;
@@ -193,8 +193,8 @@ export class SseStudioTransport {
     }
   }
 
-  closePhysical(physicalSessionId: string): void {
-    const stream = this.streams.get(physicalSessionId);
+  closeTransport(transportPeerId: string): void {
+    const stream = this.streams.get(transportPeerId);
     if (stream) this.closeStream(stream, true);
   }
 
@@ -203,11 +203,11 @@ export class SseStudioTransport {
       this.closeStream(stream, true);
     }
     this.unsubscribeRequestAvailable();
-    this.unsubscribeSessionClosed();
+    this.unsubscribePeerClosed();
   }
 
   private pump(stream: ActiveEventStream): void {
-    if (stream.closed || stream.blocked || this.streams.get(stream.physicalSessionId) !== stream) return;
+    if (stream.closed || stream.blocked || this.streams.get(stream.transportPeerId) !== stream) return;
 
     if (stream.statusPending) {
       stream.statusPending = false;
@@ -226,8 +226,8 @@ export class SseStudioTransport {
     }
 
     while (!stream.closed && !stream.blocked) {
-      const cancellation = this.queue.claimNextCancellationForPhysical(
-        stream.physicalSessionId,
+      const cancellation = this.queue.claimNextCancellationForTransport(
+        stream.transportPeerId,
         stream.claimOwner,
       );
       if (!cancellation) break;
@@ -235,12 +235,12 @@ export class SseStudioTransport {
     }
 
     while (!stream.closed && !stream.blocked) {
-      const request = this.queue.claimNextRequestForPhysical(stream.physicalSessionId, stream.claimOwner);
+      const request = this.queue.claimNextRequestForTransport(stream.transportPeerId, stream.claimOwner);
       if (!request) return;
       const event: StudioRequestEvent = {
         kind: 'request',
         requestId: request.requestId,
-        logicalSessionId: request.logicalSessionId,
+        peerId: request.peerId,
         target: request.target,
         endpoint: request.endpoint,
         data: request.data === undefined ? null : request.data,
@@ -269,11 +269,11 @@ export class SseStudioTransport {
     stream.sink.removeListener('close', stream.onClose);
     stream.sink.removeListener('error', stream.onClose);
     stream.sink.removeListener('drain', stream.onDrain);
-    if (this.streams.get(stream.physicalSessionId) === stream) {
-      this.streams.delete(stream.physicalSessionId);
+    if (this.streams.get(stream.transportPeerId) === stream) {
+      this.streams.delete(stream.transportPeerId);
     }
-    this.queue.updateInstanceActivity(stream.physicalSessionId);
-    this.queue.setDeliveryActive(stream.physicalSessionId, stream.claimOwner, false);
+    this.queue.updatePeerActivity(stream.transportPeerId);
+    this.queue.setDeliveryActive(stream.transportPeerId, stream.claimOwner, false);
     this.queue.releaseDeliveryClaims(stream.claimOwner);
     if (endSink) {
       try {

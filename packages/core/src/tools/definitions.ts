@@ -24,7 +24,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
       properties: {
         instance_id: {
           type: 'string',
-          description: 'Connected place ID; required with multiple places.'
+          description: 'Studio process ID when ambiguous.'
         }
       }
     }
@@ -51,7 +51,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
         },
         instance_id: {
           type: 'string',
-          description: 'Connected place ID; required with multiple places.'
+          description: 'Studio process ID when ambiguous.'
         }
       },
       required: ['query']
@@ -76,7 +76,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
         },
         instance_id: {
           type: 'string',
-          description: 'Connected place ID; required with multiple places.'
+          description: 'Studio process ID when ambiguous.'
         }
       },
       required: ['instancePath']
@@ -104,7 +104,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
         },
         instance_id: {
           type: 'string',
-          description: 'Connected place ID; required with multiple places.'
+          description: 'Studio process ID when ambiguous.'
         }
       }
     }
@@ -126,7 +126,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
         },
         instance_id: {
           type: 'string',
-          description: 'Connected place ID; required with multiple places.'
+          description: 'Studio process ID when ambiguous.'
         }
       },
       required: ['instancePath', 'properties']
@@ -152,7 +152,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
         },
         instance_id: {
           type: 'string',
-          description: 'Connected place ID; required with multiple places.'
+          description: 'Studio process ID when ambiguous.'
         }
       },
       required: ['instancePath']
@@ -175,7 +175,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
         },
         instance_id: {
           type: 'string',
-          description: 'Connected place ID; required with multiple places.'
+          description: 'Studio process ID when ambiguous.'
         }
       },
       required: ['instancePath', 'source']
@@ -206,7 +206,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
         },
         instance_id: {
           type: 'string',
-          description: 'Connected place ID; required with multiple places.'
+          description: 'Studio process ID when ambiguous.'
         }
       },
       required: ['instancePath', 'old_string', 'new_string']
@@ -233,7 +233,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
         },
         instance_id: {
           type: 'string',
-          description: 'Connected place ID; required with multiple places.'
+          description: 'Studio process ID when ambiguous.'
         }
       },
       required: ['instancePath', 'newContent']
@@ -256,7 +256,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
         },
         instance_id: {
           type: 'string',
-          description: 'Connected place ID; required with multiple places.'
+          description: 'Studio process ID when ambiguous.'
         }
       },
       required: ['instancePath', 'line_range']
@@ -275,7 +275,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
         },
         instance_id: {
           type: 'string',
-          description: 'Connected place ID; required with multiple places.'
+          description: 'Studio process ID when ambiguous.'
         }
       },
       required: ['instancePath']
@@ -330,7 +330,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
         },
         instance_id: {
           type: 'string',
-          description: 'Connected place ID if multiple are open.'
+          description: 'Studio process ID when ambiguous.'
         }
       },
       required: ['action']
@@ -354,7 +354,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
         },
         instance_id: {
           type: 'string',
-          description: 'Connected place ID; required with multiple places.'
+          description: 'Studio process ID when ambiguous.'
         }
       },
       required: ['code']
@@ -373,7 +373,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
         },
         instance_id: {
           type: 'string',
-          description: 'Connected place ID; required with multiple places.'
+          description: 'Studio process ID when ambiguous.'
         }
       },
       required: ['code']
@@ -396,7 +396,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
         },
         instance_id: {
           type: 'string',
-          description: 'Connected place ID; required with multiple places.'
+          description: 'Studio process ID when ambiguous.'
         }
       },
       required: ['code']
@@ -457,7 +457,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
         },
         instance_id: {
           type: 'string',
-          description: 'Connected place ID; required with multiple places.'
+          description: 'Studio process ID when ambiguous.'
         }
       },
       required: ['pattern']
@@ -549,7 +549,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
         },
         instance_id: {
           type: 'string',
-          description: 'Connected instance for close or status; excludes launch_id.'
+          description: 'Studio process ID for close or status; excludes launch_id.'
         },
         launch_id: {
           type: 'string',
@@ -584,7 +584,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
         },
         instance_id: {
           type: 'string',
-          description: 'Connected place ID; required with multiple places.'
+          description: 'Studio process ID when ambiguous.'
         }
       },
       required: ['action']
@@ -647,7 +647,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
         },
         instance_id: {
           type: 'string',
-          description: 'Connected place ID; required with multiple places.'
+          description: 'Studio process ID when ambiguous.'
         }
       },
       required: ['profile']
@@ -671,7 +671,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
         },
         instance_id: {
           type: 'string',
-          description: 'Connected place ID; required with multiple places.'
+          description: 'Studio process ID when ambiguous.'
         }
       }
     }
@@ -697,7 +697,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
         },
         instance_id: {
           type: 'string',
-          description: 'Connected place ID; required with multiple places.'
+          description: 'Studio process ID when ambiguous.'
         }
       }
     }
@@ -723,7 +723,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
         },
         instance_id: {
           type: 'string',
-          description: 'Connected place ID; required with multiple places.'
+          description: 'Studio process ID when ambiguous.'
         }
       }
     }
@@ -777,7 +777,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
         },
         instance_id: {
           type: 'string',
-          description: 'Connected place ID; required with multiple places.'
+          description: 'Studio process ID when ambiguous.'
         }
       }
     }
@@ -859,7 +859,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
         },
         instance_id: {
           type: 'string',
-          description: 'Connected place ID; required with multiple places.'
+          description: 'Studio process ID when ambiguous.'
         }
       },
       required: ['entries']
@@ -897,7 +897,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
         },
         instance_id: {
           type: 'string',
-          description: 'Connected place ID; required with multiple places.'
+          description: 'Studio process ID when ambiguous.'
         }
       },
       required: ['action']
@@ -906,17 +906,28 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
   {
     name: 'get_runtime_logs',
     category: 'read',
-    description: 'Use to read recent Studio output from edit, server, or client peers.',
+    description: 'Use to read merged logs for one Instance or separate Instance logs for a MultiplayerGroup.',
     inputSchema: {
       type: 'object',
       properties: {
-        target: {
+        instance_id: {
           type: 'string',
-          description: 'Log buffer: edit, server, client-N, or all; all deduplicates.'
+          description: 'Exact Studio process ID; excludes multiplayer_group_id.'
         },
-        since: {
-          type: 'number',
-          description: 'Sequence floor; reuse returned nextSince values for later reads.'
+        multiplayer_group_id: {
+          type: 'string',
+          description: 'Multiplayer group ID; excludes instance_id.'
+        },
+        cursor: {
+          type: 'string',
+          description: 'Opaque cursor returned by the previous read of one Instance. It remains correct when Peers are added or reloaded.'
+        },
+        cursor_by_instance: {
+          type: 'object',
+          description: 'For a multiplayer group, opaque cursors keyed by Instance ID from nextCursorByInstance.',
+          additionalProperties: {
+            type: 'string'
+          }
         },
         tail: {
           type: 'number',
@@ -925,10 +936,6 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
         filter: {
           type: 'string',
           description: 'Literal message substring applied before tail.'
-        },
-        instance_id: {
-          type: 'string',
-          description: 'Connected place ID; required with multiple places.'
         }
       }
     }
@@ -990,7 +997,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
         },
         instance_id: {
           type: 'string',
-          description: 'Connected place ID; required with multiple places.'
+          description: 'Studio process ID when ambiguous.'
         }
       }
     }
@@ -1117,7 +1124,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
         },
         instance_id: {
           type: 'string',
-          description: 'Connected place ID; required with multiple places.'
+          description: 'Studio process ID when ambiguous.'
         }
       }
     }
@@ -1168,7 +1175,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
         },
         instance_id: {
           type: 'string',
-          description: 'Connected place ID; required with multiple places.'
+          description: 'Studio process ID when ambiguous.'
         }
       },
       required: ['action']
@@ -1179,7 +1186,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
   {
     name: 'get_connected_instances',
     category: 'read',
-    description: 'Use to discover connected places and the roles available in each.',
+    description: 'Use to discover standalone Studio Instances and role-suffixed temporary Instances nested within multiplayer groups.',
     inputSchema: {
       type: 'object',
       properties: {}
@@ -1284,7 +1291,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
         },
         instance_id: {
           type: 'string',
-          description: 'Connected place ID; required with multiple places.'
+          description: 'Studio process ID when ambiguous.'
         }
       },
       required: ['assetId']
@@ -1361,7 +1368,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
         },
         instance_id: {
           type: 'string',
-          description: 'Connected place ID; required with multiple places.'
+          description: 'Studio process ID when ambiguous.'
         }
       }
     }
@@ -1401,7 +1408,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
         },
         instance_id: {
           type: 'string',
-          description: 'Connected place ID; required with multiple places.'
+          description: 'Studio process ID when ambiguous.'
         }
       },
       required: ['assetId']
@@ -1461,7 +1468,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
         },
         instance_id: {
           type: 'string',
-          description: 'Connected place ID; required with multiple places.'
+          description: 'Studio process ID when ambiguous.'
         }
       },
     }
@@ -1499,7 +1506,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
         },
         instance_id: {
           type: 'string',
-          description: 'Connected place ID; required with multiple places.'
+          description: 'Studio process ID when ambiguous.'
         }
       },
       required: ['action', 'x', 'y']
@@ -1535,7 +1542,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
         },
         instance_id: {
           type: 'string',
-          description: 'Connected place ID; required with multiple places.'
+          description: 'Studio process ID when ambiguous.'
         }
       }
     }
@@ -1560,7 +1567,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
         },
         instance_id: {
           type: 'string',
-          description: 'Connected place ID; required with multiple places.'
+          description: 'Studio process ID when ambiguous.'
         }
       }
     }
@@ -1593,7 +1600,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
         },
         instance_id: {
           type: 'string',
-          description: 'Connected place ID; required with multiple places.'
+          description: 'Studio process ID when ambiguous.'
         }
       }
     }
@@ -1623,7 +1630,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
         },
         instance_id: {
           type: 'string',
-          description: 'Connected place ID; required with multiple places.'
+          description: 'Studio process ID when ambiguous.'
         }
       },
       required: ['instance_paths', 'output_path']
@@ -1661,7 +1668,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
         },
         instance_id: {
           type: 'string',
-          description: 'Connected place ID; required with multiple places.'
+          description: 'Studio process ID when ambiguous.'
         }
       },
       required: ['source', 'parent_path']
@@ -1711,7 +1718,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
         },
         instance_id: {
           type: 'string',
-          description: 'Connected place ID; required with multiple places.'
+          description: 'Studio process ID when ambiguous.'
         }
       },
       required: ['pattern', 'replacement']

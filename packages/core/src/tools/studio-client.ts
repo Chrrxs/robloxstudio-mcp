@@ -1,7 +1,7 @@
-import { BridgeService } from '../bridge-service.js';
+import type { BridgeService } from '../bridge-service.js';
 
 export class StudioHttpClient {
-  private bridge: BridgeService;
+  private readonly bridge: BridgeService;
 
   constructor(bridge: BridgeService) {
     this.bridge = bridge;
@@ -10,21 +10,18 @@ export class StudioHttpClient {
   async request(
     endpoint: string,
     data: unknown,
-    targetInstanceId: string,
-    targetRole: string,
+    targetPeerId: string,
     timeoutMs?: number,
     signal?: AbortSignal,
-  ): Promise<any> {
+  ): Promise<unknown> {
     try {
-      const response = await this.bridge.sendRequest(
+      return await this.bridge.sendRequest(
         endpoint,
         data,
-        targetInstanceId,
-        targetRole,
+        targetPeerId,
         timeoutMs,
         signal,
       );
-      return response;
     } catch (error) {
       if (error instanceof Error && error.message === 'Request timeout') {
         throw new Error(

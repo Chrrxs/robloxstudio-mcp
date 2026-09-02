@@ -11,15 +11,15 @@ import * as os from 'os';
 import * as path from 'path';
 
 class HttpTestBridgeService extends BridgeService {
-  protected override notifyInstanceRegistered(): void {
+  protected override notifyPeerRegistered(): void {
     // HTTP route tests do not need managed-Studio lifecycle association.
   }
 }
 
 const READY_BODY = {
-  pluginSessionId: 'session-1',
-  physicalSessionId: 'session-1',
-  instanceId: 'place:test',
+  peerId: 'peer-1',
+  transportPeerId: 'peer-1',
+  instanceId: 'instance:test',
   role: 'edit',
   placeId: 0,
   placeName: 'TestPlace',
@@ -27,6 +27,7 @@ const READY_BODY = {
   isRunning: false,
   pluginVersion: 'test-version',
   pluginVariant: 'main',
+  timestamp: 1_700_000_000_000,
 };
 
 const TEST_SERVER_CONFIG = {
@@ -63,6 +64,11 @@ describe('HTTP Server', () => {
           },
         },
         pluginConnected: false,
+        instanceCount: 0,
+        peerCount: 0,
+        instances: [],
+        peers: [],
+        multiplayerGroups: [],
         mcpServerActive: false,
         activeEventStreams: 0,
       });
@@ -310,109 +316,174 @@ describe('HTTP Server', () => {
 
     test('plugin ready notification', async () => {
       const response = await request(app).post('/ready').send(READY_BODY).expect(200);
-      expect(response.body).toMatchObject({ success: true, assignedRole: 'edit', instanceId: 'place:test' });
+      expect(response.body).toMatchObject({
+        success: true,
+        assignedRole: 'edit',
+        peerId: 'peer-1',
+        instanceId: 'instance:test',
+      });
       expect(app.isPluginConnected()).toBe(true);
     });
 
-    test('maps logical clients to a physical server session and rejects logical event streams', async () => {
+    test('maps client Peers to a server transport Peer and rejects proxied event streams', async () => {
       await request(app).post('/ready').send({
         ...READY_BODY,
-        pluginSessionId: 'server-session',
-        physicalSessionId: 'server-session',
+        peerId: 'server-peer',
+        transportPeerId: 'server-peer',
         role: 'server',
         isRunning: true,
       }).expect(200);
       const clientReady = await request(app).post('/ready').send({
         ...READY_BODY,
-        pluginSessionId: 'client-session',
-        physicalSessionId: 'server-session',
+        peerId: 'client-peer',
+        transportPeerId: 'server-peer',
         role: 'client',
         isRunning: true,
       }).expect(200);
 
       expect(clientReady.body.assignedRole).toBe('client-1');
-      expect(bridge.getInstanceBySessionId('client-session')?.physicalSessionId).toBe('server-session');
+      expect(bridge.getPeerById('client-peer')?.transportPeerId).toBe('server-peer');
       const publicStatus = await request(app).get('/status').expect(200);
-      expect(publicStatus.body.instances[0]).not.toHaveProperty('physicalSessionId');
-      expect(publicStatus.body.instances[1]).not.toHaveProperty('physicalSessionId');
-      const logicalEvents = await request(app)
-        .get('/events?pluginSessionId=client-session')
+      expect(publicStatus.body.instanceCount).toBe(1);
+      expect(publicStatus.body.peerCount).toBe(2);
+      expect(publicStatus.body.peers[0]).not.toHaveProperty('peerId');
+      expect(publicStatus.body.peers[0]).not.toHaveProperty('transportPeerId');
+      expect(publicStatus.body.peers[1]).not.toHaveProperty('peerId');
+      expect(publicStatus.body.peers[1]).not.toHaveProperty('transportPeerId');
+      const proxiedEvents = await request(app)
+        .get('/events?peerId=client-peer')
         .expect(409);
-      expect(logicalEvents.body).toEqual({
-        error: 'logical_session_has_no_event_stream',
-        physicalSessionId: 'server-session',
+      expect(proxiedEvents.body).toEqual({
+        error: 'peer_has_no_event_stream',
+        transportPeerId: 'server-peer',
       });
-      await request(app).get('/events?pluginSessionId=unknown-session').expect(404, {
-        error: 'unknown_session',
-        knownInstance: false,
+      await request(app).get('/events?peerId=unknown-peer').expect(404, {
+        error: 'unknown_peer',
+        knownPeer: false,
       });
       await request(app)
         .post('/disconnect')
-        .send({ pluginSessionId: 'server-session' })
+        .send({ peerId: 'server-peer' })
         .expect(200);
-      expect(bridge.getInstanceBySessionId('server-session')).toBeUndefined();
-      expect(bridge.getInstanceBySessionId('client-session')).toBeUndefined();
+      expect(bridge.getPeerById('server-peer')).toBeUndefined();
     });
 
-    test('rejects logical clients without a matching physical server owner', async () => {
+    test('allows cross-Instance client proxies only within an explicit MultiplayerGroup', async () => {
+      await request(app).post('/ready').send({
+        ...READY_BODY,
+        peerId: 'server-peer',
+        transportPeerId: 'server-peer',
+        instanceId: 'instance:server',
+        multiplayerGroupId: 'group-1',
+        role: 'server',
+        isRunning: true,
+      }).expect(200);
+
+      const groupedClient = await request(app).post('/ready').send({
+        ...READY_BODY,
+        peerId: 'grouped-client',
+        transportPeerId: 'server-peer',
+        instanceId: 'instance:client',
+        multiplayerGroupId: 'group-1',
+        role: 'client',
+        isRunning: true,
+      }).expect(200);
+      expect(groupedClient.body).toMatchObject({
+        assignedRole: 'client-1',
+        instanceId: 'instance:client',
+        multiplayerGroupId: 'group-1',
+      });
+
+
+      const topology = await request(app).get('/topology').expect(200);
+      expect(topology.body.instances.map((instance: { id: string }) => instance.id).sort()).toEqual([
+        'instance:client',
+        'instance:server',
+      ]);
+      expect(topology.body.peers).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          peerId: 'grouped-client',
+          transportPeerId: 'server-peer',
+          instanceId: 'instance:client',
+          multiplayerGroupId: 'group-1',
+        }),
+      ]));
+      expect(topology.body.multiplayerGroups).toEqual([
+        expect.objectContaining({
+          id: 'group-1',
+          instanceIds: expect.arrayContaining(['instance:server', 'instance:client']),
+        }),
+      ]);
+      const ungroupedClient = await request(app).post('/ready').send({
+        ...READY_BODY,
+        peerId: 'ungrouped-client',
+        transportPeerId: 'server-peer',
+        instanceId: 'instance:other-client',
+        role: 'client',
+        isRunning: true,
+      }).expect(409);
+      expect(ungroupedClient.body.error).toBe('transport_peer_unavailable');
+    });
+
+    test('rejects clients without a matching server transport Peer', async () => {
       const missingOwner = await request(app).post('/ready').send({
         ...READY_BODY,
-        pluginSessionId: 'client-session',
-        physicalSessionId: 'missing-server',
+        peerId: 'client-peer',
+        transportPeerId: 'missing-server',
         role: 'client',
         isRunning: true,
       }).expect(409);
       expect(missingOwner.body).toMatchObject({
         success: false,
-        error: 'physical_session_unavailable',
+        error: 'transport_peer_unavailable',
       });
-      expect(bridge.getInstanceBySessionId('client-session')).toBeUndefined();
+      expect(bridge.getPeerById('client-peer')).toBeUndefined();
 
       await request(app).post('/ready').send({
         ...READY_BODY,
-        pluginSessionId: 'edit-session',
-        physicalSessionId: 'edit-session',
+        peerId: 'edit-peer',
+        transportPeerId: 'edit-peer',
       }).expect(200);
       const nonServerOwner = await request(app).post('/ready').send({
         ...READY_BODY,
-        pluginSessionId: 'client-session',
-        physicalSessionId: 'edit-session',
+        peerId: 'client-peer',
+        transportPeerId: 'edit-peer',
         role: 'client',
         isRunning: true,
       }).expect(409);
-      expect(nonServerOwner.body.error).toBe('physical_session_unavailable');
-      expect(bridge.getInstanceBySessionId('client-session')).toBeUndefined();
+      expect(nonServerOwner.body.error).toBe('transport_peer_unavailable');
+      expect(bridge.getPeerById('client-peer')).toBeUndefined();
     });
 
-    test('rejects physical client and logical non-client roles', async () => {
-      const physicalClient = await request(app).post('/ready').send({
+    test('rejects direct clients and proxied non-client roles', async () => {
+      const directClient = await request(app).post('/ready').send({
         ...READY_BODY,
-        pluginSessionId: 'client-session',
-        physicalSessionId: 'client-session',
+        peerId: 'client-peer',
+        transportPeerId: 'client-peer',
         role: 'client',
         isRunning: true,
       }).expect(400);
-      expect(physicalClient.body).toMatchObject({
+      expect(directClient.body).toMatchObject({
         success: false,
-        error: 'invalid_session_topology',
+        error: 'invalid_peer_topology',
       });
 
       await request(app).post('/ready').send({
         ...READY_BODY,
-        pluginSessionId: 'server-session',
-        physicalSessionId: 'server-session',
+        peerId: 'server-peer',
+        transportPeerId: 'server-peer',
         role: 'server',
         isRunning: true,
       }).expect(200);
-      const logicalEdit = await request(app).post('/ready').send({
+      const proxiedEdit = await request(app).post('/ready').send({
         ...READY_BODY,
-        pluginSessionId: 'logical-edit',
-        physicalSessionId: 'server-session',
+        peerId: 'proxied-edit',
+        transportPeerId: 'server-peer',
         role: 'edit',
       }).expect(400);
-      expect(logicalEdit.body).toMatchObject({
+      expect(proxiedEdit.body).toMatchObject({
         success: false,
-        error: 'invalid_session_topology',
+        error: 'invalid_peer_topology',
       });
     });
 
@@ -444,7 +515,7 @@ describe('HTTP Server', () => {
         serverVersion: '2.0.0',
         pluginConnected: true,
       });
-      expect(health.body.instances[0]).toMatchObject({
+      expect(health.body.instances[0].peers[0]).toMatchObject({
         pluginVersion: '2.0.0',
         pluginVariant: 'main',
         serverVersion: '2.0.0',
@@ -468,24 +539,28 @@ describe('HTTP Server', () => {
       expect(response.body).toMatchObject({
         success: false,
         error: 'missing_ready_fields',
-        message: '/ready missing required field(s): pluginSessionId, physicalSessionId, instanceId, pluginVersion, pluginVariant',
-        missingFields: ['pluginSessionId', 'physicalSessionId', 'instanceId', 'pluginVersion', 'pluginVariant'],
+        message: '/ready missing required field(s): peerId, transportPeerId, instanceId, placeId, placeName, dataModelName, isRunning, pluginVersion, pluginVariant, timestamp',
+        missingFields: [
+          'peerId', 'transportPeerId', 'instanceId', 'placeId', 'placeName',
+          'dataModelName', 'isRunning', 'pluginVersion', 'pluginVariant', 'timestamp',
+        ],
         request: { role: 'client' },
       });
     });
 
-    test('rejects duplicate (instanceId, role) on /ready', async () => {
+    test('rejects duplicate roles in one routing scope on /ready', async () => {
       await request(app).post('/ready').send(READY_BODY).expect(200);
       const dup = await request(app)
         .post('/ready')
-        .send({ ...READY_BODY, pluginSessionId: 'session-2', physicalSessionId: 'session-2' })
+        .send({ ...READY_BODY, peerId: 'peer-2', transportPeerId: 'peer-2' })
         .expect(409);
       expect(dup.body).toMatchObject({
         success: false,
-        error: 'duplicate_instance_role',
-        message: 'Another plugin is already registered as (place:test, edit).',
+        error: 'duplicate_scope_role',
         request: {
-          instanceId: 'place:test',
+          peerId: 'peer-2',
+          transportPeerId: 'peer-2',
+          instanceId: 'instance:test',
           role: 'edit',
           placeId: 0,
           placeName: 'TestPlace',
@@ -493,16 +568,17 @@ describe('HTTP Server', () => {
           isRunning: false,
         },
         existing: {
-          instanceId: 'place:test',
+          peerId: 'peer-1',
+          instanceId: 'instance:test',
           role: 'edit',
         },
       });
     });
 
-    test('plugin disconnect by pluginSessionId', async () => {
+    test('plugin disconnect by peerId', async () => {
       await request(app).post('/ready').send(READY_BODY).expect(200);
       expect(app.isPluginConnected()).toBe(true);
-      const response = await request(app).post('/disconnect').send({ pluginSessionId: 'session-1' }).expect(200);
+      const response = await request(app).post('/disconnect').send({ peerId: 'peer-1' }).expect(200);
       expect(response.body).toEqual({ success: true });
       expect(app.isPluginConnected()).toBe(false);
     });
@@ -511,20 +587,62 @@ describe('HTTP Server', () => {
       await request(app).post('/ready').send(READY_BODY).expect(200);
       await request(app).post('/ready').send({
         ...READY_BODY,
-        pluginSessionId: 'session-server',
-        physicalSessionId: 'session-server',
+        peerId: 'server-peer',
+        transportPeerId: 'server-peer',
         role: 'server',
         isRunning: true,
       }).expect(200);
 
       const response = await request(app)
         .post('/unregister-instance-id')
-        .send({ instanceId: 'place:test' })
+        .send({ instanceId: 'instance:test' })
         .expect(200);
 
       expect(response.body).toMatchObject({ success: true });
-      expect(response.body.removed.map((inst: { role: string }) => inst.role).sort()).toEqual(['edit', 'server']);
+      expect(response.body.removed.map((peer: { role: string }) => peer.role).sort()).toEqual(['edit', 'server']);
       expect(app.isPluginConnected()).toBe(false);
+    });
+
+    test('attaches a Multiplayer Group controller for proxy-started tests', async () => {
+      await request(app).post('/ready').send(READY_BODY).expect(200);
+
+      const response = await request(app)
+        .post('/create-multiplayer-group')
+        .send({
+          groupId: 'group-proxy',
+          controllerInstanceId: 'instance:test',
+        })
+        .expect(200);
+
+      expect(response.body).toMatchObject({
+        success: true,
+        group: {
+          id: 'group-proxy',
+          controllerInstanceId: 'instance:test',
+          instanceIds: ['instance:test'],
+        },
+      });
+      expect(bridge.getPeerById('peer-1')?.multiplayerGroupId).toBe('group-proxy');
+    });
+
+    test('removes a Multiplayer Group controller for proxy-ended tests', async () => {
+      await request(app).post('/ready').send(READY_BODY).expect(200);
+      bridge.createMultiplayerGroup('group-proxy', 'instance:test');
+
+      const response = await request(app)
+        .post('/remove-multiplayer-group')
+        .send({ groupId: 'group-proxy' })
+        .expect(200);
+
+      expect(response.body).toMatchObject({
+        success: true,
+        removed: {
+          id: 'group-proxy',
+          controllerInstanceId: 'instance:test',
+        },
+      });
+      expect(bridge.getMultiplayerGroups()).toEqual([]);
+      expect(bridge.getPeerById('peer-1')?.multiplayerGroupId).toBeUndefined();
     });
 
     test('forwards a validated proxy timeout to the Studio bridge', async () => {
@@ -533,8 +651,7 @@ describe('HTTP Server', () => {
       const response = await request(app).post('/proxy').send({
         endpoint: '/api/grep-scripts',
         data: { pattern: 'needle' },
-        targetInstanceId: 'place:test',
-        targetRole: 'edit',
+        targetPeerId: 'edit-peer',
         timeoutMs: 120_000,
       }).expect(200);
 
@@ -542,8 +659,7 @@ describe('HTTP Server', () => {
       expect(sendRequest).toHaveBeenCalledWith(
         '/api/grep-scripts',
         { pattern: 'needle' },
-        'place:test',
-        'edit',
+        'edit-peer',
         120_000,
         expect.any(AbortSignal),
       );
@@ -557,8 +673,7 @@ describe('HTTP Server', () => {
       jest.spyOn(bridge, 'sendRequest').mockImplementation(async (
         _endpoint,
         _data,
-        _targetInstanceId,
-        _targetRole,
+        _targetPeerId,
         _timeoutMs,
         signal,
       ) => {
@@ -577,8 +692,7 @@ describe('HTTP Server', () => {
       const body = JSON.stringify({
         endpoint: '/api/grep-scripts',
         data: { pattern: 'needle' },
-        targetInstanceId: 'place:test',
-        targetRole: 'edit',
+        targetPeerId: 'edit-peer',
         timeoutMs: 120_000,
       });
       const proxyRequest = nodeRequest({
@@ -613,32 +727,31 @@ describe('HTTP Server', () => {
       await request(app).post('/proxy').send({
         endpoint: '/api/grep-scripts',
         data: { pattern: 'needle' },
-        targetInstanceId: 'place:test',
-        targetRole: 'edit',
+        targetPeerId: 'edit-peer',
         timeoutMs: 0,
       }).expect(400, { error: 'timeoutMs must be an integer between 1 and 300000' });
     });
 
-    test('disconnect rejects pending requests targeting that tuple', async () => {
+    test('disconnect rejects pending requests targeting that Peer', async () => {
       await request(app).post('/ready').send(READY_BODY).expect(200);
-      const p1 = bridge.sendRequest('/api/test1', {}, 'place:test', 'edit');
-      const p2 = bridge.sendRequest('/api/test2', {}, 'place:test', 'edit');
+      const p1 = bridge.sendRequest('/api/test1', {}, 'peer-1');
+      const p2 = bridge.sendRequest('/api/test2', {}, 'peer-1');
       p1.catch(() => {});
       p2.catch(() => {});
       expect(bridge.getPendingRequestCount()).toBe(2);
-      await request(app).post('/disconnect').send({ pluginSessionId: 'session-1' }).expect(200);
+      await request(app).post('/disconnect').send({ peerId: 'peer-1' }).expect(200);
       expect(bridge.getPendingRequestCount()).toBe(0);
     });
 
-    test('stale instance detection via unregister', () => {
-      bridge.registerInstance({
-        pluginSessionId: 'stale-1',
-        physicalSessionId: 'stale-1',
-        instanceId: 'place:s',
+    test('stale Peer detection via unregister', () => {
+      bridge.registerPeer({
+        peerId: 'stale-peer',
+        transportPeerId: 'stale-peer',
+        instanceId: 'instance:stale',
         role: 'edit',
       });
       expect(app.isPluginConnected()).toBe(true);
-      bridge.unregisterInstance('stale-1');
+      bridge.unregisterPeer('stale-peer');
       expect(app.isPluginConnected()).toBe(false);
     });
   });
@@ -647,8 +760,8 @@ describe('HTTP Server', () => {
   describe('Response Handling', () => {
     test('acknowledges accepted and repeated successful responses', async () => {
       await request(app).post('/ready').send(READY_BODY).expect(200);
-      const requestPromise = bridge.sendRequest('/api/test', {}, 'place:test', 'edit');
-      const pending = bridge.claimNextRequestForPhysical('session-1', 'test-success-response')!;
+      const requestPromise = bridge.sendRequest('/api/test', {}, 'peer-1');
+      const pending = bridge.claimNextRequestForTransport('peer-1', 'test-success-response')!;
 
       const accepted = await request(app)
         .post('/response')
@@ -666,9 +779,9 @@ describe('HTTP Server', () => {
 
     test('treats an empty-string error as an accepted rejection', async () => {
       await request(app).post('/ready').send(READY_BODY).expect(200);
-      const requestPromise = bridge.sendRequest('/api/test', {}, 'place:test', 'edit');
+      const requestPromise = bridge.sendRequest('/api/test', {}, 'peer-1');
       requestPromise.catch(() => {});
-      const pending = bridge.claimNextRequestForPhysical('session-1', 'test-error-response')!;
+      const pending = bridge.claimNextRequestForTransport('peer-1', 'test-error-response')!;
 
       const response = await request(app)
         .post('/response')
@@ -720,13 +833,23 @@ describe('HTTP Server', () => {
       await request(app).post('/ready').send(READY_BODY).expect(200);
       app.setMCPServerActive(true);
       const response = await request(app).get('/status').expect(200);
-      expect(response.body).toMatchObject({ pluginConnected: true, mcpServerActive: true });
+      expect(response.body).toMatchObject({
+        pluginConnected: true,
+        mcpServerActive: true,
+        instanceCount: 1,
+        peerCount: 1,
+      });
       expect(response.body.instances).toHaveLength(1);
       expect(response.body.instances[0]).toMatchObject({
-        instanceId: 'place:test',
-        role: 'edit',
+        id: 'instance:test',
         placeName: 'TestPlace',
       });
+      expect(response.body.instances[0].peers[0]).toMatchObject({
+        instanceId: 'instance:test',
+        role: 'edit',
+      });
+      expect(response.body.instances[0].peers[0]).not.toHaveProperty('peerId');
+      expect(response.body.multiplayerGroups).toEqual([]);
     });
   });
 });

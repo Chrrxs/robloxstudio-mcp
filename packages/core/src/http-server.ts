@@ -3,8 +3,8 @@ import type { Express } from 'express';
 import http from 'http';
 import { toNodeHandler } from '@modelcontextprotocol/node';
 import { RobloxStudioTools } from './tools/index.js';
-import { BridgeService, RoutingFailure, toPublic } from './bridge-service.js';
-import type { RegisterInstanceResult } from './bridge-service.js';
+import { BridgeService, RoutingFailure } from './bridge-service.js';
+import type { PublicStudioInstance, PublicStudioPeer, RegisterPeerResult } from './bridge-service.js';
 import type { ToolDefinition } from './tools/definitions.js';
 import { createToolHttpHandler, normalizeToolResult, publicToolErrorBody } from './mcp-runtime.js';
 import type { ToolInvocationContext } from './mcp-runtime.js';
@@ -39,6 +39,39 @@ interface StreamableHttpConfig {
   name: string;
   version: string;
   tools: ToolDefinition[];
+}
+
+type PassiveStudioPeer = Omit<PublicStudioPeer, 'peerId'>;
+type PassiveStudioInstance = Omit<PublicStudioInstance, 'peers'> & {
+  peers: PassiveStudioPeer[];
+};
+
+function toPassivePeer(peer: PublicStudioPeer): PassiveStudioPeer {
+  return {
+    instanceId: peer.instanceId,
+    multiplayerGroupId: peer.multiplayerGroupId,
+    role: peer.role,
+    placeId: peer.placeId,
+    placeName: peer.placeName,
+    placeKey: peer.placeKey,
+    dataModelName: peer.dataModelName,
+    isRunning: peer.isRunning,
+    pluginVersion: peer.pluginVersion,
+    pluginVariant: peer.pluginVariant,
+    serverVersion: peer.serverVersion,
+    lastActivity: peer.lastActivity,
+    connectedAt: peer.connectedAt,
+  };
+}
+
+function toPassiveInstance(instance: PublicStudioInstance): PassiveStudioInstance {
+  return {
+    id: instance.id,
+    multiplayerGroupId: instance.multiplayerGroupId,
+    placeId: instance.placeId,
+    placeName: instance.placeName,
+    peers: instance.peers.map(toPassivePeer),
+  };
 }
 
 export type ToolHandler = (
@@ -145,7 +178,7 @@ export const TOOL_HANDLERS: Record<string, ToolHandler> = {
   manage_instance: (tools, body) => tools.manageInstance(body),
   solo_playtest: (tools, body) => tools.soloPlaytest(body.action, body.mode, body.timeout, body.instance_id),
   multiplayer_playtest: (tools, body) => tools.multiplayerPlaytest(body.action, body.numPlayers, body.target, body.testArgs, body.value, body.timeout, body.instance_id),
-  get_runtime_logs: (tools, body) => tools.getRuntimeLogs(body.target, body.since, body.tail, body.filter, body.instance_id),
+  get_runtime_logs: (tools, body) => tools.getRuntimeLogs(body.instance_id, body.multiplayer_group_id, body.cursor, body.cursor_by_instance, body.tail, body.filter),
   capture_script_profiler: (tools, body) => tools.captureScriptProfiler(body.target, {
     duration_ms: body.duration_ms,
     frequency: body.frequency,
@@ -220,7 +253,7 @@ export function createHttpServer(tools: RobloxStudioTools, bridge: BridgeService
   let lastMCPActivity = 0;
   let mcpServerStartTime = 0;
   const proxyInstances = new Set<string>();
-  const rejectedVersionSessions = new Set<string>();
+  const rejectedVersionPeers = new Set<string>();
   const eventTransport = new SseStudioTransport(bridge);
   const eventStreamHandles = new Set<EventStreamHandle>();
 
@@ -249,21 +282,22 @@ export function createHttpServer(tools: RobloxStudioTools, bridge: BridgeService
     return (Date.now() - lastMCPActivity) < 30000;
   };
 
-  const eventStatus = (physicalSessionId: string): StudioStatusEvent => {
-    const instance = bridge.getInstanceBySessionId(physicalSessionId);
-    const knownInstance = instance?.physicalSessionId === physicalSessionId;
+  const eventStatus = (transportPeerId: string): StudioStatusEvent => {
+    const peer = bridge.getPeerById(transportPeerId);
+    const knownPeer = peer?.transportPeerId === transportPeerId;
     return {
       kind: 'status',
-      knownInstance,
+      knownPeer,
       mcpConnected: isMCPServerActive(),
       serverVersion: serverConfig?.version,
-      pluginVersion: instance?.pluginVersion,
-      pluginVariant: instance?.pluginVariant,
+      pluginVersion: peer?.pluginVersion,
+      pluginVariant: peer?.pluginVariant,
     };
   };
 
+
   const isPluginConnected = () => {
-    return bridge.getInstances().length > 0;
+    return bridge.getPeers().length > 0;
   };
 
   // -- Origin policy --
@@ -306,7 +340,8 @@ export function createHttpServer(tools: RobloxStudioTools, bridge: BridgeService
   const authToken = security?.authToken;
   const authRequired = (path: string) =>
     path === '/mcp' || path.startsWith('/mcp/') ||
-    path === '/proxy' || path === '/instances' || path === '/unregister-instance-id';
+    path === '/proxy' || path === '/topology' || path === '/unregister-instance-id' ||
+    path === '/create-multiplayer-group' || path === '/remove-multiplayer-group';
   app.use((req, res, next) => {
     if (!authToken || !authRequired(req.path)) {
       next();
@@ -333,8 +368,9 @@ export function createHttpServer(tools: RobloxStudioTools, bridge: BridgeService
 
 
   app.get('/health', (req, res) => {
-    const instances = bridge.getInstances();
-    const publicInstances = instances.map(toPublic);
+    const peers = bridge.getPublicPeers().map(toPassivePeer);
+    const instances = bridge.getPublicInstances().map(toPassiveInstance);
+    const multiplayerGroups = bridge.getPublicMultiplayerGroups();
     res.json({
       status: 'ok',
       service: 'robloxstudio-mcp',
@@ -350,9 +386,12 @@ export function createHttpServer(tools: RobloxStudioTools, bridge: BridgeService
           processIdentity: studioLifecycleCapabilities?.processIdentity,
         },
       } : {},
-      pluginConnected: instances.length > 0,
+      pluginConnected: peers.length > 0,
       instanceCount: instances.length,
-      instances: publicInstances,
+      peerCount: peers.length,
+      instances,
+      peers,
+      multiplayerGroups,
       mcpServerActive: isMCPServerActive(),
       uptime: mcpServerActive ? Date.now() - mcpServerStartTime : 0,
       pendingRequests: bridge.getPendingRequestCount(),
@@ -365,36 +404,48 @@ export function createHttpServer(tools: RobloxStudioTools, bridge: BridgeService
 
   app.post('/ready', (req, res) => {
     const {
-      pluginSessionId,
-      physicalSessionId,
+      peerId,
+      transportPeerId,
       instanceId,
+      multiplayerGroupId,
       role,
       placeId,
       placeName,
+      placeKey,
       dataModelName,
       isRunning,
       pluginVersion,
       pluginVariant,
+      timestamp,
     } = req.body;
     const requestContext = {
-      physicalSessionId: typeof physicalSessionId === 'string' ? physicalSessionId : undefined,
+      peerId: typeof peerId === 'string' ? peerId : undefined,
+      transportPeerId: typeof transportPeerId === 'string' ? transportPeerId : undefined,
       instanceId: typeof instanceId === 'string' ? instanceId : undefined,
+      multiplayerGroupId: typeof multiplayerGroupId === 'string' ? multiplayerGroupId : undefined,
       role: typeof role === 'string' ? role : undefined,
       placeId: typeof placeId === 'number' ? placeId : undefined,
       placeName: typeof placeName === 'string' ? placeName : undefined,
+      placeKey: typeof placeKey === 'string' ? placeKey : undefined,
       dataModelName: typeof dataModelName === 'string' ? dataModelName : undefined,
       isRunning: typeof isRunning === 'boolean' ? isRunning : undefined,
       pluginVersion: typeof pluginVersion === 'string' ? pluginVersion : undefined,
       pluginVariant: typeof pluginVariant === 'string' ? pluginVariant : undefined,
+      timestamp: typeof timestamp === 'number' ? timestamp : undefined,
     };
 
     const missingFields = [
-      typeof pluginSessionId !== 'string' || pluginSessionId === '' ? 'pluginSessionId' : undefined,
-      typeof physicalSessionId !== 'string' || physicalSessionId === '' ? 'physicalSessionId' : undefined,
+      typeof peerId !== 'string' || peerId === '' ? 'peerId' : undefined,
+      typeof transportPeerId !== 'string' || transportPeerId === '' ? 'transportPeerId' : undefined,
       typeof instanceId !== 'string' || instanceId === '' ? 'instanceId' : undefined,
       typeof role !== 'string' || role === '' ? 'role' : undefined,
+      typeof placeId !== 'number' || !Number.isFinite(placeId) ? 'placeId' : undefined,
+      typeof placeName !== 'string' ? 'placeName' : undefined,
+      typeof dataModelName !== 'string' ? 'dataModelName' : undefined,
+      typeof isRunning !== 'boolean' ? 'isRunning' : undefined,
       typeof pluginVersion !== 'string' || pluginVersion === '' ? 'pluginVersion' : undefined,
       typeof pluginVariant !== 'string' || pluginVariant === '' ? 'pluginVariant' : undefined,
+      typeof timestamp !== 'number' || !Number.isFinite(timestamp) ? 'timestamp' : undefined,
     ].filter((field): field is string => !!field);
     if (missingFields.length > 0) {
       res.status(400).json({
@@ -406,6 +457,16 @@ export function createHttpServer(tools: RobloxStudioTools, bridge: BridgeService
       });
       return;
     }
+    if (multiplayerGroupId !== undefined && (typeof multiplayerGroupId !== 'string' || multiplayerGroupId === '')) {
+      res.status(400).json({
+        success: false,
+        error: 'invalid_multiplayer_group_id',
+        message: 'multiplayerGroupId must be a non-empty string when provided.',
+        request: requestContext,
+      });
+      return;
+    }
+
     const serverVersion = serverConfig?.version;
     if (!serverVersion) {
       res.status(503).json({
@@ -417,9 +478,9 @@ export function createHttpServer(tools: RobloxStudioTools, bridge: BridgeService
       return;
     }
     if (pluginVersion !== serverVersion) {
-      if (!rejectedVersionSessions.has(pluginSessionId)) {
-        if (rejectedVersionSessions.size >= 256) rejectedVersionSessions.clear();
-        rejectedVersionSessions.add(pluginSessionId);
+      if (!rejectedVersionPeers.has(peerId)) {
+        if (rejectedVersionPeers.size >= 256) rejectedVersionPeers.clear();
+        rejectedVersionPeers.add(peerId);
         console.error(
           `[plugin-version-rejected] Studio plugin v${pluginVersion} (${pluginVariant}) ` +
           `does not match MCP server v${serverVersion} for ${instanceId}/${role}`,
@@ -437,55 +498,56 @@ export function createHttpServer(tools: RobloxStudioTools, bridge: BridgeService
     }
 
     const isClientRole = role === 'client' || /^client-[1-9]\d*$/.test(role);
-    const isLogicalSession = physicalSessionId !== pluginSessionId;
+    const isProxiedPeer = transportPeerId !== peerId;
     if (
-      (isLogicalSession && !isClientRole) ||
-      (!isLogicalSession && isClientRole) ||
+      (isProxiedPeer && !isClientRole) ||
+      (!isProxiedPeer && isClientRole) ||
       (!isClientRole && role !== 'edit' && role !== 'server')
     ) {
       res.status(400).json({
         success: false,
-        error: 'invalid_session_topology',
-        message: 'Physical sessions must use the edit or server role; client roles must use a distinct physical server session.',
+        error: 'invalid_peer_topology',
+        message: 'Transport Peers must use the edit or server role; client Peers must use a distinct server transport Peer.',
         request: requestContext,
       });
       return;
     }
 
-    if (isLogicalSession) {
-      const physicalOwner = bridge.getInstanceBySessionId(physicalSessionId);
-      const requestedInstanceId = typeof placeId === 'number' && Number.isFinite(placeId) && placeId > 0
-        ? `place:${Math.trunc(placeId)}`
-        : bridge.resolveInstanceId(instanceId);
+    if (isProxiedPeer) {
+      const transportOwner = bridge.getPeerById(transportPeerId);
+      const sameInstance = transportOwner?.instanceId === instanceId;
+      const sameMultiplayerGroup = typeof multiplayerGroupId === 'string'
+        && transportOwner?.multiplayerGroupId === multiplayerGroupId;
       if (
-        !physicalOwner ||
-        physicalOwner.pluginSessionId !== physicalSessionId ||
-        physicalOwner.physicalSessionId !== physicalSessionId ||
-        physicalOwner.role !== 'server' ||
-        physicalOwner.instanceId !== requestedInstanceId
+        !transportOwner ||
+        transportOwner.peerId !== transportPeerId ||
+        transportOwner.transportPeerId !== transportPeerId ||
+        transportOwner.role !== 'server' ||
+        (!sameInstance && !sameMultiplayerGroup)
       ) {
         res.status(409).json({
           success: false,
-          error: 'physical_session_unavailable',
-          message: 'A logical client requires a registered physical server session for the same Studio instance.',
+          error: 'transport_peer_unavailable',
+          message: 'A client Peer requires a registered server transport Peer in the same Instance or explicit MultiplayerGroup.',
           request: requestContext,
         });
         return;
       }
     }
 
-
-    let result: RegisterInstanceResult;
+    let result: RegisterPeerResult;
     try {
-      result = bridge.registerInstance({
-        pluginSessionId,
-        physicalSessionId,
+      result = bridge.registerPeer({
+        peerId,
+        transportPeerId,
         instanceId,
+        multiplayerGroupId,
         role,
-        placeId: typeof placeId === 'number' ? placeId : 0,
-        placeName: typeof placeName === 'string' ? placeName : '',
-        dataModelName: typeof dataModelName === 'string' ? dataModelName : '',
-        isRunning: !!isRunning,
+        placeId,
+        placeName,
+        placeKey: typeof placeKey === 'string' ? placeKey : undefined,
+        dataModelName,
+        isRunning,
         pluginVersion,
         pluginVariant,
         serverVersion,
@@ -510,92 +572,118 @@ export function createHttpServer(tools: RobloxStudioTools, bridge: BridgeService
       });
       return;
     }
-    eventTransport.refreshStatus(physicalSessionId);
+    eventTransport.refreshStatus(transportPeerId);
 
     res.json({
       success: true,
       assignedRole: result.assignedRole,
+      peerId: result.peerId,
       instanceId: result.instanceId,
+      multiplayerGroupId: result.multiplayerGroupId,
       serverVersion,
     });
   });
 
 
   app.post('/disconnect', (req, res) => {
-    const { pluginSessionId } = req.body;
+    const { peerId } = req.body;
 
-    if (pluginSessionId) {
-      bridge.unregisterInstance(pluginSessionId);
+    if (typeof peerId === 'string' && peerId !== '') {
+      bridge.unregisterPeer(peerId);
     }
     res.json({ success: true });
   });
 
-  app.post('/unregister-instance-id', (req, res) => {
+  app.post('/unregister-instance-id', async (req, res) => {
     const { instanceId } = req.body;
     if (typeof instanceId !== 'string' || instanceId.length === 0) {
       res.status(400).json({ error: 'instanceId is required' });
       return;
     }
 
-    const removed = bridge.unregisterInstanceId(instanceId);
+    const removed = await bridge.unregisterInstanceIdEverywhere(instanceId);
+    res.json({ success: true, removed });
+  });
+  app.post('/create-multiplayer-group', async (req, res) => {
+    const { groupId, controllerInstanceId } = req.body;
+    if (
+      typeof groupId !== 'string' ||
+      groupId.length === 0 ||
+      typeof controllerInstanceId !== 'string' ||
+      controllerInstanceId.length === 0
+    ) {
+      res.status(400).json({ error: 'groupId and controllerInstanceId are required' });
+      return;
+    }
+    const group = await bridge.createMultiplayerGroupEverywhere(groupId, controllerInstanceId);
+    res.json({ success: true, group });
+  });
+  app.post('/remove-multiplayer-group', async (req, res) => {
+    const { groupId } = req.body;
+    if (typeof groupId !== 'string' || groupId.length === 0) {
+      res.status(400).json({ error: 'groupId is required' });
+      return;
+    }
+    const removed = await bridge.removeMultiplayerGroupEverywhere(groupId);
     res.json({ success: true, removed });
   });
 
 
+
   app.get('/status', (req, res) => {
-    const instances = bridge.getInstances();
-    const publicInstances = instances.map(toPublic);
+    const peers = bridge.getPublicPeers().map(toPassivePeer);
+    const instances = bridge.getPublicInstances().map(toPassiveInstance);
+    const multiplayerGroups = bridge.getPublicMultiplayerGroups();
     res.json({
-      pluginConnected: instances.length > 0,
+      pluginConnected: peers.length > 0,
       instanceCount: instances.length,
-      instances: publicInstances,
+      peerCount: peers.length,
+      instances,
+      peers,
+      multiplayerGroups,
       serverVersion: serverConfig?.version,
       mcpServerActive: isMCPServerActive(),
       lastMCPActivity,
-      uptime: mcpServerActive ? Date.now() - mcpServerStartTime : 0
+      uptime: mcpServerActive ? Date.now() - mcpServerStartTime : 0,
     });
   });
 
 
-  app.get('/instances', (req, res) => {
-    // Includes internal logical and physical transport session IDs so
-    // proxy-mode subprocesses can reproduce PluginInstance for bookkeeping.
-    // Neither identifier is exposed through MCP tools.
-    const instances = bridge.getInstances();
+  app.get('/topology', (req, res) => {
     res.json({
-      instances,
+      ...bridge.getTopologySnapshot(),
       serverVersion: serverConfig?.version,
     });
   });
 
   app.get('/events', (req, res) => {
-    const pluginSessionId = typeof req.query.pluginSessionId === 'string'
-      ? req.query.pluginSessionId
+    const peerId = typeof req.query.peerId === 'string'
+      ? req.query.peerId
       : undefined;
-    if (!pluginSessionId) {
+    if (!peerId) {
       res.status(400).json({
-        error: 'missing_plugin_session_id',
-        message: 'pluginSessionId is required',
+        error: 'missing_peer_id',
+        message: 'peerId is required',
       });
       return;
     }
 
-    const instance = bridge.getInstanceBySessionId(pluginSessionId);
-    if (!instance) {
+    const peer = bridge.getPeerById(peerId);
+    if (!peer) {
       res.status(404).json({
-        error: 'unknown_session',
-        knownInstance: false,
+        error: 'unknown_peer',
+        knownPeer: false,
       });
       return;
     }
-    if (instance.physicalSessionId !== pluginSessionId) {
+    if (peer.transportPeerId !== peerId) {
       res.status(409).json({
-        error: 'logical_session_has_no_event_stream',
-        physicalSessionId: instance.physicalSessionId,
+        error: 'peer_has_no_event_stream',
+        transportPeerId: peer.transportPeerId,
       });
       return;
     }
-    if (!eventTransport.canOpen(pluginSessionId)) {
+    if (!eventTransport.canOpen(peerId)) {
       res.setHeader('Retry-After', '1');
       res.status(503).json({
         error: 'event_stream_capacity_reached',
@@ -604,7 +692,7 @@ export function createHttpServer(tools: RobloxStudioTools, bridge: BridgeService
       return;
     }
 
-    bridge.updateInstanceActivity(pluginSessionId);
+    bridge.updatePeerActivity(peerId);
     res.status(200);
     res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
     res.setHeader('Cache-Control', 'no-cache, no-transform');
@@ -613,9 +701,9 @@ export function createHttpServer(tools: RobloxStudioTools, bridge: BridgeService
     res.flushHeaders();
 
     const handle = eventTransport.open(
-      pluginSessionId,
+      peerId,
       res,
-      () => eventStatus(pluginSessionId),
+      () => eventStatus(peerId),
     );
     if (!handle) {
       res.end();
@@ -651,10 +739,10 @@ export function createHttpServer(tools: RobloxStudioTools, bridge: BridgeService
 
 
   app.post('/proxy', async (req, res) => {
-    const { endpoint, data, targetInstanceId, targetRole, proxyInstanceId, timeoutMs } = req.body;
+    const { endpoint, data, targetPeerId, proxyInstanceId, timeoutMs } = req.body;
 
-    if (!endpoint || !targetInstanceId || !targetRole) {
-      res.status(400).json({ error: 'endpoint, targetInstanceId, and targetRole are required' });
+    if (!endpoint || !targetPeerId) {
+      res.status(400).json({ error: 'endpoint and targetPeerId are required' });
       return;
     }
 
@@ -678,8 +766,7 @@ export function createHttpServer(tools: RobloxStudioTools, bridge: BridgeService
       const response = await bridge.sendRequest(
         endpoint,
         data,
-        targetInstanceId,
-        targetRole,
+        targetPeerId,
         timeoutMs,
         controller.signal,
       );

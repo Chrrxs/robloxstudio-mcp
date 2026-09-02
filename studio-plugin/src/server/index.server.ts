@@ -100,11 +100,11 @@ UI.updateUIState();
 Communication.checkForUpdates();
 task.delay(TOOLBAR_REGISTRATION_DELAY_SECONDS, registerToolbarButton);
 
-// Auto-activate per peer. The boshyxd plugin only registers with MCP when the
-// user clicks Connect in its UI, but that UI is invisible in play DMs - so
-// play peers' plugin instances load without ever registering. Run after a
-// short delay so the UI/State have a chance to initialize first.
-task.delay(2, () => {
+// Auto-activate per Peer. Runtime plugin VMs can load before their first
+// Heartbeat; task.delay() would then wait behind the very multiplayer startup
+// that needs this Peer to register. Start runtime initialization immediately,
+// while retaining the short UI settling delay for the edit Peer.
+function autoActivatePeer(): void {
 	const role = startupRole;
 	if (role === "edit") {
 		cleanupEditBridgeArtifacts();
@@ -115,7 +115,7 @@ task.delay(2, () => {
 		}
 	}
 	if (role === "edit" || role === "server") {
-		pcall(() => {
+		const [activationOk, activationError] = pcall(() => {
 			const conn = State.getActiveConnection();
 			if (!conn.isActive) {
 				if (role === "server") {
@@ -135,6 +135,9 @@ task.delay(2, () => {
 				Communication.activatePlugin();
 			}
 		});
+		if (!activationOk) {
+			warn(`[robloxstudio-mcp] Automatic ${role} Peer activation failed: ${activationError}`);
+		}
 	}
 	if (role === "server") {
 		ClientBroker.setupServerBroker();
@@ -148,4 +151,10 @@ task.delay(2, () => {
 	} else if (role === "client") {
 		ClientBroker.setupClientBroker();
 	}
-});
+}
+
+if (startupRole === "edit") {
+	task.delay(2, autoActivatePeer);
+} else {
+	autoActivatePeer();
+}

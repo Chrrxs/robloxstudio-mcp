@@ -1,9 +1,9 @@
 import Utils from "../Utils";
+import PeerRole from "../PeerRole";
 
 const { getInstanceByPath } = Utils;
 
 const HttpService = game.GetService("HttpService");
-const RunService = game.GetService("RunService");
 const ServerStorage = game.GetService("ServerStorage");
 
 const LOG_PREFIX = "Breakpoint";
@@ -66,13 +66,13 @@ function breakpointKey(scriptPath: string, line: number): string {
 	return `${scriptPath}:${line}`;
 }
 
-function computeInstanceId(): string {
+function computePlaceKey(): string {
 	if (game.PlaceId !== 0) {
 		return `place:${tostring(game.PlaceId)}`;
 	}
 	const existing = ServerStorage.GetAttribute(MCP_PLACE_ID_ATTRIBUTE);
 	if (typeIs(existing, "string") && existing !== "") {
-		return `anon:${existing as string}`;
+		return `anon:${existing}`;
 	}
 	const fresh = HttpService.GenerateGUID(false);
 	pcall(() => ServerStorage.SetAttribute(MCP_PLACE_ID_ATTRIBUTE, fresh));
@@ -80,9 +80,7 @@ function computeInstanceId(): string {
 }
 
 function detectRole(): string {
-	if (!RunService.IsRunning()) return "edit";
-	if (RunService.IsServer()) return "server";
-	return "client";
+	return PeerRole.detect();
 }
 
 function requestedRole(requestData: Record<string, unknown>): string {
@@ -92,12 +90,10 @@ function requestedRole(requestData: Record<string, unknown>): string {
 }
 
 function registryScope(requestData: Record<string, unknown>): RegistryScope {
-	const instanceId = typeIs(requestData.__mcp_instance_id, "string") && requestData.__mcp_instance_id !== ""
-		? requestData.__mcp_instance_id as string
-		: computeInstanceId();
+	const placeKey = computePlaceKey();
 	const role = requestedRole(requestData);
 	return {
-		key: `${REGISTRY_KEY_PREFIX}${instanceId}:${role}`,
+		key: `${REGISTRY_KEY_PREFIX}${placeKey}:${role}`,
 	};
 }
 

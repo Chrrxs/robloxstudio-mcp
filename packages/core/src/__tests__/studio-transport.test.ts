@@ -37,7 +37,7 @@ class FakeEventStreamSink extends EventEmitter implements EventStreamSink {
 
 const STATUS: StudioStatusEvent = {
   kind: 'status',
-  knownInstance: true,
+  knownPeer: true,
   mcpConnected: true,
   serverVersion: '3.0.2',
   pluginVersion: '3.0.2',
@@ -46,16 +46,22 @@ const STATUS: StudioStatusEvent = {
 
 function register(
   bridge: BridgeService,
-  pluginSessionId: string,
+  peerId: string,
   instanceId: string,
   role: string,
-  physicalSessionId = pluginSessionId,
+  transportPeerId = peerId,
+  multiplayerGroupId?: string,
 ): string {
-  const result = bridge.registerInstance({
-    pluginSessionId,
-    physicalSessionId,
+  const result = bridge.registerPeer({
+    peerId,
+    transportPeerId,
     instanceId,
+    multiplayerGroupId,
     role,
+    placeId: 1,
+    placeName: 'Place',
+    dataModelName: role,
+    isRunning: role !== 'edit',
     pluginVersion: '3.0.2',
     pluginVariant: 'main',
     serverVersion: '3.0.2',
@@ -80,15 +86,21 @@ describe('SseStudioTransport', () => {
     jest.useRealTimers();
   });
 
-  test('multiplexes play-server and logical client requests over one physical stream', async () => {
-    register(bridge, 'server-session', 'place:1', 'server');
-    expect(register(bridge, 'client-a', 'place:1', 'client', 'server-session')).toBe('client-1');
-    expect(register(bridge, 'client-b', 'place:1', 'client', 'server-session')).toBe('client-2');
+  test('multiplexes exact server and client Peer requests over one transport stream', async () => {
+    register(bridge, 'server-peer', 'instance:server', 'server', 'server-peer', 'group-1');
+    expect(register(
+      bridge,
+      'client-peer',
+      'instance:client',
+      'client',
+      'server-peer',
+      'group-1',
+    )).toBe('client-1');
     const sink = new FakeEventStreamSink();
-    transport.open('server-session', sink, () => STATUS);
+    transport.open('server-peer', sink, () => STATUS);
 
-    const serverResponse = bridge.sendRequest('/api/server', { scope: 'server' }, 'place:1', 'server');
-    const clientResponse = bridge.sendRequest('/api/client', { scope: 'client' }, 'place:1', 'client-2');
+    const serverResponse = bridge.sendRequest('/api/server', { scope: 'server' }, 'server-peer');
+    const clientResponse = bridge.sendRequest('/api/client', { scope: 'client' }, 'client-peer');
     serverResponse.catch(() => {});
     clientResponse.catch(() => {});
     const events = sink.events();
@@ -97,7 +109,7 @@ describe('SseStudioTransport', () => {
     expect(events[1]).toEqual({
       kind: 'request',
       requestId: expect.any(String),
-      logicalSessionId: 'server-session',
+      peerId: 'server-peer',
       target: 'server',
       endpoint: '/api/server',
       data: { scope: 'server' },
@@ -106,8 +118,8 @@ describe('SseStudioTransport', () => {
     expect(events[2]).toEqual({
       kind: 'request',
       requestId: expect.any(String),
-      logicalSessionId: 'client-b',
-      target: 'client-2',
+      peerId: 'client-peer',
+      target: 'client-1',
       endpoint: '/api/client',
       data: { scope: 'client' },
       remainingMs: 30_000,
@@ -122,85 +134,67 @@ describe('SseStudioTransport', () => {
     await expect(clientResponse).resolves.toEqual({ ok: 'client' });
   });
 
-  test('an active physical stream prevents takeover of its logical client registrations', () => {
-    register(bridge, 'server-session', 'place:1', 'server');
-    register(bridge, 'client-session', 'place:1', 'client', 'server-session');
-    transport.open('server-session', new FakeEventStreamSink(), () => STATUS);
-    jest.advanceTimersByTime(4_000);
-
-    const duplicate = bridge.registerInstance({
-      pluginSessionId: 'replacement-client',
-      physicalSessionId: 'replacement-server',
-      instanceId: 'place:1',
-      role: 'client-1',
-    });
-    expect(duplicate.ok).toBe(false);
-    expect(bridge.getInstanceBySessionId('client-session')).toBeDefined();
-  });
-
-  test('physical registration disconnect closes its stream and logical proxies', () => {
-    register(bridge, 'server-session', 'place:1', 'server');
-    register(bridge, 'client-session', 'place:1', 'client', 'server-session');
+  test('unregistering a transport Peer closes its stream', () => {
+    register(bridge, 'server-peer', 'instance:server', 'server');
     const sink = new FakeEventStreamSink();
-    transport.open('server-session', sink, () => STATUS);
+    transport.open('server-peer', sink, () => STATUS);
 
-    bridge.unregisterInstance('server-session');
+    bridge.unregisterPeer('server-peer');
     expect(sink.ended).toBe(true);
     expect(transport.activeStreamCount).toBe(0);
-    expect(bridge.getInstanceBySessionId('server-session')).toBeUndefined();
-    expect(bridge.getInstanceBySessionId('client-session')).toBeUndefined();
+    expect(bridge.getPeerById('server-peer')).toBeUndefined();
   });
 
-  test('replaces one physical stream and redelivers each unacknowledged request once', async () => {
-    register(bridge, 'edit-session', 'place:1', 'edit');
+  test('replaces one transport stream and redelivers each unacknowledged request once', async () => {
+    register(bridge, 'edit-peer', 'instance:edit', 'edit');
     const staleSink = new FakeEventStreamSink();
-    transport.open('edit-session', staleSink, () => STATUS);
-    const response = bridge.sendRequest('/api/mutate', { value: 1 }, 'place:1', 'edit');
+    transport.open('edit-peer', staleSink, () => STATUS);
+    const response = bridge.sendRequest('/api/mutate', { value: 1 }, 'edit-peer');
     const firstRequest = staleSink.events().find((event) => event.kind === 'request');
     if (!firstRequest || firstRequest.kind !== 'request') throw new Error('expected initial request');
 
     const replacementSink = new FakeEventStreamSink();
-    transport.open('edit-session', replacementSink, () => STATUS);
+    transport.open('edit-peer', replacementSink, () => STATUS);
     const replacementRequests = replacementSink.events().filter((event) => event.kind === 'request');
     expect(staleSink.ended).toBe(true);
     expect(transport.activeStreamCount).toBe(1);
     expect(replacementRequests).toEqual([firstRequest]);
 
-    transport.refreshStatus('edit-session');
+    transport.refreshStatus('edit-peer');
     expect(replacementSink.events().filter((event) => event.kind === 'request')).toEqual([firstRequest]);
     bridge.resolveRequest(firstRequest.requestId, { ok: true });
     await expect(response).resolves.toEqual({ ok: true });
-    transport.closePhysical('edit-session');
+    transport.closeTransport('edit-peer');
     expect(bridge.getPendingRequestCount()).toBe(0);
   });
 
   test('keeps an unacknowledged request pending when a stream closes', async () => {
-    register(bridge, 'edit-session', 'place:1', 'edit');
+    register(bridge, 'edit-peer', 'instance:edit', 'edit');
     const sink = new FakeEventStreamSink();
-    const handle = transport.open('edit-session', sink, () => STATUS);
-    const response = bridge.sendRequest('/api/slow', {}, 'place:1', 'edit');
+    const handle = transport.open('edit-peer', sink, () => STATUS);
+    const response = bridge.sendRequest('/api/slow', {}, 'edit-peer');
     const timedOut = expect(response).rejects.toThrow('Request timeout');
     const requestEvent = sink.events().find((event) => event.kind === 'request');
     if (!requestEvent || requestEvent.kind !== 'request') throw new Error('expected request event');
 
     handle?.close();
     expect(sink.ended).toBe(true);
-    expect(bridge.getInstanceBySessionId('edit-session')).toBeDefined();
+    expect(bridge.getPeerById('edit-peer')).toBeDefined();
     expect(bridge.getPendingRequestCount()).toBe(1);
     const replacementSink = new FakeEventStreamSink();
-    transport.open('edit-session', replacementSink, () => STATUS);
+    transport.open('edit-peer', replacementSink, () => STATUS);
     expect(replacementSink.events().filter((event) => event.kind === 'request')).toEqual([requestEvent]);
-    transport.closePhysical('edit-session');
+    transport.closeTransport('edit-peer');
     jest.advanceTimersByTime(30_000);
     await timedOut;
     expect(bridge.getPendingRequestCount()).toBe(0);
   });
 
   test('notifies Studio when a claimed request times out and redelivers cancellation after reconnect', async () => {
-    register(bridge, 'edit-session', 'place:1', 'edit');
+    register(bridge, 'edit-peer', 'instance:edit', 'edit');
     const sink = new FakeEventStreamSink();
-    transport.open('edit-session', sink, () => STATUS);
-    const response = bridge.sendRequest('/api/slow', {}, 'place:1', 'edit', 1000);
+    transport.open('edit-peer', sink, () => STATUS);
+    const response = bridge.sendRequest('/api/slow', {}, 'edit-peer', 1000);
     const timedOut = expect(response).rejects.toThrow('Request timeout');
     const requestEvent = sink.events().find((event) => event.kind === 'request');
     if (!requestEvent || requestEvent.kind !== 'request') throw new Error('expected request event');
@@ -216,19 +210,19 @@ describe('SseStudioTransport', () => {
     await timedOut;
 
     const replacementSink = new FakeEventStreamSink();
-    transport.open('edit-session', replacementSink, () => STATUS);
+    transport.open('edit-peer', replacementSink, () => STATUS);
     expect(replacementSink.events().filter((event) => event.kind === 'cancel')).toEqual([cancellation]);
   });
 
   test('does not claim additional requests while the response is backpressured', () => {
-    register(bridge, 'edit-session', 'place:1', 'edit');
+    register(bridge, 'edit-peer', 'instance:edit', 'edit');
     const sink = new FakeEventStreamSink();
     sink.enqueueWriteResult(true);
     sink.enqueueWriteResult(false);
-    transport.open('edit-session', sink, () => STATUS);
+    transport.open('edit-peer', sink, () => STATUS);
 
-    const first = bridge.sendRequest('/api/first', {}, 'place:1', 'edit');
-    const second = bridge.sendRequest('/api/second', {}, 'place:1', 'edit');
+    const first = bridge.sendRequest('/api/first', {}, 'edit-peer');
+    const second = bridge.sendRequest('/api/second', {}, 'edit-peer');
     first.catch(() => {});
     second.catch(() => {});
     expect(sink.events().filter((event) => event.kind === 'request')).toHaveLength(1);
@@ -238,25 +232,24 @@ describe('SseStudioTransport', () => {
       event.kind === 'request' ? event.endpoint : '')).toEqual(['/api/first', '/api/second']);
   });
 
-  test('allows more than six physical streams and bounds the sixty-fifth', () => {
+  test('allows sixty-four transport streams and bounds the sixty-fifth', () => {
     for (let index = 0; index < 64; index += 1) {
-      const sessionId = `physical-${index}`;
-      register(bridge, sessionId, `place:${index}`, 'edit');
+      const peerId = `peer-${index}`;
+      register(bridge, peerId, `instance:${index}`, 'edit');
       const sink = new FakeEventStreamSink();
-      expect(transport.open(sessionId, sink, () => STATUS)).toBeDefined();
+      expect(transport.open(peerId, sink, () => STATUS)).toBeDefined();
     }
-    register(bridge, 'physical-overflow', 'place:overflow', 'edit');
+    register(bridge, 'peer-overflow', 'instance:overflow', 'edit');
     expect(transport.activeStreamCount).toBe(64);
-    expect(transport.activeStreamCount).toBeGreaterThan(6);
-    expect(transport.canOpen('physical-overflow')).toBe(false);
-    expect(transport.open('physical-overflow', new FakeEventStreamSink(), () => STATUS)).toBeUndefined();
+    expect(transport.canOpen('peer-overflow')).toBe(false);
+    expect(transport.open('peer-overflow', new FakeEventStreamSink(), () => STATUS)).toBeUndefined();
   });
 
   test('emits exact status transitions and ten-second heartbeats', () => {
-    register(bridge, 'edit-session', 'place:1', 'edit');
+    register(bridge, 'edit-peer', 'instance:edit', 'edit');
     let status = STATUS;
     const sink = new FakeEventStreamSink();
-    transport.open('edit-session', sink, () => status);
+    transport.open('edit-peer', sink, () => status);
     expect(sink.events()).toEqual([STATUS]);
 
     const heartbeatTimestamp = Date.now() + 10_000;

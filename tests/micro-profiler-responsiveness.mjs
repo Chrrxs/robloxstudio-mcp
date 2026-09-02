@@ -4,7 +4,14 @@ import { existsSync, mkdtempSync, rmSync, statSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
-import { McpClient, assert, runTest, startPlaytestAndWait } from './lib/mcp-client.mjs';
+import {
+  McpClient,
+  assert,
+  routingPeers,
+  runTest,
+  selectRoutingPeer,
+  startPlaytestAndWait,
+} from './lib/mcp-client.mjs';
 
 const MAX_CONCURRENT_RESPONSE_MS = 3000;
 const CAPTURE_DURATION_MS = 5000;
@@ -27,8 +34,8 @@ async function waitForRuntimePeersToDrain(client, timeoutMs = 30_000) {
   let last;
   while (Date.now() < deadline) {
     last = await client.callTool('get_connected_instances', {});
-    const instance = (last.instances ?? []).find((row) => row.id === process.env.MCP_INSTANCE_ID);
-    if (instance && !instance.roles.some((role) => role === 'server' || role.startsWith('client-'))) return;
+    const peers = routingPeers(last);
+    if (!peers.some((peer) => peer.role === 'server' || peer.role.startsWith('client-'))) return;
     await delay(250);
   }
   throw new Error(`runtime peers did not drain after playtest stop: ${JSON.stringify(last)}`);
@@ -59,10 +66,22 @@ await runTest('high-volume MicroProfiler capture remains cooperative', async ({ 
     playtestStarted = true;
     await startPlaytestAndWait(client, { timeoutSec: 60 });
 
-    const serverLogBaseline = await client.callTool('get_runtime_logs', { target: 'server', tail: 1 });
-    const editLogBaseline = await client.callTool('get_runtime_logs', { target: 'edit', tail: 1 });
-    const serverSince = Number.isFinite(serverLogBaseline.nextSince) ? serverLogBaseline.nextSince : 0;
-    const editSince = Number.isFinite(editLogBaseline.nextSince) ? editLogBaseline.nextSince : 0;
+    const connected = await client.callTool('get_connected_instances', {});
+    const serverPeer = selectRoutingPeer(connected, 'server');
+    const editPeer = selectRoutingPeer(connected, 'edit');
+    if (!serverPeer || !editPeer) {
+      throw new Error(`runtime log Peers were not connected: ${JSON.stringify(connected)}`);
+    }
+    assert(serverPeer.instanceId === editPeer.instanceId,
+      'solo edit and server Peers share one process Instance');
+    const logInstanceId = editPeer.instanceId;
+    const processLogBaseline = await client.callTool('get_runtime_logs', {
+      instance_id: logInstanceId,
+      tail: 1,
+    });
+    const processCursor = processLogBaseline.nextCursor;
+    assert(typeof processCursor === 'string' && processCursor.length > 0,
+      'solo process log read returns an opaque cursor');
 
     const preflight = await client.callTool('execute_luau', {
       target: 'server',
@@ -159,17 +178,18 @@ await runTest('high-volume MicroProfiler capture remains cooperative', async ({ 
     assert(after.success === true && String(after.returnValue) === 'RSMCP_PROFILER_AFTER',
       'server peer remains usable after profiler cleanup');
 
-    const [serverLogs, editLogs] = await Promise.all([
-      client.callTool('get_runtime_logs', { target: 'server', since: serverSince, tail: 200 }),
-      client.callTool('get_runtime_logs', { target: 'edit', since: editSince, tail: 200 }),
-    ]);
-    const severeLogs = [...newSevereProfilerLogs(serverLogs), ...newSevereProfilerLogs(editLogs)];
+    const processLogs = await client.callTool('get_runtime_logs', {
+      instance_id: logInstanceId,
+      cursor: processCursor,
+      tail: 200,
+    });
+    const severeLogs = newSevereProfilerLogs(processLogs);
     assert(severeLogs.length === 0,
       `runtime logs contain no new profiler/plugin timeout or error (${JSON.stringify(severeLogs)})`);
     console.log(
       `  capture elapsed=${captureElapsedMs}ms events=${capture.counts.events_sampled} ` +
       `buffer=${capture.counts.buffer_bytes} maxProbeLatency=${maxProbeLatencyMs}ms ` +
-      `runtimeLogs=${(serverLogs.entries ?? []).length + (editLogs.entries ?? []).length}`,
+      `runtimeLogs=${(processLogs.entries ?? []).length}`,
     );
   } catch (error) {
     bodyError = error;

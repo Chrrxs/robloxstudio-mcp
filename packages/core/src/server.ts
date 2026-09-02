@@ -190,7 +190,7 @@ export class RobloxStudioMCPServer {
 
     const cleanupInterval = setInterval(() => {
       this.bridge.cleanupOldRequests();
-      this.bridge.cleanupStaleInstances();
+      this.bridge.cleanupStalePeers();
     }, 5000);
 
     const shutdown = async () => {

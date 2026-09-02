@@ -61,7 +61,7 @@ gemini mcp add robloxstudio npx --trust -- -y @chrrxs/robloxstudio-mcp@latest --
 
 2. After the plugin is installed or updated, fully close and reopen Studio. The plugin shows **Connected** when it is ready.
 
-Multiple open places can connect to the same server. Call `get_connected_instances`, then pass the returned place's `id` as `instance_id` with later tool calls.
+Multiple open places can connect to the same server. Call `get_connected_instances`, then pass either a top-level `instances[].id` or a role-suffixed key from `multiplayerGroups[].instances` as `instance_id` with later tool calls.
 
 Set `MCP_PLUGINS_DIR` to use a custom Plugins folder. For a manual plugin install, run `npx -y @chrrxs/robloxstudio-mcp@latest --install-plugin`.
 

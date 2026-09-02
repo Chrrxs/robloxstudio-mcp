@@ -79,12 +79,12 @@ function decodeMessage(message: string): DecodedEvent | undefined {
 	}
 
 	if (envelope.kind === "status") {
-		if (!typeIs(envelope.knownInstance, "boolean") || !typeIs(envelope.mcpConnected, "boolean")) {
+		if (!typeIs(envelope.knownPeer, "boolean") || !typeIs(envelope.mcpConnected, "boolean")) {
 			return undefined;
 		}
 		return {
 			kind: "status",
-			knownInstance: envelope.knownInstance,
+			knownPeer: envelope.knownPeer,
 			mcpConnected: envelope.mcpConnected,
 			serverVersion: typeIs(envelope.serverVersion, "string") ? envelope.serverVersion : undefined,
 			pluginVersion: typeIs(envelope.pluginVersion, "string") ? envelope.pluginVersion : undefined,
@@ -113,7 +113,7 @@ function decodeMessage(message: string): DecodedEvent | undefined {
 	if (envelope.kind === "request") {
 		if (
 			!typeIs(envelope.requestId, "string") ||
-			!typeIs(envelope.logicalSessionId, "string") ||
+			!typeIs(envelope.peerId, "string") ||
 			!typeIs(envelope.target, "string") ||
 			!typeIs(envelope.endpoint, "string") ||
 			!typeIs(envelope.remainingMs, "number") ||
@@ -128,7 +128,7 @@ function decodeMessage(message: string): DecodedEvent | undefined {
 		return {
 			kind: "request",
 			requestId: envelope.requestId,
-			logicalSessionId: envelope.logicalSessionId,
+			peerId: envelope.peerId,
 			target: envelope.target,
 			endpoint: envelope.endpoint,
 			data,
@@ -157,7 +157,7 @@ function disconnectSession(currentOptions: StudioEventStreamOptions): void {
 			Url: `${currentOptions.serverUrl}/disconnect`,
 			Method: "POST",
 			Headers: { "Content-Type": "application/json" },
-			Body: HttpService.JSONEncode({ pluginSessionId: PluginSession.id, timestamp: tick() }),
+			Body: HttpService.JSONEncode({ peerId: PluginSession.peerId }),
 		}),
 	);
 }
@@ -421,18 +421,20 @@ function parseReadyResponse(body: string): ReadyResponse | undefined {
 		value.success !== true ||
 		!typeIs(value.assignedRole, "string") ||
 		value.assignedRole === "" ||
+		!typeIs(value.peerId, "string") ||
+		value.peerId === "" ||
 		!typeIs(value.instanceId, "string") ||
 		value.instanceId === "" ||
-		!typeIs(value.serverVersion, "string") ||
-		value.serverVersion === ""
+		(value.multiplayerGroupId !== undefined && !typeIs(value.multiplayerGroupId, "string"))
 	) {
 		return undefined;
 	}
 	return {
 		success: true,
 		assignedRole: value.assignedRole,
+		peerId: value.peerId,
 		instanceId: value.instanceId,
-		serverVersion: value.serverVersion,
+		multiplayerGroupId: value.multiplayerGroupId,
 	};
 }
 
@@ -443,10 +445,15 @@ function connect(expectedGeneration: number): void {
 
 	task.spawn(() => {
 		const instanceId = PluginSession.getInstanceId();
+		const multiplayerGroupId = PluginSession.getMultiplayerGroupId();
 		const readyUrl = `${currentOptions.serverUrl}/ready`;
-		const physicalRole = PluginSession.getRole();
-		const readyPayload = PluginSession.createReadyPayload(PluginSession.id, physicalRole);
-		readyPayload.pluginReady = true;
+		const transportRole = PluginSession.getRole();
+		const readyPayload = PluginSession.createReadyPayload(
+			PluginSession.peerId,
+			transportRole,
+			instanceId,
+			multiplayerGroupId,
+		);
 		if (!active || generation !== expectedGeneration || options !== currentOptions) return;
 		const [readyOk, readyResult] = pcall(() =>
 			HttpService.RequestAsync({
@@ -458,12 +465,12 @@ function connect(expectedGeneration: number): void {
 		);
 		if (!active || generation !== expectedGeneration || options !== currentOptions) return;
 
-		const readyLogKey = `${currentOptions.serverUrl}|${instanceId}|${physicalRole}`;
+		const readyLogKey = `${currentOptions.serverUrl}|${PluginSession.peerId}`;
 		if (!readyOk) {
 			const detail = HttpDiagnostics.formatRequestFailure(readyUrl, false, readyResult);
 			if (!readyFailureLogKeys.has(readyLogKey)) {
 				readyFailureLogKeys.add(readyLogKey);
-				warn(`[robloxstudio-mcp] /ready failed for ${instanceId}/${physicalRole}: ${detail}`);
+				warn(`[robloxstudio-mcp] /ready failed for ${instanceId}/${transportRole}: ${detail}`);
 			}
 			scheduleReconnect(expectedGeneration, detail);
 			return;
@@ -472,17 +479,22 @@ function connect(expectedGeneration: number): void {
 			const detail = HttpDiagnostics.formatRequestFailure(readyUrl, true, readyResult);
 			if (!readyFailureLogKeys.has(readyLogKey)) {
 				readyFailureLogKeys.add(readyLogKey);
-				warn(`[robloxstudio-mcp] /ready rejected for ${instanceId}/${physicalRole}: ${detail}`);
+				warn(`[robloxstudio-mcp] /ready rejected for ${instanceId}/${transportRole}: ${detail}`);
 			}
 			scheduleReconnect(expectedGeneration, detail, readyResult.StatusCode === 409);
 			return;
 		}
 
 		const readyData = parseReadyResponse(readyResult.Body);
-		if (readyData === undefined) {
+		if (
+			readyData === undefined ||
+			readyData.peerId !== PluginSession.peerId ||
+			readyData.instanceId !== instanceId ||
+			readyData.multiplayerGroupId !== multiplayerGroupId
+		) {
 			scheduleReconnect(
 				expectedGeneration,
-				"Invalid /ready response: expected the bundled server protocol",
+				"Invalid /ready response: expected the registered Peer topology",
 			);
 			return;
 		}
@@ -499,7 +511,7 @@ function connect(expectedGeneration: number): void {
 
 		const [createOk, createdClient] = pcall(() =>
 			HttpService.CreateWebStreamClient(Enum.WebStreamClientType.SSE, {
-				Url: `${currentOptions.serverUrl}/events?pluginSessionId=${PluginSession.id}`,
+				Url: `${currentOptions.serverUrl}/events?peerId=${PluginSession.peerId}`,
 				Method: "GET",
 				Headers: { Accept: "text/event-stream" },
 			}),
@@ -547,7 +559,7 @@ function connect(expectedGeneration: number): void {
 					return;
 				}
 				invokeCallback("event stream status", () => currentOptions.onStatus(event));
-				if (!event.knownInstance) refresh();
+				if (!event.knownPeer) refresh();
 			}),
 			createdClient.Error.Connect((statusCode, message) => {
 				if (!active || generation !== expectedGeneration || streamClient !== createdClient) return;

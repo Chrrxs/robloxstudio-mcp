@@ -1,21 +1,14 @@
-// Per-capture in-memory ring buffer for LogService.MessageOut events.
-// Powers the get_runtime_logs MCP tool. Replaces the out-of-tree LogBuffer
-// primitives + StringValue approach from chrrxs/roblox-mcp-primitives.
+// Bounded capture for one Peer VM's LogService callbacks.
+// Powers get_runtime_logs without parenting state to the DataModel.
 //
-// Each peer's plugin attaches a MessageOut listener at plugin load (edit DM,
-// play-server DM, play-client DM all run their own copy of this module).
-// Captured entries live in plugin module-state; nothing is parented to the
-// DataModel. The buffer is bounded by a message-byte budget; oldest entries
-// drop when over budget.
-//
-// Capture caveat: returned entries reflect which plugin buffer CAPTURED the
-// entry, NOT which peer's script originated the print. LogService reflects
-// prints across peers in ordinary Studio Play (a server print can appear in
-// server and client LogService:GetLogHistory()). The MCP-side aggregator
-// exposes that as capturedBy, and only promotes it to origin peer in
-// StudioTestService multiplayer sessions where peer attribution is reliable.
+// A Studio process can host several Peer VMs, and its LogService callbacks are
+// delivered in those VM contexts. MCP reads every Peer buffer in an Instance
+// and merges them into that process's log stream. Multiplayer Group Instances
+// remain isolated and are returned independently.
+
 
 import { LogService, RunService } from "@rbxts/services";
+import PeerRole from "./PeerRole";
 
 type LogLevel = "OUT" | "WARN" | "ERR" | "INFO";
 
@@ -118,7 +111,7 @@ interface LogHistoryEntry {
 function seedRuntimeHistory(): void {
 	const [ok, history] = pcall(() => LogService.GetLogHistory() as LogHistoryEntry[]);
 	if (!ok) return;
-	const isEdit = !RunService.IsRunning();
+	const isEdit = PeerRole.detect() === "edit";
 	// GetLogHistory timestamps and DateTime.now() share Unix time, while
 	// os.clock() is elapsed time for this Studio process. Their difference is
 	// therefore the process launch boundary. Edit-mode history is filtered to
@@ -147,11 +140,6 @@ function install(): void {
 	});
 }
 
-function detectPeer(): "edit" | "server" | "client" {
-	if (!RunService.IsRunning()) return "edit";
-	if (RunService.IsServer()) return "server";
-	return "client";
-}
 
 interface QueryOptions {
 	since?: number;
@@ -160,13 +148,12 @@ interface QueryOptions {
 }
 
 interface QueryResult {
-	capturedBy: string;
 	entries: RuntimeLogEntry[];
 	totalDropped: number;
 	nextSince: number;
 }
 
-function query(opts: QueryOptions, capturedBy: string): QueryResult {
+function query(opts: QueryOptions): QueryResult {
 	let result = opts.since !== undefined
 		? entries.filter((e) => e.seq > (opts.since as number))
 		: [...entries];
@@ -196,7 +183,6 @@ function query(opts: QueryOptions, capturedBy: string): QueryResult {
 
 	const last = entries.size() > 0 ? entries[entries.size() - 1] : undefined;
 	return {
-		capturedBy,
 		entries: result,
 		totalDropped,
 		nextSince: last ? last.seq : (opts.since ?? 0),
@@ -205,6 +191,5 @@ function query(opts: QueryOptions, capturedBy: string): QueryResult {
 
 export = {
 	install,
-	detectPeer,
 	query,
 };

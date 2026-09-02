@@ -15,7 +15,7 @@ Tool descriptions explain selection. Input schemas explain arguments. This guide
 ## Connection and paths
 
 - Use canonical DataModel paths returned by the tools. Paths usually start with game.
-- Call get_connected_instances when more than one place may be connected. Pass the chosen row's id as instance_id on later calls.
+- Call get_connected_instances when more than one Studio process may be connected. Pass either a top-level Instance ID or a multiplayer group's role-suffixed Instance ID as instance_id on later calls.
 - Use get_place_info for the active place identity and settings.
 
 ## Discovery and edit work
@@ -45,7 +45,7 @@ Start solo_playtest or multiplayer_playtest before targeting a live server or cl
 
 execute_luau runs through the Studio plugin. eval_server_runtime and eval_client_runtime run inside a live game VM and share that VM's require cache with game scripts. Use the eval tools when module state or the runtime Script or LocalScript environment matters.
 
-Read output with get_runtime_logs. Reuse nextSince or perCaptureNextSince for incremental reads instead of requesting the full buffer again.
+Read output with get_runtime_logs. Reuse nextCursor as cursor for one Instance, or nextCursorByInstance as cursor_by_instance for a Multiplayer Group, instead of requesting the full process streams again.
 
 ## Simulation and input
 

@@ -2,13 +2,19 @@
 // Regression: StudioTestService:EndTest must tear down a multiplayer session
 // after AddPlayers while every client remains connected.
 
-import { McpClient, runTest, assert, waitForEditPeer } from './lib/mcp-client.mjs';
+import {
+  McpClient,
+  runTest,
+  assert,
+  selectEditInstance,
+  waitForEditPeer,
+} from './lib/mcp-client.mjs';
 
 async function pickInstanceId(client) {
   await waitForEditPeer(client);
   if (process.env.MCP_INSTANCE_ID) return process.env.MCP_INSTANCE_ID;
   const connected = await client.callTool('get_connected_instances', {});
-  const edit = (connected.instances ?? []).find((instance) => instance.roles?.includes('edit'));
+  const edit = selectEditInstance(connected, undefined);
   if (!edit) throw new Error(`No edit Studio instance connected: ${JSON.stringify(connected)}`);
   return edit.id;
 }

@@ -34,7 +34,7 @@ import type {
 } from "../types";
 
 let assignedRole: string | undefined;
-let lastReadyInstanceId: string | undefined;
+let lastReadyPlaceKey: string | undefined;
 
 const initialRole = PluginSession.getRole();
 
@@ -120,9 +120,9 @@ function getConnectionStatus(): string {
 }
 
 function dispatchStreamRequest(request: StudioRequestEvent, context: StudioRequestContext): unknown {
-	if (request.logicalSessionId !== PluginSession.id) {
+	if (request.peerId !== PluginSession.peerId) {
 		return ClientBroker.dispatchClientRequest(
-			request.logicalSessionId,
+			request.peerId,
 			request.target,
 			request.endpoint,
 			request.data,
@@ -131,7 +131,7 @@ function dispatchStreamRequest(request: StudioRequestEvent, context: StudioReque
 	const localRole = assignedRole ?? PluginSession.getRole();
 	if (request.target !== localRole) {
 		return {
-			error: `Physical plugin session is registered as ${localRole}, not ${request.target}.`,
+			error: `Transport peer is registered as ${localRole}, not ${request.target}.`,
 		};
 	}
 	return processRequest({ endpoint: request.endpoint, data: request.data }, context);
@@ -141,9 +141,9 @@ function handleReady(response: ReadyResponse): void {
 	const conn = State.getActiveConnection();
 	if (!conn.isActive) return;
 	assignedRole = response.assignedRole;
-	lastReadyInstanceId = response.instanceId;
+	lastReadyPlaceKey = PluginSession.getPlaceKey();
 	ServerUrlSettings.rememberServerUrl(conn.serverUrl);
-	ClientBroker.refreshAllLogicalRegistrations();
+	ClientBroker.refreshAllProxyRegistrations();
 }
 
 function handleStatus(status: StudioStatusEvent): void {
@@ -213,7 +213,7 @@ function ensureIdentityWatchers(): void {
 		if (signalOk && signal) {
 			placeIdChangeConn = signal.Connect(() => {
 				PluginSession.invalidatePlaceName();
-				lastReadyInstanceId = PluginSession.getInstanceId();
+				lastReadyPlaceKey = PluginSession.getPlaceKey();
 				StudioEventStream.refresh();
 			});
 		}
@@ -251,7 +251,7 @@ function activatePlugin() {
 	const port = ServerUrlSettings.extractPort(conn.serverUrl);
 	if (port !== undefined) conn.port = port;
 	ClientBroker.setServerUrl(conn.serverUrl);
-	lastReadyInstanceId = PluginSession.getInstanceId();
+	lastReadyPlaceKey = PluginSession.getPlaceKey();
 	UI.updateUIState();
 
 	StudioEventStream.start({
@@ -270,16 +270,16 @@ function activatePlugin() {
 				deactivatePlugin();
 				return;
 			}
-			const currentInstanceId = PluginSession.getInstanceId();
-			if (lastReadyInstanceId !== undefined && currentInstanceId !== lastReadyInstanceId) {
-				lastReadyInstanceId = currentInstanceId;
+			const currentPlaceKey = PluginSession.getPlaceKey();
+			if (lastReadyPlaceKey !== undefined && currentPlaceKey !== lastReadyPlaceKey) {
+				lastReadyPlaceKey = currentPlaceKey;
 				PluginSession.invalidatePlaceName();
 				StudioEventStream.refresh();
 			}
 		});
 	}
 
-	if (!RunService.IsRunning()) {
+	if (initialRole === "edit") {
 		task.spawn(cleanupEditBridgeArtifacts);
 	}
 	ensureIdentityWatchers();
@@ -301,7 +301,7 @@ function deactivatePlugin() {
 		conn.heartbeatConnection = undefined;
 	}
 
-	lastReadyInstanceId = undefined;
+	lastReadyPlaceKey = undefined;
 	assignedRole = undefined;
 	conn.consecutiveFailures = 0;
 	conn.currentRetryDelay = 0.5;

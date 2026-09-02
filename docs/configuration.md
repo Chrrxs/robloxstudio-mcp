@@ -30,10 +30,16 @@ and treat the token as a secret.
 ## Multiple connected places
 
 Connect every open Studio place to the same MCP server URL. The server tracks
-each connection; call `get_connected_instances` to receive compact
-`{ id, name, roles }` rows, then pass a row's `id` as `instance_id` to route a
-tool call to that game. Per-place port tabs such as `58742` are not the
-supported routing model.
+each connection; call `get_connected_instances` to receive compact standalone
+and edit rows with IDs such as `instance:abc-1ef`. Each row's `peers` object
+maps roles to typed Peer IDs such as `peer:abc-1ef`.
+
+Temporary multiplayer server and client processes are listed only inside their
+`multiplayerGroups` entry. Its `instances` object maps role-suffixed IDs such as
+`instance:def-234-server` and `instance:567-890-client-1` directly to Peer IDs.
+Pass either a top-level row ID or one of these grouped runtime IDs as
+`instance_id`; the server resolves it to the correct game scope. Per-place port
+tabs such as `58742` are not the supported routing model.
 
 ## Version compatibility
 

@@ -70,6 +70,27 @@ describe('Tool schema compatibility', () => {
     }
   });
 
+  test('get_runtime_logs exposes process and group cursors without target routing', () => {
+    const tool = TOOL_DEFINITIONS.find(candidate => candidate.name === 'get_runtime_logs');
+    expect(tool).toBeDefined();
+    const properties = (tool!.inputSchema as {
+      properties?: Record<string, { type?: string; additionalProperties?: { type?: string } }>;
+    }).properties ?? {};
+    expect(Object.keys(properties).sort()).toEqual([
+      'cursor',
+      'cursor_by_instance',
+      'filter',
+      'instance_id',
+      'multiplayer_group_id',
+      'tail',
+    ]);
+    expect(properties).not.toHaveProperty('target');
+    expect(properties.cursor_by_instance).toMatchObject({
+      type: 'object',
+      additionalProperties: { type: 'string' },
+    });
+  });
+
   test('selection exposes one get/set/view lifecycle', () => {
     const tool = TOOL_DEFINITIONS.find(candidate => candidate.name === 'selection');
     expect(tool).toBeDefined();
@@ -116,7 +137,7 @@ describe('Tool schema compatibility', () => {
       minimum: -89,
       maximum: 89,
     });
-    expect(props.instance_id.description).toBe('Connected place ID if multiple are open.');
+    expect(props.instance_id.description).toBe('Studio process ID when ambiguous.');
     expect(Object.keys(props).sort()).toEqual([
       'action',
       'angleY',

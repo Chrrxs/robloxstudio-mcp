@@ -8,11 +8,8 @@ import { TOOL_DEFINITIONS } from '../tools/definitions.js';
 
 const CREATOR_STORE_TEST_CLAIM_OWNER = 'creator-store-assets-test';
 
-function claimQueuedRequest(bridge: BridgeService, physicalSessionId: string) {
-  const queued = bridge.claimNextRequestForPhysical(
-    physicalSessionId,
-    CREATOR_STORE_TEST_CLAIM_OWNER,
-  );
+function claimQueuedRequest(bridge: BridgeService, transportPeerId: string) {
+  const queued = bridge.claimNextRequestForTransport(transportPeerId, CREATOR_STORE_TEST_CLAIM_OWNER);
   if (!queued) return null;
   return {
     requestId: queued.requestId,
@@ -401,10 +398,10 @@ describe('Creator Store asset search', () => {
     replaceInstanceManager(tools, {
       pendingLaunches: jest.fn(async () => []),
     });
-    bridge.registerInstance({
-      pluginSessionId: 'creator-store-test',
-      physicalSessionId: 'creator-store-test',
-      instanceId: 'place:test',
+    bridge.registerPeer({
+      peerId: 'creator-store-test',
+      transportPeerId: 'creator-store-test',
+      instanceId: 'instance:test',
       role: 'edit',
       placeId: 0,
       placeName: 'Test',
@@ -412,7 +409,7 @@ describe('Creator Store asset search', () => {
       isRunning: false,
     });
 
-    const previewPromise = tools.previewAsset(101, true, 8, 'place:test', false);
+    const previewPromise = tools.previewAsset(101, true, 8, 'instance:test', false);
     const previewRequest = claimQueuedRequest(bridge, 'creator-store-test');
     expect(previewRequest?.request).toEqual({
       endpoint: '/api/preview-asset',
@@ -437,7 +434,7 @@ describe('Creator Store asset search', () => {
       101,
       'game.Workspace.Effects',
       { x: 1, y: 2, z: 3 },
-      'place:test',
+      'instance:test',
     );
     const insertRequest = claimQueuedRequest(bridge, 'creator-store-test');
     expect(insertRequest?.request).toEqual({
@@ -480,10 +477,10 @@ describe('Creator Store asset search', () => {
     replaceInstanceManager(tools, {
       pendingLaunches: jest.fn(async () => []),
     });
-    bridge.registerInstance({
-      pluginSessionId: 'creator-store-audio-test',
-      physicalSessionId: 'creator-store-audio-test',
-      instanceId: 'place:audio-test',
+    bridge.registerPeer({
+      peerId: 'creator-store-audio-test',
+      transportPeerId: 'creator-store-audio-test',
+      instanceId: 'instance:audio-test',
       role: 'edit',
       placeId: 0,
       placeName: 'Audio Test',
@@ -495,7 +492,7 @@ describe('Creator Store asset search', () => {
       202,
       true,
       8,
-      'place:audio-test',
+      'instance:audio-test',
       true,
       2,
     );
@@ -569,7 +566,7 @@ describe('Creator Store asset search', () => {
       203,
       true,
       8,
-      'place:audio-test',
+      'instance:audio-test',
       false,
       2,
     );
@@ -605,10 +602,10 @@ describe('Creator Store asset search', () => {
     replaceInstanceManager(tools, {
       pendingLaunches: jest.fn(async () => []),
     });
-    bridge.registerInstance({
-      pluginSessionId: 'creator-store-hierarchy-cap-test',
-      physicalSessionId: 'creator-store-hierarchy-cap-test',
-      instanceId: 'place:hierarchy-cap-test',
+    bridge.registerPeer({
+      peerId: 'creator-store-hierarchy-cap-test',
+      transportPeerId: 'creator-store-hierarchy-cap-test',
+      instanceId: 'instance:hierarchy-cap-test',
       role: 'edit',
       placeId: 0,
       placeName: 'Hierarchy Cap Test',
@@ -620,7 +617,7 @@ describe('Creator Store asset search', () => {
       204,
       false,
       8,
-      'place:hierarchy-cap-test',
+      'instance:hierarchy-cap-test',
       false,
     );
     const previewRequest = claimQueuedRequest(bridge, 'creator-store-hierarchy-cap-test');
@@ -671,10 +668,10 @@ describe('Creator Store asset search', () => {
     replaceInstanceManager(tools, {
       pendingLaunches: jest.fn(async () => []),
     });
-    bridge.registerInstance({
-      pluginSessionId: 'creator-store-direct-audio-test',
-      physicalSessionId: 'creator-store-direct-audio-test',
-      instanceId: 'place:direct-audio-test',
+    bridge.registerPeer({
+      peerId: 'creator-store-direct-audio-test',
+      transportPeerId: 'creator-store-direct-audio-test',
+      instanceId: 'instance:direct-audio-test',
       role: 'edit',
       placeId: 0,
       placeName: 'Direct Audio Test',
@@ -686,7 +683,7 @@ describe('Creator Store asset search', () => {
       2575934454,
       true,
       8,
-      'place:direct-audio-test',
+      'instance:direct-audio-test',
       true,
       1,
     );

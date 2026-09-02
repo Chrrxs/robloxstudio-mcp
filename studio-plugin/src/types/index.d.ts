@@ -25,8 +25,9 @@ export interface RequestPayload {
 export interface ReadyResponse {
 	success: true;
 	assignedRole: string;
+	peerId: string;
 	instanceId: string;
-	serverVersion: string;
+	multiplayerGroupId?: string;
 }
 
 export type StudioCancellationReason = "timeout" | "aborted" | "connection_closed";
@@ -40,7 +41,7 @@ export interface StudioRequestContext {
 export interface StudioRequestEvent {
 	kind: "request";
 	requestId: string;
-	logicalSessionId: string;
+	peerId: string;
 	target: string;
 	endpoint: string;
 	data?: RequestData;
@@ -55,7 +56,7 @@ export interface StudioCancelEvent {
 
 export interface StudioStatusEvent {
 	kind: "status";
-	knownInstance: boolean;
+	knownPeer: boolean;
 	mcpConnected: boolean;
 	serverVersion?: string;
 	pluginVersion?: string;

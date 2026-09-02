@@ -3,7 +3,7 @@
 // The converter must honor the destination property type: {X,Y} is Vector2 for
 // GuiObject.AnchorPoint, while {X,Y,Z} remains Vector3 for BasePart.Position.
 
-import { McpClient, runTest, assert } from './lib/mcp-client.mjs';
+import { McpClient, runTest, assert, selectEditInstance } from './lib/mcp-client.mjs';
 import { setTimeout as delay } from 'node:timers/promises';
 
 function findResult(response, property) {
@@ -36,8 +36,7 @@ async function waitForEditInstance(client, instanceId, timeoutMs = 30000) {
   while (Date.now() < deadline) {
     try {
       const connected = await client.callTool('get_connected_instances', {});
-      const instances = connected.instances ?? [];
-      const edit = instances.find((inst) => inst.id === instanceId && inst.roles?.includes('edit'));
+      const edit = selectEditInstance(connected, instanceId);
       if (edit) return edit;
       last = connected;
     } catch (err) {

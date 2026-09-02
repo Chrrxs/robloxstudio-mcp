@@ -9,7 +9,15 @@
 //
 // Regression test for the execute_luau output-capture bug fixed in v2.11.3.
 
-import { McpClient, runTest, assert, assertContains, startPlaytestAndWait, safeStopPlaytest } from './lib/mcp-client.mjs';
+import {
+  McpClient,
+  runTest,
+  assert,
+  assertContains,
+  safeStopPlaytest,
+  selectRoutingPeer,
+  startPlaytestAndWait,
+} from './lib/mcp-client.mjs';
 import { setTimeout as delay } from 'node:timers/promises';
 
 const M1 = 'OUTPUT_PRINT_a1';
@@ -65,8 +73,13 @@ await runTest('execute_luau target=server captures print/warn output', async ({ 
     assert(r4.success === true, 'structured LogService output succeeds');
     await delay(100);
 
+    const connected = await client.callTool('get_connected_instances', {});
+    const serverPeer = selectRoutingPeer(connected, 'server');
+    if (!serverPeer) {
+      throw new Error(`No server Instance is connected: ${JSON.stringify(connected)}`);
+    }
     const logs = await client.callTool('get_runtime_logs', {
-      target: 'server',
+      instance_id: serverPeer.instanceId,
       filter: M4,
       tail: 10,
     });

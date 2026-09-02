@@ -115,6 +115,7 @@ async function createHarness(
           Body: JSON.stringify({
             success: true,
             assignedRole: 'edit',
+            peerId: 'peer',
             instanceId: 'studio-instance',
             serverVersion: 'test',
           }),
@@ -156,8 +157,9 @@ async function createHarness(
         }
         return {
           contents: `export default {
-            id: 'plugin-session',
+            peerId: 'peer',
             getInstanceId: () => 'studio-instance',
+            getMultiplayerGroupId: () => undefined,
             getRole: () => 'edit',
             createReadyPayload: () => ({})
           };`,
@@ -253,7 +255,7 @@ async function createHarness(
       stream.MessageReceived.fire(JSON.stringify({
         kind: 'request',
         requestId,
-        logicalSessionId: 'logical-session',
+        peerId: 'peer',
         target: 'edit',
         endpoint: '/test',
         data: {},

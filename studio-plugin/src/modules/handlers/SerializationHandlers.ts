@@ -1,4 +1,4 @@
-import { RunService } from "@rbxts/services";
+import PeerRole from "../PeerRole";
 import Utils from "../Utils";
 import Recording from "../Recording";
 
@@ -112,7 +112,7 @@ function importRbxm(requestData: Record<string, unknown>): unknown {
 	// All-or-nothing parenting. Track every instance we've attached and roll back
 	// (unparent + Destroy) if any later one fails - partial imports leave the DM
 	// in a worse state than failing cleanly.
-	const isEdit = !RunService.IsRunning();
+	const isEdit = PeerRole.detect() === "edit";
 	const recordingId = isEdit ? beginRecording(`Import rbxm`) : undefined;
 
 	const attached: Instance[] = [];

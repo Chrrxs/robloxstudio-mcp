@@ -1,7 +1,13 @@
 #!/usr/bin/env node
 
 import { setTimeout as delay } from 'node:timers/promises';
-import { McpClient, runTest, assert, waitForEditPeer } from './lib/mcp-client.mjs';
+import {
+  McpClient,
+  runTest,
+  assert,
+  selectEditInstance,
+  waitForEditPeer,
+} from './lib/mcp-client.mjs';
 
 const NETWORK_KEYS = [
   'InboundNetworkMinDelayMs',
@@ -59,10 +65,7 @@ await runTest('simulation state tools reset network and device simulator determi
     await waitForEditPeer(client, { timeoutMs: 30000 });
 
     const connected = await client.callTool('get_connected_instances', {});
-    const expectedInstanceId = process.env.MCP_INSTANCE_ID;
-    const edit = (connected.instances ?? connected).find((inst) =>
-      inst.roles?.includes('edit') && (expectedInstanceId === undefined || inst.id === expectedInstanceId)
-    );
+    const edit = selectEditInstance(connected);
     assert(!!edit, 'edit peer is connected');
     instanceId = edit.id;
 

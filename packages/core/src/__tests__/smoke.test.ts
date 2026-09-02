@@ -12,11 +12,8 @@ import * as path from 'path';
 
 const SMOKE_TEST_CLAIM_OWNER = 'smoke-test';
 
-function claimQueuedRequest(bridge: BridgeService, physicalSessionId: string) {
-  const queued = bridge.claimNextRequestForPhysical(
-    physicalSessionId,
-    SMOKE_TEST_CLAIM_OWNER,
-  );
+function claimQueuedRequest(bridge: BridgeService, transportPeerId: string) {
+  const queued = bridge.claimNextRequestForTransport(transportPeerId, SMOKE_TEST_CLAIM_OWNER);
   if (!queued) return null;
   return {
     requestId: queued.requestId,
@@ -28,9 +25,9 @@ function claimQueuedRequest(bridge: BridgeService, physicalSessionId: string) {
 }
 
 const READY = {
-  pluginSessionId: 'session-1',
-  physicalSessionId: 'session-1',
-  instanceId: 'place:test',
+  peerId: 'session-1',
+  transportPeerId: 'session-1',
+  instanceId: 'instance:test',
   role: 'edit',
   placeId: 0,
   placeName: 'TestPlace',
@@ -38,6 +35,7 @@ const READY = {
   isRunning: false,
   pluginVersion: 'test-version',
   pluginVariant: 'main',
+  timestamp: Date.now(),
 };
 
 const ZERO_NETWORK_STATE = {
@@ -182,44 +180,48 @@ describe('Smoke', () => {
     expect(claimQueuedRequest(bridge, 'session-1')).toBeNull();
   });
 
-  test('get_connected_instances returns one compact routing row per place', async () => {
+  test('get_connected_instances nests role-suffixed multiplayer runtime processes', async () => {
     const bridge = new BridgeService();
     const tools = new RobloxStudioTools(bridge);
+    bridge.createMultiplayerGroup('test-1', 'instance:aaa-111');
 
-    bridge.registerInstance({
-      pluginSessionId: 'place-one-edit',
-      physicalSessionId: 'place-one-edit',
-      instanceId: 'place:1',
+    bridge.registerPeer({
+      peerId: 'peer:aaa-111',
+      transportPeerId: 'peer:aaa-111',
+      instanceId: 'instance:aaa-111',
+      multiplayerGroupId: 'test-1',
       role: 'edit',
       placeId: 1,
       placeName: 'Place One',
       dataModelName: 'PlaceOneEdit',
       isRunning: false,
     });
-    bridge.registerInstance({
-      pluginSessionId: 'place-one-server',
-      physicalSessionId: 'place-one-server',
-      instanceId: 'place:1',
+    bridge.registerPeer({
+      peerId: 'peer:bbb-222',
+      transportPeerId: 'peer:bbb-222',
+      instanceId: 'instance:bbb-222',
+      multiplayerGroupId: 'test-1',
       role: 'server',
       placeId: 1,
       placeName: 'Place One',
       dataModelName: 'PlaceOneServer',
       isRunning: true,
     });
-    bridge.registerInstance({
-      pluginSessionId: 'place-one-client',
-      physicalSessionId: 'place-one-server',
-      instanceId: 'place:1',
+    bridge.registerPeer({
+      peerId: 'peer:ccc-333',
+      transportPeerId: 'peer:bbb-222',
+      instanceId: 'instance:ccc-333',
+      multiplayerGroupId: 'test-1',
       role: 'client',
       placeId: 1,
       placeName: 'Place One',
       dataModelName: 'PlaceOneClient',
       isRunning: true,
     });
-    bridge.registerInstance({
-      pluginSessionId: 'place-two-edit',
-      physicalSessionId: 'place-two-edit',
-      instanceId: 'anon:2',
+    bridge.registerPeer({
+      peerId: 'peer:ddd-444',
+      transportPeerId: 'peer:ddd-444',
+      instanceId: 'instance:ddd-444',
       role: 'edit',
       placeId: 0,
       placeName: '',
@@ -230,13 +232,30 @@ describe('Smoke', () => {
     const result = await tools.getConnectedInstances();
     const payload = JSON.parse((result.content[0] as { type: 'text'; text: string }).text);
 
-    expect(payload).toEqual({
-      instances: [
-        { id: 'place:1', name: 'Place One', roles: ['edit', 'server', 'client-1'] },
-        { id: 'anon:2', name: 'Untitled Place', roles: ['edit'] },
-      ],
-    });
-    expect(Object.keys(payload.instances[0]).sort()).toEqual(['id', 'name', 'roles']);
+    expect(payload.instances).toHaveLength(2);
+    expect(payload.instances).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        id: 'instance:aaa-111',
+        multiplayerGroupId: 'test-1',
+        placeId: 1,
+        peers: { edit: 'peer:aaa-111' },
+      }),
+      expect.objectContaining({
+        id: 'instance:ddd-444',
+        peers: { edit: 'peer:ddd-444' },
+      }),
+    ]));
+    expect(payload.multiplayerGroups).toEqual([
+      {
+        id: 'test-1',
+        controllerInstanceId: 'instance:aaa-111',
+        instances: {
+          'instance:bbb-222-server': 'peer:bbb-222',
+          'instance:ccc-333-client-1': 'peer:ccc-333',
+        },
+      },
+    ]);
+    expect(payload.instances.every((instance: { roles?: unknown }) => instance.roles === undefined)).toBe(true);
   });
 
   test('WSL Studio launch does not inherit the synchronous PowerShell pipes', () => {
@@ -347,9 +366,9 @@ describe('Smoke', () => {
 
   test('clearAllPendingRequests rejects all pending', async () => {
     const bridge = new BridgeService();
-    bridge.registerInstance(READY);
-    const p1 = bridge.sendRequest('/test1', {}, 'place:test', 'edit');
-    const p2 = bridge.sendRequest('/test2', {}, 'place:test', 'edit');
+    bridge.registerPeer(READY);
+    const p1 = bridge.sendRequest('/test1', {}, 'session-1');
+    const p2 = bridge.sendRequest('/test2', {}, 'session-1');
     expect(claimQueuedRequest(bridge, 'session-1')).toBeTruthy();
     bridge.clearAllPendingRequests();
     expect(claimQueuedRequest(bridge, 'session-1')).toBeNull();
@@ -367,9 +386,9 @@ describe('Smoke', () => {
     });
 
     await request(app).post('/ready').send(READY).expect(200);
-    const pending = bridge.sendRequest('/test', {}, 'place:test', 'edit');
+    const pending = bridge.sendRequest('/test', {}, 'session-1');
     pending.catch(() => {});
-    await request(app).post('/disconnect').send({ pluginSessionId: 'session-1' }).expect(200);
+    await request(app).post('/disconnect').send({ peerId: 'session-1' }).expect(200);
     await expect(pending).rejects.toThrow(/disconnected/);
   });
 
@@ -384,7 +403,7 @@ describe('Smoke', () => {
     expect(app.isPluginConnected()).toBe(false);
     await request(app).post('/ready').send(READY).expect(200);
     expect(app.isPluginConnected()).toBe(true);
-    await request(app).post('/disconnect').send({ pluginSessionId: 'session-1' }).expect(200);
+    await request(app).post('/disconnect').send({ peerId: 'session-1' }).expect(200);
     expect(app.isPluginConnected()).toBe(false);
   });
 
@@ -394,19 +413,28 @@ describe('Smoke', () => {
     await expect(tools.startPlaytest('play', 1)).rejects.toThrow(/multiplayer_playtest/);
   });
 
-  test('manage_instance blocks launching an already connected latest published place', async () => {
+  test('manage_instance allows another Studio process for the same published place', async () => {
     const bridge = new BridgeService();
     const tools = new RobloxStudioTools(bridge);
-    bridge.registerInstance({
+    bridge.registerPeer({
       ...READY,
-      instanceId: 'place:123',
+      instanceId: 'instance:published-123',
       placeId: 123,
     });
-    const launch = jest.fn();
+    const launch = jest.fn(async (options) => ({
+      ...options,
+      recordId: 'launch-same-place',
+      nativeProcessId: 7000,
+      exe: 'RobloxStudioBeta.exe',
+      args: [],
+      launchedAt: Date.now(),
+      state: 'launching',
+    }));
     (tools as any).instanceManager = {
       list: () => [],
       launch,
     };
+    jest.spyOn(tools as any, '_deriveUniverseId').mockResolvedValue(456);
 
     const result = await tools.manageInstance({
       action: 'launch',
@@ -415,20 +443,20 @@ describe('Smoke', () => {
       wait_for_connection: false,
     });
 
-    const body = JSON.parse(result.content[0].text);
-    expect(body).toEqual({
-      error: 'Place is already open.',
-      message: 'place_id 123 is already connected. Use the existing instance or launch a specific place_revision.',
-    });
-    expect(launch).not.toHaveBeenCalled();
+    expect(JSON.parse(result.content[0].text)).toEqual(expect.objectContaining({
+      launch_id: 'launch-same-place',
+      state: 'launching',
+      place_id: 123,
+    }));
+    expect(launch).toHaveBeenCalledTimes(1);
   });
 
   test('manage_instance allows launching an explicit past revision for an already connected place', async () => {
     const bridge = new BridgeService();
     const tools = new RobloxStudioTools(bridge);
-    bridge.registerInstance({
+    bridge.registerPeer({
       ...READY,
-      instanceId: 'place:123',
+      instanceId: 'instance:published-123',
       placeId: 123,
     });
     const launch = jest.fn(async (options) => ({
@@ -1218,11 +1246,11 @@ describe('Smoke', () => {
         process_running: true,
       }));
 
-      bridge.registerInstance({
+      bridge.registerPeer({
         ...READY,
-        pluginSessionId: 'session-async',
-        physicalSessionId: 'session-async',
-        instanceId: 'anon:async',
+        peerId: 'session-async',
+        transportPeerId: 'session-async',
+        instanceId: 'instance:async',
         placeName: 'place.rbxl',
         dataModelName: 'place.rbxl',
       });
@@ -1231,13 +1259,13 @@ describe('Smoke', () => {
 
       const statusRequest = tools.manageInstance({
         action: 'status',
-        instance_id: 'anon:async',
+        instance_id: 'instance:async',
       });
       releaseAssociation();
       const status = JSON.parse((await statusRequest).content[0].text);
       expect(status).toEqual(expect.objectContaining({
         launch_id: launched.launch_id,
-        instance_id: 'anon:async',
+        instance_id: 'instance:async',
         managed: true,
         state: 'connected',
         pid: 4321,
@@ -1247,11 +1275,11 @@ describe('Smoke', () => {
 
       const closed = JSON.parse((await tools.manageInstance({
         action: 'close',
-        instance_id: 'anon:async',
+        instance_id: 'instance:async',
       })).content[0].text);
       expect(closed).toEqual(expect.objectContaining({
         launch_id: launched.launch_id,
-        instance_id: 'anon:async',
+        instance_id: 'instance:async',
         state: 'exited',
         close_status: 'closed',
         message: 'Studio instance closed.',
@@ -1456,14 +1484,14 @@ describe('Smoke', () => {
     try {
       const manager = new StudioInstanceManager({ registryDir, processAdapter });
       const record = await manager.launch({ source: 'local_file', localPlaceFile: '/tmp/unknown.rbxl' });
-      await manager.attachInstanceId(record, 'anon:unknown');
+      await manager.attachInstanceId(record, 'instance:unknown');
       observationFails = true;
 
       await manager.refresh(record);
       await manager.refresh(record);
 
       expect(record).toEqual(expect.objectContaining({
-        instanceId: 'anon:unknown',
+        instanceId: 'instance:unknown',
         state: 'connected',
         processObservationStatus: 'unknown',
         lastProcessObservationError: 'PowerShell unavailable',
@@ -1511,7 +1539,7 @@ describe('Smoke', () => {
       });
       const record = await manager.launch({ source: 'local_file', localPlaceFile: '/tmp/grace.rbxl' });
       observedAt = 1500;
-      await manager.attachInstanceId(record, 'anon:grace');
+      await manager.attachInstanceId(record, 'instance:grace');
       spawned = false;
       observedAt = 2000;
 
@@ -1530,7 +1558,7 @@ describe('Smoke', () => {
 
       spawned = true;
       observedAt = 9000;
-      await manager.attachInstanceId(record, 'anon:grace');
+      await manager.attachInstanceId(record, 'instance:grace');
       expect(record).toEqual(expect.objectContaining({
         state: 'connected',
         processObservationStatus: 'running',
@@ -1750,17 +1778,17 @@ describe('Smoke', () => {
   test('manage_instance close accepts an explicit connected unmanaged instance', async () => {
     const bridge = new BridgeService();
     const tools = new RobloxStudioTools(bridge);
-    bridge.registerInstance({
+    bridge.registerPeer({
       ...READY,
-      instanceId: 'anon:external',
+      instanceId: 'instance:external',
       placeName: 'ExternalPlace',
       dataModelName: 'ExternalPlace',
     });
-    bridge.registerInstance({
+    bridge.registerPeer({
       ...READY,
-      pluginSessionId: 'session-server',
-      physicalSessionId: 'session-server',
-      instanceId: 'anon:external',
+      peerId: 'session-server',
+      transportPeerId: 'session-server',
+      instanceId: 'instance:external',
       role: 'server',
       placeName: 'ExternalPlace',
       dataModelName: 'ExternalPlace',
@@ -1776,21 +1804,21 @@ describe('Smoke', () => {
 
     const result = await tools.manageInstance({
       action: 'close',
-      instance_id: 'anon:external',
+      instance_id: 'instance:external',
     });
 
     const body = JSON.parse(result.content[0].text);
     expect(body).toEqual({
-      instance_id: 'anon:external',
+      instance_id: 'instance:external',
       close_status: 'closed',
       message: 'Studio instance closed.',
     });
     expect(closeConnectedInstance).toHaveBeenCalledWith(expect.objectContaining({
-      instanceId: 'anon:external',
+      instanceId: 'instance:external',
       role: 'edit',
       dataModelName: 'ExternalPlace',
     }));
-    expect(unregisterInstanceIdEverywhere).toHaveBeenCalledWith('anon:external');
+    expect(unregisterInstanceIdEverywhere).toHaveBeenCalledWith('instance:external');
     expect(bridge.getPublicInstances()).toEqual([]);
   });
 
@@ -1827,7 +1855,7 @@ describe('Smoke', () => {
     try {
       const launcher = new StudioInstanceManager({ registryDir, processAdapter });
       const record = await launcher.launch({ source: 'baseplate', localPlaceFile: placeFile });
-      await launcher.attachInstanceId(record, 'anon:shared-baseplate');
+      await launcher.attachInstanceId(record, 'instance:shared-baseplate');
 
       const bridge = new BridgeService();
       const tools = new RobloxStudioTools(bridge);
@@ -1835,12 +1863,12 @@ describe('Smoke', () => {
 
       const result = await tools.manageInstance({
         action: 'close',
-        instance_id: 'anon:shared-baseplate',
+        instance_id: 'instance:shared-baseplate',
       });
 
       const body = JSON.parse(result.content[0].text);
       expect(body).toEqual(expect.objectContaining({
-        instance_id: 'anon:shared-baseplate',
+        instance_id: 'instance:shared-baseplate',
         message: 'Studio instance closed.',
         state: 'exited',
         process_running: false,
@@ -1979,9 +2007,9 @@ describe('Smoke', () => {
   test('manage_instance close returns a compact error for an unclosable connected unmanaged instance', async () => {
     const bridge = new BridgeService();
     const tools = new RobloxStudioTools(bridge);
-    bridge.registerInstance({
+    bridge.registerPeer({
       ...READY,
-      instanceId: 'anon:external',
+      instanceId: 'instance:external',
       placeName: 'ExternalPlace',
       dataModelName: 'ExternalPlace',
     });
@@ -1995,13 +2023,13 @@ describe('Smoke', () => {
 
     const result = await tools.manageInstance({
       action: 'close',
-      instance_id: 'anon:external',
+      instance_id: 'instance:external',
     });
 
     const body = JSON.parse(result.content[0].text);
     expect(body).toEqual({
       error: 'Could not find a Studio process for connected instance "anon:external".',
-      instance_id: 'anon:external',
+      instance_id: 'instance:external',
     });
     expect(bridge.getPublicInstances()).toHaveLength(1);
   });
@@ -2334,11 +2362,11 @@ describe('Smoke', () => {
   test('breakpoints decorates response with resolved target role', async () => {
     const bridge = new BridgeService();
     const tools = new RobloxStudioTools(bridge);
-    bridge.registerInstance(READY);
-    bridge.registerInstance({
-      pluginSessionId: 'server-1',
-      physicalSessionId: 'server-1',
-      instanceId: 'place:test',
+    bridge.registerPeer(READY);
+    bridge.registerPeer({
+      peerId: 'server-1',
+      transportPeerId: 'server-1',
+      instanceId: 'instance:test',
       role: 'server',
       placeId: 0,
       placeName: 'TestPlace',
@@ -2350,7 +2378,7 @@ describe('Smoke', () => {
       script_path: 'game.ServerScriptService.Main',
       line: 12,
       log_message: '"probe"',
-    }, 'server', 'place:test');
+    }, 'server', 'instance:test');
 
     const pending = claimQueuedRequest(bridge, 'server-1');
     expect(pending?.request).toMatchObject({
@@ -2360,7 +2388,6 @@ describe('Smoke', () => {
         script_path: 'game.ServerScriptService.Main',
         line: 12,
         log_message: '"probe"',
-        __mcp_instance_id: 'place:test',
         __mcp_target_role: 'server',
       },
     });
@@ -2374,11 +2401,11 @@ describe('Smoke', () => {
   test('capture_script_profiler routes to one runtime peer and writes raw json to output_path', async () => {
     const bridge = new BridgeService();
     const tools = new RobloxStudioTools(bridge);
-    bridge.registerInstance(READY);
-    bridge.registerInstance({
-      pluginSessionId: 'client-1',
-      physicalSessionId: 'server-1',
-      instanceId: 'place:test',
+    bridge.registerPeer(READY);
+    bridge.registerPeer({
+      peerId: 'client-1',
+      transportPeerId: 'server-1',
+      instanceId: 'instance:test',
       role: 'client',
       placeId: 0,
       placeName: 'TestPlace',
@@ -2390,7 +2417,7 @@ describe('Smoke', () => {
     const resultPromise = tools.captureScriptProfiler('client-1', {
       duration_ms: 250,
       output_path: outputPath,
-    }, 'place:test');
+    }, 'instance:test');
 
     const pending = claimQueuedRequest(bridge, 'server-1');
     expect(pending?.request).toMatchObject({
@@ -2398,7 +2425,7 @@ describe('Smoke', () => {
       data: {
         duration_ms: 250,
         __mcp_include_raw_json: true,
-        __mcp_instance_id: 'place:test',
+        __mcp_instance_id: 'instance:test',
         __mcp_target_role: 'client-1',
       },
     });
@@ -2425,11 +2452,11 @@ describe('Smoke', () => {
   test('capture_micro_profiler routes to one runtime peer and writes raw snapshot to output_path', async () => {
     const bridge = new BridgeService();
     const tools = new RobloxStudioTools(bridge);
-    bridge.registerInstance(READY);
-    bridge.registerInstance({
-      pluginSessionId: 'server-1',
-      physicalSessionId: 'server-1',
-      instanceId: 'place:test',
+    bridge.registerPeer(READY);
+    bridge.registerPeer({
+      peerId: 'server-1',
+      transportPeerId: 'server-1',
+      instanceId: 'instance:test',
       role: 'server',
       placeId: 0,
       placeName: 'TestPlace',
@@ -2455,7 +2482,7 @@ describe('Smoke', () => {
         top_groups: [{ group: 'Script', total_us: 100, exclusive_us: 40, count: 2 }],
         top_timers: [{ group: 'Script', name: '$Script', total_us: 80, exclusive_us: 30, count: 2 }],
       },
-    }, 'place:test');
+    }, 'instance:test');
 
     const pending = claimQueuedRequest(bridge, 'server-1');
     expect(pending?.request).toMatchObject({
@@ -2468,7 +2495,7 @@ describe('Smoke', () => {
         max_timers_per_group: 3,
         __mcp_include_raw_buffer: true,
         __mcp_include_comparison_index: true,
-        __mcp_instance_id: 'place:test',
+        __mcp_instance_id: 'instance:test',
         __mcp_target_role: 'server',
       },
     });
@@ -2561,14 +2588,14 @@ describe('Smoke', () => {
   test('generate_model routes to edit context and returns brief model path response', async () => {
     const bridge = new BridgeService();
     const tools = new RobloxStudioTools(bridge);
-    bridge.registerInstance(READY);
+    bridge.registerPeer(READY);
 
     const resultPromise = tools.generateModel({
       prompt: 'low-poly sci-fi crate',
       name: 'GeneratedCrate',
       schema: 'Body1',
       timeout_ms: 60000,
-    }, 'place:test');
+    }, 'instance:test');
 
     const pending = claimQueuedRequest(bridge, 'session-1');
     expect(pending?.request).toMatchObject({
@@ -2594,13 +2621,13 @@ describe('Smoke', () => {
   test('generate_model sends schema_groups without a conflicting default schema', async () => {
     const bridge = new BridgeService();
     const tools = new RobloxStudioTools(bridge);
-    bridge.registerInstance(READY);
+    bridge.registerPeer(READY);
 
     const resultPromise = tools.generateModel({
       prompt: 'low-poly vehicle',
       name: 'SegmentedVehicle',
       schema_groups: ['Body', 'Front Left Wheel', 'Front Right Wheel', 'Rear Left Wheel', 'Rear Right Wheel'],
-    }, 'place:test');
+    }, 'instance:test');
 
     const pending = claimQueuedRequest(bridge, 'session-1');
     expect(pending?.request.endpoint).toBe('/api/generate-model');
@@ -2644,7 +2671,7 @@ describe('Smoke', () => {
     delete process.env.ROBLOX_CREATOR_GROUP_ID;
 
     try {
-      const imageId = await tools.uploadGenerateModelReferenceImage(Buffer.from('not actually png'), 'place:test');
+      const imageId = await tools.uploadGenerateModelReferenceImage(Buffer.from('not actually png'), 'instance:test');
 
       expect(imageId).toBe(777);
       expect(tools.openCloudClient.createAsset).toHaveBeenCalledWith(
@@ -2677,7 +2704,7 @@ describe('Smoke', () => {
 
     const imageId = await tools.uploadGenerateModelReferenceImage(
       Buffer.from('not actually png'),
-      'place:test',
+      'instance:test',
     );
 
     expect(imageId).toBe(888);
@@ -2694,9 +2721,9 @@ describe('Smoke', () => {
   test('get_script_source returns structured truncation metadata', async () => {
     const bridge = new BridgeService();
     const tools = new RobloxStudioTools(bridge);
-    bridge.registerInstance(READY);
+    bridge.registerPeer(READY);
 
-    const resultPromise = tools.getScriptSource('game.ServerScriptService.Manager', undefined, undefined, 'place:test');
+    const resultPromise = tools.getScriptSource('game.ServerScriptService.Manager', undefined, undefined, 'instance:test');
     const pending = claimQueuedRequest(bridge, 'session-1');
     expect(pending?.request.endpoint).toBe('/api/get-script-source');
     bridge.resolveRequest(pending!.requestId, {
@@ -2729,21 +2756,21 @@ describe('Smoke', () => {
   test('start_playtest reports already running when runtime peers are connected', async () => {
     const bridge = new BridgeService();
     const tools = new RobloxStudioTools(bridge);
-    bridge.registerInstance(READY);
-    bridge.registerInstance({
-      pluginSessionId: 'server-1',
-      physicalSessionId: 'server-1',
-      instanceId: 'place:test',
+    bridge.registerPeer(READY);
+    bridge.registerPeer({
+      peerId: 'server-1',
+      transportPeerId: 'server-1',
+      instanceId: 'instance:test',
       role: 'server',
       placeId: 0,
       placeName: 'TestPlace',
       dataModelName: 'Game',
       isRunning: true,
     });
-    bridge.registerInstance({
-      pluginSessionId: 'client-1',
-      physicalSessionId: 'server-1',
-      instanceId: 'place:test',
+    bridge.registerPeer({
+      peerId: 'client-1',
+      transportPeerId: 'server-1',
+      instanceId: 'instance:test',
       role: 'client',
       placeId: 0,
       placeName: 'TestPlace',
@@ -2751,13 +2778,13 @@ describe('Smoke', () => {
       isRunning: true,
     });
 
-    const result = await tools.startPlaytest('play', undefined, 'place:test');
+    const result = await tools.startPlaytest('play', undefined, 'instance:test');
     expect(claimQueuedRequest(bridge, 'session-1')).toBeNull();
     const body = JSON.parse(result.content[0].text);
     expect(body).toMatchObject({
       success: false,
       error: 'Playtest already running.',
-      message: 'A playtest is already running for this Studio place. Stop the current playtest before starting another.',
+      message: 'A playtest is already running for this Studio process scope. Stop the current playtest before starting another.',
       runtimeReady: true,
       timedOut: false,
       roles: ['edit', 'server', 'client-1'],
@@ -2768,7 +2795,7 @@ describe('Smoke', () => {
   test('start_playtest play mode waits for fresh server and client peers', async () => {
     const bridge = new BridgeService();
     const tools = new RobloxStudioTools(bridge);
-    bridge.registerInstance(READY);
+    bridge.registerPeer(READY);
 
     const resultPromise = tools.startPlaytest('play');
     const pending = claimQueuedRequest(bridge, 'session-1');
@@ -2784,10 +2811,10 @@ describe('Smoke', () => {
     await new Promise((resolve) => setTimeout(resolve, 20));
     expect(settled).toBe(false);
 
-    bridge.registerInstance({
-      pluginSessionId: 'server-1',
-      physicalSessionId: 'server-1',
-      instanceId: 'place:test',
+    bridge.registerPeer({
+      peerId: 'server-1',
+      transportPeerId: 'server-1',
+      instanceId: 'instance:test',
       role: 'server',
       placeId: 0,
       placeName: 'TestPlace',
@@ -2798,10 +2825,10 @@ describe('Smoke', () => {
     await new Promise((resolve) => setTimeout(resolve, 20));
     expect(settled).toBe(false);
 
-    bridge.registerInstance({
-      pluginSessionId: 'client-1',
-      physicalSessionId: 'server-1',
-      instanceId: 'place:test',
+    bridge.registerPeer({
+      peerId: 'client-1',
+      transportPeerId: 'server-1',
+      instanceId: 'instance:test',
       role: 'client',
       placeId: 0,
       placeName: 'TestPlace',
@@ -2823,7 +2850,7 @@ describe('Smoke', () => {
   test('start_playtest run mode waits only for a fresh server peer', async () => {
     const bridge = new BridgeService();
     const tools = new RobloxStudioTools(bridge);
-    bridge.registerInstance(READY);
+    bridge.registerPeer(READY);
 
     const resultPromise = tools.startPlaytest('run');
     const pending = claimQueuedRequest(bridge, 'session-1');
@@ -2839,10 +2866,10 @@ describe('Smoke', () => {
     await new Promise((resolve) => setTimeout(resolve, 20));
     expect(settled).toBe(false);
 
-    bridge.registerInstance({
-      pluginSessionId: 'server-1',
-      physicalSessionId: 'server-1',
-      instanceId: 'place:test',
+    bridge.registerPeer({
+      peerId: 'server-1',
+      transportPeerId: 'server-1',
+      instanceId: 'instance:test',
       role: 'server',
       placeId: 0,
       placeName: 'TestPlace',
@@ -2864,21 +2891,21 @@ describe('Smoke', () => {
   test('stop_playtest waits for runtime peers to disconnect', async () => {
     const bridge = new BridgeService();
     const tools = new RobloxStudioTools(bridge);
-    bridge.registerInstance(READY);
-    bridge.registerInstance({
-      pluginSessionId: 'server-1',
-      physicalSessionId: 'server-1',
-      instanceId: 'place:test',
+    bridge.registerPeer(READY);
+    bridge.registerPeer({
+      peerId: 'server-1',
+      transportPeerId: 'server-1',
+      instanceId: 'instance:test',
       role: 'server',
       placeId: 0,
       placeName: 'TestPlace',
       dataModelName: 'TestPlace',
       isRunning: true,
     });
-    bridge.registerInstance({
-      pluginSessionId: 'client-1',
-      physicalSessionId: 'server-1',
-      instanceId: 'place:test',
+    bridge.registerPeer({
+      peerId: 'client-1',
+      transportPeerId: 'server-1',
+      instanceId: 'instance:test',
       role: 'client',
       placeId: 0,
       placeName: 'TestPlace',
@@ -2900,8 +2927,8 @@ describe('Smoke', () => {
     await new Promise((resolve) => setTimeout(resolve, 20));
     expect(settled).toBe(false);
 
-    bridge.unregisterInstance('server-1');
-    bridge.unregisterInstance('client-1');
+    bridge.unregisterPeer('server-1');
+    bridge.unregisterPeer('client-1');
 
     const result = await resultPromise;
     const body = JSON.parse(result.content[0].text);
@@ -2916,21 +2943,21 @@ describe('Smoke', () => {
   test('stop_playtest reports stuck teardown when runtime peers do not disconnect', async () => {
     const bridge = new BridgeService();
     const tools = new RobloxStudioTools(bridge);
-    bridge.registerInstance(READY);
-    bridge.registerInstance({
-      pluginSessionId: 'server-1',
-      physicalSessionId: 'server-1',
-      instanceId: 'place:test',
+    bridge.registerPeer(READY);
+    bridge.registerPeer({
+      peerId: 'server-1',
+      transportPeerId: 'server-1',
+      instanceId: 'instance:test',
       role: 'server',
       placeId: 0,
       placeName: 'TestPlace',
       dataModelName: 'TestPlace',
       isRunning: true,
     });
-    bridge.registerInstance({
-      pluginSessionId: 'client-1',
-      physicalSessionId: 'server-1',
-      instanceId: 'place:test',
+    bridge.registerPeer({
+      peerId: 'client-1',
+      transportPeerId: 'server-1',
+      instanceId: 'instance:test',
       role: 'client',
       placeId: 0,
       placeName: 'TestPlace',
@@ -2968,11 +2995,11 @@ describe('Smoke', () => {
   test('stop_playtest reports edit request failure when runtime peers remain', async () => {
     const bridge = new BridgeService();
     const tools = new RobloxStudioTools(bridge);
-    bridge.registerInstance(READY);
-    bridge.registerInstance({
-      pluginSessionId: 'server-1',
-      physicalSessionId: 'server-1',
-      instanceId: 'place:test',
+    bridge.registerPeer(READY);
+    bridge.registerPeer({
+      peerId: 'server-1',
+      transportPeerId: 'server-1',
+      instanceId: 'instance:test',
       role: 'server',
       placeId: 0,
       placeName: 'TestPlace',
@@ -3002,31 +3029,31 @@ describe('Smoke', () => {
     expect(body.fallbacks).toBeUndefined();
   });
 
-  test('stop_playtest accepts stale anon id after publish and waits for runtime peers', async () => {
+  test('stop_playtest keeps the process ID after publication metadata changes', async () => {
     const bridge = new BridgeService();
     const tools = new RobloxStudioTools(bridge);
-    bridge.registerInstance({
+    bridge.registerPeer({
       ...READY,
-      pluginSessionId: 'edit-stale',
-      physicalSessionId: 'edit-stale',
-      instanceId: 'anon:old-file-id',
+      peerId: 'edit-stale',
+      transportPeerId: 'edit-stale',
+      instanceId: 'instance:old-file',
       placeId: 0,
     });
-    bridge.updateInstanceMetadata('edit-stale', { placeId: 12345 });
-    bridge.registerInstance({
-      pluginSessionId: 'server-1',
-      physicalSessionId: 'server-1',
-      instanceId: 'place:12345',
+    bridge.updatePeerMetadata('edit-stale', { placeId: 12345 });
+    bridge.registerPeer({
+      peerId: 'server-1',
+      transportPeerId: 'server-1',
+      instanceId: 'instance:old-file',
       role: 'server',
       placeId: 12345,
       placeName: 'TestPlace',
       dataModelName: 'TestPlace',
       isRunning: true,
     });
-    bridge.registerInstance({
-      pluginSessionId: 'client-1',
-      physicalSessionId: 'server-1',
-      instanceId: 'place:12345',
+    bridge.registerPeer({
+      peerId: 'client-1',
+      transportPeerId: 'server-1',
+      instanceId: 'instance:old-file',
       role: 'client',
       placeId: 12345,
       placeName: 'TestPlace',
@@ -3034,7 +3061,7 @@ describe('Smoke', () => {
       isRunning: true,
     });
 
-    const resultPromise = tools.stopPlaytest('anon:old-file-id');
+    const resultPromise = tools.stopPlaytest('instance:old-file');
     const pending = claimQueuedRequest(bridge, 'edit-stale');
     expect(pending).toBeTruthy();
     bridge.resolveRequest(pending!.requestId, { success: true, message: 'stopping' });
@@ -3048,8 +3075,8 @@ describe('Smoke', () => {
     await new Promise((resolve) => setTimeout(resolve, 20));
     expect(settled).toBe(false);
 
-    bridge.unregisterInstance('server-1');
-    bridge.unregisterInstance('client-1');
+    bridge.unregisterPeer('server-1');
+    bridge.unregisterPeer('client-1');
 
     const result = await resultPromise;
     const body = JSON.parse(result.content[0].text);
@@ -3064,16 +3091,16 @@ describe('Smoke', () => {
   test('solo_playtest start returns a brief ready response', async () => {
     const bridge = new BridgeService();
     const tools = new RobloxStudioTools(bridge);
-    bridge.registerInstance(READY);
+    bridge.registerPeer(READY);
 
     const resultPromise = tools.soloPlaytest('start', 'run', 1);
     const pending = claimQueuedRequest(bridge, 'session-1');
     expect(pending).toBeTruthy();
     bridge.resolveRequest(pending!.requestId, { success: true, message: 'started' });
-    bridge.registerInstance({
-      pluginSessionId: 'server-1',
-      physicalSessionId: 'server-1',
-      instanceId: 'place:test',
+    bridge.registerPeer({
+      peerId: 'server-1',
+      transportPeerId: 'server-1',
+      instanceId: 'instance:test',
       role: 'server',
       placeId: 0,
       placeName: 'TestPlace',
@@ -3094,11 +3121,11 @@ describe('Smoke', () => {
   test('solo_playtest stop returns a brief stopped response', async () => {
     const bridge = new BridgeService();
     const tools = new RobloxStudioTools(bridge);
-    bridge.registerInstance(READY);
-    bridge.registerInstance({
-      pluginSessionId: 'server-1',
-      physicalSessionId: 'server-1',
-      instanceId: 'place:test',
+    bridge.registerPeer(READY);
+    bridge.registerPeer({
+      peerId: 'server-1',
+      transportPeerId: 'server-1',
+      instanceId: 'instance:test',
       role: 'server',
       placeId: 0,
       placeName: 'TestPlace',
@@ -3110,7 +3137,7 @@ describe('Smoke', () => {
     const pending = claimQueuedRequest(bridge, 'session-1');
     expect(pending).toBeTruthy();
     bridge.resolveRequest(pending!.requestId, { success: true, message: 'stopping' });
-    bridge.unregisterInstance('server-1');
+    bridge.unregisterPeer('server-1');
 
     const result = await resultPromise;
     const body = JSON.parse(result.content[0].text);
@@ -3124,7 +3151,7 @@ describe('Smoke', () => {
   test('multiplayer_playtest status returns a brief state summary', async () => {
     const bridge = new BridgeService();
     const tools = new RobloxStudioTools(bridge);
-    bridge.registerInstance(READY);
+    bridge.registerPeer(READY);
     (tools as any)._buildMultiplayerState = async () => ({
       phase: 'running',
       peers: [{ role: 'edit' }, { role: 'server' }, { role: 'client-1' }],
@@ -3133,7 +3160,7 @@ describe('Smoke', () => {
       testArgs: { noisy: true },
     });
 
-    const result = await tools.multiplayerPlaytest('status', undefined, undefined, undefined, undefined, undefined, 'place:test');
+    const result = await tools.multiplayerPlaytest('status', undefined, undefined, undefined, undefined, undefined, 'instance:test');
     const body = JSON.parse(result.content[0].text);
     expect(body).toEqual({
       success: true,
@@ -3152,9 +3179,9 @@ describe('Smoke', () => {
       clientRoles: ['client-1'],
       playerCount: 1,
     });
-    bridge.registerInstance(READY);
+    bridge.registerPeer(READY);
 
-    const resultPromise = tools.multiplayerPlaytest('start', 1, undefined, undefined, undefined, 2, 'place:test');
+    const resultPromise = tools.multiplayerPlaytest('start', 1, undefined, undefined, undefined, 2, 'instance:test');
     const pending = claimQueuedRequest(bridge, 'session-1');
     expect(pending?.request).toMatchObject({
       endpoint: '/api/multiplayer-test-start',
@@ -3163,21 +3190,24 @@ describe('Smoke', () => {
     bridge.resolveRequest(pending!.requestId, {
       success: true,
       message: 'Multiplayer Studio test starting with 1 player(s).',
+      testId: 'test-1',
     });
-    bridge.registerInstance({
-      pluginSessionId: 'server-1',
-      physicalSessionId: 'server-1',
-      instanceId: 'place:test',
+    bridge.registerPeer({
+      peerId: 'server-1',
+      transportPeerId: 'server-1',
+      instanceId: 'instance:server',
+      multiplayerGroupId: 'test-1',
       role: 'server',
       placeId: 0,
       placeName: 'Game',
       dataModelName: 'Game',
       isRunning: true,
     });
-    bridge.registerInstance({
-      pluginSessionId: 'client-1',
-      physicalSessionId: 'server-1',
-      instanceId: 'place:test',
+    bridge.registerPeer({
+      peerId: 'client-1',
+      transportPeerId: 'server-1',
+      instanceId: 'instance:client-1',
+      multiplayerGroupId: 'test-1',
       role: 'client',
       placeId: 0,
       placeName: 'Game',
@@ -3191,6 +3221,7 @@ describe('Smoke', () => {
       success: true,
       action: 'start',
       message: 'Multiplayer playtest started.',
+      multiplayerGroupId: 'test-1',
       roles: ['edit', 'server', 'client-1'],
       playerCount: 1,
     });
@@ -3204,13 +3235,14 @@ describe('Smoke', () => {
       clientRoles: [],
       playerCount: 0,
     });
-    bridge.registerInstance(READY);
+    bridge.registerPeer(READY);
 
-    const resultPromise = tools.multiplayerPlaytest('start', 1, undefined, undefined, undefined, 0.1, 'place:test');
+    const resultPromise = tools.multiplayerPlaytest('start', 1, undefined, undefined, undefined, 0.1, 'instance:test');
     const pending = claimQueuedRequest(bridge, 'session-1');
     bridge.resolveRequest(pending!.requestId, {
       success: true,
       message: 'Multiplayer Studio test starting with 1 player(s).',
+      testId: 'test-timeout',
     });
 
     const result = await resultPromise;
@@ -3220,8 +3252,16 @@ describe('Smoke', () => {
       action: 'start',
       error: 'multiplayer_start_not_detected',
       message: 'Multiplayer Studio test start was requested, but MCP did not detect the required server/client peers before timeout.',
+      multiplayerGroupId: 'test-timeout',
       roles: ['edit'],
     });
+    expect(bridge.getMultiplayerGroups()).toEqual([
+      expect.objectContaining({
+        id: 'test-timeout',
+        controllerInstanceId: 'instance:test',
+        instanceIds: ['instance:test'],
+      }),
+    ]);
   });
 
   test('multiplayer_playtest add_players returns a brief result', async () => {
@@ -3244,7 +3284,7 @@ describe('Smoke', () => {
       }],
     }));
 
-    const result = await tools.multiplayerPlaytest('add_players', 1, undefined, undefined, undefined, 2, 'place:test');
+    const result = await tools.multiplayerPlaytest('add_players', 1, undefined, undefined, undefined, 2, 'instance:test');
     expect(JSON.parse(result.content[0].text)).toEqual({
       success: true,
       action: 'add_players',
@@ -3269,7 +3309,7 @@ describe('Smoke', () => {
       }],
     }));
 
-    const result = await tools.multiplayerPlaytest('leave_client', undefined, 'client-2', undefined, undefined, 2, 'place:test');
+    const result = await tools.multiplayerPlaytest('leave_client', undefined, 'client-2', undefined, undefined, 2, 'instance:test');
     expect(JSON.parse(result.content[0].text)).toEqual({
       success: true,
       action: 'leave_client',
@@ -3284,11 +3324,13 @@ describe('Smoke', () => {
     tools._waitForMultiplayerEditDone = jest.fn(async () => true);
     tools._waitForRuntimeRoles = jest.fn(async () => ({ ok: true, timedOut: false, roles: ['edit'] }));
     tools._buildMultiplayerState = jest.fn(async () => ({ phase: 'completed', peers: [{ role: 'edit' }] }));
-    bridge.registerInstance(READY);
-    bridge.registerInstance({
-      pluginSessionId: 'server-1',
-      physicalSessionId: 'server-1',
-      instanceId: 'place:test',
+    bridge.createMultiplayerGroup('test-end', 'instance:test');
+    bridge.registerPeer(READY);
+    bridge.registerPeer({
+      peerId: 'server-1',
+      transportPeerId: 'server-1',
+      instanceId: 'instance:server',
+      multiplayerGroupId: 'test-end',
       role: 'server',
       placeId: 0,
       placeName: 'Game',
@@ -3296,7 +3338,7 @@ describe('Smoke', () => {
       isRunning: true,
     });
 
-    const wrapperPromise = tools.multiplayerPlaytest('end', undefined, undefined, undefined, 'done', 1, 'place:test');
+    const wrapperPromise = tools.multiplayerPlaytest('end', undefined, undefined, undefined, 'done', 1, 'instance:test');
     const pending = claimQueuedRequest(bridge, 'server-1');
     expect(pending?.request).toMatchObject({
       endpoint: '/api/multiplayer-test-end',
@@ -3313,11 +3355,13 @@ describe('Smoke', () => {
     expect(wrapperBody).toEqual({
       success: true,
       action: 'end',
+      multiplayerGroupId: 'test-end',
       message: 'Multiplayer playtest ended.',
       teardownConfirmed: true,
     });
-    expect(tools._waitForMultiplayerEditDone).toHaveBeenCalledWith('place:test', 1);
-    expect(tools._waitForRuntimeRoles).toHaveBeenCalledWith('place:test', { noRuntime: true }, 1);
+    expect(tools._waitForMultiplayerEditDone).toHaveBeenCalledWith('instance:test', 1);
+    expect(tools._waitForRuntimeRoles).toHaveBeenCalledWith('instance:test', { noRuntime: true }, 1);
+    expect(bridge.getMultiplayerGroups()).toEqual([]);
   });
 
   test('multiplayer start keeps waiting when edit phase completes before peers register', async () => {
@@ -3333,7 +3377,7 @@ describe('Smoke', () => {
       })),
     };
 
-    const result = await tools._waitForMultiplayerStart('place:test', 1, 1);
+    const result = await tools._waitForMultiplayerStart('instance:test', 1, 1);
 
     expect(result).toEqual({
       ok: true,
@@ -3347,11 +3391,11 @@ describe('Smoke', () => {
   test('get_scene_analysis fans out to connected peers', async () => {
     const bridge = new BridgeService();
     const tools = new RobloxStudioTools(bridge);
-    bridge.registerInstance(READY);
-    bridge.registerInstance({
-      pluginSessionId: 'server-1',
-      physicalSessionId: 'server-1',
-      instanceId: 'place:test',
+    bridge.registerPeer(READY);
+    bridge.registerPeer({
+      peerId: 'server-1',
+      transportPeerId: 'server-1',
+      instanceId: 'instance:test',
       role: 'server',
       placeId: 0,
       placeName: 'TestPlace',
@@ -3359,7 +3403,7 @@ describe('Smoke', () => {
       isRunning: true,
     });
 
-    const resultPromise = tools.getSceneAnalysis('script_memory', 'all', 5, false, 'place:test');
+    const resultPromise = tools.getSceneAnalysis('script_memory', 'all', 5, false, 'instance:test');
     const editPending = claimQueuedRequest(bridge, 'session-1');
     const serverPending = claimQueuedRequest(bridge, 'server-1');
     expect(editPending?.request).toMatchObject({
@@ -3385,31 +3429,31 @@ describe('Smoke', () => {
   test('set_network_profile fans out to connected clients only', async () => {
     const bridge = new BridgeService();
     const tools = new RobloxStudioTools(bridge);
-    bridge.registerInstance(READY);
-    bridge.registerInstance({
-      pluginSessionId: 'server-1',
-      physicalSessionId: 'server-1',
-      instanceId: 'place:test',
+    bridge.registerPeer(READY);
+    bridge.registerPeer({
+      peerId: 'server-1',
+      transportPeerId: 'server-1',
+      instanceId: 'instance:test',
       role: 'server',
       placeId: 0,
       placeName: 'TestPlace',
       dataModelName: 'TestPlace',
       isRunning: true,
     });
-    bridge.registerInstance({
-      pluginSessionId: 'client-1',
-      physicalSessionId: 'server-1',
-      instanceId: 'place:test',
+    bridge.registerPeer({
+      peerId: 'client-1',
+      transportPeerId: 'server-1',
+      instanceId: 'instance:test',
       role: 'client',
       placeId: 0,
       placeName: 'TestPlace',
       dataModelName: 'TestPlace',
       isRunning: true,
     });
-    bridge.registerInstance({
-      pluginSessionId: 'client-2',
-      physicalSessionId: 'server-1',
-      instanceId: 'place:test',
+    bridge.registerPeer({
+      peerId: 'client-2',
+      transportPeerId: 'server-1',
+      instanceId: 'instance:test',
       role: 'client',
       placeId: 0,
       placeName: 'TestPlace',
@@ -3417,7 +3461,7 @@ describe('Smoke', () => {
       isRunning: true,
     });
 
-    const resultPromise = tools.setNetworkProfile('good', 'all-clients', undefined, 'place:test');
+    const resultPromise = tools.setNetworkProfile('good', 'all-clients', undefined, 'instance:test');
     const client1Pending = claimQueuedRequest(bridge, 'server-1');
     const client2Pending = claimQueuedRequest(bridge, 'server-1');
     const editPending = claimQueuedRequest(bridge, 'session-1');
@@ -3472,29 +3516,29 @@ describe('Smoke', () => {
   test('set_network_profile rejects non-client targets', async () => {
     const bridge = new BridgeService();
     const tools = new RobloxStudioTools(bridge);
-    bridge.registerInstance(READY);
+    bridge.registerPeer(READY);
 
-    await expect(tools.setNetworkProfile('good', 'server', undefined, 'place:test')).rejects.toThrow(/client-N|all-clients/);
+    await expect(tools.setNetworkProfile('good', 'server', undefined, 'instance:test')).rejects.toThrow(/client-N|all-clients/);
   });
 
   test('set_network_profile rejects the tool call when any fanout target fails', async () => {
     const bridge = new BridgeService();
     const tools = new RobloxStudioTools(bridge);
-    bridge.registerInstance(READY);
-    bridge.registerInstance({
-      pluginSessionId: 'client-1',
-      physicalSessionId: 'server-1',
-      instanceId: 'place:test',
+    bridge.registerPeer(READY);
+    bridge.registerPeer({
+      peerId: 'client-1',
+      transportPeerId: 'server-1',
+      instanceId: 'instance:test',
       role: 'client',
       placeId: 0,
       placeName: 'TestPlace',
       dataModelName: 'TestPlace',
       isRunning: true,
     });
-    bridge.registerInstance({
-      pluginSessionId: 'client-2',
-      physicalSessionId: 'server-1',
-      instanceId: 'place:test',
+    bridge.registerPeer({
+      peerId: 'client-2',
+      transportPeerId: 'server-1',
+      instanceId: 'instance:test',
       role: 'client',
       placeId: 0,
       placeName: 'TestPlace',
@@ -3502,7 +3546,7 @@ describe('Smoke', () => {
       isRunning: true,
     });
 
-    const resultPromise = tools.setNetworkProfile('good', 'all-clients', undefined, 'place:test');
+    const resultPromise = tools.setNetworkProfile('good', 'all-clients', undefined, 'instance:test');
     const client1Pending = claimQueuedRequest(bridge, 'server-1');
     const client2Pending = claimQueuedRequest(bridge, 'server-1');
     bridge.resolveRequest(client1Pending!.requestId, {
@@ -3551,11 +3595,11 @@ describe('Smoke', () => {
   test('set_network_profile allows packet loss at Roblox engine limit', async () => {
     const bridge = new BridgeService();
     const tools = new RobloxStudioTools(bridge);
-    bridge.registerInstance(READY);
-    bridge.registerInstance({
-      pluginSessionId: 'client-1',
-      physicalSessionId: 'server-1',
-      instanceId: 'place:test',
+    bridge.registerPeer(READY);
+    bridge.registerPeer({
+      peerId: 'client-1',
+      transportPeerId: 'server-1',
+      instanceId: 'instance:test',
       role: 'client',
       placeId: 0,
       placeName: 'TestPlace',
@@ -3565,7 +3609,7 @@ describe('Smoke', () => {
 
     const resultPromise = tools.setNetworkProfile('custom', 'client-1', {
       InboundNetworkLossPercent: 0.5,
-    }, 'place:test');
+    }, 'instance:test');
     const pending = claimQueuedRequest(bridge, 'server-1');
     expect(pending?.request).toMatchObject({ endpoint: '/api/execute-luau' });
     expect(pending?.request.data.code).toContain('\\"InboundNetworkLossPercent\\":0.5');
@@ -3589,21 +3633,21 @@ describe('Smoke', () => {
   test('get_simulation_state reads edit and connected clients while skipping server', async () => {
     const bridge = new BridgeService();
     const tools = new RobloxStudioTools(bridge);
-    bridge.registerInstance(READY);
-    bridge.registerInstance({
-      pluginSessionId: 'server-1',
-      physicalSessionId: 'server-1',
-      instanceId: 'place:test',
+    bridge.registerPeer(READY);
+    bridge.registerPeer({
+      peerId: 'server-1',
+      transportPeerId: 'server-1',
+      instanceId: 'instance:test',
       role: 'server',
       placeId: 0,
       placeName: 'TestPlace',
       dataModelName: 'TestPlace',
       isRunning: true,
     });
-    bridge.registerInstance({
-      pluginSessionId: 'client-1',
-      physicalSessionId: 'server-1',
-      instanceId: 'place:test',
+    bridge.registerPeer({
+      peerId: 'client-1',
+      transportPeerId: 'server-1',
+      instanceId: 'instance:test',
       role: 'client',
       placeId: 0,
       placeName: 'TestPlace',
@@ -3611,7 +3655,7 @@ describe('Smoke', () => {
       isRunning: true,
     });
 
-    const resultPromise = tools.getSimulationState('both', 'edit-and-clients', 'place:test');
+    const resultPromise = tools.getSimulationState('both', 'edit-and-clients', 'instance:test');
     const editNetworkPending = claimQueuedRequest(bridge, 'session-1');
     const clientNetworkPending = claimQueuedRequest(bridge, 'server-1');
     const serverPending = claimQueuedRequest(bridge, 'server-1');
@@ -3674,9 +3718,9 @@ describe('Smoke', () => {
   test('get_simulation_state respects network-only and device-only includes', async () => {
     const bridge = new BridgeService();
     const tools = new RobloxStudioTools(bridge);
-    bridge.registerInstance(READY);
+    bridge.registerPeer(READY);
 
-    const networkOnlyPromise = tools.getSimulationState('network', 'edit', 'place:test');
+    const networkOnlyPromise = tools.getSimulationState('network', 'edit', 'instance:test');
     const networkPending = claimQueuedRequest(bridge, 'session-1');
     expect(networkPending?.request).toMatchObject({ endpoint: '/api/execute-luau' });
     expect(networkPending?.request.data.code).toContain('NetworkSettings');
@@ -3695,7 +3739,7 @@ describe('Smoke', () => {
     });
     expect(networkOnly.roles.edit.deviceSimulator).toBeUndefined();
 
-    const deviceOnlyPromise = tools.getSimulationState('deviceSimulator', 'edit', 'place:test');
+    const deviceOnlyPromise = tools.getSimulationState('deviceSimulator', 'edit', 'instance:test');
     const devicePending = claimQueuedRequest(bridge, 'session-1');
     expect(devicePending?.request).toMatchObject({ endpoint: '/api/execute-luau' });
     expect(devicePending?.request.data.code).toContain('StudioDeviceSimulatorService');
@@ -3716,21 +3760,21 @@ describe('Smoke', () => {
   test('reset_simulation_state resets network and device state for edit and clients only', async () => {
     const bridge = new BridgeService();
     const tools = new RobloxStudioTools(bridge);
-    bridge.registerInstance(READY);
-    bridge.registerInstance({
-      pluginSessionId: 'server-1',
-      physicalSessionId: 'server-1',
-      instanceId: 'place:test',
+    bridge.registerPeer(READY);
+    bridge.registerPeer({
+      peerId: 'server-1',
+      transportPeerId: 'server-1',
+      instanceId: 'instance:test',
       role: 'server',
       placeId: 0,
       placeName: 'TestPlace',
       dataModelName: 'TestPlace',
       isRunning: true,
     });
-    bridge.registerInstance({
-      pluginSessionId: 'client-1',
-      physicalSessionId: 'server-1',
-      instanceId: 'place:test',
+    bridge.registerPeer({
+      peerId: 'client-1',
+      transportPeerId: 'server-1',
+      instanceId: 'instance:test',
       role: 'client',
       placeId: 0,
       placeName: 'TestPlace',
@@ -3738,7 +3782,7 @@ describe('Smoke', () => {
       isRunning: true,
     });
 
-    const resultPromise = tools.resetSimulationState(undefined, undefined, undefined, 'place:test');
+    const resultPromise = tools.resetSimulationState(undefined, undefined, undefined, 'instance:test');
     const editNetworkPending = claimQueuedRequest(bridge, 'session-1');
     const clientNetworkPending = claimQueuedRequest(bridge, 'server-1');
     const serverPending = claimQueuedRequest(bridge, 'server-1');
@@ -3811,9 +3855,9 @@ describe('Smoke', () => {
   test('reset_simulation_state rejects the tool call when any reset operation fails', async () => {
     const bridge = new BridgeService();
     const tools = new RobloxStudioTools(bridge);
-    bridge.registerInstance(READY);
+    bridge.registerPeer(READY);
 
-    const resultPromise = tools.resetSimulationState('edit', true, false, 'place:test');
+    const resultPromise = tools.resetSimulationState('edit', true, false, 'instance:test');
     const pending = claimQueuedRequest(bridge, 'session-1');
     expect(pending?.request).toMatchObject({ endpoint: '/api/execute-luau' });
     bridge.rejectRequest(pending!.requestId, new Error('network reset boom'));
@@ -3824,9 +3868,9 @@ describe('Smoke', () => {
   test('reset_simulation_state warns but does not fail when all-clients has no clients', async () => {
     const bridge = new BridgeService();
     const tools = new RobloxStudioTools(bridge);
-    bridge.registerInstance(READY);
+    bridge.registerPeer(READY);
 
-    const result = await tools.resetSimulationState('all-clients', true, false, 'place:test');
+    const result = await tools.resetSimulationState('all-clients', true, false, 'instance:test');
     const body = JSON.parse(result.content[0].text);
     expect(body).toMatchObject({
       success: true,
@@ -3842,19 +3886,19 @@ describe('Smoke', () => {
   test('simulation state tools reject server target and empty reset', async () => {
     const bridge = new BridgeService();
     const tools = new RobloxStudioTools(bridge);
-    bridge.registerInstance(READY);
+    bridge.registerPeer(READY);
 
-    await expect(tools.getSimulationState('both', 'server', 'place:test')).rejects.toThrow(/edit|client-N|all-clients|edit-and-clients/);
-    await expect(tools.resetSimulationState('server', undefined, undefined, 'place:test')).rejects.toThrow(/edit|client-N|all-clients|edit-and-clients/);
-    await expect(tools.resetSimulationState('edit', false, false, 'place:test')).rejects.toThrow(/network=true and\/or deviceSimulator=true/);
+    await expect(tools.getSimulationState('both', 'server', 'instance:test')).rejects.toThrow(/edit|client-N|all-clients|edit-and-clients/);
+    await expect(tools.resetSimulationState('server', undefined, undefined, 'instance:test')).rejects.toThrow(/edit|client-N|all-clients|edit-and-clients/);
+    await expect(tools.resetSimulationState('edit', false, false, 'instance:test')).rejects.toThrow(/network=true and\/or deviceSimulator=true/);
   });
 
   test('get_device_simulator_state defaults to the edit peer', async () => {
     const bridge = new BridgeService();
     const tools = new RobloxStudioTools(bridge);
-    bridge.registerInstance(READY);
+    bridge.registerPeer(READY);
 
-    const resultPromise = tools.getDeviceSimulatorState(undefined, undefined, undefined, 'place:test');
+    const resultPromise = tools.getDeviceSimulatorState(undefined, undefined, undefined, 'instance:test');
     const pending = claimQueuedRequest(bridge, 'session-1');
     expect(pending?.request).toMatchObject({ endpoint: '/api/execute-luau' });
     expect(pending?.request.data.code).toContain('StudioDeviceSimulatorService');
@@ -3884,31 +3928,31 @@ describe('Smoke', () => {
   test('set_device_simulator fans out to connected clients only', async () => {
     const bridge = new BridgeService();
     const tools = new RobloxStudioTools(bridge);
-    bridge.registerInstance(READY);
-    bridge.registerInstance({
-      pluginSessionId: 'server-1',
-      physicalSessionId: 'server-1',
-      instanceId: 'place:test',
+    bridge.registerPeer(READY);
+    bridge.registerPeer({
+      peerId: 'server-1',
+      transportPeerId: 'server-1',
+      instanceId: 'instance:test',
       role: 'server',
       placeId: 0,
       placeName: 'TestPlace',
       dataModelName: 'TestPlace',
       isRunning: true,
     });
-    bridge.registerInstance({
-      pluginSessionId: 'client-1',
-      physicalSessionId: 'server-1',
-      instanceId: 'place:test',
+    bridge.registerPeer({
+      peerId: 'client-1',
+      transportPeerId: 'server-1',
+      instanceId: 'instance:test',
       role: 'client',
       placeId: 0,
       placeName: 'TestPlace',
       dataModelName: 'TestPlace',
       isRunning: true,
     });
-    bridge.registerInstance({
-      pluginSessionId: 'client-2',
-      physicalSessionId: 'server-1',
-      instanceId: 'place:test',
+    bridge.registerPeer({
+      peerId: 'client-2',
+      transportPeerId: 'server-1',
+      instanceId: 'instance:test',
       role: 'client',
       placeId: 0,
       placeName: 'TestPlace',
@@ -3916,7 +3960,7 @@ describe('Smoke', () => {
       isRunning: true,
     });
 
-    const resultPromise = tools.setDeviceSimulator('all-clients', 'iphone_XR', 'LandscapeRight', undefined, undefined, undefined, undefined, 'place:test');
+    const resultPromise = tools.setDeviceSimulator('all-clients', 'iphone_XR', 'LandscapeRight', undefined, undefined, undefined, undefined, 'instance:test');
     const client1Pending = claimQueuedRequest(bridge, 'server-1');
     const client2Pending = claimQueuedRequest(bridge, 'server-1');
     const editPending = claimQueuedRequest(bridge, 'session-1');
@@ -3953,30 +3997,30 @@ describe('Smoke', () => {
   test('set_device_simulator rejects server target and stopSimulation combinations', async () => {
     const bridge = new BridgeService();
     const tools = new RobloxStudioTools(bridge);
-    bridge.registerInstance(READY);
+    bridge.registerPeer(READY);
 
-    await expect(tools.setDeviceSimulator('server', 'iphone_XR', undefined, undefined, undefined, undefined, undefined, 'place:test')).rejects.toThrow(/edit|client-N/);
-    await expect(tools.setDeviceSimulator('edit', 'iphone_XR', undefined, undefined, undefined, undefined, true, 'place:test')).rejects.toThrow(/stopSimulation=true cannot be combined/);
+    await expect(tools.setDeviceSimulator('server', 'iphone_XR', undefined, undefined, undefined, undefined, undefined, 'instance:test')).rejects.toThrow(/edit|client-N/);
+    await expect(tools.setDeviceSimulator('edit', 'iphone_XR', undefined, undefined, undefined, undefined, true, 'instance:test')).rejects.toThrow(/stopSimulation=true cannot be combined/);
   });
 
   test('set_device_simulator rejects the tool call when any fanout target fails', async () => {
     const bridge = new BridgeService();
     const tools = new RobloxStudioTools(bridge);
-    bridge.registerInstance(READY);
-    bridge.registerInstance({
-      pluginSessionId: 'client-1',
-      physicalSessionId: 'server-1',
-      instanceId: 'place:test',
+    bridge.registerPeer(READY);
+    bridge.registerPeer({
+      peerId: 'client-1',
+      transportPeerId: 'server-1',
+      instanceId: 'instance:test',
       role: 'client',
       placeId: 0,
       placeName: 'TestPlace',
       dataModelName: 'TestPlace',
       isRunning: true,
     });
-    bridge.registerInstance({
-      pluginSessionId: 'client-2',
-      physicalSessionId: 'server-1',
-      instanceId: 'place:test',
+    bridge.registerPeer({
+      peerId: 'client-2',
+      transportPeerId: 'server-1',
+      instanceId: 'instance:test',
       role: 'client',
       placeId: 0,
       placeName: 'TestPlace',
@@ -3984,7 +4028,7 @@ describe('Smoke', () => {
       isRunning: true,
     });
 
-    const resultPromise = tools.setDeviceSimulator('all-clients', 'iphone_XR', undefined, undefined, undefined, undefined, undefined, 'place:test');
+    const resultPromise = tools.setDeviceSimulator('all-clients', 'iphone_XR', undefined, undefined, undefined, undefined, undefined, 'instance:test');
     const client1Pending = claimQueuedRequest(bridge, 'server-1');
     const client2Pending = claimQueuedRequest(bridge, 'server-1');
     bridge.resolveRequest(client1Pending!.requestId, {
@@ -4004,16 +4048,16 @@ describe('Smoke', () => {
   test('capture_device_matrix rejects unsupported targets', async () => {
     const bridge = new BridgeService();
     const tools = new RobloxStudioTools(bridge);
-    bridge.registerInstance(READY);
+    bridge.registerPeer(READY);
 
-    await expect(tools.captureDeviceMatrix([{ deviceId: 'iphone_XR' }], 'server', undefined, undefined, undefined, undefined, 'place:test')).rejects.toThrow(/edit|client-N/);
-    await expect(tools.captureDeviceMatrix([{ deviceId: 'iphone_XR' }], 'all-clients', undefined, undefined, undefined, undefined, 'place:test')).rejects.toThrow(/edit|client-N/);
+    await expect(tools.captureDeviceMatrix([{ deviceId: 'iphone_XR' }], 'server', undefined, undefined, undefined, undefined, 'instance:test')).rejects.toThrow(/edit|client-N/);
+    await expect(tools.captureDeviceMatrix([{ deviceId: 'iphone_XR' }], 'all-clients', undefined, undefined, undefined, undefined, 'instance:test')).rejects.toThrow(/edit|client-N/);
   });
 
   test('capture_device_matrix rejects active custom device before mutating when restore is enabled', async () => {
     const bridge = new BridgeService();
     const tools = new RobloxStudioTools(bridge);
-    bridge.registerInstance(READY);
+    bridge.registerPeer(READY);
 
     const resultPromise = tools.captureDeviceMatrix(
       [{ label: 'phone', deviceId: 'iphone_XR' }],
@@ -4022,7 +4066,7 @@ describe('Smoke', () => {
       80,
       0,
       true,
-      'place:test',
+      'instance:test',
     );
 
     const snapshotPending = claimQueuedRequest(bridge, 'session-1');
@@ -4043,7 +4087,7 @@ describe('Smoke', () => {
   test('capture_device_matrix rejects the tool call when an entry capture fails', async () => {
     const bridge = new BridgeService();
     const tools = new RobloxStudioTools(bridge);
-    bridge.registerInstance(READY);
+    bridge.registerPeer(READY);
 
     const resultPromise = tools.captureDeviceMatrix(
       [{ label: 'phone', deviceId: 'iphone_XR' }],
@@ -4052,7 +4096,7 @@ describe('Smoke', () => {
       80,
       0,
       true,
-      'place:test',
+      'instance:test',
     );
 
     const snapshotPending = claimQueuedRequest(bridge, 'session-1');
@@ -4097,7 +4141,7 @@ describe('Smoke', () => {
   test('capture_device_matrix rejects the tool call when restore fails', async () => {
     const bridge = new BridgeService();
     const tools = new RobloxStudioTools(bridge);
-    bridge.registerInstance(READY);
+    bridge.registerPeer(READY);
 
     const resultPromise = tools.captureDeviceMatrix(
       [{ label: 'phone', deviceId: 'iphone_XR' }],
@@ -4106,7 +4150,7 @@ describe('Smoke', () => {
       80,
       0,
       true,
-      'place:test',
+      'instance:test',
     );
 
     const snapshotPending = claimQueuedRequest(bridge, 'session-1');
@@ -4146,7 +4190,7 @@ describe('Smoke', () => {
   test('capture_device_matrix captures entries and restores prior state', async () => {
     const bridge = new BridgeService();
     const tools = new RobloxStudioTools(bridge);
-    bridge.registerInstance(READY);
+    bridge.registerPeer(READY);
 
     const resultPromise = tools.captureDeviceMatrix(
       [{ label: 'phone', deviceId: 'iphone_XR' }],
@@ -4155,7 +4199,7 @@ describe('Smoke', () => {
       80,
       0,
       true,
-      'place:test',
+      'instance:test',
     );
 
     const snapshotPending = claimQueuedRequest(bridge, 'session-1');
@@ -4219,9 +4263,9 @@ describe('Smoke', () => {
   test('capture_screenshot reports the coordinate multiplier when Studio downscales the capture', async () => {
     const bridge = new BridgeService();
     const tools = new RobloxStudioTools(bridge);
-    bridge.registerInstance(READY);
+    bridge.registerPeer(READY);
 
-    const resultPromise = tools.captureScreenshot('place:test', 'jpeg', 80);
+    const resultPromise = tools.captureScreenshot('instance:test', 'jpeg', 80);
 
     await new Promise((resolve) => setTimeout(resolve, 0));
     const capturePending = claimQueuedRequest(bridge, 'session-1');
@@ -4246,7 +4290,7 @@ describe('Smoke', () => {
   test('capture_device_matrix keeps the total inline image payload within the aggregate budget', async () => {
     const bridge = new BridgeService();
     const tools = new RobloxStudioTools(bridge);
-    bridge.registerInstance(READY);
+    bridge.registerPeer(READY);
 
     const noiseSide = 2000;
     const noise = Buffer.alloc(noiseSide * noiseSide * 4);
@@ -4269,7 +4313,7 @@ describe('Smoke', () => {
       100,
       0,
       false,
-      'place:test',
+      'instance:test',
     );
 
     const snapshotPending = claimQueuedRequest(bridge, 'session-1');

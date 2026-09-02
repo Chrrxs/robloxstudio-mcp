@@ -57,7 +57,7 @@ const INTERNAL_RESULT_KEYS = new Set([
   'diagnostics',
   'internal',
   'lastActivity',
-  'pluginSessionId',
+  'transportPeerId',
   'pluginVariant',
   'pluginVersion',
   'requestId',
@@ -178,12 +178,18 @@ function publicRoutingError(error: RoutingFailure): Record<string, unknown> {
   return {
     error: error.routingError.code,
     message: error.routingError.message,
+    count: error.routingError.data.count,
     instances: error.routingError.data.instances.map((instance) => ({
-      instance_id: instance.instanceId,
-      role: instance.role,
+      instance_id: instance.id,
+      multiplayer_group_id: instance.multiplayerGroupId,
       place_id: instance.placeId,
       place_name: instance.placeName,
-      running: instance.isRunning,
+      peers: instance.peers,
+    })),
+    multiplayer_groups: error.routingError.data.multiplayerGroups.map((group) => ({
+      multiplayer_group_id: group.id,
+      controller_instance_id: group.controllerInstanceId,
+      instances: group.instances,
     })),
   };
 }
@@ -257,7 +263,7 @@ export function serverInstructions(definitions: readonly ToolDefinition[]): stri
 
   if (has('get_connected_instances')) {
     instructions.push(
-      'When more than one place is connected, call get_connected_instances and pass the chosen id as instance_id.',
+      "When more than one Studio process scope is connected, call get_connected_instances and pass either a top-level instance id or a multiplayer group's role-suffixed instance id as instance_id.",
     );
   }
   if (has('search_objects', 'get_project_structure', 'grep_scripts', 'execute_luau')) {

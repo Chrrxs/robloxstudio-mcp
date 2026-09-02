@@ -40,24 +40,24 @@ function addUnique(values: string[], value: string): void {
 	}
 }
 
-function computeInstanceIds(options?: { createAnonymous?: boolean }): string[] {
-	const ids: string[] = [];
+function computePlaceKeys(options?: { createAnonymous?: boolean }): string[] {
+	const placeKeys: string[] = [];
 	if (game.PlaceId !== 0) {
-		addUnique(ids, `place:${tostring(game.PlaceId)}`);
+		addUnique(placeKeys, `place:${tostring(game.PlaceId)}`);
 	}
 	const existing = ServerStorage.GetAttribute("__MCPPlaceId");
 	if (typeIs(existing, "string") && existing !== "") {
-		addUnique(ids, `anon:${existing as string}`);
+		addUnique(placeKeys, `anon:${existing}`);
 	} else if (game.PlaceId === 0 && options?.createAnonymous === true) {
 		const fresh = HttpService.GenerateGUID(false);
 		pcall(() => ServerStorage.SetAttribute("__MCPPlaceId", fresh));
-		addUnique(ids, `anon:${fresh}`);
+		addUnique(placeKeys, `anon:${fresh}`);
 	}
-	return ids;
+	return placeKeys;
 }
 
-function settingKey(instanceId: string): string {
-	return SETTING_KEY_PREFIX + instanceId;
+function settingKey(placeKey: string): string {
+	return SETTING_KEY_PREFIX + placeKey;
 }
 
 
@@ -79,18 +79,18 @@ function rememberServerUrl(serverUrl: string): void {
 	const normalized = normalizeServerUrl(serverUrl);
 	if (!pluginRef || normalized === "") return;
 	writeSettingString(GLOBAL_SETTING_KEY, normalized);
-	for (const instanceId of computeInstanceIds({ createAnonymous: true })) {
-		writeSettingString(settingKey(instanceId), normalized);
+	for (const placeKey of computePlaceKeys({ createAnonymous: true })) {
+		writeSettingString(settingKey(placeKey), normalized);
 	}
 }
 
 function readServerUrl(): string | undefined {
 	if (!pluginRef) return undefined;
-	// Reading settings should not mint a place identity. Client play DMs have
-	// their own ServerStorage; creating an id there makes a misleading anon id
-	// that never matches the edit/server bridge identity.
-	for (const instanceId of computeInstanceIds()) {
-		const remembered = readSettingString(settingKey(instanceId));
+	// Reading settings should not mint a place key. Client play DataModels have
+	// their own ServerStorage; creating a key there would not match the
+	// edit/server place-scoped setting.
+	for (const placeKey of computePlaceKeys()) {
+		const remembered = readSettingString(settingKey(placeKey));
 		if (remembered !== undefined) return remembered;
 	}
 	const globalRemembered = readSettingString(GLOBAL_SETTING_KEY);

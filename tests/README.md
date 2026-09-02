@@ -144,14 +144,15 @@ into immediate, causal errors instead of waiting indefinitely.
 RSMCP_E2E_CLOSE_ALL_STUDIO=1 npm run test:e2e:auto-install
 ```
 
-## Lifecycle regressions: fast relaunch and edit startup logs
+## Lifecycle regressions: same-place process coexistence and edit startup logs
 
 `tests/studio-lifecycle-regressions.mjs` launches the same unpublished local
-place twice with a persisted anonymous instance ID. It force-closes the first
-Studio process, guarantees that the replacement receives an initial duplicate
-409, and verifies automatic takeover and edit-tool routing. A temporary repro
-plugin also emits errors before the MCP plugin installs its log listener so the
-test can verify current-launch history seeding and prior-launch exclusion.
+place twice with one persisted anonymous place key. It force-closes the first
+Studio process, holds its stale Peer transport open, and verifies that the
+replacement registers immediately as a distinct process Instance. The test
+then routes explicitly to the replacement. A temporary repro plugin also emits
+errors before the MCP plugin installs its log listener so the test can verify
+current-launch history seeding and prior-launch exclusion.
 
 ```bash
 RSMCP_E2E_CLOSE_ALL_STUDIO=1 npm run test:e2e:lifecycle
@@ -182,9 +183,9 @@ node scripts/studio-lifecycle.mjs wait-connected --variant main --version <expec
 | `codex-wsl-environment.mjs` | The supported Codex wrapper validates Windows interop and advertises the retained process-identity launcher from a sanitized WSL environment without launching Studio |
 | `eval-bridge-error-preservation.mjs` | `eval_server_runtime` / `eval_client_runtime` surface actual user errors instead of Roblox's generic `"Requested module experienced an error while loading"` wrapper for explicit errors, nil derefs, parser errors, and nested `require()` module-load failures |
 | `eval-context-routing.mjs` | `execute_luau target=server/client-N` runs in plugin context on the selected peer, while `eval_server_runtime` / `eval_client_runtime` run through the server Script and client LocalScript eval bridges |
-| `runtime-bridge-lifecycle.mjs` | Runtime eval bridges are created inside play DataModels, stay out of edit mode, work for managed and manually-started playtests, and direct multiplayer logs get peer attribution |
+| `runtime-bridge-lifecycle.mjs` | Runtime eval bridges stay out of edit mode, managed and manually-started solo Peers share one process Instance, and a managed Multiplayer Group returns isolated per-process logs without synthetic Peer attribution |
 | `execute-luau-error-preservation.mjs` | `execute_luau` surfaces user error messages, parser errors, and nested `require()` module-load failures without leaking plugin-internal paths or Roblox's generic module-load wrapper |
-| `proxy-mode-peer-fanout.mjs` | `get_runtime_logs target=all`, `get_connected_instances`, and `get_memory_breakdown target=all` return non-empty capture/peer data when invoked from a proxy-mode subprocess (the multi-session path) |
+| `proxy-mode-peer-fanout.mjs` | A proxy-mode subprocess discovers nested Instance/Peer topology, reads an exact process log buffer, and fans a Peer-scoped memory request through the primary |
 | `execute-luau-output-capture.mjs` | `execute_luau target=server` captures user `print()` and `warn()` calls in the response `output` array, matching the `target=edit` baseline; live structured `LogService` context is returned as `get_runtime_logs` entry `data` |
 | `multiplayer-add-player-end-regression.mjs` | Starts one multiplayer client, adds a second client, and verifies `EndTest` disconnects both runtime peers |
 | `multiplayer-test-lifecycle.mjs` | `multiplayer_test_start`, add-player, client-leave, state, and end-test flow against real StudioTestService multiplayer peers |

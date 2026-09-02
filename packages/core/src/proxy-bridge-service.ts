@@ -1,15 +1,39 @@
-import { BridgeService, toPublic } from './bridge-service.js';
-import type { PluginInstance, PublicPluginInstance } from './bridge-service.js';
+import { BridgeService, toPublicPeer } from './bridge-service.js';
+import type {
+  MultiplayerGroup,
+  PublicStudioPeer,
+  StudioInstance,
+  StudioPeer,
+  TopologySnapshot,
+} from './bridge-service.js';
 import { randomUUID } from 'crypto';
 
 const PROXY_RESPONSE_GRACE_MS = 5_000;
+function peerPublicationChanged(previous: StudioPeer | undefined, current: StudioPeer): boolean {
+  return previous === undefined
+    || previous.transportPeerId !== current.transportPeerId
+    || previous.instanceId !== current.instanceId
+    || previous.multiplayerGroupId !== current.multiplayerGroupId
+    || previous.role !== current.role
+    || previous.placeId !== current.placeId
+    || previous.placeName !== current.placeName
+    || previous.placeKey !== current.placeKey
+    || previous.dataModelName !== current.dataModelName
+    || previous.isRunning !== current.isRunning
+    || previous.pluginVersion !== current.pluginVersion
+    || previous.pluginVariant !== current.pluginVariant
+    || previous.serverVersion !== current.serverVersion;
+}
+
 
 export class ProxyBridgeService extends BridgeService {
   private primaryBaseUrl: string;
   private authToken?: string;
   readonly proxyInstanceId: string;
   private proxyRequestTimeout = 30000;
-  private cachedInstances: PluginInstance[] = [];
+  private cachedPeers: StudioPeer[] = [];
+  private cachedInstances: StudioInstance[] = [];
+  private cachedMultiplayerGroups: MultiplayerGroup[] = [];
   private readonly initialRefresh: Promise<void>;
   private refreshTimer?: ReturnType<typeof setInterval>;
   private static REFRESH_INTERVAL_MS = 1000;
@@ -19,13 +43,11 @@ export class ProxyBridgeService extends BridgeService {
     this.primaryBaseUrl = primaryBaseUrl;
     this.authToken = authToken;
     this.proxyInstanceId = randomUUID();
-    // Mirror the primary's peer list locally so getInstances() / resolveTarget
-    // see real data. Without this, anything that enumerates peers from a
-    // proxy-mode subprocess (target=all fanout, get_connected_instances)
-    // sees the proxy's own empty instances Map and returns nothing.
-    this.initialRefresh = this.refreshInstances();
+    // Mirror the primary's explicit topology so proxy-mode routing observes
+    // every Studio process and Peer without deriving identity from place metadata.
+    this.initialRefresh = this.refreshTopology();
     this.refreshTimer = setInterval(
-      () => this.refreshInstances(),
+      () => this.refreshTopology(),
       ProxyBridgeService.REFRESH_INTERVAL_MS,
     );
   }
@@ -40,34 +62,134 @@ export class ProxyBridgeService extends BridgeService {
     return headers;
   }
 
-  private async refreshInstances(): Promise<void> {
+  private async refreshTopology(): Promise<void> {
     try {
-      const res = await fetch(`${this.primaryBaseUrl}/instances`, {
+      const res = await fetch(`${this.primaryBaseUrl}/topology`, {
         headers: this.authHeaders(),
       });
       if (!res.ok) return;
-      const body = (await res.json()) as { instances?: PluginInstance[] };
-      if (Array.isArray(body.instances)) {
-        const previousKeys = new Set(this.cachedInstances.map((instance) =>
-          `${instance.pluginSessionId}\0${instance.instanceId}\0${instance.role}\0${instance.connectedAt}`,
-        ));
-        this.cachedInstances = body.instances;
-        for (const instance of body.instances) {
-          const key = `${instance.pluginSessionId}\0${instance.instanceId}\0${instance.role}\0${instance.connectedAt}`;
-          if (!previousKeys.has(key)) this.notifyInstanceRegistered(toPublic(instance));
+      const body = (await res.json()) as Partial<TopologySnapshot>;
+      if (
+        !Array.isArray(body.peers)
+        || !Array.isArray(body.instances)
+        || !Array.isArray(body.multiplayerGroups)
+      ) {
+        return;
+      }
+
+      const previousPeers = new Map(this.cachedPeers.map((peer) => [peer.peerId, peer]));
+      this.cachedPeers = body.peers;
+      this.cachedInstances = body.instances;
+      this.cachedMultiplayerGroups = body.multiplayerGroups;
+      for (const peer of body.peers) {
+        if (peerPublicationChanged(previousPeers.get(peer.peerId), peer)) {
+          this.notifyPeerRegistered(toPublicPeer(peer));
         }
       }
     } catch {
-      // Primary unreachable — keep the last-known list rather than
+      // Primary unreachable — keep the last-known topology rather than
       // silently reporting empty.
     }
   }
 
-  override getInstances(): PluginInstance[] {
+  override getPeers(): StudioPeer[] {
+    return this.cachedPeers;
+  }
+
+  override getInstances(): StudioInstance[] {
     return this.cachedInstances;
   }
 
-  override async unregisterInstanceIdEverywhere(instanceId: string): Promise<PublicPluginInstance[]> {
+  override getMultiplayerGroups(): MultiplayerGroup[] {
+    return this.cachedMultiplayerGroups;
+  }
+
+  override getTopologySnapshot(): TopologySnapshot {
+    return {
+      peers: this.cachedPeers,
+      instances: this.cachedInstances,
+      multiplayerGroups: this.cachedMultiplayerGroups,
+    };
+  }
+  override async createMultiplayerGroupEverywhere(
+    groupId: string,
+    controllerInstanceId: string,
+  ): Promise<MultiplayerGroup> {
+    const response = await fetch(`${this.primaryBaseUrl}/create-multiplayer-group`, {
+      method: 'POST',
+      headers: this.authHeaders({ 'Content-Type': 'application/json' }),
+      body: JSON.stringify({ groupId, controllerInstanceId }),
+    });
+    if (!response.ok) {
+      const body = await response.text().catch(() => '');
+      throw new Error(`Proxy Multiplayer Group creation failed (${response.status}): ${body || response.statusText}`);
+    }
+    const result = await response.json() as { group?: MultiplayerGroup };
+    if (!result.group || result.group.id !== groupId) {
+      throw new Error('Proxy Multiplayer Group creation returned an invalid Group.');
+    }
+    const group = {
+      ...result.group,
+      instanceIds: [...result.group.instanceIds],
+    };
+    this.cachedPeers = this.cachedPeers.map((peer) =>
+      peer.instanceId === controllerInstanceId
+        ? { ...peer, multiplayerGroupId: group.id }
+        : peer);
+    this.cachedInstances = this.cachedInstances.map((instance) =>
+      instance.id === controllerInstanceId
+        ? {
+            ...instance,
+            multiplayerGroupId: group.id,
+            peers: instance.peers.map((peer) => ({ ...peer, multiplayerGroupId: group.id })),
+          }
+        : instance);
+    this.cachedMultiplayerGroups = [
+      ...this.cachedMultiplayerGroups.filter((candidate) => candidate.id !== group.id),
+      group,
+    ];
+    return group;
+  }
+
+  override async removeMultiplayerGroupEverywhere(
+    groupId: string,
+  ): Promise<MultiplayerGroup | undefined> {
+    const response = await fetch(`${this.primaryBaseUrl}/remove-multiplayer-group`, {
+      method: 'POST',
+      headers: this.authHeaders({ 'Content-Type': 'application/json' }),
+      body: JSON.stringify({ groupId }),
+    });
+    if (!response.ok) {
+      const body = await response.text().catch(() => '');
+      throw new Error(`Proxy Multiplayer Group removal failed (${response.status}): ${body || response.statusText}`);
+    }
+    const result = await response.json() as { removed?: MultiplayerGroup };
+    const removed = result.removed;
+    if (removed !== undefined && removed.id !== groupId) {
+      throw new Error('Proxy Multiplayer Group removal returned an invalid Group.');
+    }
+    this.cachedPeers = this.cachedPeers.map((peer) =>
+      peer.multiplayerGroupId === groupId
+        ? { ...peer, multiplayerGroupId: undefined }
+        : peer);
+    this.cachedInstances = this.cachedInstances.map((instance) =>
+      instance.multiplayerGroupId === groupId
+        ? {
+            ...instance,
+            multiplayerGroupId: undefined,
+            peers: instance.peers.map((peer) => ({ ...peer, multiplayerGroupId: undefined })),
+          }
+        : instance);
+    this.cachedMultiplayerGroups = this.cachedMultiplayerGroups.filter(
+      (candidate) => candidate.id !== groupId,
+    );
+    return removed === undefined
+      ? undefined
+      : { ...removed, instanceIds: [...removed.instanceIds] };
+  }
+
+
+  override async unregisterInstanceIdEverywhere(instanceId: string): Promise<PublicStudioPeer[]> {
     const response = await fetch(`${this.primaryBaseUrl}/unregister-instance-id`, {
       method: 'POST',
       headers: this.authHeaders({ 'Content-Type': 'application/json' }),
@@ -79,12 +201,23 @@ export class ProxyBridgeService extends BridgeService {
       throw new Error(`Proxy unregister failed (${response.status}): ${body || response.statusText}`);
     }
 
-    const result = await response.json() as { removed?: PublicPluginInstance[] };
+    const result = await response.json() as { removed?: PublicStudioPeer[] };
     const removed = Array.isArray(result.removed) ? result.removed : [];
-    const removedKeys = new Set(removed.map((inst) => `${inst.instanceId}\0${inst.role}`));
-    if (removedKeys.size > 0) {
-      this.cachedInstances = this.cachedInstances.filter((inst) => !removedKeys.has(`${inst.instanceId}\0${inst.role}`));
-    }
+    const removedPeerIds = new Set(removed.map((peer) => peer.peerId));
+    const removedInstanceIds = new Set([
+      instanceId,
+      ...removed.map((peer) => peer.instanceId),
+    ]);
+    this.cachedPeers = this.cachedPeers.filter((peer) => !removedPeerIds.has(peer.peerId));
+    this.cachedInstances = this.cachedInstances.filter(
+      (instance) => !removedInstanceIds.has(instance.id),
+    );
+    this.cachedMultiplayerGroups = this.cachedMultiplayerGroups
+      .map((group) => ({
+        ...group,
+        instanceIds: group.instanceIds.filter((id) => !removedInstanceIds.has(id)),
+      }))
+      .filter((group) => group.instanceIds.length > 0);
     return removed;
   }
 
@@ -100,8 +233,7 @@ export class ProxyBridgeService extends BridgeService {
   override async sendRequest(
     endpoint: string,
     data: unknown,
-    targetInstanceId: string,
-    targetRole: string,
+    targetPeerId: string,
     timeoutMs = this.proxyRequestTimeout,
     signal?: AbortSignal,
   ): Promise<unknown> {
@@ -126,8 +258,7 @@ export class ProxyBridgeService extends BridgeService {
         body: JSON.stringify({
           endpoint,
           data,
-          targetInstanceId,
-          targetRole,
+          targetPeerId,
           proxyInstanceId: this.proxyInstanceId,
           timeoutMs: effectiveTimeoutMs,
         }),

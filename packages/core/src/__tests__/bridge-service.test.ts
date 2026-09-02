@@ -1,28 +1,19 @@
 import { BridgeService } from '../bridge-service.js';
+import type { RegisterPeerInput } from '../bridge-service.js';
 
-class MirroredBridgeService extends BridgeService {
-  constructor(private readonly mirroredInstances: ReturnType<BridgeService['getInstances']>) {
-    super();
-  }
-
-  override getInstances() {
-    return this.mirroredInstances;
-  }
-}
-
-function register(b: BridgeService, opts: { pluginSessionId: string; physicalSessionId?: string; instanceId: string; role: string; placeId?: number; placeName?: string }) {
-  const res = b.registerInstance({
-    pluginSessionId: opts.pluginSessionId,
-    physicalSessionId: opts.physicalSessionId ?? opts.pluginSessionId,
-    instanceId: opts.instanceId,
-    role: opts.role,
-    placeId: opts.placeId ?? 0,
-    placeName: opts.placeName ?? '',
-    dataModelName: opts.placeName ?? '',
-    isRunning: false,
+function register(
+  bridge: BridgeService,
+  input: Pick<RegisterPeerInput, 'peerId' | 'instanceId' | 'role'> &
+    Partial<Omit<RegisterPeerInput, 'peerId' | 'instanceId' | 'role'>>,
+) {
+  const result = bridge.registerPeer({
+    transportPeerId: input.peerId,
+    placeId: 0,
+    placeName: '',
+    ...input,
   });
-  if (!res.ok) throw new Error(`registerInstance failed: ${res.error.code}`);
-  return res;
+  if (!result.ok) throw new Error(`registerPeer failed: ${result.error.code}`);
+  return result;
 }
 
 describe('BridgeService', () => {
@@ -37,681 +28,767 @@ describe('BridgeService', () => {
     jest.useRealTimers();
   });
 
-  describe('Request management', () => {
-    test('claims a queued request for the matching physical session', async () => {
-      register(bridge, { pluginSessionId: 'edit', instanceId: 'place:1', role: 'edit' });
-      const response = bridge.sendRequest('/api/test', { hello: 'world' }, 'place:1', 'edit');
-
-      const delivery = bridge.claimNextRequestForPhysical('edit', 'test-delivery');
-      expect(delivery).toMatchObject({
-        logicalSessionId: 'edit',
-        target: 'edit',
-        endpoint: '/api/test',
-        data: { hello: 'world' },
-      });
-      expect(bridge.resolveRequest(delivery!.requestId, { ok: true })).toBe('accepted');
-      expect(bridge.rejectRequest(delivery!.requestId, 'late duplicate')).toBe('already_settled');
-      await expect(response).resolves.toEqual({ ok: true });
-    });
-
-    test('reports the remaining request lifetime when Studio claims work', async () => {
-      register(bridge, { pluginSessionId: 'edit', instanceId: 'place:1', role: 'edit' });
-      const response = bridge.sendRequest('/api/slow', {}, 'place:1', 'edit', 2000);
-      jest.advanceTimersByTime(250);
-
-      const delivery = bridge.claimNextRequestForPhysical('edit', 'deadline-delivery');
-
-      expect(delivery).toMatchObject({ remainingMs: 1750 });
-      bridge.resolveRequest(delivery!.requestId, { ok: true });
-      await expect(response).resolves.toEqual({ ok: true });
-    });
-
-    test('settles an error once and reports repeated settlement', async () => {
-      register(bridge, { pluginSessionId: 'edit', instanceId: 'place:1', role: 'edit' });
-      const response = bridge.sendRequest('/api/test', {}, 'place:1', 'edit');
-      response.catch(() => {});
-      const delivery = bridge.claimNextRequestForPhysical('edit', 'test-error');
-
-      expect(bridge.rejectRequest(delivery!.requestId, 'failed')).toBe('accepted');
-      expect(bridge.resolveRequest(delivery!.requestId, { tooLate: true })).toBe('already_settled');
-      await expect(response).rejects.toBe('failed');
-    });
-
-    test('reports unknown for a request ID that was never issued', () => {
-      expect(bridge.resolveRequest('never-issued', { ok: true })).toBe('unknown');
-      expect(bridge.rejectRequest('never-issued', 'failed')).toBe('unknown');
-    });
-
-    test('expires accepted request IDs after 60 seconds', async () => {
-      register(bridge, { pluginSessionId: 'edit', instanceId: 'place:1', role: 'edit' });
-      const response = bridge.sendRequest('/api/test', {}, 'place:1', 'edit', 120_000);
-      const delivery = bridge.claimNextRequestForPhysical('edit', 'test-expiry');
-
-      expect(bridge.resolveRequest(delivery!.requestId, { ok: true })).toBe('accepted');
-      await expect(response).resolves.toEqual({ ok: true });
-      jest.advanceTimersByTime(59_999);
-      expect(bridge.resolveRequest(delivery!.requestId, { duplicate: true })).toBe('already_settled');
-      jest.advanceTimersByTime(1);
-      expect(bridge.resolveRequest(delivery!.requestId, { duplicate: true })).toBe('unknown');
-    });
-
-    test('retains only the 4096 most recently accepted request IDs', async () => {
-      register(bridge, { pluginSessionId: 'edit', instanceId: 'place:1', role: 'edit' });
-      const responses: Promise<unknown>[] = [];
-      let oldestRequestId = '';
-      let newestRequestId = '';
-      for (let index = 0; index < 4097; index += 1) {
-        const response = bridge.sendRequest('/api/test', { index }, 'place:1', 'edit');
-        responses.push(response);
-        const delivery = bridge.claimNextRequestForPhysical('edit', `test-cap-${index}`)!;
-        if (index === 0) oldestRequestId = delivery.requestId;
-        newestRequestId = delivery.requestId;
-        if (bridge.resolveRequest(delivery.requestId, { index }) !== 'accepted') {
-          throw new Error(`Request ${index} was not accepted`);
-        }
-      }
-      await expect(Promise.all(responses)).resolves.toHaveLength(4097);
-
-      expect(bridge.resolveRequest(oldestRequestId, {})).toBe('unknown');
-      expect(bridge.resolveRequest(newestRequestId, {})).toBe('already_settled');
-    });
-
-    test('does not claim requests for a different role or physical session', async () => {
-      register(bridge, { pluginSessionId: 'edit-a', instanceId: 'place:A', role: 'edit' });
-      register(bridge, { pluginSessionId: 'server-a', instanceId: 'place:A', role: 'server' });
-      register(bridge, { pluginSessionId: 'edit-b', instanceId: 'place:B', role: 'edit' });
-      const response = bridge.sendRequest('/api/test', {}, 'place:A', 'edit');
-
-      expect(bridge.claimNextRequestForPhysical('server-a', 'wrong-role')).toBeNull();
-      expect(bridge.claimNextRequestForPhysical('edit-b', 'wrong-instance')).toBeNull();
-      const delivery = bridge.claimNextRequestForPhysical('edit-a', 'matching-session');
-      expect(delivery?.logicalSessionId).toBe('edit-a');
-      bridge.resolveRequest(delivery!.requestId, { ok: true });
-      await expect(response).resolves.toEqual({ ok: true });
-    });
-
-    test('holds a claimed request until response or owner release', async () => {
-      register(bridge, { pluginSessionId: 'server', instanceId: 'place:1', role: 'server' });
-      const response = bridge.sendRequest('/api/test', { mutates: true }, 'place:1', 'server');
-
-      const first = bridge.claimNextRequestForPhysical('server', 'stream-generation-1');
-      expect(first).not.toBeNull();
-      expect(bridge.claimNextRequestForPhysical('server', 'stream-generation-2')).toBeNull();
-
-      bridge.releaseDeliveryClaims('stream-generation-1');
-      const redelivery = bridge.claimNextRequestForPhysical('server', 'stream-generation-2');
-      expect(redelivery).toEqual(first);
-      bridge.resolveRequest(redelivery!.requestId, { ok: true });
-      await expect(response).resolves.toEqual({ ok: true });
-    });
-
-    test('claims requests in FIFO order within a routed role', async () => {
-      register(bridge, { pluginSessionId: 'edit', instanceId: 'place:1', role: 'edit' });
-      const firstResponse = bridge.sendRequest('/api/a', { order: 1 }, 'place:1', 'edit');
-      jest.advanceTimersByTime(10);
-      const secondResponse = bridge.sendRequest('/api/b', { order: 2 }, 'place:1', 'edit');
-
-      const first = bridge.claimNextRequestForPhysical('edit', 'stream');
-      expect(first?.data).toEqual({ order: 1 });
-      bridge.resolveRequest(first!.requestId, { ok: 1 });
-      const second = bridge.claimNextRequestForPhysical('edit', 'stream');
-      expect(second?.data).toEqual({ order: 2 });
-      bridge.resolveRequest(second!.requestId, { ok: 2 });
-      await expect(Promise.all([firstResponse, secondResponse])).resolves.toEqual([
-        { ok: 1 },
-        { ok: 2 },
-      ]);
-    });
-
-    test('notifies the physical stream when logical-client work is queued', async () => {
-      register(bridge, { pluginSessionId: 'server', instanceId: 'place:1', role: 'server' });
+  describe('Peer and Instance topology', () => {
+    test('aggregates Peers by opaque process Instance ID', () => {
       register(bridge, {
-        pluginSessionId: 'client',
-        physicalSessionId: 'server',
-        instanceId: 'place:1',
-        role: 'client',
+        peerId: 'edit-peer',
+        instanceId: 'instance:solo',
+        role: 'edit',
+        placeId: 123,
+        placeName: 'Shared Place',
       });
-      const available = jest.fn();
-      bridge.onRequestAvailable(available);
-
-      const response = bridge.sendRequest('/api/test', {}, 'place:1', 'client-1');
-      expect(available).toHaveBeenCalledWith('server');
-      const delivery = bridge.claimNextRequestForPhysical('server', 'stream');
-      expect(delivery).toMatchObject({
-        logicalSessionId: 'client',
-        target: 'client-1',
-      });
-      bridge.resolveRequest(delivery!.requestId, { ok: true });
-      await expect(response).resolves.toEqual({ ok: true });
-    });
-
-    test('keeps request timeout semantics after delivery', async () => {
-      register(bridge, { pluginSessionId: 'edit', instanceId: 'place:1', role: 'edit' });
-      const response = bridge.sendRequest('/api/slow', {}, 'place:1', 'edit');
-      const delivery = bridge.claimNextRequestForPhysical('edit', 'stream')!;
-
-      jest.advanceTimersByTime(31_000);
-      await expect(response).rejects.toThrow('Request timeout');
-      expect(bridge.resolveRequest(delivery.requestId, {})).toBe('unknown');
-    });
-
-    test('cancels claimed Studio work when its caller aborts', async () => {
-      register(bridge, { pluginSessionId: 'edit', instanceId: 'place:1', role: 'edit' });
-      const controller = new AbortController();
-      const response = bridge.sendRequest('/api/slow', {}, 'place:1', 'edit', 120_000, controller.signal);
-      response.catch(() => {});
-      const delivery = bridge.claimNextRequestForPhysical('edit', 'stream');
-      if (!delivery) throw new Error('expected request delivery');
-
-      controller.abort();
-
-      await expect(response).rejects.toThrow('Request aborted');
-      expect(bridge.claimNextCancellationForPhysical('edit', 'cancel-stream')).toEqual({
-        requestId: delivery.requestId,
-        reason: 'aborted',
-      });
-      expect(bridge.resolveRequest(delivery.requestId, {})).toBe('unknown');
-      jest.advanceTimersByTime(30_000);
-      bridge.releaseDeliveryClaims('cancel-stream');
-      expect(bridge.claimNextCancellationForPhysical('edit', 'replacement-stream')).toEqual({
-        requestId: delivery.requestId,
-        reason: 'aborted',
-      });
-    });
-
-    test('migrates queued work when an anonymous session becomes published', async () => {
-      register(bridge, { pluginSessionId: 'edit', instanceId: 'anon:old', role: 'edit' });
-      const response = bridge.sendRequest('/api/test', {}, 'anon:old', 'edit');
-
-      bridge.updateInstanceMetadata('edit', { placeId: 52 });
-      const delivery = bridge.claimNextRequestForPhysical('edit', 'stream');
-      expect(delivery?.logicalSessionId).toBe('edit');
-      bridge.resolveRequest(delivery!.requestId, { ok: true });
-      await expect(response).resolves.toEqual({ ok: true });
-    });
-
-    test('bridge shutdown rejects every queued request', async () => {
-      register(bridge, { pluginSessionId: 'edit', instanceId: 'place:1', role: 'edit' });
-      const first = bridge.sendRequest('/api/a', {}, 'place:1', 'edit');
-      const second = bridge.sendRequest('/api/b', {}, 'place:1', 'edit');
-      first.catch(() => {});
-      second.catch(() => {});
-      const firstDelivery = bridge.claimNextRequestForPhysical('edit', 'shutdown-1')!;
-      const secondDelivery = bridge.claimNextRequestForPhysical('edit', 'shutdown-2')!;
-
-      bridge.clearAllPendingRequests();
-      await expect(first).rejects.toThrow('Connection closed');
-      await expect(second).rejects.toThrow('Connection closed');
-      expect(bridge.getPendingRequestCount()).toBe(0);
-      expect(bridge.resolveRequest(firstDelivery.requestId, {})).toBe('unknown');
-      expect(bridge.rejectRequest(secondDelivery.requestId, 'late')).toBe('unknown');
-    });
-  });
-
-  describe('registerInstance', () => {
-
-    test('keeps logical proxies live while their mapped physical delivery is active', () => {
-      register(bridge, { pluginSessionId: 'server', instanceId: 'place:1', role: 'server' });
       register(bridge, {
-        pluginSessionId: 'client',
-        physicalSessionId: 'server',
-        instanceId: 'place:1',
-        role: 'client',
-      });
-      bridge.setDeliveryActive('server', 'sse-generation', true);
-
-      jest.advanceTimersByTime(31_000);
-      bridge.cleanupStaleInstances();
-      expect(bridge.getInstances().map((instance) => instance.pluginSessionId).sort()).toEqual([
-        'client',
-        'server',
-      ]);
-
-      bridge.setDeliveryActive('server', 'sse-generation', false);
-      bridge.cleanupStaleInstances();
-      expect(bridge.getInstances()).toEqual([]);
-    });
-
-    test('transport observer failures cannot break registration, delivery, or cleanup', async () => {
-      bridge.onRequestAvailable(() => {
-        throw new Error('request observer failed');
-      });
-      bridge.onSessionClosed(() => {
-        throw new Error('close observer failed');
+        peerId: 'server-peer',
+        instanceId: 'instance:solo',
+        role: 'server',
+        placeId: 123,
+        placeName: 'Shared Place',
       });
 
-      expect(() => register(bridge, {
-        pluginSessionId: 'edit',
-        instanceId: 'place:1',
-        role: 'edit',
-      })).not.toThrow();
-      const response = bridge.sendRequest('/api/test', {}, 'place:1', 'edit');
-      const delivery = bridge.claimNextRequestForPhysical('edit', 'observer-test');
-      expect(delivery).not.toBeNull();
-      bridge.resolveRequest(delivery!.requestId, { ok: true });
-      await expect(response).resolves.toEqual({ ok: true });
-      expect(() => bridge.unregisterInstance('edit')).not.toThrow();
-      expect(bridge.getInstances()).toEqual([]);
-    });
-    test('canonicalizes published places when a stale anon id is reported', () => {
-      const r = register(bridge, {
-        pluginSessionId: 'edit',
-        instanceId: 'anon:old-file-id',
-        role: 'edit',
-        placeId: 12345,
-      });
-
-      expect(r.instanceId).toBe('place:12345');
-      expect(bridge.getPublicInstances()[0].instanceId).toBe('place:12345');
-
-      const resolved = bridge.resolveTarget({ instance_id: 'anon:old-file-id', target: 'edit' });
-      expect(resolved.ok).toBe(true);
-      if (!resolved.ok || resolved.mode !== 'single') throw new Error('expected single');
-      expect(resolved.targetInstanceId).toBe('place:12345');
-      expect(resolved.targetRole).toBe('edit');
-    });
-
-    test('metadata updates migrate stale anon edit to the published place id', () => {
-      register(bridge, { pluginSessionId: 'edit', instanceId: 'anon:old-file-id', role: 'edit' });
-      bridge.updateInstanceMetadata('edit', { placeId: 12345 });
-      register(bridge, { pluginSessionId: 'server', instanceId: 'place:12345', role: 'server', placeId: 12345 });
-
-      expect(bridge.getPublicInstances().map((inst) => inst.instanceId).sort()).toEqual(['place:12345', 'place:12345']);
-
-      const editFromPublished = bridge.resolveTarget({ instance_id: 'place:12345', target: 'edit' });
-      expect(editFromPublished.ok).toBe(true);
-      if (!editFromPublished.ok || editFromPublished.mode !== 'single') throw new Error('expected single');
-      expect(editFromPublished.targetInstanceId).toBe('place:12345');
-      expect(editFromPublished.targetRole).toBe('edit');
-
-      const serverFromAnon = bridge.resolveTarget({ instance_id: 'anon:old-file-id', target: 'server' });
-      expect(serverFromAnon.ok).toBe(true);
-      if (!serverFromAnon.ok || serverFromAnon.mode !== 'single') throw new Error('expected single');
-      expect(serverFromAnon.targetInstanceId).toBe('place:12345');
-      expect(serverFromAnon.targetRole).toBe('server');
-
-      const omittedInstance = bridge.resolveTarget({ target: 'edit' });
-      expect(omittedInstance.ok).toBe(true);
-      if (!omittedInstance.ok || omittedInstance.mode !== 'single') throw new Error('expected single');
-      expect(omittedInstance.targetInstanceId).toBe('place:12345');
-      expect(omittedInstance.targetRole).toBe('edit');
-    });
-
-    test('migrates pending requests when an anon place becomes published', async () => {
-      register(bridge, { pluginSessionId: 'edit', instanceId: 'anon:old-file-id', role: 'edit' });
-      const pending = bridge.sendRequest('/api/test', {}, 'anon:old-file-id', 'edit');
-
-      const r = register(bridge, {
-        pluginSessionId: 'edit',
-        instanceId: 'anon:old-file-id',
-        role: 'edit',
-        placeId: 12345,
-      });
-      expect(r.instanceId).toBe('place:12345');
-
-      const delivery = bridge.claimNextRequestForPhysical('edit', 'migration-test');
-      expect(delivery).toBeTruthy();
-      bridge.resolveRequest(delivery!.requestId, { ok: true });
-      await expect(pending).resolves.toEqual({ ok: true });
-    });
-
-    test('routing works for proxy-style bridges that mirror instances via getInstances', () => {
-      const mirrored = new MirroredBridgeService([
-        {
-          pluginSessionId: 'edit',
-          physicalSessionId: 'edit',
-          instanceId: 'anon:mirrored-place-id',
-          role: 'edit',
-          placeId: 0,
-          placeName: 'MirroredPlace',
-          dataModelName: 'MirroredPlace',
-          isRunning: false,
-          pluginVersion: '2.16.1',
-          pluginVariant: 'main',
-          serverVersion: '2.16.1',
-          lastActivity: Date.now(),
-          connectedAt: Date.now(),
-        },
-      ]);
-
-      const resolved = mirrored.resolveTarget({ instance_id: 'anon:mirrored-place-id', target: 'edit' });
-      expect(resolved.ok).toBe(true);
-      if (!resolved.ok || resolved.mode !== 'single') throw new Error('expected single');
-      expect(resolved.targetInstanceId).toBe('anon:mirrored-place-id');
-      expect(resolved.targetRole).toBe('edit');
-    });
-
-    test('first client gets client-1', () => {
-      const r = register(bridge, { pluginSessionId: 'a', instanceId: 'place:1', role: 'client' });
-      expect(r.assignedRole).toBe('client-1');
-    });
-
-    test('sequential clients get sequential indices', () => {
-      expect(register(bridge, { pluginSessionId: 'a', instanceId: 'place:1', role: 'client' }).assignedRole).toBe('client-1');
-      expect(register(bridge, { pluginSessionId: 'b', instanceId: 'place:1', role: 'client' }).assignedRole).toBe('client-2');
-      expect(register(bridge, { pluginSessionId: 'c', instanceId: 'place:1', role: 'client' }).assignedRole).toBe('client-3');
-    });
-
-    test('client indices are scoped per instance_id', () => {
-      expect(register(bridge, { pluginSessionId: 'a', instanceId: 'place:1', role: 'client' }).assignedRole).toBe('client-1');
-      expect(register(bridge, { pluginSessionId: 'b', instanceId: 'place:2', role: 'client' }).assignedRole).toBe('client-1');
-      expect(register(bridge, { pluginSessionId: 'c', instanceId: 'place:1', role: 'client' }).assignedRole).toBe('client-2');
-      expect(register(bridge, { pluginSessionId: 'd', instanceId: 'place:2', role: 'client' }).assignedRole).toBe('client-2');
-    });
-
-    test('client refresh preserves assigned role', () => {
-      expect(register(bridge, { pluginSessionId: 'a', instanceId: 'place:1', role: 'client' }).assignedRole).toBe('client-1');
-      expect(register(bridge, { pluginSessionId: 'b', instanceId: 'place:1', role: 'client' }).assignedRole).toBe('client-2');
-      expect(register(bridge, { pluginSessionId: 'a', instanceId: 'place:1', role: 'client' }).assignedRole).toBe('client-1');
-      expect(bridge.getInstances()).toHaveLength(2);
-    });
-
-    test('disconnecting a middle client fills the hole', () => {
-      register(bridge, { pluginSessionId: 'a', instanceId: 'place:1', role: 'client' });
-      register(bridge, { pluginSessionId: 'b', instanceId: 'place:1', role: 'client' });
-      register(bridge, { pluginSessionId: 'c', instanceId: 'place:1', role: 'client' });
-      bridge.unregisterInstance('b');
-      expect(register(bridge, { pluginSessionId: 'd', instanceId: 'place:1', role: 'client' }).assignedRole).toBe('client-2');
-    });
-
-    test('rejects duplicate (instanceId, role) tuple', () => {
-      register(bridge, { pluginSessionId: 'p1', instanceId: 'place:1', role: 'edit' });
-      const dup = bridge.registerInstance({
-        pluginSessionId: 'p2',
-        physicalSessionId: 'p2',
-        instanceId: 'place:1',
-        role: 'edit',
-      });
-      expect(dup.ok).toBe(false);
-      if (dup.ok) return;
-      expect(dup.error.code).toBe('duplicate_instance_role');
-      expect(dup.error.existing.instanceId).toBe('place:1');
-      expect(dup.error.existing.role).toBe('edit');
-    });
-
-    test('fast relaunch takes over an inactive predecessor and rejects its pending requests', async () => {
-      register(bridge, { pluginSessionId: 'old-session', instanceId: 'anon:relaunch', role: 'edit' });
-      const pending = bridge.sendRequest('/api/test', { generation: 'old' }, 'anon:relaunch', 'edit');
-      const delivery = bridge.claimNextRequestForPhysical('old-session', 'old-delivery')!;
-
-      jest.advanceTimersByTime(3_001);
-      const relaunched = bridge.registerInstance({
-        pluginSessionId: 'new-session',
-        physicalSessionId: 'new-session',
-        instanceId: 'anon:relaunch',
-        role: 'edit',
-      });
-
-      expect(relaunched.ok).toBe(true);
-      expect(bridge.getInstanceBySessionId('old-session')).toBeUndefined();
-      expect(bridge.getInstanceBySessionId('new-session')).toBeDefined();
-      expect(bridge.getPendingRequestCount()).toBe(0);
-      await expect(pending).rejects.toThrow(/disconnected/);
-      expect(bridge.resolveRequest(delivery.requestId, {})).toBe('unknown');
-    });
-
-    test('recent stream activity prevents an active duplicate from being taken over', () => {
-      register(bridge, { pluginSessionId: 'active-session', instanceId: 'anon:active', role: 'edit' });
-      jest.advanceTimersByTime(2_500);
-      bridge.updateInstanceActivity('active-session');
-      jest.advanceTimersByTime(2_500);
-
-      const duplicate = bridge.registerInstance({
-        pluginSessionId: 'duplicate-session',
-        physicalSessionId: 'duplicate-session',
-        instanceId: 'anon:active',
-        role: 'edit',
-      });
-
-      expect(duplicate.ok).toBe(false);
-      expect(bridge.getInstanceBySessionId('active-session')).toBeDefined();
-      expect(bridge.getInstanceBySessionId('duplicate-session')).toBeUndefined();
-    });
-
-    test('rejects duplicate explicit client role within the same instance_id', () => {
-      register(bridge, { pluginSessionId: 'p1', instanceId: 'place:1', role: 'client' });
-      const dup = bridge.registerInstance({
-        pluginSessionId: 'p2',
-        physicalSessionId: 'p2',
-        instanceId: 'place:1',
-        role: 'client-1',
-      });
-      expect(dup.ok).toBe(false);
-      if (dup.ok) return;
-      expect(dup.error.code).toBe('duplicate_instance_role');
-      expect(dup.error.existing.role).toBe('client-1');
-    });
-
-    test('re-registering same pluginSessionId is allowed (refresh)', () => {
-      register(bridge, { pluginSessionId: 'p1', instanceId: 'place:1', role: 'edit' });
-      const refresh = bridge.registerInstance({
-        pluginSessionId: 'p1',
-        physicalSessionId: 'p1',
-        instanceId: 'place:1',
-        role: 'edit',
-      });
-      expect(refresh.ok).toBe(true);
+      expect(bridge.getPeers()).toHaveLength(2);
       expect(bridge.getInstances()).toHaveLength(1);
+      expect(bridge.getPublicInstances()[0]).toMatchObject({
+        id: 'instance:solo',
+        placeId: 123,
+        placeName: 'Shared Place',
+        peers: [
+          { peerId: 'edit-peer', instanceId: 'instance:solo', role: 'edit' },
+          { peerId: 'server-peer', instanceId: 'instance:solo', role: 'server' },
+        ],
+      });
+      expect(bridge.getConnectedInstances()[0]).toMatchObject({
+        id: 'instance:solo',
+        placeId: 123,
+        placeName: 'Shared Place',
+        peers: {
+          edit: 'edit-peer',
+          server: 'server-peer',
+        },
+      });
+      expect(bridge.getPublicPeers()[0]).not.toHaveProperty('transportPeerId');
     });
 
-    test('two edit plugins of different places coexist', () => {
-      register(bridge, { pluginSessionId: 'p1', instanceId: 'place:1', role: 'edit' });
-      const r = bridge.registerInstance({
-        pluginSessionId: 'p2',
-        physicalSessionId: 'p2',
-        instanceId: 'place:2',
+    test('allows same-place same-role Peers in separate process Instances', () => {
+      const first = register(bridge, {
+        peerId: 'window-a-edit',
+        instanceId: 'instance:window-a',
+        role: 'edit',
+        placeId: 456,
+        placeName: 'Same Published Place',
+        placeKey: 'place:456',
+      });
+      const second = register(bridge, {
+        peerId: 'window-b-edit',
+        instanceId: 'instance:window-b',
+        role: 'edit',
+        placeId: 456,
+        placeName: 'Same Published Place',
+        placeKey: 'place:456',
+      });
+
+      expect(first.instanceId).toBe('instance:window-a');
+      expect(second.instanceId).toBe('instance:window-b');
+      expect(bridge.getInstances().map((instance) => instance.id)).toEqual([
+        'instance:window-a',
+        'instance:window-b',
+      ]);
+      expect(bridge.resolveTarget({})).toMatchObject({
+        ok: false,
+        error: { code: 'multiple_instances_connected' },
+      });
+    });
+
+    test('allows separate unpublished-place processes without place aliases', () => {
+      register(bridge, {
+        peerId: 'anon-a',
+        instanceId: 'instance:anon-a',
+        role: 'edit',
+        placeKey: 'anon:shared-document',
+      });
+      register(bridge, {
+        peerId: 'anon-b',
+        instanceId: 'instance:anon-b',
+        role: 'edit',
+        placeKey: 'anon:shared-document',
+      });
+
+      expect(bridge.getPublicInstances().map((instance) => instance.id)).toEqual([
+        'instance:anon-a',
+        'instance:anon-b',
+      ]);
+      expect(bridge.resolveTarget({ instance_id: 'anon:shared-document' })).toMatchObject({
+        ok: false,
+        error: { code: 'unrecognized_instance_id' },
+      });
+    });
+
+    test('metadata publication never changes Instance or queued Peer identity', async () => {
+      register(bridge, {
+        peerId: 'edit-peer',
+        instanceId: 'instance:stable',
+        role: 'edit',
+        placeKey: 'anon:document',
+      });
+      const response = bridge.sendRequest('/api/save', {}, 'edit-peer');
+
+      bridge.updatePeerMetadata('edit-peer', {
+        placeId: 987,
+        placeName: 'Published',
+        placeKey: 'place:987',
+      });
+
+      expect(bridge.getPeerById('edit-peer')).toMatchObject({
+        peerId: 'edit-peer',
+        instanceId: 'instance:stable',
+        placeId: 987,
+        placeKey: 'place:987',
+      });
+      const delivery = bridge.claimNextRequestForTransport('edit-peer', 'stream');
+      expect(delivery).toMatchObject({ peerId: 'edit-peer', endpoint: '/api/save' });
+      bridge.resolveRequest(delivery!.requestId, { saved: true });
+      await expect(response).resolves.toEqual({ saved: true });
+    });
+
+    test('rejects a duplicate route only within one routing scope', () => {
+      register(bridge, {
+        peerId: 'first-edit',
+        instanceId: 'instance:first',
         role: 'edit',
       });
-      expect(r.ok).toBe(true);
-      expect(bridge.getInstances()).toHaveLength(2);
+      const duplicateStandalone = bridge.registerPeer({
+        peerId: 'second-edit',
+        transportPeerId: 'second-edit',
+        instanceId: 'instance:first',
+        role: 'edit',
+      });
+      expect(duplicateStandalone).toMatchObject({
+        ok: false,
+        error: { code: 'duplicate_scope_role', existing: { peerId: 'first-edit' } },
+      });
+
+      register(bridge, {
+        peerId: 'group-server',
+        instanceId: 'instance:server',
+        multiplayerGroupId: 'test:one',
+        role: 'server',
+      });
+      const duplicateGroupRole = bridge.registerPeer({
+        peerId: 'other-server',
+        transportPeerId: 'other-server',
+        instanceId: 'instance:other-server',
+        multiplayerGroupId: 'test:one',
+        role: 'server',
+      });
+      expect(duplicateGroupRole).toMatchObject({
+        ok: false,
+        error: { code: 'duplicate_scope_role', existing: { peerId: 'group-server' } },
+      });
+
+      expect(register(bridge, {
+        peerId: 'separate-server',
+        instanceId: 'instance:separate',
+        role: 'server',
+      }).assignedRole).toBe('server');
+    });
+
+    test('re-registration preserves Peer identity and connectedAt', () => {
+      const first = register(bridge, {
+        peerId: 'edit-peer',
+        instanceId: 'instance:one',
+        role: 'edit',
+        placeName: 'Before',
+      });
+      const connectedAt = bridge.getPeerById('edit-peer')!.connectedAt;
+      jest.advanceTimersByTime(1000);
+      const second = register(bridge, {
+        peerId: 'edit-peer',
+        instanceId: 'instance:one',
+        role: 'edit',
+        placeName: 'After',
+      });
+
+      expect(second.peerId).toBe(first.peerId);
+      expect(bridge.getPeers()).toHaveLength(1);
+      expect(bridge.getPeerById('edit-peer')).toMatchObject({ connectedAt, placeName: 'After' });
+    });
+
+    test('rejects reuse of a Peer ID for a different process or transport', () => {
+      register(bridge, {
+        peerId: 'stable-peer',
+        instanceId: 'instance:first',
+        role: 'edit',
+      });
+
+      expect(bridge.registerPeer({
+        peerId: 'stable-peer',
+        transportPeerId: 'different-transport',
+        instanceId: 'instance:second',
+        role: 'edit',
+      })).toMatchObject({ ok: false, error: { code: 'peer_identity_mismatch' } });
     });
   });
 
-  describe('resolveTarget', () => {
-    test('omitted/omitted with single instance auto-routes', () => {
-      register(bridge, { pluginSessionId: 'p1', instanceId: 'place:1', role: 'edit' });
-      const r = bridge.resolveTarget({});
-      expect(r.ok).toBe(true);
-      if (!r.ok) return;
-      expect(r.mode).toBe('single');
-      if (r.mode !== 'single') return;
-      expect(r.targetInstanceId).toBe('place:1');
-      expect(r.targetRole).toBe('edit');
+  describe('explicit Multiplayer Groups', () => {
+    test('auto-creates from runtime registration and merges the edit controller later', () => {
+      register(bridge, {
+        peerId: 'server-peer',
+        instanceId: 'instance:server',
+        multiplayerGroupId: 'test:abc',
+        role: 'server',
+      });
+      register(bridge, {
+        peerId: 'edit-peer',
+        instanceId: 'instance:edit',
+        role: 'edit',
+      });
+
+      bridge.createMultiplayerGroup('test:abc', 'instance:edit');
+
+      expect(bridge.getMultiplayerGroups()).toEqual([
+        expect.objectContaining({
+          id: 'test:abc',
+          controllerInstanceId: 'instance:edit',
+          instanceIds: ['instance:server', 'instance:edit'],
+        }),
+      ]);
+      expect(bridge.getPeerById('edit-peer')?.multiplayerGroupId).toBe('test:abc');
+      expect(bridge.getInstanceIdsInScope('instance:server')).toEqual([
+        'instance:server',
+        'instance:edit',
+      ]);
     });
 
-    test('omitted/omitted with multiple instances errors multiple_instances_connected', () => {
-      register(bridge, { pluginSessionId: 'p1', instanceId: 'place:1', role: 'edit' });
-      register(bridge, { pluginSessionId: 'p2', instanceId: 'place:2', role: 'edit' });
-      const r = bridge.resolveTarget({});
-      expect(r.ok).toBe(false);
-      if (r.ok) return;
-      expect(r.error.code).toBe('multiple_instances_connected');
-      expect(r.error.data.count).toBe(2);
-      expect(r.error.data.instances).toHaveLength(2);
+    test('retains the controller group while publishing only active runtime Peer aliases', () => {
+      register(bridge, {
+        peerId: 'runtime-server',
+        instanceId: 'instance:runtime',
+        multiplayerGroupId: 'test:lifetime',
+        role: 'server',
+      });
+      register(bridge, {
+        peerId: 'controller-edit',
+        instanceId: 'instance:edit',
+        role: 'edit',
+      });
+      bridge.createMultiplayerGroup('test:lifetime', 'instance:edit');
+
+      expect(bridge.getConnectedMultiplayerGroups()[0]?.instances).toEqual({
+        'instance:runtime-server': 'runtime-server',
+      });
+
+      bridge.unregisterPeer('runtime-server');
+
+      expect(bridge.getConnectedMultiplayerGroups()).toEqual([{
+        id: 'test:lifetime',
+        controllerInstanceId: 'instance:edit',
+        instances: {},
+      }]);
+      expect(bridge.resolveConnectedInstanceId('instance:runtime-server')).toBeUndefined();
+      expect(bridge.getConnectedInstances()).toEqual([
+        expect.objectContaining({
+          id: 'instance:edit',
+          multiplayerGroupId: 'test:lifetime',
+          peers: { edit: 'controller-edit' },
+        }),
+      ]);
+
+      register(bridge, {
+        peerId: 'replacement-server',
+        instanceId: 'instance:replacement',
+        multiplayerGroupId: 'test:lifetime',
+        role: 'server',
+      });
+      expect(bridge.resolveTarget({
+        instance_id: 'instance:edit',
+        target: 'server',
+      })).toMatchObject({
+        ok: true,
+        targetPeerId: 'replacement-server',
+      });
     });
 
-    test('target=role with multiple matching instances errors ambiguous_target', () => {
-      register(bridge, { pluginSessionId: 'p1', instanceId: 'place:1', role: 'edit' });
-      register(bridge, { pluginSessionId: 'p2', instanceId: 'place:2', role: 'edit' });
-      const r = bridge.resolveTarget({ target: 'edit' });
-      expect(r.ok).toBe(false);
-      if (r.ok) return;
-      expect(r.error.code).toBe('ambiguous_target');
-      expect(r.error.message).toContain('multiple Studio places are connected');
-      expect(r.error.message).toContain('Pass instance_id');
-      expect(r.error.data.count).toBe(2);
+    test('does not repeat grouped runtime Peers on a mixed edit process row', () => {
+      register(bridge, {
+        peerId: 'mixed-edit',
+        instanceId: 'instance:mixed',
+        multiplayerGroupId: 'test:mixed',
+        role: 'edit',
+      });
+      register(bridge, {
+        peerId: 'mixed-server',
+        instanceId: 'instance:mixed',
+        multiplayerGroupId: 'test:mixed',
+        role: 'server',
+      });
+
+      expect(bridge.getConnectedInstances()).toEqual([
+        expect.objectContaining({
+          id: 'instance:mixed',
+          peers: { edit: 'mixed-edit' },
+        }),
+      ]);
+      expect(bridge.getConnectedMultiplayerGroups()[0]?.instances).toEqual({
+        'instance:mixed-server': 'mixed-server',
+      });
     });
 
-    test('instance_id picks the place', () => {
-      register(bridge, { pluginSessionId: 'p1', instanceId: 'place:1', role: 'edit' });
-      register(bridge, { pluginSessionId: 'p2', instanceId: 'place:2', role: 'edit' });
-      const r = bridge.resolveTarget({ instance_id: 'place:2' });
-      expect(r.ok).toBe(true);
-      if (!r.ok) return;
-      expect(r.mode).toBe('single');
-      if (r.mode !== 'single') return;
-      expect(r.targetInstanceId).toBe('place:2');
-      expect(r.targetRole).toBe('edit');
+    test('rejects canonical IDs that collide with runtime aliases in either registration order', () => {
+      register(bridge, {
+        peerId: 'grouped-first',
+        instanceId: 'instance:runtime',
+        multiplayerGroupId: 'test:collision',
+        role: 'server',
+      });
+      expect(bridge.registerPeer({
+        peerId: 'canonical-second',
+        transportPeerId: 'canonical-second',
+        instanceId: 'instance:runtime-server',
+        role: 'edit',
+      })).toMatchObject({
+        ok: false,
+        error: {
+          code: 'instance_id_alias_collision',
+          existing: { peerId: 'grouped-first' },
+        },
+      });
+
+      const reverseBridge = new BridgeService();
+      register(reverseBridge, {
+        peerId: 'canonical-first',
+        instanceId: 'instance:runtime-server',
+        role: 'edit',
+      });
+      expect(reverseBridge.registerPeer({
+        peerId: 'grouped-second',
+        transportPeerId: 'grouped-second',
+        instanceId: 'instance:runtime',
+        multiplayerGroupId: 'test:collision',
+        role: 'server',
+      })).toMatchObject({
+        ok: false,
+        error: {
+          code: 'instance_id_alias_collision',
+          existing: { peerId: 'canonical-first' },
+        },
+      });
     });
 
-    test('unknown instance_id errors unrecognized_instance_id with full list', () => {
-      register(bridge, { pluginSessionId: 'p1', instanceId: 'place:1', role: 'edit' });
-      const r = bridge.resolveTarget({ instance_id: 'place:does-not-exist' });
-      expect(r.ok).toBe(false);
-      if (r.ok) return;
-      expect(r.error.code).toBe('unrecognized_instance_id');
-      expect(r.error.data.instances).toHaveLength(1);
-      expect(r.error.data.instances[0].instanceId).toBe('place:1');
+    test('routes any selected member across the entire group', () => {
+      register(bridge, {
+        peerId: 'runtime-server',
+        instanceId: 'instance:server',
+        multiplayerGroupId: 'test:routing',
+        role: 'server',
+      });
+      register(bridge, {
+        peerId: 'runtime-client',
+        transportPeerId: 'runtime-server',
+        instanceId: 'instance:client',
+        multiplayerGroupId: 'test:routing',
+        role: 'client',
+      });
+      register(bridge, {
+        peerId: 'controller-edit',
+        instanceId: 'instance:edit',
+        role: 'edit',
+      });
+      bridge.createMultiplayerGroup('test:routing', 'instance:edit');
+      expect(bridge.getConnectedInstances()).toEqual([
+        expect.objectContaining({
+          id: 'instance:edit',
+          multiplayerGroupId: 'test:routing',
+          peers: { edit: 'controller-edit' },
+        }),
+      ]);
+      expect(bridge.getConnectedMultiplayerGroups()).toEqual([{
+        id: 'test:routing',
+        controllerInstanceId: 'instance:edit',
+        instances: {
+          'instance:server-server': 'runtime-server',
+          'instance:client-client-1': 'runtime-client',
+        },
+      }]);
+
+
+      expect(bridge.resolveTarget({ instance_id: 'instance:client' })).toEqual({
+        ok: true,
+        mode: 'single',
+        targetPeerId: 'controller-edit',
+        targetInstanceId: 'instance:edit',
+        targetRole: 'edit',
+      });
+      expect(bridge.resolveTarget({ instance_id: 'instance:edit', target: 'server' })).toEqual({
+        ok: true,
+        mode: 'single',
+        targetPeerId: 'runtime-server',
+        targetInstanceId: 'instance:server',
+        targetRole: 'server',
+      });
+      expect(bridge.resolveTarget({
+        instance_id: 'instance:server-server',
+        target: 'server',
+      })).toEqual({
+        ok: true,
+        mode: 'single',
+        targetPeerId: 'runtime-server',
+        targetInstanceId: 'instance:server',
+        targetRole: 'server',
+      });
+      expect(bridge.resolveTarget({ target: 'client-1' })).toEqual({
+        ok: true,
+        mode: 'single',
+        targetPeerId: 'runtime-client',
+        targetInstanceId: 'instance:client',
+        targetRole: 'client-1',
+      });
+      const fanout = bridge.resolveTarget({ instance_id: 'instance:server', target: 'all' });
+      expect(fanout).toMatchObject({ ok: true, mode: 'fanout' });
+      if (!fanout.ok || fanout.mode !== 'fanout') throw new Error('expected fanout');
+      expect(fanout.targets.map((target) => target.targetPeerId)).toEqual([
+        'runtime-server',
+        'runtime-client',
+        'controller-edit',
+      ]);
     });
 
-    test('instance_id with role picks (instance, role) tuple', () => {
-      register(bridge, { pluginSessionId: 'p1', instanceId: 'place:1', role: 'edit' });
-      register(bridge, { pluginSessionId: 'p2', instanceId: 'place:1', role: 'server' });
-      register(bridge, { pluginSessionId: 'p3', instanceId: 'place:1', role: 'client' });
-      const r = bridge.resolveTarget({ instance_id: 'place:1', target: 'server' });
-      expect(r.ok).toBe(true);
-      if (!r.ok || r.mode !== 'single') throw new Error('expected single');
-      expect(r.targetRole).toBe('server');
+    test('allocates client ordinals within a group, not by place or process', () => {
+      const first = register(bridge, {
+        peerId: 'group-a-client-one',
+        instanceId: 'instance:a-client-one',
+        multiplayerGroupId: 'test:a',
+        role: 'client',
+        placeId: 100,
+      });
+      const second = register(bridge, {
+        peerId: 'group-a-client-two',
+        instanceId: 'instance:a-client-two',
+        multiplayerGroupId: 'test:a',
+        role: 'client',
+        placeId: 100,
+      });
+      const otherGroup = register(bridge, {
+        peerId: 'group-b-client-one',
+        instanceId: 'instance:b-client-one',
+        multiplayerGroupId: 'test:b',
+        role: 'client',
+        placeId: 100,
+      });
+      const standalone = register(bridge, {
+        peerId: 'standalone-client-one',
+        instanceId: 'instance:standalone',
+        role: 'client',
+        placeId: 100,
+      });
+
+      expect(first.assignedRole).toBe('client-1');
+      expect(second.assignedRole).toBe('client-2');
+      expect(otherGroup.assignedRole).toBe('client-1');
+      expect(standalone.assignedRole).toBe('client-1');
     });
 
-    test('instance_id with client role picks that place client even when another place has same client role', () => {
-      register(bridge, { pluginSessionId: 'p1', instanceId: 'place:1', role: 'client' });
-      register(bridge, { pluginSessionId: 'p2', instanceId: 'place:2', role: 'client' });
-      const r = bridge.resolveTarget({ instance_id: 'place:2', target: 'client-1' });
-      expect(r.ok).toBe(true);
-      if (!r.ok || r.mode !== 'single') throw new Error('expected single');
-      expect(r.targetInstanceId).toBe('place:2');
-      expect(r.targetRole).toBe('client-1');
+    test('moving an Instance detaches it from its prior group', () => {
+      register(bridge, {
+        peerId: 'edit-peer',
+        instanceId: 'instance:edit',
+        multiplayerGroupId: 'test:old',
+        role: 'edit',
+      });
+
+      bridge.createMultiplayerGroup('test:new', 'instance:edit');
+
+      expect(bridge.getPeerById('edit-peer')?.multiplayerGroupId).toBe('test:new');
+      expect(bridge.getMultiplayerGroups()).toEqual([
+        expect.objectContaining({
+          id: 'test:new',
+          controllerInstanceId: 'instance:edit',
+          instanceIds: ['instance:edit'],
+        }),
+      ]);
     });
 
-    test('instance_id with role that does not exist on instance errors target_role_not_present_on_instance', () => {
-      register(bridge, { pluginSessionId: 'p1', instanceId: 'place:1', role: 'edit' });
-      const r = bridge.resolveTarget({ instance_id: 'place:1', target: 'server' });
-      expect(r.ok).toBe(false);
-      if (r.ok) return;
-      expect(r.error.code).toBe('target_role_not_present_on_instance');
-    });
+    test('removing a group makes every member Instance standalone', () => {
+      register(bridge, {
+        peerId: 'server-peer',
+        instanceId: 'instance:server',
+        multiplayerGroupId: 'test:remove',
+        role: 'server',
+      });
+      register(bridge, {
+        peerId: 'client-peer',
+        instanceId: 'instance:client',
+        multiplayerGroupId: 'test:remove',
+        role: 'client',
+      });
 
-    test('instance_id without role on multi-role instance prefers edit', () => {
-      register(bridge, { pluginSessionId: 'p1', instanceId: 'place:1', role: 'edit' });
-      register(bridge, { pluginSessionId: 'p2', instanceId: 'place:1', role: 'server' });
-      const r = bridge.resolveTarget({ instance_id: 'place:1' });
-      expect(r.ok).toBe(true);
-      if (!r.ok || r.mode !== 'single') throw new Error('expected single');
-      expect(r.targetRole).toBe('edit');
-    });
+      const removed = bridge.removeMultiplayerGroup('test:remove');
 
-    test('instance_id without role on multi-role no-edit instance errors target_role_required', () => {
-      register(bridge, { pluginSessionId: 'p1', instanceId: 'place:1', role: 'server' });
-      register(bridge, { pluginSessionId: 'p2', instanceId: 'place:1', role: 'client' });
-      const r = bridge.resolveTarget({ instance_id: 'place:1' });
-      expect(r.ok).toBe(false);
-      if (r.ok) return;
-      expect(r.error.code).toBe('target_role_required');
-    });
-
-    test('target=all with single instance fans out across its roles', () => {
-      register(bridge, { pluginSessionId: 'p1', instanceId: 'place:1', role: 'edit' });
-      register(bridge, { pluginSessionId: 'p2', instanceId: 'place:1', role: 'server' });
-      register(bridge, { pluginSessionId: 'p3', instanceId: 'place:1', role: 'client' });
-      const r = bridge.resolveTarget({ target: 'all' });
-      expect(r.ok).toBe(true);
-      if (!r.ok || r.mode !== 'fanout') throw new Error('expected fanout');
-      expect(r.targets).toHaveLength(3);
-      const roles = r.targets.map((t) => t.targetRole).sort();
-      expect(roles).toEqual(['client-1', 'edit', 'server']);
-      r.targets.forEach((t) => expect(t.targetInstanceId).toBe('place:1'));
-    });
-
-    test('target=all with multiple instances errors multiple_instances_connected', () => {
-      register(bridge, { pluginSessionId: 'p1', instanceId: 'place:1', role: 'edit' });
-      register(bridge, { pluginSessionId: 'p2', instanceId: 'place:2', role: 'edit' });
-      const r = bridge.resolveTarget({ target: 'all' });
-      expect(r.ok).toBe(false);
-      if (r.ok) return;
-      expect(r.error.code).toBe('multiple_instances_connected');
-    });
-
-    test('instance_id + target=all fans out only across that instance', () => {
-      register(bridge, { pluginSessionId: 'p1', instanceId: 'place:1', role: 'edit' });
-      register(bridge, { pluginSessionId: 'p2', instanceId: 'place:1', role: 'server' });
-      register(bridge, { pluginSessionId: 'p3', instanceId: 'place:2', role: 'edit' });
-      const r = bridge.resolveTarget({ instance_id: 'place:1', target: 'all' });
-      expect(r.ok).toBe(true);
-      if (!r.ok || r.mode !== 'fanout') throw new Error('expected fanout');
-      expect(r.targets).toHaveLength(2);
-      r.targets.forEach((t) => expect(t.targetInstanceId).toBe('place:1'));
-    });
-
-    test('no instances connected errors with empty list', () => {
-      const r = bridge.resolveTarget({});
-      expect(r.ok).toBe(false);
-      if (r.ok) return;
-      expect(r.error.code).toBe('unrecognized_instance_id');
-      expect(r.error.data.count).toBe(0);
+      expect(removed?.instanceIds).toEqual(['instance:server', 'instance:client']);
+      expect(bridge.getMultiplayerGroups()).toEqual([]);
+      expect(bridge.getInstances()).toEqual([
+        expect.objectContaining({ id: 'instance:server', multiplayerGroupId: undefined }),
+        expect.objectContaining({ id: 'instance:client', multiplayerGroupId: undefined }),
+      ]);
+      expect(bridge.resolveTarget({})).toMatchObject({
+        ok: false,
+        error: { code: 'multiple_instances_connected' },
+      });
     });
   });
 
-  describe('cleanup', () => {
-    test('cleanupOldRequests rejects timed-out requests', async () => {
-      const a = bridge.sendRequest('/api/a', {}, 'place:1', 'edit');
-      const b = bridge.sendRequest('/api/b', {}, 'place:1', 'edit');
-      jest.advanceTimersByTime(31000);
-      bridge.cleanupOldRequests();
-      await expect(a).rejects.toThrow('Request timeout');
-      await expect(b).rejects.toThrow('Request timeout');
+  describe('routing errors', () => {
+    test('reports compact role-keyed Instances and Multiplayer Groups', () => {
+      register(bridge, {
+        peerId: 'peer:aaa-111',
+        instanceId: 'instance:a',
+        multiplayerGroupId: 'test:a',
+        role: 'edit',
+      });
+      register(bridge, {
+        peerId: 'peer:bbb-222',
+        instanceId: 'instance:b',
+        role: 'edit',
+      });
+
+      const result = bridge.resolveTarget({ target: 'edit' });
+
+      expect(result).toMatchObject({
+        ok: false,
+        error: {
+          code: 'ambiguous_target',
+          data: {
+            count: 3,
+            instances: [
+              { id: 'instance:a', peers: { edit: 'peer:aaa-111' } },
+              { id: 'instance:b', peers: { edit: 'peer:bbb-222' } },
+            ],
+            multiplayerGroups: [{ id: 'test:a', instances: {} }],
+          },
+        },
+      });
+      if (result.ok) throw new Error('expected routing error');
+      expect(result.error.data.instances[0].peers).toEqual({ edit: 'peer:aaa-111' });
     });
 
-    test('clearAllPendingRequests rejects everything', async () => {
-      const a = bridge.sendRequest('/api/a', {}, 'place:1', 'edit');
-      bridge.clearAllPendingRequests();
-      await expect(a).rejects.toThrow('Connection closed');
+    test('explicit Instance selects its scope even for same-place processes', () => {
+      register(bridge, {
+        peerId: 'first-edit',
+        instanceId: 'instance:first',
+        role: 'edit',
+        placeId: 1,
+      });
+      register(bridge, {
+        peerId: 'second-edit',
+        instanceId: 'instance:second',
+        role: 'edit',
+        placeId: 1,
+      });
+
+      expect(bridge.resolveTarget({ instance_id: 'instance:second', target: 'edit' })).toEqual({
+        ok: true,
+        mode: 'single',
+        targetPeerId: 'second-edit',
+        targetInstanceId: 'instance:second',
+        targetRole: 'edit',
+      });
+    });
+  });
+
+  describe('exact Peer request delivery', () => {
+    test('delivers to the exact target Peer through its transport owner', async () => {
+      register(bridge, {
+        peerId: 'server-peer',
+        instanceId: 'instance:server',
+        multiplayerGroupId: 'test:proxy',
+        role: 'server',
+      });
+      register(bridge, {
+        peerId: 'client-peer',
+        transportPeerId: 'server-peer',
+        instanceId: 'instance:client',
+        multiplayerGroupId: 'test:proxy',
+        role: 'client',
+      });
+      const response = bridge.sendRequest('/api/client-only', { value: 1 }, 'client-peer');
+
+      expect(bridge.claimNextRequestForTransport('unrelated-peer', 'wrong-stream')).toBeNull();
+      const delivery = bridge.claimNextRequestForTransport('server-peer', 'server-stream');
+      expect(delivery).toMatchObject({
+        peerId: 'client-peer',
+        target: 'client-1',
+        endpoint: '/api/client-only',
+        data: { value: 1 },
+      });
+      bridge.resolveRequest(delivery!.requestId, { reached: 'client-peer' });
+      await expect(response).resolves.toEqual({ reached: 'client-peer' });
     });
 
-    test('unregisterInstance rejects requests targeting the removed (instanceId, role)', async () => {
-      register(bridge, { pluginSessionId: 'p1', instanceId: 'place:1', role: 'edit' });
-      const controller = new AbortController();
-      const removeAbortListener = jest.spyOn(controller.signal, 'removeEventListener');
-      const req = bridge.sendRequest('/api/test', {}, 'place:1', 'edit', 30_000, controller.signal);
-      const delivery = bridge.claimNextRequestForPhysical('p1', 'disconnecting-delivery')!;
-      bridge.unregisterInstance('p1');
-      await expect(req).rejects.toThrow(/disconnected/);
-      expect(removeAbortListener).toHaveBeenCalledWith('abort', expect.any(Function));
-      expect(bridge.resolveRequest(delivery.requestId, {})).toBe('unknown');
+    test('does not retarget queued work when a different Peer appears', async () => {
+      register(bridge, {
+        peerId: 'original-peer',
+        instanceId: 'instance:one',
+        role: 'edit',
+      });
+      const response = bridge.sendRequest('/api/mutate', {}, 'original-peer');
+      const rejected = expect(response).rejects.toThrow('original-peer');
+
+      bridge.unregisterPeer('original-peer');
+      register(bridge, {
+        peerId: 'replacement-peer',
+        instanceId: 'instance:one',
+        role: 'edit',
+      });
+
+      expect(bridge.claimNextRequestForTransport('replacement-peer', 'replacement-stream')).toBeNull();
+      await rejected;
     });
 
-    test('unregisterInstance leaves requests alone if another plugin still holds the tuple', async () => {
-      // Two plugins both registering the same (instance, role) would be
-      // duplicate_instance_role and rejected — this test exercises the case
-      // where role differs.
-      register(bridge, { pluginSessionId: 'p1', instanceId: 'place:1', role: 'edit' });
-      register(bridge, { pluginSessionId: 'p2', instanceId: 'place:1', role: 'server' });
-      const editReq = bridge.sendRequest('/api/test', {}, 'place:1', 'edit');
-      const serverReq = bridge.sendRequest('/api/test', {}, 'place:1', 'server');
+    test('release redelivers the same request to the same transport and Peer', async () => {
+      register(bridge, {
+        peerId: 'client-peer',
+        transportPeerId: 'server-peer',
+        instanceId: 'instance:client',
+        role: 'client',
+      });
+      const response = bridge.sendRequest('/api/work', {}, 'client-peer');
+      const first = bridge.claimNextRequestForTransport('server-peer', 'old-stream');
 
-      bridge.unregisterInstance('p2'); // remove server plugin
-      // edit request should still be pending (edit plugin still here)
-      const stillPending = bridge.claimNextRequestForPhysical('p1', 'unregister-test');
-      expect(stillPending).toBeTruthy();
+      bridge.releaseDeliveryClaims('old-stream');
+      const second = bridge.claimNextRequestForTransport('server-peer', 'new-stream');
 
-      // server request should have been rejected
-      await expect(serverReq).rejects.toThrow(/disconnected/);
-
-      // Clean up the edit request to avoid hanging promise.
-      bridge.resolveRequest(stillPending!.requestId, {});
-      await editReq;
+      expect(second).toEqual(first);
+      expect(second?.peerId).toBe('client-peer');
+      bridge.resolveRequest(second!.requestId, { ok: true });
+      await expect(response).resolves.toEqual({ ok: true });
     });
 
-    test('unregisterInstanceId immediately removes every role for an instance', async () => {
-      register(bridge, { pluginSessionId: 'edit-1', instanceId: 'anon:1', role: 'edit' });
-      register(bridge, { pluginSessionId: 'server-1', instanceId: 'anon:1', role: 'server' });
-      register(bridge, { pluginSessionId: 'client-1', instanceId: 'anon:1', role: 'client' });
-      register(bridge, { pluginSessionId: 'edit-2', instanceId: 'anon:2', role: 'edit' });
+    test('timeout emits cancellation only to the transport that received the request', async () => {
+      register(bridge, {
+        peerId: 'client-peer',
+        transportPeerId: 'server-peer',
+        instanceId: 'instance:client',
+        role: 'client',
+      });
+      const response = bridge.sendRequest('/api/slow', {}, 'client-peer', 1000);
+      const rejected = expect(response).rejects.toThrow('Request timeout');
+      const delivery = bridge.claimNextRequestForTransport('server-peer', 'stream');
 
-      const removed = bridge.unregisterInstanceId('anon:1');
+      jest.advanceTimersByTime(1000);
 
-      expect(removed.map((inst) => inst.role).sort()).toEqual(['client-1', 'edit', 'server']);
-      expect(bridge.getPublicInstances().map((inst) => inst.instanceId)).toEqual(['anon:2']);
+      expect(bridge.claimNextCancellationForTransport('other-peer', 'other-stream')).toBeNull();
+      expect(bridge.claimNextCancellationForTransport('server-peer', 'stream')).toEqual({
+        requestId: delivery!.requestId,
+        reason: 'timeout',
+      });
+      await rejected;
+    });
+
+    test('settles a request once and retains an accepted tombstone', async () => {
+      register(bridge, {
+        peerId: 'edit-peer',
+        instanceId: 'instance:edit',
+        role: 'edit',
+      });
+      const response = bridge.sendRequest('/api/test', {}, 'edit-peer');
+      const delivery = bridge.claimNextRequestForTransport('edit-peer', 'stream')!;
+
+      expect(bridge.resolveRequest(delivery.requestId, { ok: true })).toBe('accepted');
+      expect(bridge.rejectRequest(delivery.requestId, new Error('late'))).toBe('already_settled');
+      expect(bridge.resolveRequest('unknown', {})).toBe('unknown');
+      await expect(response).resolves.toEqual({ ok: true });
+    });
+  });
+
+  describe('Peer lifecycle', () => {
+    test('uses Peer listener and close terminology', () => {
+      const registered: string[] = [];
+      const closed: string[] = [];
+      bridge.onPeerRegistered((peer) => registered.push(peer.peerId));
+      bridge.onPeerClosed((peer) => closed.push(`${peer.peerId}:${peer.transportPeerId}`));
+
+      register(bridge, {
+        peerId: 'edit-peer',
+        instanceId: 'instance:edit',
+        role: 'edit',
+      });
+      bridge.unregisterPeer('edit-peer');
+
+      expect(registered).toEqual(['edit-peer']);
+      expect(closed).toEqual(['edit-peer:edit-peer']);
+    });
+
+    test('transport Instance removal returns and cascades only its proxied Peers', () => {
+      register(bridge, {
+        peerId: 'server-peer',
+        instanceId: 'instance:server',
+        multiplayerGroupId: 'test:cascade',
+        role: 'server',
+      });
+      register(bridge, {
+        peerId: 'client-peer',
+        transportPeerId: 'server-peer',
+        instanceId: 'instance:client',
+        multiplayerGroupId: 'test:cascade',
+        role: 'client',
+      });
+      register(bridge, {
+        peerId: 'other-peer',
+        instanceId: 'instance:other',
+        role: 'edit',
+      });
+      bridge.createMultiplayerGroup('test:cascade', 'instance:other');
+
+      const removed = bridge.unregisterInstanceId('instance:server');
+
+      expect(removed.map((peer) => peer.peerId)).toEqual(['server-peer', 'client-peer']);
+      expect(bridge.getPeerById('server-peer')).toBeUndefined();
+      expect(bridge.getPeerById('client-peer')).toBeUndefined();
+      expect(bridge.getPeerById('other-peer')).toBeDefined();
+      expect(bridge.getMultiplayerGroups()).toEqual([]);
+    });
+
+    test('unregisterInstanceId removes one process without touching same-place processes', () => {
+      register(bridge, {
+        peerId: 'first-edit',
+        instanceId: 'instance:first',
+        role: 'edit',
+        placeId: 22,
+      });
+      register(bridge, {
+        peerId: 'second-edit',
+        instanceId: 'instance:second',
+        role: 'edit',
+        placeId: 22,
+      });
+
+      const removed = bridge.unregisterInstanceId('instance:first');
+
+      expect(removed.map((peer) => peer.peerId)).toEqual(['first-edit']);
+      expect(bridge.getPublicInstances()).toEqual([
+        expect.objectContaining({ id: 'instance:second' }),
+      ]);
+    });
+
+    test('active transport protects its direct and proxied Peers from stale cleanup', () => {
+      register(bridge, {
+        peerId: 'server-peer',
+        instanceId: 'instance:server',
+        role: 'server',
+      });
+      register(bridge, {
+        peerId: 'client-peer',
+        transportPeerId: 'server-peer',
+        instanceId: 'instance:client',
+        role: 'client',
+      });
+      bridge.setDeliveryActive('server-peer', 'stream', true);
+
+      jest.advanceTimersByTime(31_000);
+      bridge.cleanupStalePeers();
+
+      expect(bridge.getPeers().map((peer) => peer.peerId)).toEqual(['server-peer', 'client-peer']);
+      bridge.setDeliveryActive('server-peer', 'stream', false);
+      bridge.cleanupStalePeers();
+      expect(bridge.getPeers()).toEqual([]);
     });
   });
 });

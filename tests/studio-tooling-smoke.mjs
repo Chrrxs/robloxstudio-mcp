@@ -4,7 +4,16 @@ import { createConnection } from 'node:net';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
-import { BASE_PORT, McpClient, DIST, REPO_ROOT, assert, assertContains } from './lib/mcp-client.mjs';
+import {
+  BASE_PORT,
+  McpClient,
+  DIST,
+  REPO_ROOT,
+  assert,
+  assertContains,
+  instancePeers,
+  selectEditInstance,
+} from './lib/mcp-client.mjs';
 import { windowsPortIsAvailable } from './lib/test-port.mjs';
 import {
   closeStudioProcess,
@@ -48,12 +57,23 @@ async function waitForEditInstance(client, expectedVersion, instanceId, timeoutM
   while (Date.now() < deadline) {
     try {
       const connected = await client.callTool('get_connected_instances', {});
-      const instances = connected.instances ?? [];
-      const edit = instances.find((inst) => inst.id === instanceId && inst.roles?.includes('edit'));
+      const edit = selectEditInstance(connected, instanceId);
       if (edit) {
+        assert(
+          /^instance:[0-9a-z]{3}-[0-9a-z]{3}$/u.test(edit.id),
+          `connected Instance uses a compact typed ID (${edit.id})`,
+        );
+        assert(
+          !Array.isArray(edit.peers) &&
+            edit.peers !== null &&
+            typeof edit.peers === 'object' &&
+            /^peer:[0-9a-z]{3}-[0-9a-z]{3}$/u.test(edit.peers.edit),
+          `connected peers map roles to compact typed IDs (${JSON.stringify(edit.peers)})`,
+        );
         const statusResponse = await fetch(`http://127.0.0.1:${BASE_PORT}/status`);
         const status = await statusResponse.json();
-        const peer = status.instances?.find((inst) => inst.role === 'edit' && inst.instanceId === instanceId);
+        const peer = instancePeers(selectEditInstance(status, instanceId))
+          .find((candidate) => candidate.role === 'edit');
         if (!peer) {
           last = { connected, status };
           await delay(1000);

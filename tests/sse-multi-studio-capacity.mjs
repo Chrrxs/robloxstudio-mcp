@@ -10,7 +10,14 @@ import {
   configureStudioDirectoryIsolation,
   createIsolatedStudioDirectory,
 } from '../scripts/studio-lifecycle.mjs';
-import { DIST, McpClient, REPO_ROOT } from './lib/mcp-client.mjs';
+import {
+  DIST,
+  McpClient,
+  REPO_ROOT,
+  connectedInstances,
+  instancePeers,
+  routingPeers,
+} from './lib/mcp-client.mjs';
 import { acquireSuitePort } from './lib/test-port.mjs';
 
 const STUDIO_COUNT = 4;
@@ -36,18 +43,8 @@ async function settleOrThrow(promises, label) {
 }
 
 
-function instanceRows(connected) {
-  const rows = connected?.instances ?? connected;
-  return Array.isArray(rows) ? rows : [];
-}
-
-function instanceId(row) {
-  return row?.id ?? row?.instanceId;
-}
-
-function instanceRoles(row) {
-  if (Array.isArray(row?.roles)) return row.roles;
-  return row?.role ? [row.role] : [];
+function uniquePeers(peers) {
+  return [...new Map(peers.map((peer) => [peer.peerId, peer])).values()];
 }
 
 function workerEnvironment(worker, port, workerIndex, { requirePrimary }) {
@@ -193,9 +190,9 @@ async function waitForAllEditPeers(control, expectedInstanceIds) {
   let lastConnected;
   while (Date.now() < deadline) {
     lastConnected = await control.callTool('get_connected_instances', {}, 10_000);
-    const edits = new Set(instanceRows(lastConnected)
-      .filter((row) => instanceRoles(row).includes('edit'))
-      .map(instanceId));
+    const edits = new Set(connectedInstances(lastConnected)
+      .filter((instance) => instancePeers(instance).some((peer) => peer.role === 'edit'))
+      .map((instance) => instance.id));
     if ([...expected].every((id) => edits.has(id))) return lastConnected;
     await delay(POLL_MS);
   }
@@ -226,10 +223,8 @@ async function waitForServerCapacity(control, port, expectedInstanceIds) {
         control.callTool('get_connected_instances', {}, 10_000),
         readHealth(port),
       ]);
-      const rows = instanceRows(lastConnected).filter((row) => expected.has(instanceId(row)));
       const allRuntimePeersPresent = expectedInstanceIds.every((id) => {
-        const row = rows.find((candidate) => instanceId(candidate) === id);
-        const roles = instanceRoles(row);
+        const roles = routingPeers(lastConnected, id).map((peer) => peer.role);
         return roles.includes('edit') &&
           roles.includes('server') &&
           roles.some((role) => /^client-[1-9]\d*$/.test(role));
@@ -252,51 +247,44 @@ async function waitForServerCapacity(control, port, expectedInstanceIds) {
 }
 
 function assertCapacityEvidence(connected, health, expectedInstanceIds) {
-  const expected = new Set(expectedInstanceIds);
-  const rows = instanceRows(connected).filter((row) => expected.has(instanceId(row)));
-  const physicalRoles = rows.flatMap((row) => instanceRoles(row)
-    .filter((role) => role === 'edit' || role === 'server')
-    .map((role) => ({ instanceId: instanceId(row), role })));
-  if (physicalRoles.length !== EXPECTED_PHYSICAL_STREAMS) {
-    throw new Error(`Expected four edit/server role pairs, got ${JSON.stringify(physicalRoles)}`);
+  const scopedPeers = uniquePeers(
+    expectedInstanceIds.flatMap((instanceId) => routingPeers(connected, instanceId)),
+  );
+  const physicalPeers = scopedPeers.filter((peer) => peer.role === 'edit' || peer.role === 'server');
+  if (physicalPeers.length !== EXPECTED_PHYSICAL_STREAMS) {
+    throw new Error(`Expected four edit/server peer pairs, got ${JSON.stringify(physicalPeers)}`);
   }
   if (!Number.isInteger(health.activeEventStreams) || health.activeEventStreams < EXPECTED_PHYSICAL_STREAMS) {
     throw new Error(`Health did not report at least ${EXPECTED_PHYSICAL_STREAMS} active event streams: ${JSON.stringify(health)}`);
   }
 
-  const clientRoles = rows.flatMap((row) => instanceRoles(row)
-    .filter((role) => /^client-[1-9]\d*$/.test(role))
-    .map((role) => ({ instanceId: instanceId(row), role })));
-  const instancesWithoutClients = expectedInstanceIds.filter((id) =>
-    !clientRoles.some((client) => client.instanceId === id));
+  const clientPeers = scopedPeers.filter((peer) => /^client-[1-9]\d*$/.test(peer.role));
+  const instancesWithoutClients = expectedInstanceIds.filter((instanceId) =>
+    !routingPeers(connected, instanceId).some((peer) => /^client-[1-9]\d*$/.test(peer.role)));
   if (instancesWithoutClients.length > 0) {
-    throw new Error(`Expected a logical client role for every playtest; missing ${JSON.stringify(instancesWithoutClients)}`);
+    throw new Error(`Expected a logical client peer for every playtest; missing ${JSON.stringify(instancesWithoutClients)}`);
   }
-  if (health.activeEventStreams !== physicalRoles.length) {
+  if (health.activeEventStreams !== physicalPeers.length) {
     throw new Error(
-      `Logical client roles must not add physical SSE responses. Physical edit/server roles: ` +
-      `${physicalRoles.length}; logical clients: ${JSON.stringify(clientRoles)}; health: ${JSON.stringify(health)}`,
+      `Logical client peers must not add physical SSE responses. Physical edit/server peers: ` +
+      `${physicalPeers.length}; logical clients: ${JSON.stringify(clientPeers)}; health: ${JSON.stringify(health)}`,
     );
   }
 
-  const healthRows = Array.isArray(health.instances)
-    ? health.instances.filter((row) => expected.has(instanceId(row)))
-    : [];
-  if (healthRows.length > 0) {
-    const healthPairs = new Set(healthRows
-      .filter((row) => row.role === 'edit' || row.role === 'server')
-      .map((row) => `${instanceId(row)}:${row.role}`));
-    for (const id of expectedInstanceIds) {
-      if (!healthPairs.has(`${id}:edit`) || !healthPairs.has(`${id}:server`)) {
-        throw new Error(`Health lacks distinct edit/server session evidence for ${id}: ${JSON.stringify(healthRows)}`);
-      }
+  const scopedHealthPeers = expectedInstanceIds
+    .flatMap((instanceId) => routingPeers(health, instanceId));
+  const healthPeers = uniquePeers(scopedHealthPeers);
+  for (const instanceId of expectedInstanceIds) {
+    const routed = routingPeers(health, instanceId);
+    if (!routed.some((peer) => peer.role === 'edit') || !routed.some((peer) => peer.role === 'server')) {
+      throw new Error(`Health lacks distinct edit/server peer evidence for ${instanceId}: ${JSON.stringify(healthPeers)}`);
     }
-    const sessionIds = healthRows
-      .map((row) => row.pluginSessionId)
-      .filter((id) => typeof id === 'string' && id);
-    if (sessionIds.length > 0 && new Set(sessionIds).size !== sessionIds.length) {
-      throw new Error(`Health reported duplicate physical plugin session ids: ${JSON.stringify(sessionIds)}`);
-    }
+  }
+  const peerIds = scopedHealthPeers
+    .map((peer) => peer.peerId)
+    .filter((id) => typeof id === 'string' && id);
+  if (new Set(peerIds).size !== peerIds.length) {
+    throw new Error(`Health reported duplicate peer ids: ${JSON.stringify(peerIds)}`);
   }
 }
 

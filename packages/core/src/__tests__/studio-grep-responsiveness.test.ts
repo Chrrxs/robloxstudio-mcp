@@ -327,20 +327,20 @@ describe('Studio grep responsiveness', () => {
     jest.spyOn(bridge, 'resolveTarget').mockReturnValue({
       ok: true,
       mode: 'single',
-      targetInstanceId: 'place:test',
+      targetPeerId: 'peer:test',
+      targetInstanceId: 'instance:test',
       targetRole: 'edit',
     });
     const sendRequest = jest.spyOn(bridge, 'sendRequest').mockResolvedValue({ results: [] });
     const tools = new RobloxStudioTools(bridge);
     const controller = new AbortController();
 
-    await tools.grepScripts('needle', {}, 'place:test', controller.signal);
+    await tools.grepScripts('needle', {}, 'instance:test', controller.signal);
 
     expect(sendRequest).toHaveBeenCalledWith(
       '/api/grep-scripts',
       { pattern: 'needle' },
-      'place:test',
-      'edit',
+      'peer:test',
       120_000,
       controller.signal,
     );
@@ -351,13 +351,14 @@ describe('Studio grep responsiveness', () => {
     jest.spyOn(bridge, 'resolveTarget').mockReturnValue({
       ok: true,
       mode: 'single',
-      targetInstanceId: 'place:test',
+      targetPeerId: 'peer:test',
+      targetInstanceId: 'instance:test',
       targetRole: 'edit',
     });
     const sendRequest = jest.spyOn(bridge, 'sendRequest').mockResolvedValue({ results: [] });
     const tools = new RobloxStudioTools(bridge);
 
-    await expect(tools.grepScripts('é'.repeat(4096), {}, 'place:test')).rejects.toThrow(
+    await expect(tools.grepScripts('é'.repeat(4096), {}, 'instance:test')).rejects.toThrow(
       'Pattern must not exceed 4096 UTF-8 bytes',
     );
     expect(sendRequest).not.toHaveBeenCalled();

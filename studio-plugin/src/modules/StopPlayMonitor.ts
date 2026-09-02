@@ -1,30 +1,9 @@
-// Cross-DM stop_playtest signaling via plugin:SetSetting, scoped by
-// per-instance setting key so the same Studio process can host playtests
-// for multiple places without one place's stop_playtest yanking another's.
-// During publish-after-connect, both "anon:<uuid>" and "place:<PlaceId>"
-// can refer to the same Studio place, so stop requests are mirrored across
-// both keys while the monitor waits for a matching result on either key.
-//
-// `plugin:SetSetting` / `plugin:GetSetting` is a per-plugin persistent store
-// shared across every DataModel the plugin runs in (edit DMs, play-server
-// DMs, play-client DMs). For each connected place we use a dedicated key
-// "MCP_STOP_PLAY_<instanceId>" as a tiny request/result mailbox:
-//
-//   * The edit DM's handler writes a tokenized stop request into its own key
-//     (computed from its placeId / ServerStorage anon UUID).
-//   * Each play-server DM's monitor loop polls the key matching its own
-//     instanceId at 1Hz. On a fresh token, it calls StudioTestService:EndTest
-//     and writes a matching result token. Play-server DMs for other places
-//     never touch this key.
-//   * The edit DM waits up to ~8s for its result token, confirming a matching
-//     play-server actually consumed the request.
-//
-// Earlier versions used a single shared boolean flag, which let any
-// play-server DM in the same Studio process consume any place's stop
-// request — silently yanking teammates' playtests. The per-key scoping
-// below is the fix.
+// Cross-DataModel stop_playtest signaling via plugin settings. Solo edit and
+// runtime peers share one process instanceId through PluginSession's topology
+// marker, so only the intended Studio process can consume the request.
 
-import { HttpService, RunService, ServerStorage } from "@rbxts/services";
+import { HttpService, RunService } from "@rbxts/services";
+import PluginSession from "./PluginSession";
 
 const StudioTestService = game.GetService("StudioTestService");
 
@@ -75,39 +54,8 @@ function init(p: Plugin): void {
 	pluginRef = p;
 }
 
-// Mirror of PluginSession's place identity rules. Duplicated here because
-// StopPlayMonitor runs in both edit and play-server DMs, and both must
-// agree on the place identifier (published places: placeId; unpublished:
-// UUID on ServerStorage's __MCPPlaceId attribute, travels with the .rbxl
-// into the play DM).
-function addUnique(values: string[], value: string): void {
-	if (!values.includes(value)) {
-		values.push(value);
-	}
-}
-
-function computeInstanceIds(): string[] {
-	const ids: string[] = [];
-	if (game.PlaceId !== 0) {
-		addUnique(ids, `place:${tostring(game.PlaceId)}`);
-	}
-	const existing = ServerStorage.GetAttribute("__MCPPlaceId");
-	if (typeIs(existing, "string") && existing !== "") {
-		addUnique(ids, `anon:${existing as string}`);
-	} else if (game.PlaceId === 0) {
-		const fresh = HttpService.GenerateGUID(false);
-		pcall(() => ServerStorage.SetAttribute("__MCPPlaceId", fresh));
-		addUnique(ids, `anon:${fresh}`);
-	}
-	return ids;
-}
-
-function settingKey(instanceId: string): string {
-	return SETTING_KEY_PREFIX + instanceId;
-}
-
-function settingKeys(): string[] {
-	return computeInstanceIds().map((instanceId) => settingKey(instanceId));
+function settingKey(): string {
+	return SETTING_KEY_PREFIX + PluginSession.getInstanceId();
 }
 
 function readSetting(key: string): unknown {
@@ -211,11 +159,10 @@ function startMonitor(lifecycle: StopTransportLifecycle): void {
 	}
 	task.spawn(() => {
 		while (true) {
-			for (const myKey of settingKeys()) {
-				const payload = decodePayload(readSetting(myKey));
-				if (payload) {
-					handleStopRequest(myKey, payload);
-				}
+			const myKey = settingKey();
+			const payload = decodePayload(readSetting(myKey));
+			if (payload) {
+				handleStopRequest(myKey, payload);
 			}
 			task.wait(POLL_INTERVAL_SEC);
 		}
@@ -230,10 +177,7 @@ function requestStop(): StopRequestResult {
 		id: requestId,
 		requestedAt: tick(),
 	};
-	let ok = false;
-	for (const myKey of settingKeys()) {
-		ok = writePayload(myKey, payload) || ok;
-	}
+	const ok = writePayload(settingKey(), payload);
 	return { ok, requestId: ok ? requestId : undefined };
 }
 
@@ -241,15 +185,13 @@ function waitForConsumption(requestId: string): StopConsumptionResult {
 	if (!pluginRef) return { ok: false, consumed: false, error: "Plugin reference is not initialized." };
 	const start = tick();
 	while (tick() - start < WAIT_FOR_CONSUMPTION_TIMEOUT_SEC) {
-		for (const myKey of settingKeys()) {
-			const payload = decodePayload(readSetting(myKey));
-			if (payload && payload.kind === "result" && payload.id === requestId) {
-				return {
-					ok: payload.ok === true,
-					consumed: true,
-					error: payload.error,
-				};
-			}
+		const payload = decodePayload(readSetting(settingKey()));
+		if (payload && payload.kind === "result" && payload.id === requestId) {
+			return {
+				ok: payload.ok === true,
+				consumed: true,
+				error: payload.error,
+			};
 		}
 		task.wait(WAIT_POLL_SEC);
 	}
@@ -262,13 +204,12 @@ function waitForConsumption(requestId: string): StopConsumptionResult {
 
 function clearPending(requestId?: string): void {
 	if (!pluginRef) return;
-	for (const myKey of settingKeys()) {
-		if (requestId !== undefined) {
-			const payload = decodePayload(readSetting(myKey));
-			if (payload && payload.id !== requestId) continue;
-		}
-		writeSetting(myKey, false);
+	const myKey = settingKey();
+	if (requestId !== undefined) {
+		const payload = decodePayload(readSetting(myKey));
+		if (payload && payload.id !== requestId) return;
 	}
+	writeSetting(myKey, false);
 }
 
 export = {

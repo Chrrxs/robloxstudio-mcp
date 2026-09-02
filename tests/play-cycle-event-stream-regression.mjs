@@ -6,6 +6,7 @@ import {
   McpClient,
   assert,
   runTest,
+  routingPeers,
   safeStopPlaytest,
   startPlaytestAndWait,
   waitForEditPeer,
@@ -41,10 +42,7 @@ function httpToolClient() {
 }
 
 function rolesForInstance(connected) {
-  const expectedInstanceId = process.env.MCP_INSTANCE_ID;
-  return (connected.instances ?? [])
-    .filter((instance) => !expectedInstanceId || instance.id === expectedInstanceId || instance.instanceId === expectedInstanceId)
-    .flatMap((instance) => instance.roles ?? (instance.role ? [instance.role] : []));
+  return routingPeers(connected).map((peer) => peer.role);
 }
 
 async function waitForRuntimePeersToDrain(client) {
@@ -85,6 +83,16 @@ async function activeEventStreamCount() {
   return health.activeEventStreams;
 }
 
+async function waitForActiveEventStreamCount(expected, timeoutMs = 15_000) {
+  const deadline = Date.now() + timeoutMs;
+  let count = await activeEventStreamCount();
+  while (count !== expected && Date.now() < deadline) {
+    await delay(100);
+    count = await activeEventStreamCount();
+  }
+  return count;
+}
+
 async function assertEditStreamResponds(client, cycle) {
   const marker = `event-stream-cycle-${cycle}`;
   const result = await client.callTool('execute_luau', {
@@ -114,7 +122,10 @@ await runTest('event stream survives repeated play cycles', async ({ track }) =>
     for (let cycle = 1; cycle <= PLAY_CYCLES; cycle += 1) {
       playRunning = true;
       await startPlaytestAndWait(client, { timeoutSec: 45, pollMs: 250 });
-      assert(await activeEventStreamCount() === 2, `cycle ${cycle}: edit and server event streams are active`);
+      assert(
+        await waitForActiveEventStreamCount(2) === 2,
+        `cycle ${cycle}: edit and server event streams are active`,
+      );
 
       const runtimeMarker = `runtime-cycle-${cycle}`;
       const runtime = await client.callTool('eval_server_runtime', {

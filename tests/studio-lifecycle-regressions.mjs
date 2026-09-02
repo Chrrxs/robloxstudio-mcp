@@ -2,12 +2,7 @@
 
 import { randomUUID } from 'node:crypto';
 import { createConnection } from 'node:net';
-import {
-  readFileSync,
-  readdirSync,
-  statSync,
-  writeFileSync,
-} from 'node:fs';
+import { writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { BASE_PORT, McpClient, DIST, assert } from './lib/mcp-client.mjs';
@@ -16,11 +11,10 @@ import {
   closeStudioProcess,
   configureStudioDirectoryIsolation,
   createIsolatedStudioDirectory,
-  resolveStudioLogsDir,
 } from '../scripts/studio-lifecycle.mjs';
 
-const INSTANCE_UUID = randomUUID();
-const INSTANCE_ID = `anon:${INSTANCE_UUID}`;
+const PLACE_UUID = randomUUID();
+const PLACE_KEY = `anon:${PLACE_UUID}`;
 const REPRO_PLUGIN_NAME = '000_RSMCP_EditHistoryRepro.rbxmx';
 const SERVER_ENV = {
   ROBLOX_STUDIO_PROXY_PROMOTION_INTERVAL_MS: '600000',
@@ -62,7 +56,7 @@ function stringAttributeBlob(name, value) {
 }
 
 function lifecyclePlaceXml() {
-  const attributes = stringAttributeBlob('__MCPPlaceId', INSTANCE_UUID);
+  const attributes = stringAttributeBlob('__MCPPlaceId', PLACE_UUID);
   return `<?xml version="1.0" encoding="utf-8"?>
 <roblox version="4">
   <External>null</External>
@@ -146,54 +140,36 @@ async function launchLocalPlace(client, placeFile, workingDirectory, launchedPro
   throw new Error(`Managed Studio launch did not connect: ${JSON.stringify(status)}`);
 }
 
-async function serverInstances() {
+async function serverTopology() {
   const { token } = resolveAuthToken();
-  const response = await fetch(`http://127.0.0.1:${BASE_PORT}/instances`, {
+  const response = await fetch(`http://127.0.0.1:${BASE_PORT}/topology`, {
     headers: token ? { 'X-MCP-Auth': token } : undefined,
   });
-  if (!response.ok) throw new Error(`/instances returned HTTP ${response.status}`);
+  if (!response.ok) throw new Error(`/topology returned HTTP ${response.status}`);
   return response.json();
 }
 
-async function waitForSessionActivityAdvance(pluginSessionId, priorActivity, timeoutMs = 5_000) {
+async function waitForPeerActivityAdvance(peerId, priorActivity, timeoutMs = 5_000) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    const body = await serverInstances();
-    const session = (body.instances ?? []).find(
-      (instance) => instance.pluginSessionId === pluginSessionId,
-    );
-    if (session?.lastActivity > priorActivity) return;
+    const body = await serverTopology();
+    const peer = (body.peers ?? []).find((candidate) => candidate.peerId === peerId);
+    if (peer?.lastActivity > priorActivity) return;
     await delay(25);
   }
-  throw new Error(`Session ${pluginSessionId} did not activate its event stream within ${timeoutMs}ms`);
+  throw new Error(`Peer ${peerId} did not activate its event stream within ${timeoutMs}ms`);
 }
 
-async function waitForStudioLogLine(needle, startedAt, timeoutMs = 20_000) {
-  const logsDir = resolveStudioLogsDir();
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    const candidates = readdirSync(logsDir)
-      .filter((name) => name.includes('_Studio_'))
-      .map((name) => path.join(logsDir, name))
-      .filter((file) => statSync(file).mtimeMs >= startedAt - 1000);
-    for (const file of candidates) {
-      if (readFileSync(file, 'utf8').includes(needle)) return Date.now();
-    }
-    await delay(100);
-  }
-  throw new Error(`Studio log did not contain ${JSON.stringify(needle)} within ${timeoutMs}ms`);
-}
 
-function matchingEditSessions(body) {
-  return (body.instances ?? []).filter(
-    (instance) => instance.instanceId === INSTANCE_ID && instance.role === 'edit',
+function matchingEditPeers(body, instanceId) {
+  return (body.peers ?? []).filter(
+    (peer) => peer.instanceId === instanceId && peer.role === 'edit',
   );
 }
 
-async function assertLogMarker(client, marker, expectedCount, expectedLevel = 'ERR') {
+async function assertLogMarker(client, instanceId, marker, expectedCount, expectedLevel = 'ERR') {
   const logs = await client.callTool('get_runtime_logs', {
-    instance_id: INSTANCE_ID,
-    target: 'edit',
+    instance_id: instanceId,
     filter: marker,
   }, 5_000);
   const matches = (logs.entries ?? []).filter((entry) => entry.message.includes(marker));
@@ -218,7 +194,7 @@ async function main() {
   const liveInvalidMarker = `[MCP-LIVE-INVALID-UTF8-${Date.now()}]`;
   const launchedProcesses = [];
   let client;
-  let keepOldSessionAlive;
+  let keepOldPeerAlive;
   let bodyError;
 
   try {
@@ -245,51 +221,58 @@ async function main() {
       worker.workingDirectory,
       launchedProcesses,
     );
-    assert(firstLaunch.instance_id === INSTANCE_ID, 'first launch uses the persisted anonymous instance id');
-    const firstSessions = matchingEditSessions(await serverInstances());
-    assert(firstSessions.length === 1, 'first launch has one edit registration');
-    const firstSessionId = firstSessions[0].pluginSessionId;
-    const startupInvalidEntries = await assertLogMarker(client, markerA, 1);
+    const firstInstanceId = firstLaunch.instance_id;
+    assert(typeof firstInstanceId === 'string' && firstInstanceId.length > 0,
+      'first launch reports its Studio process Instance ID');
+    assert(firstInstanceId !== PLACE_KEY,
+      'process Instance identity is distinct from persisted place metadata');
+    const firstPeers = matchingEditPeers(await serverTopology(), firstInstanceId);
+    assert(firstPeers.length === 1, 'first launch has one edit Peer');
+    const firstPeerId = firstPeers[0].peerId;
+    const firstTransportPeerId = firstPeers[0].transportPeerId;
+    assert(firstPeerId === firstTransportPeerId, 'edit Peer directly owns its event transport');
+    assert(firstPeers[0].placeKey === PLACE_KEY,
+      'persisted anonymous place identity remains non-routing metadata');
+    const startupInvalidEntries = await assertLogMarker(client, firstInstanceId, markerA, 1);
     assert(
       startupInvalidEntries[0].message.includes(`${markerA}\\xA3\\xB7\\xC7`),
       'edit startup history escapes malformed UTF-8 bytes without dropping the log message',
     );
 
     // Force termination prevents plugin.Unloading from reliably completing
-    // /disconnect, reproducing the stale-registration fast-relaunch race.
+    // /disconnect. Keep that stale transport active while reopening the same
+    // place to verify process identity, rather than place metadata, controls
+    // coexistence and routing.
     await closeStudioProcess(launchedProcesses[0]);
     await configureStudioDirectoryIsolation({ requireStudioClosed: false });
     writeFileSync(reproPlugin, reproPluginXml(markerB));
-    const staleSession = (await serverInstances()).instances.find(
-      (instance) => instance.pluginSessionId === firstSessionId,
+    const stalePeer = (await serverTopology()).peers.find(
+      (peer) => peer.peerId === firstPeerId,
     );
-    assert(staleSession, 'terminated Studio session remains registered for takeover reproduction');
-    const staleSessionActivity = staleSession.lastActivity;
+    assert(stalePeer, 'terminated Studio Peer remains registered for coexistence reproduction');
+    const stalePeerActivity = stalePeer.lastActivity;
 
-    // Re-open the terminated peer's event stream long enough to reproduce a
-    // duplicate that is still transport-active using the production SSE
-    // contract.
     const oldStreamController = new AbortController();
-    keepOldSessionAlive = {
+    keepOldPeerAlive = {
       controller: oldStreamController,
       completion: (async () => {
         const response = await fetch(
-          `http://127.0.0.1:${BASE_PORT}/events?pluginSessionId=${encodeURIComponent(firstSessionId)}`,
+          `http://127.0.0.1:${BASE_PORT}/events?peerId=${encodeURIComponent(firstTransportPeerId)}`,
           {
             headers: { Accept: 'text/event-stream' },
             signal: oldStreamController.signal,
           },
         );
         if (!response.ok) {
-          throw new Error(`Held stale-session event stream returned HTTP ${response.status}`);
+          throw new Error(`Held stale-Peer event stream returned HTTP ${response.status}`);
         }
-        if (!response.body) throw new Error('Held stale-session event stream has no response body');
+        if (!response.body) throw new Error('Held stale-Peer event stream has no response body');
         const reader = response.body.getReader();
         while (!oldStreamController.signal.aborted) {
           const event = await reader.read();
           if (event.done) {
             if (oldStreamController.signal.aborted) break;
-            throw new Error('Held stale-session event stream closed unexpectedly');
+            throw new Error('Held stale-Peer event stream closed unexpectedly');
           }
         }
       })().then(
@@ -297,65 +280,76 @@ async function main() {
         (error) => error,
       ),
     };
-    await waitForSessionActivityAdvance(firstSessionId, staleSessionActivity);
-    console.log('\n=== fast relaunch automatically takes over a stale predecessor ===');
+    await waitForPeerActivityAdvance(firstPeerId, stalePeerActivity);
+
+    console.log('\n=== same-place relaunch creates a distinct process Instance ===');
     const relaunchedAt = Date.now();
-    const secondLaunchPromise = launchLocalPlace(
+    const secondLaunch = await launchLocalPlace(
       client,
       placeFile,
       worker.workingDirectory,
       launchedProcesses,
     );
-    const conflictObservedAt = await waitForStudioLogLine(
-      `/ready rejected for ${INSTANCE_ID}/edit: HTTP 409 Conflict`,
-      relaunchedAt,
-    );
-    keepOldSessionAlive.controller.abort();
-    const oldStreamError = await keepOldSessionAlive.completion;
+    const relaunchElapsedMs = Date.now() - relaunchedAt;
+    const secondInstanceId = secondLaunch.instance_id;
+    assert(typeof secondInstanceId === 'string' && secondInstanceId.length > 0,
+      'second launch reports its Studio process Instance ID');
+    assert(secondInstanceId !== firstInstanceId,
+      'relaunching the same place creates a distinct process Instance');
+    assert(relaunchElapsedMs < 25_000,
+      `same-place process becomes routable without waiting for stale cleanup (${relaunchElapsedMs}ms)`);
+
+    const topologyWithBoth = await serverTopology();
+    const secondPeers = matchingEditPeers(topologyWithBoth, secondInstanceId);
+    assert(secondPeers.length === 1, 'second process has one edit Peer');
+    assert(secondPeers[0].peerId !== firstPeerId, 'second process has a distinct Peer execution context');
+    assert(secondPeers[0].transportPeerId === secondPeers[0].peerId,
+      'second edit Peer directly owns its event transport');
+    assert(topologyWithBoth.peers.some((peer) => peer.peerId === firstPeerId),
+      'active stale Peer and new Peer coexist instead of colliding by place');
+    assert(secondPeers[0].placeKey === PLACE_KEY && stalePeer.placeKey === PLACE_KEY,
+      'coexisting process Instances may share the same place metadata');
+
+    keepOldPeerAlive.controller.abort();
+    const oldStreamError = await keepOldPeerAlive.completion;
     if (oldStreamError !== undefined && oldStreamError.name !== 'AbortError') throw oldStreamError;
-    keepOldSessionAlive = undefined;
-    assert(true, `replacement receives a real duplicate 409 after ${conflictObservedAt - relaunchedAt}ms`);
-
-    const secondLaunch = await secondLaunchPromise;
-    const connectedAt = Date.now();
-    const relaunchElapsedMs = connectedAt - relaunchedAt;
-    const recoveryAfterConflictMs = connectedAt - conflictObservedAt;
-    assert(secondLaunch.instance_id === INSTANCE_ID, 'relaunch preserves the anonymous instance id');
-    assert(relaunchElapsedMs < 25_000, `relaunch becomes routable without the 30s stale timeout (${relaunchElapsedMs}ms)`);
-    assert(recoveryAfterConflictMs < 5_000, `relaunch recovers after the forced conflict (${recoveryAfterConflictMs}ms)`);
-
-    const secondSessions = matchingEditSessions(await serverInstances());
-    assert(secondSessions.length === 1, 'takeover leaves exactly one edit registration');
-    assert(secondSessions[0].pluginSessionId !== firstSessionId, 'takeover routes through the new plugin session');
+    keepOldPeerAlive = undefined;
 
     const routed = await client.callTool('execute_luau', {
-      instance_id: INSTANCE_ID,
+      instance_id: secondInstanceId,
       target: 'edit',
       code: 'return "relaunch-ok"',
     });
-    assert(routed.success === true && routed.returnValue === 'relaunch-ok', 'an edit tool call routes through the relaunched Studio process');
+    assert(routed.success === true && routed.returnValue === 'relaunch-ok',
+      'an edit tool call routes through the selected relaunched process');
 
-    await assertLogMarker(client, markerB, 1);
-    await assertLogMarker(client, markerA, 0);
+    await assertLogMarker(client, secondInstanceId, markerB, 1);
+    await assertLogMarker(client, secondInstanceId, markerA, 0);
 
     console.log('\n=== live malformed UTF-8 logs remain JSON-safe ===');
     const scheduled = await client.callTool('execute_luau', {
-      instance_id: INSTANCE_ID,
+      instance_id: secondInstanceId,
       target: 'edit',
       code: `task.delay(0.25, function() warn(${JSON.stringify(liveInvalidMarker)} .. string.char(0xA3, 0xB7, 0xC7)) end); return "scheduled"`,
     });
-    assert(scheduled.success === true && scheduled.returnValue === 'scheduled', 'malformed live log is scheduled after execute_luau responds');
+    assert(scheduled.success === true && scheduled.returnValue === 'scheduled',
+      'malformed live log is scheduled after execute_luau responds');
     await delay(500);
     const unfiltered = await client.callTool('get_runtime_logs', {
-      instance_id: INSTANCE_ID,
-      target: 'edit',
+      instance_id: secondInstanceId,
       tail: 50,
     }, 5_000);
     assert(
       unfiltered.entries?.some((entry) => entry.message.includes(`${liveInvalidMarker}\\xA3\\xB7\\xC7`)),
       'original unfiltered tail=50 timeout reproduction returns the escaped malformed log',
     );
-    const liveInvalidEntries = await assertLogMarker(client, liveInvalidMarker, 1, 'WARN');
+    const liveInvalidEntries = await assertLogMarker(
+      client,
+      secondInstanceId,
+      liveInvalidMarker,
+      1,
+      'WARN',
+    );
     assert(
       liveInvalidEntries[0].message.includes(`${liveInvalidMarker}\\xA3\\xB7\\xC7`),
       'live MessageOut capture escapes malformed UTF-8 bytes without dropping the log message',
@@ -366,9 +360,9 @@ async function main() {
     throw error;
   } finally {
     const cleanupErrors = [];
-    if (keepOldSessionAlive) {
-      keepOldSessionAlive.controller.abort();
-      const oldStreamError = await keepOldSessionAlive.completion;
+    if (keepOldPeerAlive) {
+      keepOldPeerAlive.controller.abort();
+      const oldStreamError = await keepOldPeerAlive.completion;
       if (oldStreamError !== undefined && oldStreamError.name !== 'AbortError') {
         cleanupErrors.push(oldStreamError);
       }

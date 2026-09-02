@@ -59,28 +59,33 @@ describe('HTTP security', () => {
 
     it('rejects tool endpoints without a token', async () => {
       const app = authedApp();
-      for (const path of ['/proxy', '/unregister-instance-id']) {
+      for (const path of [
+        '/proxy',
+        '/unregister-instance-id',
+        '/create-multiplayer-group',
+        '/remove-multiplayer-group',
+      ]) {
         const res = await request(app).post(path).send({});
         expect(res.status).toBe(401);
         expect(res.body.error).toBe('unauthorized');
       }
-      const instances = await request(app).get('/instances');
-      expect(instances.status).toBe(401);
+      const topology = await request(app).get('/topology');
+      expect(topology.status).toBe(401);
       const tool = await request(app).post('/mcp/selection').send({});
       expect(tool.status).toBe(401);
     });
 
     it('rejects a wrong token', async () => {
       const app = authedApp();
-      const res = await request(app).get('/instances').set('X-MCP-Auth', 'wrong');
+      const res = await request(app).get('/topology').set('X-MCP-Auth', 'wrong');
       expect(res.status).toBe(401);
     });
 
     it('accepts X-MCP-Auth and Authorization: Bearer', async () => {
       const app = authedApp();
-      const viaHeader = await request(app).get('/instances').set('X-MCP-Auth', TOKEN);
+      const viaHeader = await request(app).get('/topology').set('X-MCP-Auth', TOKEN);
       expect(viaHeader.status).toBe(200);
-      const viaBearer = await request(app).get('/instances').set('Authorization', `Bearer ${TOKEN}`);
+      const viaBearer = await request(app).get('/topology').set('Authorization', `Bearer ${TOKEN}`);
       expect(viaBearer.status).toBe(200);
     });
 
@@ -90,15 +95,15 @@ describe('HTTP security', () => {
       expect(health.status).toBe(200);
       const status = await request(app).get('/status');
       expect(status.status).toBe(200);
-      const events = await request(app).get('/events?pluginSessionId=unknown-session');
-      expect(events.status).toBe(404); // unknown session — but not 401
+      const events = await request(app).get('/events?peerId=unknown-peer');
+      expect(events.status).toBe(404); // unknown Peer — but not 401
       const disconnect = await request(app).post('/disconnect').send({});
       expect(disconnect.status).toBe(200);
     });
 
     it('does not require a token when auth is disabled', async () => {
       const app = createHttpServer(tools, bridge);
-      const res = await request(app).get('/instances');
+      const res = await request(app).get('/topology');
       expect(res.status).toBe(200);
     });
   });

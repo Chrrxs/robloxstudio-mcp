@@ -7,22 +7,15 @@ import type {
   StudioTransportQueue,
 } from './studio-transport.js';
 
-export interface PluginInstance {
-  // Internal: per-plugin GUID, regenerated on every plugin load.
-  // Identifies one logical registration in multiplexed SSE envelopes. MCP
-  // tools route by the user-facing `instanceId` plus `role`.
-  pluginSessionId: string;
-  // Internal: the physical Studio peer that owns the downstream connection.
-  // Logical play-client sessions point at their play-server session.
-  physicalSessionId: string;
-  // User-facing routing key: identifies the place file.
-  // Format: "place:${PlaceId}" for published places, "anon:${uuid}" for
-  // unpublished places (where the UUID lives on ServerStorage's
-  // __MCPPlaceId attribute and travels with the .rbxl).
+export interface StudioPeer {
+  peerId: string;
+  transportPeerId: string;
   instanceId: string;
+  multiplayerGroupId?: string;
   role: string;
   placeId: number;
   placeName: string;
+  placeKey?: string;
   dataModelName: string;
   isRunning: boolean;
   pluginVersion: string;
@@ -32,17 +25,122 @@ export interface PluginInstance {
   connectedAt: number;
 }
 
+export interface PublicStudioPeer {
+  peerId: string;
+  instanceId: string;
+  multiplayerGroupId?: string;
+  role: string;
+  placeId: number;
+  placeName: string;
+  placeKey?: string;
+  dataModelName: string;
+  isRunning: boolean;
+  pluginVersion: string;
+  pluginVariant: string;
+  serverVersion: string;
+  lastActivity: number;
+  connectedAt: number;
+}
+
+export interface StudioInstance {
+  id: string;
+  multiplayerGroupId?: string;
+  placeId: number;
+  placeName: string;
+  peers: StudioPeer[];
+}
+
+export interface PublicStudioInstance {
+  id: string;
+  multiplayerGroupId?: string;
+  placeId: number;
+  placeName: string;
+  peers: PublicStudioPeer[];
+}
+export interface ConnectedStudioInstance {
+  id: string;
+  multiplayerGroupId?: string;
+  placeId: number;
+  placeName: string;
+  peers: Record<string, string>;
+}
+export interface ConnectedMultiplayerGroup {
+  id: string;
+  controllerInstanceId?: string;
+  instances: Record<string, string>;
+}
+
+
+
+export interface MultiplayerGroup {
+  id: string;
+  controllerInstanceId?: string;
+  instanceIds: string[];
+  createdAt: number;
+}
+
+export type PublicMultiplayerGroup = MultiplayerGroup;
+
+export interface TopologySnapshot {
+  peers: StudioPeer[];
+  instances: StudioInstance[];
+  multiplayerGroups: MultiplayerGroup[];
+}
+
+export interface RegisterPeerInput {
+  peerId: string;
+  transportPeerId: string;
+  instanceId: string;
+  multiplayerGroupId?: string;
+  role: string;
+  placeId?: number;
+  placeName?: string;
+  placeKey?: string;
+  dataModelName?: string;
+  isRunning?: boolean;
+  pluginVersion?: string;
+  pluginVariant?: string;
+  serverVersion?: string;
+}
+
+export type RegisterPeerResult =
+  | {
+      ok: true;
+      assignedRole: string;
+      peerId: string;
+      instanceId: string;
+      multiplayerGroupId?: string;
+    }
+  | {
+      ok: false;
+      error:
+        | {
+            code: 'duplicate_scope_role';
+            message: string;
+            existing: PublicStudioPeer;
+          }
+        | {
+            code: 'peer_identity_mismatch';
+            message: string;
+            existing: PublicStudioPeer;
+          }
+        | {
+            code: 'instance_id_alias_collision';
+            message: string;
+            existing: PublicStudioPeer;
+          };
+    };
+
 export type SettlementDisposition = 'accepted' | 'already_settled' | 'unknown';
 
 interface PendingRequest {
   id: string;
   endpoint: string;
   data: unknown;
-  targetInstanceId: string;
-  targetRole: string;
+  targetPeerId: string;
   timestamp: number;
   claimOwner?: string;
-  lastDeliveryPhysicalSessionId?: string;
+  lastDeliveryTransportPeerId?: string;
   resolve: (value: unknown) => void;
   reject: (error: unknown) => void;
   timeoutId: ReturnType<typeof setTimeout>;
@@ -52,11 +150,10 @@ interface PendingRequest {
 }
 
 interface PendingCancellation extends StudioRequestCancellation {
-  physicalSessionId: string;
+  transportPeerId: string;
   createdAt: number;
   claimOwner?: string;
 }
-
 
 export type RoutingErrorCode =
   | 'multiple_instances_connected'
@@ -65,18 +162,21 @@ export type RoutingErrorCode =
   | 'target_role_not_present_on_instance'
   | 'unrecognized_instance_id';
 
+export interface PublicTopologyChoices {
+  instances: ConnectedStudioInstance[];
+  multiplayerGroups: ConnectedMultiplayerGroup[];
+  count: number;
+}
+
 export interface RoutingError {
   code: RoutingErrorCode;
   message: string;
-  data: { instances: PublicPluginInstance[]; count: number };
+  data: PublicTopologyChoices;
 }
 
-// Thrown by tools when resolveTarget returns an error. Caught at the MCP
-// transport layer and surfaced as a structured tool-call error so the LLM
-// can recover (e.g. pick an instance_id from data.instances) without an
-// extra get_connected_instances round-trip.
 export class RoutingFailure extends Error {
   readonly routingError: RoutingError;
+
   constructor(routingError: RoutingError) {
     super(routingError.message);
     this.name = 'RoutingFailure';
@@ -84,645 +184,772 @@ export class RoutingFailure extends Error {
   }
 }
 
-// Shape exposed to MCP tool callers — strips internal transport session IDs.
-export interface PublicPluginInstance {
-  instanceId: string;
-  role: string;
-  placeId: number;
-  placeName: string;
-  dataModelName: string;
-  isRunning: boolean;
-  pluginVersion: string;
-  pluginVariant: string;
-  serverVersion: string;
-  lastActivity: number;
-  connectedAt: number;
-}
-
-export type InstanceRegisteredListener = (instance: PublicPluginInstance) => void;
+export type PeerRegisteredListener = (peer: PublicStudioPeer) => void;
+export type PeerClosedListener = (peer: StudioSession) => void;
 
 export interface ResolveTargetInput {
   instance_id?: string;
   target?: string;
 }
 
-export type ResolveTargetResult =
-  | { ok: true; mode: 'single'; targetInstanceId: string; targetRole: string }
-  | { ok: true; mode: 'fanout'; targets: { targetInstanceId: string; targetRole: string }[] }
-  | { ok: false; error: RoutingError };
-
-export interface RegisterInstanceInput {
-  pluginSessionId: string;
-  physicalSessionId: string;
-  instanceId: string;
-  role: string;
-  placeId?: number;
-  placeName?: string;
-  dataModelName?: string;
-  isRunning?: boolean;
-  pluginVersion?: string;
-  pluginVariant?: string;
-  serverVersion?: string;
+export interface ResolvedPeerTarget {
+  targetPeerId: string;
+  targetInstanceId: string;
+  targetRole: string;
 }
 
-export type RegisterInstanceResult =
-  | { ok: true; assignedRole: string; instanceId: string }
-  | { ok: false; error: { code: 'duplicate_instance_role'; message: string; existing: PublicPluginInstance } };
+export type ResolveTargetResult =
+  | ({ ok: true; mode: 'single' } & ResolvedPeerTarget)
+  | { ok: true; mode: 'fanout'; targets: ResolvedPeerTarget[] }
+  | { ok: false; error: RoutingError };
 
-export function toPublic(inst: PluginInstance): PublicPluginInstance {
+export function toPublicPeer(peer: StudioPeer): PublicStudioPeer {
   return {
-    instanceId: inst.instanceId,
-    role: inst.role,
-    placeId: inst.placeId,
-    placeName: inst.placeName,
-    dataModelName: inst.dataModelName,
-    isRunning: inst.isRunning,
-    pluginVersion: inst.pluginVersion,
-    pluginVariant: inst.pluginVariant,
-    serverVersion: inst.serverVersion,
-    lastActivity: inst.lastActivity,
-    connectedAt: inst.connectedAt,
+    peerId: peer.peerId,
+    instanceId: peer.instanceId,
+    multiplayerGroupId: peer.multiplayerGroupId,
+    role: peer.role,
+    placeId: peer.placeId,
+    placeName: peer.placeName,
+    placeKey: peer.placeKey,
+    dataModelName: peer.dataModelName,
+    isRunning: peer.isRunning,
+    pluginVersion: peer.pluginVersion,
+    pluginVariant: peer.pluginVariant,
+    serverVersion: peer.serverVersion,
+    lastActivity: peer.lastActivity,
+    connectedAt: peer.connectedAt,
   };
 }
 
-const STALE_INSTANCE_MS = 30000;
-// Active downstream delivery protects a tuple from takeover. Once delivery
-// closes, an inactive duplicate may take over after this shorter threshold so
-// a Studio close/relaunch does not strand the replacement for stale cleanup.
-const DUPLICATE_TAKEOVER_MS = 3000;
-const INSTANCE_ALIAS_TTL_MS = 5 * 60 * 1000;
+const STALE_PEER_MS = 30_000;
 const ACCEPTED_REQUEST_TOMBSTONE_TTL_MS = 60_000;
 const MAX_ACCEPTED_REQUEST_TOMBSTONES = 4096;
 const CANCELLATION_TOMBSTONE_TTL_MS = 60_000;
 const MAX_CANCELLATION_TOMBSTONES = 4096;
 
-interface InstanceAlias {
-  targetInstanceId: string;
-  lastSeen: number;
+function roleOrder(role: string): number {
+  if (role === 'edit') return 0;
+  if (role === 'server') return 1;
+  const client = /^client-(\d+)$/.exec(role);
+  return client ? 2 + Number(client[1]) : Number.MAX_SAFE_INTEGER;
+}
+function isRuntimeRole(role: string): boolean {
+  return role === 'server' || /^client-\d+$/.test(role);
 }
 
-function publishedInstanceId(placeId: number | undefined): string | undefined {
-  if (placeId === undefined || !Number.isFinite(placeId) || placeId <= 0) return undefined;
-  return `place:${Math.trunc(placeId)}`;
+function connectedRuntimeInstanceId(peer: StudioPeer): string {
+  return `${peer.instanceId}-${peer.role}`;
+}
+
+function peerIdsByRole(peers: StudioPeer[]): Record<string, string> {
+  return Object.fromEntries(
+    [...peers]
+      .sort((left, right) =>
+        roleOrder(left.role) - roleOrder(right.role) || left.peerId.localeCompare(right.peerId))
+      .map((peer) => [peer.role, peer.peerId]),
+  );
+}
+
+
+function preferredPeer(peers: StudioPeer[]): StudioPeer {
+  return peers.reduce((preferred, candidate) => {
+    const difference = roleOrder(candidate.role) - roleOrder(preferred.role);
+    if (difference !== 0) return difference < 0 ? candidate : preferred;
+    return candidate.connectedAt < preferred.connectedAt ? candidate : preferred;
+  });
+}
+
+function copyGroup(group: MultiplayerGroup): MultiplayerGroup {
+  return { ...group, instanceIds: [...group.instanceIds] };
 }
 
 export class BridgeService implements StudioTransportQueue {
-  private pendingRequests: Map<string, PendingRequest> = new Map();
-  private acceptedRequestIds: Map<string, number> = new Map();
-  private pendingCancellations: Map<string, PendingCancellation> = new Map();
-  // Keyed by pluginSessionId (the per-plugin GUID).
-  private instances: Map<string, PluginInstance> = new Map();
-  private instanceAliases: Map<string, InstanceAlias> = new Map();
-  private instanceRegisteredListeners: Set<InstanceRegisteredListener> = new Set();
-  private requestAvailableListeners = new Set<(physicalSessionId: string) => void>();
-  private sessionClosedListeners = new Set<(session: StudioSession) => void>();
-  private deliveryOwnersByPhysicalSession = new Map<string, Set<string>>();
-  private requestTimeout = 30000;
+  private readonly pendingRequests = new Map<string, PendingRequest>();
+  private readonly acceptedRequestIds = new Map<string, number>();
+  private readonly pendingCancellations = new Map<string, PendingCancellation>();
+  private readonly peersById = new Map<string, StudioPeer>();
+  private readonly multiplayerGroupsById = new Map<string, MultiplayerGroup>();
+  private readonly peerRegisteredListeners = new Set<PeerRegisteredListener>();
+  private readonly requestAvailableListeners = new Set<(transportPeerId: string) => void>();
+  private readonly peerClosedListeners = new Set<PeerClosedListener>();
+  private readonly deliveryOwnersByTransportPeer = new Map<string, Set<string>>();
+  private readonly requestTimeout = 30_000;
 
-  onInstanceRegistered(listener: InstanceRegisteredListener): () => void {
-    this.instanceRegisteredListeners.add(listener);
-    // A proxy may already have populated its peer cache before its tools
-    // subscribe. Replay the current view so lifecycle correlation cannot miss
-    // a connection solely because discovery won the subscription race.
-    for (const instance of this.getPublicInstances()) {
+  onPeerRegistered(listener: PeerRegisteredListener): () => void {
+    this.peerRegisteredListeners.add(listener);
+    for (const peer of this.getPublicPeers()) {
       try {
-        listener(instance);
+        listener(peer);
       } catch {
-        // Observers must not disrupt bridge setup.
+        // Observers cannot disrupt bridge setup.
       }
     }
-    return () => this.instanceRegisteredListeners.delete(listener);
+    return () => this.peerRegisteredListeners.delete(listener);
   }
 
-  protected notifyInstanceRegistered(instance: PublicPluginInstance): void {
-    for (const listener of this.instanceRegisteredListeners) {
+  protected notifyPeerRegistered(peer: PublicStudioPeer): void {
+    for (const listener of this.peerRegisteredListeners) {
       try {
-        listener(instance);
+        listener(peer);
       } catch {
-        // Registration is the transport boundary. A lifecycle observer must
-        // not reject an otherwise valid plugin connection.
+        // Registration remains successful when a lifecycle observer fails.
       }
     }
   }
 
-  onRequestAvailable(listener: (physicalSessionId: string) => void): () => void {
+  onRequestAvailable(listener: (transportPeerId: string) => void): () => void {
     this.requestAvailableListeners.add(listener);
     return () => this.requestAvailableListeners.delete(listener);
   }
 
-  onSessionClosed(listener: (session: StudioSession) => void): () => void {
-    this.sessionClosedListeners.add(listener);
-    return () => this.sessionClosedListeners.delete(listener);
+  onPeerClosed(listener: PeerClosedListener): () => void {
+    this.peerClosedListeners.add(listener);
+    return () => this.peerClosedListeners.delete(listener);
   }
 
-  setDeliveryActive(physicalSessionId: string, owner: string, active: boolean): void {
-    let owners = this.deliveryOwnersByPhysicalSession.get(physicalSessionId);
+  setDeliveryActive(transportPeerId: string, owner: string, active: boolean): void {
+    let owners = this.deliveryOwnersByTransportPeer.get(transportPeerId);
     if (active) {
       if (!owners) {
         owners = new Set<string>();
-        this.deliveryOwnersByPhysicalSession.set(physicalSessionId, owners);
+        this.deliveryOwnersByTransportPeer.set(transportPeerId, owners);
       }
       owners.add(owner);
       return;
     }
     if (!owners) return;
     owners.delete(owner);
-    if (owners.size === 0) this.deliveryOwnersByPhysicalSession.delete(physicalSessionId);
+    if (owners.size === 0) this.deliveryOwnersByTransportPeer.delete(transportPeerId);
   }
 
-
-  private notifyRequestAvailable(physicalSessionId: string): void {
+  private notifyRequestAvailable(transportPeerId: string): void {
     for (const listener of this.requestAvailableListeners) {
       try {
-        listener(physicalSessionId);
+        listener(transportPeerId);
       } catch {
-        // Delivery observers cannot break request queue ownership.
+        // Delivery observers cannot break queue ownership.
       }
     }
   }
 
   private notifyRequestCancelled(request: PendingRequest, reason: StudioCancellationReason): void {
-    const physicalSessionId = request.lastDeliveryPhysicalSessionId;
-    if (!physicalSessionId || this.pendingCancellations.has(request.id)) return;
+    const transportPeerId = request.lastDeliveryTransportPeerId;
+    if (!transportPeerId || this.pendingCancellations.has(request.id)) return;
     const now = Date.now();
     this.prunePendingCancellations(now);
     this.pendingCancellations.set(request.id, {
       requestId: request.id,
       reason,
-      physicalSessionId,
+      transportPeerId,
       createdAt: now,
     });
     this.prunePendingCancellations(now);
-    this.notifyRequestAvailable(physicalSessionId);
+    this.notifyRequestAvailable(transportPeerId);
   }
 
-
-  private physicalSessionsForTarget(targetInstanceId: string, targetRole: string): string[] {
-    const physicalSessionIds = new Set<string>();
-    for (const instance of this.instances.values()) {
-      if (instance.instanceId === targetInstanceId && instance.role === targetRole) {
-        physicalSessionIds.add(instance.physicalSessionId);
-      }
+  private groupIdForInstance(instanceId: string): string | undefined {
+    for (const group of this.getMultiplayerGroups()) {
+      if (group.instanceIds.includes(instanceId)) return group.id;
     }
-    return Array.from(physicalSessionIds);
+    return undefined;
   }
 
-  private canonicalInstanceId(instanceId: string, placeId?: number): string {
-    return publishedInstanceId(placeId) ?? instanceId;
+  private peerScopeKey(peer: StudioPeer): string {
+    return peer.multiplayerGroupId ? `group:${peer.multiplayerGroupId}` : `instance:${peer.instanceId}`;
   }
 
-  private rememberInstanceAlias(aliasInstanceId: string, targetInstanceId: string) {
-    if (aliasInstanceId === targetInstanceId) return;
-    this.instanceAliases.set(aliasInstanceId, {
-      targetInstanceId,
-      lastSeen: Date.now(),
-    });
-  }
-
-  private resolveInstanceAlias(instanceId: string): string {
-    const alias = this.instanceAliases.get(instanceId);
-    if (!alias) return instanceId;
-    alias.lastSeen = Date.now();
-    return alias.targetInstanceId;
-  }
-
-  private migratePendingRequests(fromInstanceId: string, toInstanceId: string) {
-    if (fromInstanceId === toInstanceId) return;
-    for (const request of this.pendingRequests.values()) {
-      if (request.targetInstanceId === fromInstanceId) {
-        request.targetInstanceId = toInstanceId;
-      }
+  private registrationScopePeers(instanceId: string, multiplayerGroupId?: string): StudioPeer[] {
+    if (multiplayerGroupId) {
+      return this.getPeers().filter((peer) => peer.multiplayerGroupId === multiplayerGroupId);
     }
-  }
-
-  private cleanupStaleAliases(now = Date.now()) {
-    for (const [alias, entry] of this.instanceAliases.entries()) {
-      const targetIsLive = this.getInstances().some((inst) => inst.instanceId === entry.targetInstanceId);
-      if (!targetIsLive && now - entry.lastSeen > INSTANCE_ALIAS_TTL_MS) {
-        this.instanceAliases.delete(alias);
-      }
-    }
-  }
-
-  private routingKeyForInstance(inst: PluginInstance): string {
-    return publishedInstanceId(inst.placeId) ?? this.resolveInstanceAlias(inst.instanceId);
-  }
-
-  private matchingInstancesForInstanceId(instanceId: string): PluginInstance[] {
-    const resolvedInstanceId = this.resolveInstanceAlias(instanceId);
-    const ids = new Set<string>([instanceId, resolvedInstanceId]);
-    const placeIds = new Set<number>();
-    const addPlaceId = (placeId: number | undefined) => {
-      const published = publishedInstanceId(placeId);
-      if (!published || placeId === undefined) return;
-      ids.add(published);
-      placeIds.add(Math.trunc(placeId));
-    };
-
-    const placeMatch = resolvedInstanceId.match(/^place:(\d+)$/) ?? instanceId.match(/^place:(\d+)$/);
-    if (placeMatch) addPlaceId(Number(placeMatch[1]));
-
-    for (const inst of this.getInstances()) {
-      if (ids.has(inst.instanceId)) addPlaceId(inst.placeId);
-    }
-
-    return this.getInstances().filter(
-      (inst) => ids.has(inst.instanceId) || (inst.placeId > 0 && placeIds.has(Math.trunc(inst.placeId))),
+    return this.getPeers().filter(
+      (peer) => peer.instanceId === instanceId && peer.multiplayerGroupId === undefined,
     );
   }
 
-  resolveInstanceId(instanceId: string): string {
-    return this.resolveInstanceAlias(instanceId);
+  private detachInstanceFromOtherGroups(instanceId: string, retainedGroupId?: string): void {
+    for (const group of this.multiplayerGroupsById.values()) {
+      if (group.id === retainedGroupId || !group.instanceIds.includes(instanceId)) continue;
+      group.instanceIds = group.instanceIds.filter((id) => id !== instanceId);
+      if (group.controllerInstanceId === instanceId) group.controllerInstanceId = undefined;
+      if (group.instanceIds.length === 0) this.multiplayerGroupsById.delete(group.id);
+    }
+  }
+  private groupAttachmentConflict(instanceId: string, groupId: string): StudioPeer | undefined {
+    const incomingRoles = new Set(
+      this.getPeers()
+        .filter((peer) => peer.instanceId === instanceId)
+        .map((peer) => peer.role),
+    );
+    return this.getPeers().find(
+      (peer) =>
+        peer.instanceId !== instanceId &&
+        peer.multiplayerGroupId === groupId &&
+        incomingRoles.has(peer.role),
+    );
   }
 
-  registerInstance(input: RegisterInstanceInput): RegisterInstanceResult {
-    const { pluginSessionId, role } = input;
-    const rawInstanceId = input.instanceId;
-    const instanceId = this.canonicalInstanceId(rawInstanceId, input.placeId);
-    const prior = this.instances.get(pluginSessionId);
-    let assignedRole = role;
-    const pluginVersion = input.pluginVersion ?? '';
-    const pluginVariant = input.pluginVariant ?? 'unknown';
-    const serverVersion = input.serverVersion ?? '';
 
-    this.rememberInstanceAlias(rawInstanceId, instanceId);
-    if (prior && prior.instanceId !== instanceId) {
-      this.rememberInstanceAlias(prior.instanceId, instanceId);
-      this.migratePendingRequests(prior.instanceId, instanceId);
+  private attachInstanceToGroup(instanceId: string, groupId: string): MultiplayerGroup {
+    const conflict = this.groupAttachmentConflict(instanceId, groupId);
+    if (conflict) {
+      throw new Error(
+        `Cannot attach Instance "${instanceId}" to Multiplayer Group "${groupId}": role "${conflict.role}" is already owned by Peer "${conflict.peerId}".`,
+      );
+    }
+    this.detachInstanceFromOtherGroups(instanceId, groupId);
+    let group = this.multiplayerGroupsById.get(groupId);
+    if (!group) {
+      group = { id: groupId, instanceIds: [], createdAt: Date.now() };
+      this.multiplayerGroupsById.set(groupId, group);
+    }
+    if (!group.instanceIds.includes(instanceId)) group.instanceIds.push(instanceId);
+    for (const peer of this.peersById.values()) {
+      if (peer.instanceId === instanceId) peer.multiplayerGroupId = groupId;
+    }
+    return group;
+  }
+
+  createMultiplayerGroup(groupId: string, controllerInstanceId: string): MultiplayerGroup {
+    const group = this.attachInstanceToGroup(controllerInstanceId, groupId);
+    group.controllerInstanceId = controllerInstanceId;
+    return copyGroup(group);
+  }
+  async createMultiplayerGroupEverywhere(
+    groupId: string,
+    controllerInstanceId: string,
+  ): Promise<MultiplayerGroup> {
+    return this.createMultiplayerGroup(groupId, controllerInstanceId);
+  }
+
+
+  removeMultiplayerGroup(groupId: string): MultiplayerGroup | undefined {
+    const group = this.multiplayerGroupsById.get(groupId);
+    if (!group) return undefined;
+    this.multiplayerGroupsById.delete(groupId);
+    for (const peer of this.peersById.values()) {
+      if (peer.multiplayerGroupId === groupId) peer.multiplayerGroupId = undefined;
+    }
+    return copyGroup(group);
+  }
+
+  async removeMultiplayerGroupEverywhere(groupId: string): Promise<MultiplayerGroup | undefined> {
+    return this.removeMultiplayerGroup(groupId);
+  }
+
+  private connectedInstanceIdCollision(
+    peerId: string,
+    instanceId: string,
+    role: string,
+    multiplayerGroupId?: string,
+  ): StudioPeer | undefined {
+    const peers = this.getPeers().filter((peer) => peer.peerId !== peerId);
+    const canonicalCollision = peers.find((peer) =>
+      peer.multiplayerGroupId !== undefined &&
+      isRuntimeRole(peer.role) &&
+      connectedRuntimeInstanceId(peer) === instanceId);
+    if (canonicalCollision) return canonicalCollision;
+    if (multiplayerGroupId === undefined || !isRuntimeRole(role)) return undefined;
+    const runtimeAlias = `${instanceId}-${role}`;
+    return peers.find((peer) => peer.instanceId === runtimeAlias);
+  }
+
+  registerPeer(input: RegisterPeerInput): RegisterPeerResult {
+    const prior = this.peersById.get(input.peerId);
+    if (
+      prior &&
+      (prior.instanceId !== input.instanceId || prior.transportPeerId !== input.transportPeerId)
+    ) {
+      return {
+        ok: false,
+        error: {
+          code: 'peer_identity_mismatch',
+          message: `Peer "${input.peerId}" is already registered to Instance "${prior.instanceId}" through transport Peer "${prior.transportPeerId}".`,
+          existing: toPublicPeer(prior),
+        },
+      };
     }
 
-    // Client roles get lowest-unused-N, scoped per place. That keeps
-    // target=client-1 intuitive when several Studio places are connected:
-    // client-1 always means the first client for the selected instance_id.
-    if (role === 'client') {
-      if (prior && prior.role.match(/^client-\d+$/)) {
+    const multiplayerGroupId =
+      input.multiplayerGroupId ?? this.groupIdForInstance(input.instanceId) ?? prior?.multiplayerGroupId;
+    const attachmentConflict = multiplayerGroupId
+      ? this.groupAttachmentConflict(input.instanceId, multiplayerGroupId)
+      : undefined;
+    if (attachmentConflict) {
+      return {
+        ok: false,
+        error: {
+          code: 'duplicate_scope_role',
+          message: `Multiplayer Group "${multiplayerGroupId}" already has a Peer registered as "${attachmentConflict.role}".`,
+          existing: toPublicPeer(attachmentConflict),
+        },
+      };
+    }
+    const scopePeers = this.registrationScopePeers(input.instanceId, multiplayerGroupId).filter(
+      (peer) => peer.peerId !== input.peerId,
+    );
+    let assignedRole = input.role;
+
+    if (input.role === 'client') {
+      const used = new Set<number>();
+      for (const peer of scopePeers) {
+        const match = /^client-(\d+)$/.exec(peer.role);
+        if (match) used.add(Number(match[1]));
+      }
+      const priorOrdinal = prior ? /^client-(\d+)$/.exec(prior.role) : null;
+      if (prior && priorOrdinal && !used.has(Number(priorOrdinal[1]))) {
         assignedRole = prior.role;
       } else {
-        const used = new Set<number>();
-        for (const inst of this.instances.values()) {
-          if (inst.instanceId !== instanceId || inst.pluginSessionId === pluginSessionId) continue;
-          const match = inst.role.match(/^client-(\d+)$/);
-          if (match) used.add(Number(match[1]));
-        }
-        let idx = 1;
-        while (used.has(idx)) idx++;
-        assignedRole = `client-${idx}`;
+        let ordinal = 1;
+        while (used.has(ordinal)) ordinal += 1;
+        assignedRole = `client-${ordinal}`;
       }
     }
-
-    // Reject duplicate (instanceId, role) tuples. This should not be
-    // reachable through normal Studio + Team Create usage, but defense in
-    // depth: surface it loudly rather than silently misrouting.
-    const existing = Array.from(this.instances.values()).find(
-      (i) => i.instanceId === instanceId && i.role === assignedRole && i.pluginSessionId !== pluginSessionId,
+    const instanceIdCollision = this.connectedInstanceIdCollision(
+      input.peerId,
+      input.instanceId,
+      assignedRole,
+      multiplayerGroupId,
     );
-    if (existing) {
-      const existingDeliveryActive =
-        (this.deliveryOwnersByPhysicalSession.get(existing.physicalSessionId)?.size ?? 0) > 0;
-      if (!existingDeliveryActive && Date.now() - existing.lastActivity > DUPLICATE_TAKEOVER_MS) {
-        // Reject requests owned by the unresponsive process instead of
-        // redelivering a potentially mutating in-flight call to the new load.
-        this.unregisterInstance(existing.pluginSessionId);
-      } else {
-        return {
-          ok: false,
-          error: {
-            code: 'duplicate_instance_role',
-            message: `Another plugin is already registered as (${instanceId}, ${assignedRole}).`,
-            existing: toPublic(existing),
-          },
-        };
-      }
+    if (instanceIdCollision) {
+      return {
+        ok: false,
+        error: {
+          code: 'instance_id_alias_collision',
+          message: `Instance "${input.instanceId}" would make a grouped runtime Instance ID ambiguous.`,
+          existing: toPublicPeer(instanceIdCollision),
+        },
+      };
     }
 
-    const registered: PluginInstance = {
-      pluginSessionId,
-      physicalSessionId: input.physicalSessionId,
-      instanceId,
+
+    const existing = scopePeers.find((peer) => peer.role === assignedRole);
+    if (existing) {
+      const scopeDescription = multiplayerGroupId
+        ? `Multiplayer Group "${multiplayerGroupId}"`
+        : `Instance "${input.instanceId}"`;
+      return {
+        ok: false,
+        error: {
+          code: 'duplicate_scope_role',
+          message: `${scopeDescription} already has a Peer registered as "${assignedRole}".`,
+          existing: toPublicPeer(existing),
+        },
+      };
+    }
+
+    const now = Date.now();
+    const registered: StudioPeer = {
+      peerId: input.peerId,
+      transportPeerId: input.transportPeerId,
+      instanceId: input.instanceId,
+      multiplayerGroupId,
       role: assignedRole,
       placeId: input.placeId ?? 0,
       placeName: input.placeName ?? '',
+      placeKey: input.placeKey,
       dataModelName: input.dataModelName ?? '',
       isRunning: input.isRunning ?? false,
-      pluginVersion,
-      pluginVariant,
-      serverVersion,
-      lastActivity: Date.now(),
-      connectedAt: prior?.connectedAt ?? Date.now(),
+      pluginVersion: input.pluginVersion ?? '',
+      pluginVariant: input.pluginVariant ?? 'unknown',
+      serverVersion: input.serverVersion ?? '',
+      lastActivity: now,
+      connectedAt: prior?.connectedAt ?? now,
     };
-    this.instances.set(pluginSessionId, registered);
+    this.peersById.set(input.peerId, registered);
+    if (multiplayerGroupId) this.attachInstanceToGroup(input.instanceId, multiplayerGroupId);
 
-    this.notifyInstanceRegistered(toPublic(registered));
-    this.notifyRequestAvailable(registered.physicalSessionId);
-
-    return { ok: true, assignedRole, instanceId };
+    this.notifyPeerRegistered(toPublicPeer(registered));
+    this.notifyRequestAvailable(registered.transportPeerId);
+    return {
+      ok: true,
+      assignedRole,
+      peerId: registered.peerId,
+      instanceId: registered.instanceId,
+      multiplayerGroupId: registered.multiplayerGroupId,
+    };
   }
 
-  unregisterInstance(pluginSessionId: string) {
-    const removed = this.instances.get(pluginSessionId);
-    if (!removed) return;
-    const logicalChildren = removed.physicalSessionId === pluginSessionId
-      ? Array.from(this.instances.values()).filter(
-          (instance) =>
-            instance.pluginSessionId !== pluginSessionId &&
-            instance.physicalSessionId === pluginSessionId,
-        )
-      : [];
-    this.instances.delete(pluginSessionId);
+  unregisterPeer(peerId: string): void {
+    this.unregisterPeerInternal(peerId, new Set<string>());
+  }
 
-    const session: StudioSession = {
-      logicalSessionId: pluginSessionId,
-      physicalSessionId: removed.physicalSessionId,
-    };
-    for (const listener of this.sessionClosedListeners) {
+  private unregisterPeerInternal(
+    peerId: string,
+    visited: Set<string>,
+    removedPeers?: StudioPeer[],
+  ): void {
+    if (visited.has(peerId)) return;
+    visited.add(peerId);
+    const removed = this.peersById.get(peerId);
+    if (!removed) return;
+    removedPeers?.push(removed);
+
+    const dependentPeerIds = removed.transportPeerId === peerId
+      ? this.getPeers()
+          .filter((peer) => peer.peerId !== peerId && peer.transportPeerId === peerId)
+          .map((peer) => peer.peerId)
+      : [];
+    this.peersById.delete(peerId);
+
+    const session: StudioSession = { peerId, transportPeerId: removed.transportPeerId };
+    for (const listener of this.peerClosedListeners) {
       try {
         listener(session);
       } catch {
         // Cleanup proceeds even if a downstream adapter fails.
       }
     }
-    if (removed.physicalSessionId === pluginSessionId) {
-      this.deliveryOwnersByPhysicalSession.delete(pluginSessionId);
+    if (removed.transportPeerId === peerId) {
+      this.deliveryOwnersByTransportPeer.delete(peerId);
     }
-    for (const child of logicalChildren) this.unregisterInstance(child.pluginSessionId);
-    // Reject any pending requests targeted at this (instanceId, role) tuple
-    // if no other plugin handles it.
-    for (const req of Array.from(this.pendingRequests.values())) {
-      const stillHasHandler = Array.from(this.instances.values()).some(
-        (i) => i.instanceId === req.targetInstanceId && i.role === req.targetRole,
-      );
-      if (!stillHasHandler) {
-        this.removePendingRequest(req);
-        req.reject(new Error(`Target (${req.targetInstanceId}, ${req.targetRole}) disconnected`));
-      }
+
+    for (const request of Array.from(this.pendingRequests.values())) {
+      if (request.targetPeerId !== peerId) continue;
+      this.removePendingRequest(request);
+      request.reject(new Error(`Target Peer "${peerId}" disconnected`));
     }
+    for (const dependentPeerId of dependentPeerIds) {
+      this.unregisterPeerInternal(dependentPeerId, visited, removedPeers);
+    }
+    this.removeInstanceFromGroupsWhenDisconnected(removed.instanceId);
   }
 
-  unregisterInstanceId(instanceId: string): PublicPluginInstance[] {
-    const matching = this.matchingInstancesForInstanceId(instanceId);
-    const removed = matching.map(toPublic);
-    for (const inst of matching) {
-      this.unregisterInstance(inst.pluginSessionId);
-    }
-    return removed;
+  private removeInstanceFromGroupsWhenDisconnected(instanceId: string): void {
+    if (this.getPeers().some((peer) => peer.instanceId === instanceId)) return;
+    this.detachInstanceFromOtherGroups(instanceId);
   }
 
-  async unregisterInstanceIdEverywhere(instanceId: string): Promise<PublicPluginInstance[]> {
+  unregisterInstanceId(instanceId: string): PublicStudioPeer[] {
+    const matching = this.getPeers().filter((peer) => peer.instanceId === instanceId);
+    const departingRuntimeGroupIds = new Set(matching.flatMap((peer) =>
+      peer.multiplayerGroupId !== undefined && isRuntimeRole(peer.role)
+        ? [peer.multiplayerGroupId]
+        : []));
+    const removedPeers: StudioPeer[] = [];
+    const visited = new Set<string>();
+    for (const peer of matching) {
+      this.unregisterPeerInternal(peer.peerId, visited, removedPeers);
+    }
+    this.detachInstanceFromOtherGroups(instanceId);
+    for (const groupId of departingRuntimeGroupIds) {
+      const hasRuntimePeer = this.getPeers().some((peer) =>
+        peer.multiplayerGroupId === groupId && isRuntimeRole(peer.role));
+      if (!hasRuntimePeer) this.removeMultiplayerGroup(groupId);
+    }
+    return removedPeers.map(toPublicPeer);
+  }
+
+  async unregisterInstanceIdEverywhere(instanceId: string): Promise<PublicStudioPeer[]> {
     return this.unregisterInstanceId(instanceId);
   }
 
-  getInstances(): PluginInstance[] {
-    return Array.from(this.instances.values());
+  getPeers(): StudioPeer[] {
+    return Array.from(this.peersById.values());
   }
 
-  getPublicInstances(): PublicPluginInstance[] {
-    return this.getInstances().map(toPublic);
+  getPublicPeers(): PublicStudioPeer[] {
+    return this.getPeers().map(toPublicPeer);
   }
 
-  getInstanceBySessionId(pluginSessionId: string): PluginInstance | undefined {
-    return this.instances.get(pluginSessionId);
+  getPeerById(peerId: string): StudioPeer | undefined {
+    return this.getPeers().find((peer) => peer.peerId === peerId);
+  }
+
+  getInstances(): StudioInstance[] {
+    const peersByInstance = new Map<string, StudioPeer[]>();
+    for (const peer of this.getPeers()) {
+      const peers = peersByInstance.get(peer.instanceId);
+      if (peers) peers.push(peer);
+      else peersByInstance.set(peer.instanceId, [peer]);
+    }
+    return Array.from(peersByInstance, ([id, peers]) => {
+      const preferred = preferredPeer(peers);
+      return {
+        id,
+        multiplayerGroupId: this.groupIdForInstance(id) ?? preferred.multiplayerGroupId,
+        placeId: preferred.placeId,
+        placeName: preferred.placeName,
+        peers,
+      };
+    });
+  }
+
+  getPublicInstances(): PublicStudioInstance[] {
+    return this.getInstances().map((instance) => ({
+      id: instance.id,
+      multiplayerGroupId: instance.multiplayerGroupId,
+      placeId: instance.placeId,
+      placeName: instance.placeName,
+      peers: instance.peers.map(toPublicPeer),
+    }));
+  }
+  getConnectedInstances(): ConnectedStudioInstance[] {
+    return this.getInstances().flatMap((instance): ConnectedStudioInstance[] => {
+      const peers = instance.multiplayerGroupId === undefined
+        ? instance.peers
+        : instance.peers.filter((peer) => !isRuntimeRole(peer.role));
+      if (peers.length === 0) return [];
+      return [{
+        id: instance.id,
+        multiplayerGroupId: instance.multiplayerGroupId,
+        placeId: instance.placeId,
+        placeName: instance.placeName,
+        peers: peerIdsByRole(peers),
+      }];
+    });
+  }
+
+  getConnectedMultiplayerGroups(): ConnectedMultiplayerGroup[] {
+    const peers = this.getPeers();
+    return this.getMultiplayerGroups().map((group) => ({
+      id: group.id,
+      controllerInstanceId: group.controllerInstanceId,
+      instances: Object.fromEntries(
+        peers
+          .filter((peer) => peer.multiplayerGroupId === group.id && isRuntimeRole(peer.role))
+          .sort((left, right) =>
+            roleOrder(left.role) - roleOrder(right.role) || left.peerId.localeCompare(right.peerId))
+          .map((peer) => [connectedRuntimeInstanceId(peer), peer.peerId]),
+      ),
+    }));
+  }
+
+
+  getMultiplayerGroups(): MultiplayerGroup[] {
+    return Array.from(this.multiplayerGroupsById.values(), copyGroup);
+  }
+
+  getPublicMultiplayerGroups(): PublicMultiplayerGroup[] {
+    return this.getMultiplayerGroups().map(copyGroup);
+  }
+
+  getTopologySnapshot(): TopologySnapshot {
+    return {
+      peers: this.getPeers(),
+      instances: this.getInstances(),
+      multiplayerGroups: this.getMultiplayerGroups(),
+    };
+  }
+
+  resolveConnectedInstanceId(instanceId: string): string | undefined {
+    const exact = this.getInstances().find((instance) => instance.id === instanceId);
+    const groupedRuntime = this.getPeers().find((peer) =>
+      peer.multiplayerGroupId !== undefined &&
+      isRuntimeRole(peer.role) &&
+      connectedRuntimeInstanceId(peer) === instanceId);
+    if (exact && groupedRuntime && exact.id !== groupedRuntime.instanceId) return undefined;
+    return exact?.id ?? groupedRuntime?.instanceId;
+  }
+
+  getInstanceIdsInScope(instanceId: string): string[] {
+    const resolvedInstanceId = this.resolveConnectedInstanceId(instanceId);
+    if (resolvedInstanceId === undefined) return [];
+    const groupId = this.groupIdForInstance(resolvedInstanceId);
+    if (groupId) {
+      return [...(this.getMultiplayerGroups().find((group) => group.id === groupId)?.instanceIds ?? [])];
+    }
+    return [resolvedInstanceId];
+  }
+
+  getPeersInScope(instanceId: string): StudioPeer[] {
+    const instanceIds = new Set(this.getInstanceIdsInScope(instanceId));
+    return this.getPeers().filter((peer) => instanceIds.has(peer.instanceId));
   }
 
   getPendingRequestCount(): number {
     return this.pendingRequests.size;
   }
 
-  updateInstanceActivity(pluginSessionId: string) {
-    const instance = this.instances.get(pluginSessionId);
-    if (!instance) return;
+  updatePeerActivity(peerId: string): void {
+    const peer = this.getPeerById(peerId);
+    if (!peer) return;
     const now = Date.now();
-    for (const candidate of this.instances.values()) {
-      if (candidate.physicalSessionId === instance.physicalSessionId) {
-        candidate.lastActivity = now;
+    if (peer.transportPeerId === peerId) {
+      for (const candidate of this.getPeers()) {
+        if (candidate.transportPeerId === peerId) candidate.lastActivity = now;
       }
+      return;
     }
+    peer.lastActivity = now;
   }
 
-  updateInstanceMetadata(pluginSessionId: string, metadata: Partial<Pick<PluginInstance, 'placeId' | 'placeName' | 'dataModelName' | 'isRunning'>>) {
-    const inst = this.instances.get(pluginSessionId);
-    if (!inst) return;
-    const priorInstanceId = inst.instanceId;
-    if (metadata.placeId !== undefined) inst.placeId = metadata.placeId;
-    if (metadata.placeName !== undefined) inst.placeName = metadata.placeName;
-    if (metadata.dataModelName !== undefined) inst.dataModelName = metadata.dataModelName;
-    if (metadata.isRunning !== undefined) inst.isRunning = metadata.isRunning;
-    const canonicalInstanceId = this.canonicalInstanceId(inst.instanceId, inst.placeId);
-    if (canonicalInstanceId !== inst.instanceId) {
-      const duplicate = Array.from(this.instances.values()).find(
-        (other) =>
-          other.pluginSessionId !== pluginSessionId &&
-          other.instanceId === canonicalInstanceId &&
-          other.role === inst.role,
-      );
-      if (!duplicate) {
-        this.rememberInstanceAlias(priorInstanceId, canonicalInstanceId);
-        this.migratePendingRequests(priorInstanceId, canonicalInstanceId);
-        inst.instanceId = canonicalInstanceId;
-        this.notifyRequestAvailable(inst.physicalSessionId);
-      }
-    }
+  updatePeerMetadata(
+    peerId: string,
+    metadata: Partial<
+      Pick<StudioPeer, 'placeId' | 'placeName' | 'placeKey' | 'dataModelName' | 'isRunning'>
+    >,
+  ): void {
+    const peer = this.getPeerById(peerId);
+    if (!peer) return;
+    if (metadata.placeId !== undefined) peer.placeId = metadata.placeId;
+    if (metadata.placeName !== undefined) peer.placeName = metadata.placeName;
+    if (metadata.placeKey !== undefined) peer.placeKey = metadata.placeKey;
+    if (metadata.dataModelName !== undefined) peer.dataModelName = metadata.dataModelName;
+    if (metadata.isRunning !== undefined) peer.isRunning = metadata.isRunning;
   }
 
-  cleanupStaleInstances() {
+  cleanupStalePeers(): void {
     const now = Date.now();
-    for (const [id, inst] of this.instances.entries()) {
+    for (const peer of this.getPeers()) {
       const deliveryActive =
-        (this.deliveryOwnersByPhysicalSession.get(inst.physicalSessionId)?.size ?? 0) > 0;
-      if (!deliveryActive && now - inst.lastActivity > STALE_INSTANCE_MS) {
-        this.unregisterInstance(id);
+        (this.deliveryOwnersByTransportPeer.get(peer.transportPeerId)?.size ?? 0) > 0;
+      if (!deliveryActive && now - peer.lastActivity > STALE_PEER_MS) {
+        this.unregisterPeer(peer.peerId);
       }
     }
-    this.cleanupStaleAliases(now);
   }
 
-  getEquivalentInstanceIds(instanceId: string): string[] {
-    const resolvedInstanceId = this.resolveInstanceAlias(instanceId);
-    const ids = new Set<string>([instanceId, resolvedInstanceId]);
-    const placeIds = new Set<number>();
-
-    const addPlaceId = (placeId: number | undefined) => {
-      const published = publishedInstanceId(placeId);
-      if (!published || placeId === undefined) return;
-      ids.add(published);
-      placeIds.add(Math.trunc(placeId));
+  private routingErrorData(): PublicTopologyChoices {
+    const instances = this.getConnectedInstances();
+    const multiplayerGroups = this.getConnectedMultiplayerGroups();
+    return {
+      instances,
+      multiplayerGroups,
+      count: instances.length + multiplayerGroups.length,
     };
-
-    const placeMatch = resolvedInstanceId.match(/^place:(\d+)$/) ?? instanceId.match(/^place:(\d+)$/);
-    if (placeMatch) addPlaceId(Number(placeMatch[1]));
-
-    for (const inst of this.getInstances()) {
-      if (ids.has(inst.instanceId)) {
-        addPlaceId(inst.placeId);
-      }
-    }
-
-    for (const inst of this.getInstances()) {
-      if (inst.placeId > 0 && placeIds.has(Math.trunc(inst.placeId))) {
-        ids.add(inst.instanceId);
-      }
-    }
-
-    for (const [alias, entry] of this.instanceAliases.entries()) {
-      if (ids.has(entry.targetInstanceId)) ids.add(alias);
-    }
-
-    return Array.from(ids);
   }
 
-  // Resolves (instance_id, target-role) MCP arguments to a concrete
-  // routing decision: either a single (instanceId, role) tuple or a fanout
-  // list. Returns an error result with the full instance list embedded so
-  // the caller (tool layer) can surface it without a second round-trip.
-  resolveTarget(input: ResolveTargetInput): ResolveTargetResult {
-    const instances = this.getInstances();
-    const publicList = instances.map(toPublic);
-    const errorData = { instances: publicList, count: publicList.length };
+  private resolvedTarget(peer: StudioPeer): ResolvedPeerTarget {
+    return {
+      targetPeerId: peer.peerId,
+      targetInstanceId: peer.instanceId,
+      targetRole: peer.role,
+    };
+  }
 
-    const { instance_id, target } = input;
-    const isFanout = target === 'all';
-    const role = target && target !== 'all' ? target : undefined;
-
-    // Case 1: instance_id provided
-    if (instance_id !== undefined) {
-      const matchingInstances = this.matchingInstancesForInstanceId(instance_id);
-      if (matchingInstances.length === 0) {
+  private resolveWithinScope(
+    peers: StudioPeer[],
+    target: string | undefined,
+    errorData: PublicTopologyChoices,
+    selectedInstanceId?: string,
+  ): ResolveTargetResult {
+    if (target === 'all') {
+      return { ok: true, mode: 'fanout', targets: peers.map((peer) => this.resolvedTarget(peer)) };
+    }
+    if (target) {
+      const exact = peers.find((peer) => peer.role === target);
+      if (!exact) {
         return {
           ok: false,
           error: {
-            code: 'unrecognized_instance_id',
-            message: `instance_id "${instance_id}" is not connected. Pass one from data.instances.`,
+            code: 'target_role_not_present_on_instance',
+            message: `${selectedInstanceId ? `Instance "${selectedInstanceId}" scope` : 'The connected scope'} has no role "${target}". Available roles: ${peers.map((peer) => peer.role).join(', ')}.`,
             data: errorData,
           },
         };
       }
-
-      if (isFanout) {
-        // Fan out across all roles of that instance (e.g. edit + server + client-N).
-        return {
-          ok: true,
-          mode: 'fanout',
-          targets: matchingInstances.map((i) => ({
-            targetInstanceId: i.instanceId,
-            targetRole: i.role,
-          })),
-        };
-      }
-
-      if (role) {
-        const exact = matchingInstances.find((i) => i.role === role);
-        if (!exact) {
-          return {
-            ok: false,
-            error: {
-              code: 'target_role_not_present_on_instance',
-              message: `instance "${instance_id}" has no role "${role}". Available roles: ${matchingInstances.map((i) => i.role).join(', ')}.`,
-              data: errorData,
-            },
-          };
-        }
-        return { ok: true, mode: 'single', targetInstanceId: exact.instanceId, targetRole: role };
-      }
-
-      // role omitted, instance_id provided
-      if (matchingInstances.length === 1) {
-        return {
-          ok: true,
-          mode: 'single',
-          targetInstanceId: matchingInstances[0].instanceId,
-          targetRole: matchingInstances[0].role,
-        };
-      }
-      // Multiple roles for that instance — prefer edit if present.
-      const edit = matchingInstances.find((i) => i.role === 'edit');
-      if (edit) {
-        return { ok: true, mode: 'single', targetInstanceId: edit.instanceId, targetRole: 'edit' };
-      }
-      return {
-        ok: false,
-        error: {
-          code: 'target_role_required',
-          message: `instance "${instance_id}" has multiple roles connected: ${matchingInstances.map((i) => i.role).join(', ')}. Pass target=<role>.`,
-          data: errorData,
-        },
-      };
+      return { ok: true, mode: 'single', ...this.resolvedTarget(exact) };
     }
 
-    // Case 2: instance_id omitted — distinct instanceIds across connected plugins
-    const distinctInstanceIds = new Set(instances.map((i) => this.routingKeyForInstance(i)));
-    if (distinctInstanceIds.size === 0) {
-      // No connected instances at all. Caller will hit a separate timeout/
-      // not-connected error; return a clear routing error here too.
+    const edit = peers.find((peer) => peer.role === 'edit');
+    if (edit) return { ok: true, mode: 'single', ...this.resolvedTarget(edit) };
+    if (peers.length === 1) {
+      return { ok: true, mode: 'single', ...this.resolvedTarget(peers[0]) };
+    }
+    return {
+      ok: false,
+      error: {
+        code: 'target_role_required',
+        message: `${selectedInstanceId ? `Instance "${selectedInstanceId}" scope` : 'The connected scope'} has multiple roles connected: ${peers.map((peer) => peer.role).join(', ')}. Pass target=<role>.`,
+        data: errorData,
+      },
+    };
+  }
+
+  resolveTarget(input: ResolveTargetInput): ResolveTargetResult {
+    const errorData = this.routingErrorData();
+    if (input.instance_id !== undefined) {
+      const peers = this.getPeersInScope(input.instance_id);
+      if (peers.length === 0) {
+        return {
+          ok: false,
+          error: {
+            code: 'unrecognized_instance_id',
+            message: `instance_id "${input.instance_id}" is not connected. Pass a connected top-level or grouped role-suffixed Instance ID.`,
+            data: errorData,
+          },
+        };
+      }
+      return this.resolveWithinScope(peers, input.target, errorData, input.instance_id);
+    }
+
+    const scopeKeys = new Set(this.getPeers().map((peer) => this.peerScopeKey(peer)));
+    if (scopeKeys.size === 0) {
       return {
         ok: false,
         error: {
           code: 'unrecognized_instance_id',
-          message: 'No Studio plugin is connected.',
+          message: 'No Studio Peer is connected.',
           data: errorData,
         },
       };
     }
-    if (distinctInstanceIds.size > 1) {
-      const errorCode: RoutingErrorCode = role ? 'ambiguous_target' : 'multiple_instances_connected';
-      const msg = role
-        ? `target=${role} is ambiguous because multiple Studio places are connected. Pass instance_id to choose a place.`
-        : 'Multiple Studio places are connected. Pass instance_id to disambiguate.';
-      return { ok: false, error: { code: errorCode, message: msg, data: errorData } };
+    if (scopeKeys.size > 1) {
+      const code: RoutingErrorCode = input.target ? 'ambiguous_target' : 'multiple_instances_connected';
+      return {
+        ok: false,
+        error: {
+          code,
+          message: input.target
+            ? `target=${input.target} is ambiguous because multiple Studio routing scopes are connected. Pass instance_id to choose a scope.`
+            : 'Multiple Studio routing scopes are connected. Pass instance_id to disambiguate.',
+          data: errorData,
+        },
+      };
     }
 
-    // Exactly one distinct instance_id connected. Apply role resolution
-    // identically to the instance_id-provided path.
-    const onlyInstanceId = distinctInstanceIds.values().next().value;
-    return this.resolveTarget({ instance_id: onlyInstanceId, target });
+    const onlyScope = scopeKeys.values().next().value;
+    const peers = this.getPeers().filter((peer) => this.peerScopeKey(peer) === onlyScope);
+    return this.resolveWithinScope(peers, input.target, errorData);
   }
 
-  async sendRequest(
+  sendRequest(
     endpoint: string,
     data: unknown,
-    targetInstanceId: string,
-    targetRole: string,
+    targetPeerId: string,
     timeoutMs = this.requestTimeout,
     signal?: AbortSignal,
   ): Promise<unknown> {
     const requestId = randomUUID();
     const effectiveTimeoutMs = Math.max(1, timeoutMs);
-    if (signal?.aborted) throw new Error('Request aborted');
+    if (signal?.aborted) return Promise.reject(new Error('Request aborted'));
 
-    return new Promise((resolve, reject) => {
-      const cancelPending = (reason: StudioCancellationReason, error: Error): void => {
-        const pending = this.pendingRequests.get(requestId);
-        if (!pending || !this.removePendingRequest(pending)) return;
-        this.notifyRequestCancelled(pending, reason);
-        pending.reject(error);
-      };
-      const timeoutId = setTimeout(
-        () => cancelPending('timeout', new Error('Request timeout')),
-        effectiveTimeoutMs,
-      );
-      const abortListener = () => cancelPending('aborted', new Error('Request aborted'));
-      const request: PendingRequest = {
-        id: requestId,
-        endpoint,
-        data,
-        targetInstanceId,
-        targetRole,
-        timestamp: Date.now(),
-        resolve,
-        reject,
-        timeoutId,
-        timeoutMs: effectiveTimeoutMs,
-        abortSignal: signal,
-        abortListener,
-      };
+    const { promise, resolve, reject } = Promise.withResolvers<unknown>();
+    const cancelPending = (reason: StudioCancellationReason, error: Error): void => {
+      const pending = this.pendingRequests.get(requestId);
+      if (!pending || !this.removePendingRequest(pending)) return;
+      this.notifyRequestCancelled(pending, reason);
+      pending.reject(error);
+    };
+    const timeoutId = setTimeout(
+      () => cancelPending('timeout', new Error('Request timeout')),
+      effectiveTimeoutMs,
+    );
+    const abortListener = () => cancelPending('aborted', new Error('Request aborted'));
+    const request: PendingRequest = {
+      id: requestId,
+      endpoint,
+      data,
+      targetPeerId,
+      timestamp: Date.now(),
+      resolve,
+      reject,
+      timeoutId,
+      timeoutMs: effectiveTimeoutMs,
+      abortSignal: signal,
+      abortListener,
+    };
 
-      this.pendingRequests.set(requestId, request);
-      signal?.addEventListener('abort', abortListener, { once: true });
-      if (signal?.aborted) abortListener();
-      if (this.pendingRequests.has(requestId)) {
-        for (const physicalSessionId of this.physicalSessionsForTarget(targetInstanceId, targetRole)) {
-          this.notifyRequestAvailable(physicalSessionId);
-        }
-      }
-    });
+    this.pendingRequests.set(requestId, request);
+    signal?.addEventListener('abort', abortListener, { once: true });
+    if (signal?.aborted) abortListener();
+    const target = this.getPeerById(targetPeerId);
+    if (this.pendingRequests.has(requestId) && target) {
+      this.notifyRequestAvailable(target.transportPeerId);
+    }
+    return promise;
   }
 
   private removePendingRequest(request: PendingRequest): boolean {
@@ -735,53 +962,39 @@ export class BridgeService implements StudioTransportQueue {
     return true;
   }
 
-
-  claimNextRequestForPhysical(
-    physicalSessionId: string,
+  claimNextRequestForTransport(
+    transportPeerId: string,
     claimOwner: string,
   ): StudioQueuedRequest | null {
     let oldestRequest: PendingRequest | undefined;
-    let logicalSessionId = '';
     for (const request of this.pendingRequests.values()) {
       if (request.claimOwner !== undefined) continue;
-      let matchingSessionId: string | undefined;
-      for (const candidate of this.instances.values()) {
-        if (
-          candidate.physicalSessionId === physicalSessionId &&
-          candidate.instanceId === request.targetInstanceId &&
-          candidate.role === request.targetRole
-        ) {
-          matchingSessionId = candidate.pluginSessionId;
-          break;
-        }
-      }
-      if (!matchingSessionId) continue;
-      if (!oldestRequest || request.timestamp < oldestRequest.timestamp) {
-        oldestRequest = request;
-        logicalSessionId = matchingSessionId;
-      }
+      const peer = this.getPeerById(request.targetPeerId);
+      if (!peer || peer.transportPeerId !== transportPeerId) continue;
+      if (!oldestRequest || request.timestamp < oldestRequest.timestamp) oldestRequest = request;
     }
     if (!oldestRequest) return null;
+    const peer = this.getPeerById(oldestRequest.targetPeerId);
+    if (!peer) return null;
     oldestRequest.claimOwner = claimOwner;
-    oldestRequest.lastDeliveryPhysicalSessionId = physicalSessionId;
+    oldestRequest.lastDeliveryTransportPeerId = transportPeerId;
     return {
       requestId: oldestRequest.id,
-      logicalSessionId,
-      target: oldestRequest.targetRole,
+      peerId: oldestRequest.targetPeerId,
+      target: peer.role,
       endpoint: oldestRequest.endpoint,
       data: oldestRequest.data,
       remainingMs: Math.max(1, oldestRequest.timeoutMs - (Date.now() - oldestRequest.timestamp)),
     };
   }
 
-
-  claimNextCancellationForPhysical(
-    physicalSessionId: string,
+  claimNextCancellationForTransport(
+    transportPeerId: string,
     claimOwner: string,
   ): StudioRequestCancellation | null {
     this.prunePendingCancellations(Date.now());
     for (const cancellation of this.pendingCancellations.values()) {
-      if (cancellation.physicalSessionId !== physicalSessionId || cancellation.claimOwner !== undefined) {
+      if (cancellation.transportPeerId !== transportPeerId || cancellation.claimOwner !== undefined) {
         continue;
       }
       cancellation.claimOwner = claimOwner;
@@ -791,25 +1004,19 @@ export class BridgeService implements StudioTransportQueue {
   }
 
   releaseDeliveryClaims(claimOwner: string): void {
-    const physicalSessionIds = new Set<string>();
+    const transportPeerIds = new Set<string>();
     for (const request of this.pendingRequests.values()) {
       if (request.claimOwner !== claimOwner) continue;
       request.claimOwner = undefined;
-      for (const physicalSessionId of this.physicalSessionsForTarget(
-        request.targetInstanceId,
-        request.targetRole,
-      )) {
-        physicalSessionIds.add(physicalSessionId);
-      }
+      const peer = this.getPeerById(request.targetPeerId);
+      if (peer) transportPeerIds.add(peer.transportPeerId);
     }
     for (const cancellation of this.pendingCancellations.values()) {
       if (cancellation.claimOwner !== claimOwner) continue;
       cancellation.claimOwner = undefined;
-      physicalSessionIds.add(cancellation.physicalSessionId);
+      transportPeerIds.add(cancellation.transportPeerId);
     }
-    for (const physicalSessionId of physicalSessionIds) {
-      this.notifyRequestAvailable(physicalSessionId);
-    }
+    for (const transportPeerId of transportPeerIds) this.notifyRequestAvailable(transportPeerId);
   }
 
   resolveRequest(requestId: string, response: unknown): SettlementDisposition {
@@ -826,11 +1033,8 @@ export class BridgeService implements StudioTransportQueue {
   ): SettlementDisposition {
     const now = Date.now();
     this.pruneAcceptedRequestIds(now);
-
     const request = this.pendingRequests.get(requestId);
-    if (!request) {
-      return this.acceptedRequestIds.has(requestId) ? 'already_settled' : 'unknown';
-    }
+    if (!request) return this.acceptedRequestIds.has(requestId) ? 'already_settled' : 'unknown';
 
     this.removePendingRequest(request);
     this.acceptedRequestIds.set(requestId, now);
@@ -844,7 +1048,6 @@ export class BridgeService implements StudioTransportQueue {
       if (now - acceptedAt < ACCEPTED_REQUEST_TOMBSTONE_TTL_MS) break;
       this.acceptedRequestIds.delete(requestId);
     }
-
     while (this.acceptedRequestIds.size > MAX_ACCEPTED_REQUEST_TOMBSTONES) {
       const oldestRequestId = this.acceptedRequestIds.keys().next().value;
       if (oldestRequestId === undefined) break;
@@ -857,7 +1060,6 @@ export class BridgeService implements StudioTransportQueue {
       if (now - cancellation.createdAt < CANCELLATION_TOMBSTONE_TTL_MS) break;
       this.pendingCancellations.delete(requestId);
     }
-
     while (this.pendingCancellations.size > MAX_CANCELLATION_TOMBSTONES) {
       const oldestRequestId = this.pendingCancellations.keys().next().value;
       if (oldestRequestId === undefined) break;
@@ -865,7 +1067,7 @@ export class BridgeService implements StudioTransportQueue {
     }
   }
 
-  cleanupOldRequests() {
+  cleanupOldRequests(): void {
     const now = Date.now();
     for (const request of this.pendingRequests.values()) {
       if (now - request.timestamp > request.timeoutMs && this.removePendingRequest(request)) {
@@ -875,7 +1077,7 @@ export class BridgeService implements StudioTransportQueue {
     }
   }
 
-  clearAllPendingRequests() {
+  clearAllPendingRequests(): void {
     for (const request of Array.from(this.pendingRequests.values())) {
       this.removePendingRequest(request);
       request.reject(new Error('Connection closed'));

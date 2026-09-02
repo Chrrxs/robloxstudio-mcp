@@ -12,6 +12,8 @@ import MicroProfilerHandlers from "./handlers/MicroProfilerHandlers";
 import LuauExec from "./LuauExec";
 import HttpDiagnostics from "./HttpDiagnostics";
 import PluginSession from "./PluginSession";
+import TopologyId from "./TopologyId";
+import PeerRole from "./PeerRole";
 
 interface StudioTestServiceMultiplayer extends StudioTestService {
 	CanLeaveTest(): boolean;
@@ -21,23 +23,23 @@ interface StudioTestServiceMultiplayer extends StudioTestService {
 
 const StudioTestService = game.GetService("StudioTestService") as StudioTestServiceMultiplayer;
 
-
-// The client peer cannot reach the MCP HTTP server - Roblox forbids
-// HttpService:RequestAsync from the client DM even under PluginSecurity, and
-// HttpEnabled reads as false there regardless of identity. So the server peer
-// brokers client-targeted requests through a RemoteFunction it places
-// in ReplicatedStorage; each player gets a logical proxy registration on the
-// MCP side, multiplexed over the play-server peer's physical event stream.
+// Client Peers cannot reach the MCP HTTP server, so the server transport
+// forwards requests over this RemoteFunction. The client supplies only its
+// VM Peer identity; the server broker assigns trusted process/group topology
+// from its own playtest context before publishing that Peer to MCP.
 
 const DEFAULT_MCP_URL = "http://localhost:58741";
 let mcpUrl = DEFAULT_MCP_URL;
 const BROKER_NAME = "__MCPClientBroker";
 const BROKER_OWNER_ATTRIBUTE = "__MCPBrokerOwner";
+const CLIENT_IDENTITY_KIND = "identity";
 
 interface ProxyEntry {
 	player: Player;
 	remote: RemoteFunction;
-	pluginSessionId: string;
+	peerId: string;
+	instanceId: string;
+	multiplayerGroupId?: string;
 	role: string;
 	registered: boolean;
 	registering: boolean;
@@ -48,6 +50,11 @@ interface ProxyEntry {
 interface BrokerEnvelope {
 	endpoint: string;
 	data?: Record<string, unknown>;
+}
+
+interface ClientIdentityHandshake {
+	kind: "identity";
+	peerId: string;
 }
 
 
@@ -78,9 +85,7 @@ const CLIENT_BROKER_ALLOWED_ENDPOINTS = new Set<string>([
 
 
 function forkRole(): "edit" | "server" | "client" {
-	if (!RunService.IsRunning()) return "edit";
-	if (RunService.IsServer()) return "server";
-	return "client";
+	return PeerRole.detect();
 }
 
 function postJson(endpoint: string, body: Record<string, unknown>) {
@@ -122,9 +127,7 @@ function handleGetRuntimeLogs(data: Record<string, unknown> | undefined): unknow
 	const since = d.since as number | undefined;
 	const tail = d.tail as number | undefined;
 	const filter = d.filter as string | undefined;
-	// "client" is the generic capture tag; MCP-side aggregation overrides it
-	// with the specific role (e.g. "client-1") for capturedBy.
-	return RuntimeLogBuffer.query({ since, tail, filter }, "client");
+	return RuntimeLogBuffer.query({ since, tail, filter });
 }
 
 function handleMultiplayerTestState(): unknown {
@@ -173,10 +176,31 @@ function handleMultiplayerTestLeaveClient(): unknown {
 	};
 }
 
-function setupClientBroker() {
+function sendClientIdentity(rf: RemoteFunction, attempt: number): void {
+	if (PeerRole.detect() !== "client" || rf.Parent === undefined) return;
+	const identity: ClientIdentityHandshake = {
+		kind: "identity",
+		peerId: PluginSession.peerId,
+	};
+	const [ok, response] = pcall(() => rf.InvokeServer(identity));
+	if (ok && typeIs(response, "table")) {
+		const acknowledgement = response as Record<string, unknown>;
+		if (acknowledgement.success === true) return;
+	}
+	if (attempt === 0) {
+		warn(`[robloxstudio-mcp] client identity handshake failed; retrying`);
+	}
+	task.delay(proxyRetryDelay(attempt + 1), sendClientIdentity, rf, attempt + 1);
+}
+
+function setupClientBroker(attempt = 0) {
+	if (PeerRole.detect() !== "client") return;
 	const rf = ReplicatedStorage.WaitForChild(BROKER_NAME, 10);
 	if (!rf || !rf.IsA("RemoteFunction")) {
-		warn(`[robloxstudio-mcp] client: ${BROKER_NAME} not found`);
+		if (attempt === 0) warn(`[robloxstudio-mcp] client: ${BROKER_NAME} not found; retrying`);
+		if (RunService.IsRunning()) {
+			task.delay(proxyRetryDelay(attempt + 1), setupClientBroker, attempt + 1);
+		}
 		return;
 	}
 	rf.OnClientInvoke = (payload: BrokerEnvelope | undefined) => {
@@ -227,12 +251,13 @@ function setupClientBroker() {
 		}
 		return { error: `Unsupported client broker endpoint: ${payload.endpoint}` };
 	};
+	task.spawn(sendClientIdentity, rf, 0);
 }
 
 const INITIAL_PROXY_RETRY_DELAY_SECONDS = 0.5;
 const MAX_PROXY_RETRY_DELAY_SECONDS = 5;
 const proxyByPlayer = new Map<Player, ProxyEntry>();
-const proxyBySessionId = new Map<string, ProxyEntry>();
+const proxyByPeerId = new Map<string, ProxyEntry>();
 const proxyRegisterFailuresByPlayer = new Set<Player>();
 const pendingProxyDisconnects = new Set<string>();
 let serverBrokerStarted = false;
@@ -242,9 +267,9 @@ function unregisterProxy(player: Player, entry?: ProxyEntry): void {
 	if (!proxy) return;
 	proxy.generation++;
 	proxyByPlayer.delete(player);
-	proxyBySessionId.delete(proxy.pluginSessionId);
+	proxyByPeerId.delete(proxy.peerId);
 	proxyRegisterFailuresByPlayer.delete(player);
-	queueProxyDisconnect(proxy.pluginSessionId);
+	queueProxyDisconnect(proxy.peerId);
 }
 
 function disconnectAllProxies(): void {
@@ -252,7 +277,7 @@ function disconnectAllProxies(): void {
 		unregisterProxy(player, entry);
 	}
 	proxyByPlayer.clear();
-	proxyBySessionId.clear();
+	proxyByPeerId.clear();
 	proxyRegisterFailuresByPlayer.clear();
 }
 
@@ -262,30 +287,37 @@ function proxyRetryDelay(attempt: number): number {
 		MAX_PROXY_RETRY_DELAY_SECONDS,
 	);
 }
-function deliverProxyDisconnect(pluginSessionId: string, attempt: number): void {
-	if (!pendingProxyDisconnects.has(pluginSessionId)) return;
-	const [ok, response] = postJson("/disconnect", { pluginSessionId });
+function deliverProxyDisconnect(peerId: string, attempt: number): void {
+	if (!pendingProxyDisconnects.has(peerId)) return;
+	const [ok, response] = postJson("/disconnect", { peerId });
 	if (ok && response && response.Success) {
-		pendingProxyDisconnects.delete(pluginSessionId);
+		pendingProxyDisconnects.delete(peerId);
 		return;
 	}
 	task.delay(proxyRetryDelay(attempt + 1), () => {
-		deliverProxyDisconnect(pluginSessionId, attempt + 1);
+		deliverProxyDisconnect(peerId, attempt + 1);
 	});
 }
 
-function queueProxyDisconnect(pluginSessionId: string): void {
-	if (pendingProxyDisconnects.has(pluginSessionId)) return;
-	pendingProxyDisconnects.add(pluginSessionId);
-	task.spawn(deliverProxyDisconnect, pluginSessionId, 0);
+function queueProxyDisconnect(peerId: string): void {
+	if (pendingProxyDisconnects.has(peerId)) return;
+	pendingProxyDisconnects.add(peerId);
+	task.spawn(deliverProxyDisconnect, peerId, 0);
 }
 
 
-function parseAssignedRole(body: string): string | undefined {
+function parseAssignedRole(body: string, entry: ProxyEntry): string | undefined {
 	const [decodeOk, decoded] = pcall(() => HttpService.JSONDecode(body));
 	if (!decodeOk || !typeIs(decoded, "table")) return undefined;
 	const ready = decoded as Record<string, unknown>;
-	if (ready.success !== true) return undefined;
+	if (
+		ready.success !== true ||
+		ready.peerId !== entry.peerId ||
+		ready.instanceId !== entry.instanceId ||
+		ready.multiplayerGroupId !== entry.multiplayerGroupId
+	) {
+		return undefined;
+	}
 	return typeIs(ready.assignedRole, "string") && ready.assignedRole !== ""
 		? ready.assignedRole
 		: undefined;
@@ -330,21 +362,22 @@ function registerProxyEntry(entry: ProxyEntry): void {
 	entry.registering = true;
 	const expectedGeneration = entry.generation;
 	const requestedRole = entry.role === "client" ? "client" : entry.role;
-	const readyPayload = PluginSession.createReadyPayload(entry.pluginSessionId, requestedRole);
-	if (proxyByPlayer.get(entry.player) !== entry) return;
-	if (entry.generation !== expectedGeneration) {
-		if (!entry.registering) task.spawn(registerProxyEntry, entry);
-		return;
-	}
+	const readyPayload = PluginSession.createReadyPayload(
+		entry.peerId,
+		requestedRole,
+		entry.instanceId,
+		entry.multiplayerGroupId,
+	);
 	const [ok, res] = postJson("/ready", readyPayload);
 	if (proxyByPlayer.get(entry.player) !== entry) {
 		if (ok && res && res.Success) {
-			queueProxyDisconnect(entry.pluginSessionId);
+			queueProxyDisconnect(entry.peerId);
 		}
 		return;
 	}
 	if (entry.generation !== expectedGeneration) {
-		if (!entry.registering) task.spawn(registerProxyEntry, entry);
+		entry.registering = false;
+		if (!entry.registered) task.spawn(registerProxyEntry, entry);
 		return;
 	}
 	entry.registering = false;
@@ -353,9 +386,9 @@ function registerProxyEntry(entry: ProxyEntry): void {
 		failProxyRegistration(entry, formatPostJsonFailure("/ready", ok, res));
 		return;
 	}
-	const assignedRole = parseAssignedRole(res.Body);
+	const assignedRole = parseAssignedRole(res.Body, entry);
 	if (assignedRole === undefined) {
-		failProxyRegistration(entry, "invalid /ready response: expected success=true and a non-empty assignedRole");
+		failProxyRegistration(entry, "invalid /ready response for client Peer topology");
 		return;
 	}
 	entry.role = assignedRole;
@@ -367,12 +400,67 @@ function registerProxyEntry(entry: ProxyEntry): void {
 	}
 }
 
-function registerProxy(player: Player, rf: RemoteFunction): void {
-	if (proxyByPlayer.has(player)) return;
+function parseClientIdentity(payload: unknown): ClientIdentityHandshake | undefined {
+	if (!typeIs(payload, "table")) return undefined;
+	const identity = payload as Record<string, unknown>;
+	if (
+		identity.kind !== CLIENT_IDENTITY_KIND ||
+		!typeIs(identity.peerId, "string") ||
+		identity.peerId === ""
+	) {
+		return undefined;
+	}
+	return {
+		kind: "identity",
+		peerId: identity.peerId,
+	};
+}
+
+function registerProxy(player: Player, rf: RemoteFunction, identity: ClientIdentityHandshake): boolean {
+	const peerOwner = proxyByPeerId.get(identity.peerId);
+	if (peerOwner !== undefined && peerOwner.player !== player) return false;
+
+	const current = proxyByPlayer.get(player);
+	const multiplayerGroupId = PluginSession.getMultiplayerGroupId();
+	// Managed multiplayer launches one client Player per Studio process. The
+	// server creates that process identity instead of trusting replicated game
+	// code to claim an Instance or Multiplayer Group. Solo clients use the
+	// server's process Instance because their VMs share one Studio process.
+	const retainedMultiplayerInstanceId =
+		current !== undefined && current.multiplayerGroupId === multiplayerGroupId
+			? current.instanceId
+			: undefined;
+	const instanceId = multiplayerGroupId !== undefined
+		? retainedMultiplayerInstanceId ?? TopologyId.createInstanceId()
+		: PluginSession.getInstanceId();
+
+	if (current !== undefined) {
+		if (current.peerId !== identity.peerId) {
+			unregisterProxy(player, current);
+		} else {
+			if (
+				current.instanceId !== instanceId ||
+				current.multiplayerGroupId !== multiplayerGroupId
+			) {
+				current.generation++;
+				current.instanceId = instanceId;
+				current.multiplayerGroupId = multiplayerGroupId;
+				current.role = "client";
+				current.registered = false;
+				current.registering = false;
+				current.retryAttempt = 0;
+				task.spawn(registerProxyEntry, current);
+			}
+			return true;
+		}
+	}
+
 	const entry: ProxyEntry = {
 		player,
 		remote: rf,
-		pluginSessionId: HttpService.GenerateGUID(false),
+		peerId: identity.peerId,
+		instanceId,
+		multiplayerGroupId,
 		role: "client",
 		registered: false,
 		registering: false,
@@ -380,11 +468,12 @@ function registerProxy(player: Player, rf: RemoteFunction): void {
 		generation: 0,
 	};
 	proxyByPlayer.set(player, entry);
-	proxyBySessionId.set(entry.pluginSessionId, entry);
+	proxyByPeerId.set(entry.peerId, entry);
 	task.spawn(registerProxyEntry, entry);
+	return true;
 }
 
-function refreshAllLogicalRegistrations(): void {
+function refreshAllProxyRegistrations(): void {
 	for (const [, entry] of proxyByPlayer) {
 		entry.generation++;
 		entry.registered = false;
@@ -395,14 +484,14 @@ function refreshAllLogicalRegistrations(): void {
 }
 
 function dispatchClientRequest(
-	logicalSessionId: string,
+	peerId: string,
 	target: string,
 	endpoint: string,
 	data?: Record<string, unknown>,
 ): unknown {
-	const entry = proxyBySessionId.get(logicalSessionId);
+	const entry = proxyByPeerId.get(peerId);
 	if (!entry || proxyByPlayer.get(entry.player) !== entry) {
-		return { error: `Client proxy ${target} (${logicalSessionId}) is not registered.` };
+		return { error: `Client proxy ${target} (${peerId}) is not registered.` };
 	}
 	if (entry.role === "client") {
 		const [assignedClientRole] = target.match("^client%-%d+$");
@@ -410,7 +499,7 @@ function dispatchClientRequest(
 	}
 	if (entry.role !== target) {
 		return {
-			error: `Client proxy ${logicalSessionId} is registered as ${entry.role}, not ${target}.`,
+			error: `Client proxy ${peerId} is registered as ${entry.role}, not ${target}.`,
 		};
 	}
 	if (entry.player.Parent === undefined || !RunService.IsRunning()) {
@@ -436,24 +525,35 @@ function dispatchClientRequest(
 
 function setupServerBroker() {
 	if (serverBrokerStarted) return;
-	let rf = ReplicatedStorage.FindFirstChild(BROKER_NAME) as RemoteFunction | undefined;
-	if (!rf) {
+	const existing = ReplicatedStorage.FindFirstChild(BROKER_NAME);
+	let rf: RemoteFunction;
+	if (existing !== undefined) {
+		if (!existing.IsA("RemoteFunction")) {
+			warn(`[robloxstudio-mcp] server: ${BROKER_NAME} exists but is not a RemoteFunction`);
+			return;
+		}
+		rf = existing;
+	} else {
 		rf = new Instance("RemoteFunction");
-		rf.Name = BROKER_NAME;
-		rf.Parent = ReplicatedStorage;
 	}
-	if (rf.GetAttribute(BROKER_OWNER_ATTRIBUTE) !== undefined) {
-		return;
-	}
-	rf.SetAttribute(BROKER_OWNER_ATTRIBUTE, HttpService.GenerateGUID(false));
+	if (rf.GetAttribute(BROKER_OWNER_ATTRIBUTE) !== undefined) return;
+
+	rf.Name = BROKER_NAME;
+	rf.SetAttribute(BROKER_OWNER_ATTRIBUTE, PluginSession.peerId);
+	rf.OnServerInvoke = (player, payload: unknown) => {
+		const identity = parseClientIdentity(payload);
+		if (identity === undefined) {
+			return { success: false, error: "Invalid client Peer identity handshake." };
+		}
+		if (!registerProxy(player, rf, identity)) {
+			return { success: false, error: "Client Peer identity is already registered by another player." };
+		}
+		return { success: true };
+	};
+	if (rf.Parent === undefined) rf.Parent = ReplicatedStorage;
 	serverBrokerStarted = true;
-	const broker = rf;
-	Players.PlayerAdded.Connect((p) => registerProxy(p, broker));
-	for (const p of Players.GetPlayers()) {
-		task.spawn(registerProxy, p, broker);
-	}
-	Players.PlayerRemoving.Connect((p) => {
-		unregisterProxy(p);
+	Players.PlayerRemoving.Connect((player) => {
+		unregisterProxy(player);
 	});
 	game.BindToClose(() => {
 		disconnectAllProxies();
@@ -464,7 +564,7 @@ export = {
 	DEFAULT_MCP_URL,
 	setServerUrl,
 	disconnectAllProxies,
-	refreshAllLogicalRegistrations,
+	refreshAllProxyRegistrations,
 	dispatchClientRequest,
 	forkRole,
 	setupClientBroker,
