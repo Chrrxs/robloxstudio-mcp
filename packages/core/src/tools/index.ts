@@ -8,6 +8,7 @@ import {
 } from '../opencloud-client.js';
 import { RobloxCookieClient } from '../roblox-cookie-client.js';
 import {
+  describeStudioInstallations,
   parseStudioProcessEnvironmentPatch,
   parseStudioWorkingDirectory,
   StudioInstanceManager,
@@ -3028,9 +3029,33 @@ export class RobloxStudioTools {
       action !== 'complete' &&
       action !== 'close' &&
       action !== 'status' &&
-      action !== 'list_place_versions'
+      action !== 'list_place_versions' &&
+      action !== 'list_studio_installations'
     ) {
-      throw new Error('manage_instance requires action=launch|authorize|complete|close|status|list_place_versions');
+      throw new Error('manage_instance requires action=launch|authorize|complete|close|status|list_place_versions|list_studio_installations');
+    }
+
+    if (action === 'list_studio_installations') {
+      const discovery = describeStudioInstallations();
+      return this._textResult({
+        selected_executable: discovery.executableOverride ?? discovery.selected?.executable,
+        selection_reason: discovery.executableOverride
+          ? 'ROBLOX_STUDIO_EXE'
+          : discovery.selected?.launcherDefault
+            ? 'launcher default'
+            : discovery.selected
+              ? 'most recently modified'
+              : 'none found',
+        preferred_source: discovery.preferredSource,
+        searched_roots: [...new Set(discovery.roots.map((root) => root.path))],
+        installations: discovery.installations.map((installation) => ({
+          executable: installation.executable,
+          source: installation.source,
+          version_folder: installation.versionFolder,
+          launcher_default: installation.launcherDefault,
+          modified_at: new Date(installation.modifiedAtMs).toISOString(),
+        })),
+      });
     }
 
     if (action === 'list_place_versions') {

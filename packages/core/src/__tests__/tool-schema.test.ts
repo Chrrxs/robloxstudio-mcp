@@ -364,6 +364,7 @@ describe('Tool schema compatibility', () => {
       'close',
       'status',
       'list_place_versions',
+      'list_studio_installations',
     ]);
     expect((props.source as { enum?: string[] }).enum).toEqual([
       'baseplate',

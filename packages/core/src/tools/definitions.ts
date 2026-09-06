@@ -468,13 +468,13 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
   {
     name: 'manage_instance',
     category: 'write',
-    description: 'Use to manage Studio processes or list place revisions.',
+    description: 'Use to manage Studio processes, list place revisions, or list Studio installs.',
     inputSchema: {
       type: 'object',
       properties: {
         action: {
           type: 'string',
-          enum: ['launch', 'authorize', 'complete', 'close', 'status', 'list_place_versions'],
+          enum: ['launch', 'authorize', 'complete', 'close', 'status', 'list_place_versions', 'list_studio_installations'],
           description: 'Operation; authorize and complete only resume identity launches.'
         },
         source: {

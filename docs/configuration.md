@@ -60,7 +60,37 @@ Studio to load the matching bundled plugin.
 | `ROBLOX_STUDIO_ALLOWED_ORIGINS` | None | Comma-separated browser origins allowed to call the HTTP API cross-origin. |
 | `ROBLOX_OPEN_CLOUD_API_KEY` | None | Roblox Open Cloud key used by features such as audio preview and place version access. Required permissions depend on the tool. |
 | `MCP_PLUGINS_DIR` | Platform Studio Plugins folder | Override the destination used by plugin installation. |
+| `ROBLOX_STUDIO_EXE` | Auto-discovered | Exact Studio executable used by `manage_instance action=launch`. |
+| `ROBLOX_STUDIO_SOURCE` | `auto` | Restrict auto-discovery to one install source: `official`, `rml`, or `custom`. |
+| `ROBLOX_STUDIO_SEARCH_ROOTS` | None | Extra Studio install roots, separated by `;`. Each is scanned for `version-*/RobloxStudioBeta.exe` and for a `RobloxStudioBeta.exe` directly inside it. |
 
 Creator Store audio preview requires `asset:read` permission. See
 [Creator Store assets](creator-store-assets.md) for its download and validation
 behavior.
+
+## Which Studio gets launched
+
+`manage_instance action=launch` discovers Studio in both the official install
+tree (`%LOCALAPPDATA%\Roblox\Versions`) and third-party launcher trees. The
+Roblox Mod Loader launcher, which installs each Studio build under
+`%APPDATA%\com.revolution.rml-launcher\studio\versions\version-<hash>`, is
+recognized.
+
+That launcher also records the instance it opens by default in
+`studio/settings.json` as `"defaultInstallationId": "<source>:<version-folder>"`.
+The source decides which tree the default lives in: `managed` is the launcher's
+own tree, `roblox-official` is `%LOCALAPPDATA%\Roblox\Versions`. Only builds
+found under the matching root are treated as the launcher default.
+
+Selection order:
+
+1. `studio_executable` on the launch request.
+2. `ROBLOX_STUDIO_EXE`.
+3. The build a launcher declares as its default.
+4. The most recently modified `RobloxStudioBeta.exe` across every searched root.
+
+Run `manage_instance action=list_studio_installations` to see every install
+found, which one a launch would use, and why. Any other launcher can be added
+with `ROBLOX_STUDIO_SEARCH_ROOTS`; `ROBLOX_STUDIO_SOURCE=official` restores
+official-only discovery.
+

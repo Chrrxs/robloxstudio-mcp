@@ -81,6 +81,8 @@ generate_model stages generated content under ServerStorage for review. upload_a
 
 manage_instance can launch, inspect, and close Studio or list published place revisions. A process-identity launch returns a suspended launch that must be authorized and completed explicitly. Keep its launch_id until the connection has an instance_id.
 
+Launches auto-discover Studio in the official Roblox install tree and in third-party launcher trees such as Roblox Mod Loader. Use action=list_studio_installations when a launch opens the wrong build; pin one with studio_executable, ROBLOX_STUDIO_EXE, or ROBLOX_STUDIO_SOURCE.
+
 ## Roblox reference material
 
 Use get_roblox_docs for official engine and Luau reference pages. Use get_roblox_skills to list or read Roblox-authored Studio Assistant skills when their longer guidance is useful.
