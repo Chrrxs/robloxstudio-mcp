@@ -18,6 +18,7 @@ screenshots, memory reports, and profiler captures from each peer.
 
 - Start, inspect, and stop solo or multi-client sessions with `solo_playtest` and `multiplayer_playtest`.
 - Open or close Studio windows with `manage_instance`. It can launch a baseplate, a local place file, a published place, or an older place revision.
+- Launches find Studio in the official install tree and in third-party launcher trees such as Roblox Mod Loader. See [which Studio gets launched](docs/configuration.md#which-studio-gets-launched).
 
 ### Find performance problems
 
