@@ -107,6 +107,7 @@ const MAX_DEVICE_MATRIX_ENTRIES = 6;
 const MAX_NETWORK_PACKET_LOSS_PERCENT = 0.5;
 const GREP_SCRIPTS_TIMEOUT_MS = 120_000;
 const MAX_GREP_PATTERN_UTF8_BYTES = 4096;
+const RUNTIME_LOG_PEER_TIMEOUT_MS = 5_000;
 const STUDIO_ASSISTANT_SOURCE_IMAGE_LABEL = 'Studio Assistant Source Image';
 const CREATOR_STORE_SEARCH_TYPES = new Set<string>([
   'Audio',
@@ -2409,6 +2410,7 @@ export class RobloxStudioTools {
     cursor_by_instance?: Record<string, string>,
     tail?: number,
     filter?: string,
+    signal?: AbortSignal,
   ) {
     if (instance_id !== undefined && multiplayer_group_id !== undefined) {
       throw new Error('get_runtime_logs accepts only one of instance_id or multiplayer_group_id.');
@@ -2607,6 +2609,8 @@ export class RobloxStudioTools {
             '/api/get-runtime-logs',
             data,
             peer.peerId,
+            RUNTIME_LOG_PEER_TIMEOUT_MS,
+            signal,
           );
           if (typeof responseValue !== 'object' || responseValue === null || Array.isArray(responseValue)) {
             return {
@@ -2638,6 +2642,7 @@ export class RobloxStudioTools {
             nextSince: response.nextSince,
           };
         } catch (error) {
+          if (signal?.aborted) throw error;
           return { peerId: peer.peerId, role: peer.role, error: errorMessage(error) };
         }
       }));

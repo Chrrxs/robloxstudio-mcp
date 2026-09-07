@@ -21,6 +21,7 @@ import {
 import { acquireSuitePort } from './lib/test-port.mjs';
 
 const STUDIO_COUNT = 4;
+const PLAY_CYCLES = 3;
 const EXPECTED_PHYSICAL_STREAMS = STUDIO_COUNT * 2;
 const LAUNCH_TIMEOUT_MS = 120_000;
 const CONNECTION_TIMEOUT_MS = 120_000;
@@ -337,6 +338,56 @@ async function closeWorker(control, launch) {
   if (managedError) throw managedError;
 }
 
+async function assertScopedRuntimeLogs(control, instanceId, expectedRoles, label) {
+  // Proxy topology refresh is asynchronous. Wait for this caller's view before
+  // testing delivery so a lifecycle-cache lag cannot masquerade as frame loss.
+  const topologyDeadline = performance.now() + 10_000;
+  let peers;
+  while (true) {
+    const connected = await control.callTool('get_connected_instances', {}, 10_000);
+    peers = routingPeers(connected, instanceId);
+    if (peers.length === expectedRoles && peers.some((peer) => peer.role === 'edit')) break;
+    if (performance.now() >= topologyDeadline) {
+      throw new Error(`${label}: topology did not settle: ${JSON.stringify(peers)}`);
+    }
+    await delay(POLL_MS);
+  }
+  const startedAt = performance.now();
+  const logs = await control.callTool('get_runtime_logs', {
+    instance_id: instanceId,
+    tail: 10,
+    filter: '__MCP_LOG_TIMEOUT_PROBE__',
+  }, 10_000);
+  const elapsedMs = Math.round(performance.now() - startedAt);
+  if (logs.instanceId !== instanceId || !Array.isArray(logs.entries) || logs.entries.length !== 0) {
+    throw new Error(`${label}: unexpected scoped log response: ${JSON.stringify(logs)}`);
+  }
+  if (logs.peerErrors?.length || typeof logs.nextCursor !== 'string') {
+    throw new Error(`${label}: a connected Peer did not answer: ${JSON.stringify(logs)}`);
+  }
+  const cursor = JSON.parse(Buffer.from(logs.nextCursor, 'base64url').toString('utf8'));
+  if (
+    cursor.version !== 1 ||
+    cursor.instanceId !== instanceId ||
+    !cursor.peers ||
+    Object.keys(cursor.peers).length !== expectedRoles ||
+    peers.some((peer) => !(peer.peerId in cursor.peers))
+  ) {
+    throw new Error(`${label}: log cursor omitted a Peer: ${JSON.stringify(cursor)}`);
+  }
+  console.log(`${label}: all ${expectedRoles} Peer buffers returned in ${elapsedMs}ms`);
+}
+
+async function assertLogReadsThroughBothRoutes(controls, instanceIds, expectedRoles, label) {
+  for (const [index, instanceId] of instanceIds.entries()) {
+    // The primary synchronously fans out to server and client on one SSE stream.
+    // A proxy hop can space out the writes and hide broken coalesced-frame decoding.
+    await assertScopedRuntimeLogs(controls[0], instanceId, expectedRoles, `${label} Studio ${index + 1} primary`);
+    const proxy = controls[1 + (index % (controls.length - 1))];
+    await assertScopedRuntimeLogs(proxy, instanceId, expectedRoles, `${label} Studio ${index + 1} proxy`);
+  }
+}
+
 await configureStudioDirectoryIsolation({ requireStudioClosed: false });
 
 const workers = [];
@@ -384,24 +435,34 @@ try {
   }
   await waitForAllEditPeers(controls[0], expectedInstanceIds);
 
-  await settleOrThrow(expectedInstanceIds.map(async (id, index) => {
-    playtestInstanceIds.add(id);
-    const started = await controls[index].callTool('solo_playtest', {
-      action: 'start',
-      mode: 'play',
-      instance_id: id,
-    }, 60_000);
-    if (started?.success !== true) {
-      throw new Error(`solo_playtest did not start for Studio ${index + 1} (${id}): ${JSON.stringify(started)}`);
-    }
-  }), 'Starting four solo playtests');
+  for (let cycle = 1; cycle <= PLAY_CYCLES; cycle++) {
+    await assertLogReadsThroughBothRoutes(controls, expectedInstanceIds, 1, `cycle ${cycle} edit`);
+    await settleOrThrow(expectedInstanceIds.map(async (id, index) => {
+      playtestInstanceIds.add(id);
+      const started = await controls[index].callTool('solo_playtest', {
+        action: 'start',
+        mode: 'play',
+        instance_id: id,
+      }, 60_000);
+      if (started?.success !== true) {
+        throw new Error(`solo_playtest did not start for Studio ${index + 1} (${id}): ${JSON.stringify(started)}`);
+      }
+    }), 'Starting four solo playtests');
 
-  const evidence = await waitForServerCapacity(controls[0], portLease.port, expectedInstanceIds);
-  assertCapacityEvidence(evidence.connected, evidence.health, expectedInstanceIds);
-  console.log(
-    `SSE multi-Studio capacity passed: ${expectedInstanceIds.length} Studio processes, ` +
-    `${evidence.health.activeEventStreams} physical event streams on port ${portLease.port}.`,
-  );
+    const evidence = await waitForServerCapacity(controls[0], portLease.port, expectedInstanceIds);
+    assertCapacityEvidence(evidence.connected, evidence.health, expectedInstanceIds);
+    await assertLogReadsThroughBothRoutes(controls, expectedInstanceIds, 3, `cycle ${cycle} Play`);
+    await settleOrThrow(expectedInstanceIds.map((id, index) => stopPlaytest(controls[index], id)),
+      'Stopping four solo playtests');
+    playtestInstanceIds.clear();
+    // Read through the control that observed each stop; other proxy snapshots
+    // can legitimately lag the lifecycle change by their refresh interval.
+    for (const [index, id] of expectedInstanceIds.entries()) {
+      await assertScopedRuntimeLogs(controls[0], id, 1, `cycle ${cycle} stopped Studio ${index + 1} primary`);
+      await assertScopedRuntimeLogs(controls[index], id, 1, `cycle ${cycle} stopped Studio ${index + 1} owner`);
+    }
+  }
+  console.log(`SSE multi-Studio capacity and log delivery passed across ${PLAY_CYCLES} Play cycles.`);
 } catch (error) {
   primaryError = asError(error);
   throw error;

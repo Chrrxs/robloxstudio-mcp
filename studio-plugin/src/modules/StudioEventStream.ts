@@ -16,6 +16,8 @@ const INITIAL_RESPONSE_RETRY_DELAY_SECONDS = 0.5;
 const MAX_RESPONSE_RETRY_DELAY_SECONDS = 5;
 const MAX_TERMINAL_RESPONSES = 256;
 const STREAM_SILENCE_TIMEOUT_SECONDS = 20;
+// The bridge accepts request bodies up to 50 MiB; leave room for its envelope.
+const MAX_STREAM_FRAME_BYTES = 64 * 1024 * 1024;
 
 
 interface StudioEventStreamOptions {
@@ -59,16 +61,14 @@ const pendingResponses = new Map<string, PendingResponse>();
 const terminalResponseIds = new Set<string>();
 const terminalResponseOrder: string[] = [];
 const readyFailureLogKeys = new Set<string>();
+let streamLineParts: string[] = [];
+let streamDataLines: string[] = [];
+let streamFrameBytes = 0;
+let streamLineHasContent = false;
+let streamDiscardingFrame = false;
+let streamSkipLf = false;
 
-function decodeMessage(message: string): DecodedEvent | undefined {
-	// Studio versions in the supported channel have surfaced either the SSE
-	// data payload or the complete single-line `data:` frame. The bridge emits
-	// one JSON data line per event, so normalize both forms before decoding.
-	let payload = message;
-	const normalized = message.gsub("\r\n", "\n")[0].gsub("\r", "\n")[0];
-	if (normalized.sub(1, 5) === "data:") {
-		payload = normalized.sub(6).gsub("^%s+", "")[0].gsub("%s+$", "")[0];
-	}
+function decodeMessage(payload: string): DecodedEvent | undefined {
 	const [decodeOk, decoded] = pcall(() => HttpService.JSONDecode(payload));
 	if (!decodeOk || !typeIs(decoded, "table")) return undefined;
 	const envelope = decoded as Record<string, unknown>;
@@ -139,9 +139,107 @@ function decodeMessage(message: string): DecodedEvent | undefined {
 	return undefined;
 }
 
+function resetStreamFrame(): void {
+	streamLineParts = [];
+	streamDataLines = [];
+	streamFrameBytes = 0;
+	streamLineHasContent = false;
+	streamDiscardingFrame = false;
+}
+
+function finishStreamLine(events: DecodedEvent[]): void {
+	if (!streamLineHasContent) {
+		if (!streamDiscardingFrame && streamDataLines.size() > 0) {
+			const event = decodeMessage(streamDataLines.join("\n"));
+			if (event !== undefined) events.push(event);
+		}
+		resetStreamFrame();
+		return;
+	}
+
+	if (!streamDiscardingFrame) {
+		const line = streamLineParts.join("");
+		if (line.sub(1, 5) === "data:") {
+			const start = line.sub(6, 6) === " " ? 7 : 6;
+			streamDataLines.push(line.sub(start));
+		} else if (line === "data") {
+			streamDataLines.push("");
+		}
+	}
+	streamLineParts = [];
+	streamLineHasContent = false;
+}
+
+// MessageReceived may coalesce frames (notably server/client fanout) or split
+// them across callbacks. Callback boundaries are not SSE event boundaries.
+function decodeMessages(message: string): DecodedEvent[] {
+	const events: DecodedEvent[] = [];
+	const messageBytes = message.size();
+	if (messageBytes === 0) return events;
+
+	// Some Studio versions deliver the decoded SSE data or a complete data line
+	// without delimiters. Only recognize those forms with no unfinished frame;
+	// once framing starts, callback boundaries never terminate partial data.
+	if (streamFrameBytes === 0 && !streamDiscardingFrame && messageBytes <= MAX_STREAM_FRAME_BYTES) {
+		const first = message.sub(1, 1);
+		if (first === "{" || first === " " || first === "\t" || first === "\r" || first === "\n") {
+			const event = decodeMessage(message);
+			if (event !== undefined) {
+				streamSkipLf = false;
+				events.push(event);
+				return events;
+			}
+			if (first === "{") return events;
+		}
+		if (message.sub(1, 5) === "data:" && message.find("[\r\n]")[0] === undefined) {
+			const event = decodeMessage(message.sub(6));
+			if (event !== undefined) {
+				streamSkipLf = false;
+				events.push(event);
+				return events;
+			}
+		}
+	}
+
+	let offset = 1;
+	while (offset <= messageBytes) {
+		if (streamSkipLf) {
+			streamSkipLf = false;
+			if (message.sub(offset, offset) === "\n") {
+				offset++;
+				continue;
+			}
+		}
+		const [newline] = message.find("[\r\n]", offset);
+		const lineEnd = newline === undefined ? messageBytes + 1 : newline;
+		const partBytes = lineEnd - offset;
+		if (partBytes > 0) streamLineHasContent = true;
+		if (!streamDiscardingFrame) {
+			streamFrameBytes += partBytes + (newline === undefined ? 0 : 1);
+			if (streamFrameBytes > MAX_STREAM_FRAME_BYTES) {
+				// Keep scanning delimiters but retain no oversized frame bytes.
+				streamDiscardingFrame = true;
+				streamLineParts = [];
+				streamDataLines = [];
+			} else if (partBytes > 0) {
+				// Join only on a line boundary, not every callback (large scripts
+				// can arrive in many fragments).
+				streamLineParts.push(message.sub(offset, lineEnd - 1));
+			}
+		}
+		if (newline === undefined) break;
+		finishStreamLine(events);
+		streamSkipLf = message.sub(newline, newline) === "\r";
+		offset = newline + 1;
+	}
+	return events;
+}
+
 function closeCurrentStream(): void {
 	const current = streamClient;
 	streamClient = undefined;
+	resetStreamFrame();
+	streamSkipLf = false;
 	for (const connection of streamConnections) {
 		connection.Disconnect();
 	}
@@ -540,26 +638,29 @@ function connect(expectedGeneration: number): void {
 			}),
 			createdClient.MessageReceived.Connect((message) => {
 				if (!active || generation !== expectedGeneration || streamClient !== createdClient) return;
-				const event = decodeMessage(message);
-				if (event === undefined) return;
-				lastValidEventAt = tick();
-				if (event.kind === "heartbeat") {
-					invokeCallback(
-						"event stream heartbeat",
-						() => currentOptions.onHeartbeat(event.timestamp),
-					);
-					return;
+				for (const event of decodeMessages(message)) {
+					// Status callbacks can refresh/stop the stream. The remainder of
+					// that callback belongs to the old connection, not its successor.
+					if (!active || generation !== expectedGeneration || streamClient !== createdClient) return;
+					lastValidEventAt = tick();
+					if (event.kind === "heartbeat") {
+						invokeCallback(
+							"event stream heartbeat",
+							() => currentOptions.onHeartbeat(event.timestamp),
+						);
+						continue;
+					}
+					if (event.kind === "cancel") {
+						cancelRequest(event);
+						continue;
+					}
+					if (event.kind === "request") {
+						dispatchRequest(event);
+						continue;
+					}
+					invokeCallback("event stream status", () => currentOptions.onStatus(event));
+					if (!event.knownPeer) refresh();
 				}
-				if (event.kind === "cancel") {
-					cancelRequest(event);
-					return;
-				}
-				if (event.kind === "request") {
-					dispatchRequest(event);
-					return;
-				}
-				invokeCallback("event stream status", () => currentOptions.onStatus(event));
-				if (!event.knownPeer) refresh();
 			}),
 			createdClient.Error.Connect((statusCode, message) => {
 				if (!active || generation !== expectedGeneration || streamClient !== createdClient) return;

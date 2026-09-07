@@ -8,6 +8,7 @@ import {
   runTest,
   routingPeers,
   safeStopPlaytest,
+  selectEditInstance,
   startPlaytestAndWait,
   waitForEditPeer,
 } from './lib/mcp-client.mjs';
@@ -105,6 +106,20 @@ async function assertEditStreamResponds(client, cycle) {
   );
 }
 
+async function assertRuntimeLogsRespond(client, query, label) {
+  const startedAt = Date.now();
+  const logs = await client.callTool('get_runtime_logs', query, 10_000);
+  assert(Date.now() - startedAt < 10_000, `${label}: bounded log read beats the MCP deadline`);
+  assert(logs.instanceId === query.instance_id, `${label}: log read stays on the selected Instance`);
+  assert(Array.isArray(logs.entries) && logs.entries.length === 0,
+    `${label}: unmatched small filtered query returns an empty buffer`);
+  assert(!logs.peerErrors?.length, `${label}: every live Peer answers: ${JSON.stringify(logs.peerErrors)}`);
+  assert(typeof logs.nextCursor === 'string', `${label}: log read returns a cursor`);
+  const cursor = JSON.parse(Buffer.from(logs.nextCursor, 'base64url').toString('utf8'));
+  assert(cursor.instanceId === query.instance_id && cursor.version === 1,
+    `${label}: cursor belongs to the selected Instance`);
+}
+
 await runTest('event stream survives repeated play cycles', async ({ track }) => {
   // Keep a normal MCP client connected while a second authenticated client
   // drives POST /mcp/<tool>, matching the original report's topology.
@@ -113,6 +128,14 @@ await runTest('event stream survives repeated play cycles', async ({ track }) =>
   await mcpClient.initialize();
   const client = httpToolClient();
   await waitForEditPeer(client, { timeoutMs: 120_000 });
+  const connected = await mcpClient.callTool('get_connected_instances', {});
+  const instanceId = process.env.MCP_INSTANCE_ID ?? selectEditInstance(connected)?.id;
+  assert(typeof instanceId === 'string', 'log regression has an explicit Instance selection');
+  const logQuery = {
+    instance_id: instanceId,
+    tail: 10,
+    filter: `__MCP_LOG_TIMEOUT_PROBE_${Date.now()}__`,
+  };
 
   let playRunning = false;
 
@@ -120,6 +143,7 @@ await runTest('event stream survives repeated play cycles', async ({ track }) =>
     assert(await activeEventStreamCount() === 1, 'baseline has only the edit event stream');
 
     for (let cycle = 1; cycle <= PLAY_CYCLES; cycle += 1) {
+      await assertRuntimeLogsRespond(mcpClient, logQuery, `cycle ${cycle}: before Play`);
       playRunning = true;
       await startPlaytestAndWait(client, { timeoutSec: 45, pollMs: 250 });
       assert(
@@ -136,6 +160,7 @@ await runTest('event stream survives repeated play cycles', async ({ track }) =>
         runtime.ok === true && runtime.bridge === 'ok' && runtimeResult.marker === runtimeMarker,
         `cycle ${cycle}: server eval crosses the runtime event stream`,
       );
+      await assertRuntimeLogsRespond(mcpClient, logQuery, `cycle ${cycle}: during Play`);
 
       const stopped = await client.callTool('solo_playtest', { action: 'stop' }, 45_000);
       assert(stopped.success === true, `cycle ${cycle}: playtest stops cleanly`);
@@ -150,6 +175,7 @@ await runTest('event stream survives repeated play cycles', async ({ track }) =>
 
       assert(await activeEventStreamCount() === 1, `cycle ${cycle}: server event stream is released`);
       await assertEditStreamResponds(client, cycle);
+      await assertRuntimeLogsRespond(mcpClient, logQuery, `cycle ${cycle}: after Play`);
     }
   } finally {
     if (playRunning) await safeStopPlaytest(client);

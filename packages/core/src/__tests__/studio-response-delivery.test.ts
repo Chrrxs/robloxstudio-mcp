@@ -74,7 +74,7 @@ function createSignal<T extends unknown[]>(): MockSignal<T> {
       return { Disconnect: () => callbacks.delete(callback) };
     },
     fire(...args) {
-      for (const callback of callbacks) callback(...args);
+      for (const callback of [...callbacks]) callback(...args);
     },
   };
 }
@@ -87,6 +87,8 @@ async function createHarness(
   scheduled: ScheduledTask[];
   responseBodies: string[];
   dispatchRequest: jest.Mock;
+  onStatus: jest.Mock;
+  onHeartbeat: jest.Mock;
   emitRequest(requestId: string): void;
   emitCancel(requestId: string): void;
   deferSpawns(): void;
@@ -214,6 +216,17 @@ async function createHarness(
       const parts = String(this).split(search);
       return [parts.join(replacement), parts.length - 1];
     };
+    String.prototype.size = function() { return this.length; };
+    String.prototype.find = function(pattern, init = 1, plain = false) {
+      const value = String(this);
+      const offset = init - 1;
+      if (plain) {
+        const index = value.indexOf(pattern, offset);
+        return index < 0 ? [] : [index + 1, index + pattern.length];
+      }
+      const match = new RegExp(pattern).exec(value.slice(offset));
+      return match ? [offset + match.index + 1, offset + match.index + match[0].length] : [];
+    };
     String.prototype.sub = function(start, finish) {
       const from = start > 0 ? start - 1 : this.length + start;
       const to = finish === undefined ? this.length : (finish > 0 ? finish : this.length + finish + 1);
@@ -228,11 +241,13 @@ async function createHarness(
     success: true,
     requestId: request.requestId,
   }));
+  const onStatus = jest.fn();
+  const onHeartbeat = jest.fn();
   eventStream.start({
     serverUrl: 'http://127.0.0.1:19191',
     dispatchRequest,
-    onStatus: jest.fn(),
-    onHeartbeat: jest.fn(),
+    onStatus,
+    onHeartbeat,
     onReady: jest.fn(),
     onTransportUpdate: jest.fn(),
   });
@@ -244,6 +259,8 @@ async function createHarness(
     scheduled,
     responseBodies,
     dispatchRequest,
+    onStatus,
+    onHeartbeat,
     deferSpawns() {
       spawnsDeferred = true;
     },
@@ -381,5 +398,145 @@ describe('Studio response delivery', () => {
 
     expect(harness.dispatchRequest).toHaveBeenCalledTimes(257);
     expect(harness.responseBodies).toHaveLength(257);
+  });
+});
+
+function requestEvent(requestId: string, target = 'edit'): Record<string, unknown> {
+  return {
+    kind: 'request',
+    requestId,
+    peerId: 'peer',
+    target,
+    endpoint: '/api/get-runtime-logs',
+    data: { tail: 10 },
+    remainingMs: 5000,
+  };
+}
+
+function dataFrame(event: Record<string, unknown>, newline = '\n'): string {
+  return `data: ${JSON.stringify(event)}${newline}${newline}`;
+}
+
+function acceptedResponse(): HttpResponse {
+  return { Success: true, StatusCode: 200, Body: '{"success":true}' };
+}
+
+describe('Studio event stream framing', () => {
+  test('dispatches both runtime-log requests from one MessageReceived callback', async () => {
+    const harness = await createHarness(acceptedResponse);
+    harness.stream.MessageReceived.fire(
+      'data: {"kind":"request","requestId":"601e7596-b39a-495b-ba2b-59b54cb079ba","peerId":"peer:o1s-gsh","target":"server","endpoint":"/api/get-runtime-logs","data":{"tail":10,"filter":"__MCP_LOG_TIMEOUT_PROBE__"},"remainingMs":5000}\n\n' +
+      'data: {"kind":"request","requestId":"2294d3ab-58f1-4672-9bdb-d7e3bd216e93","peerId":"peer:lvp-0jp","target":"client-1","endpoint":"/api/get-runtime-logs","data":{"tail":10,"filter":"__MCP_LOG_TIMEOUT_PROBE__"},"remainingMs":5000}\n\n',
+    );
+
+    expect(harness.dispatchRequest.mock.calls.map(([event]) => [event.requestId, event.target]))
+      .toEqual([
+        ['601e7596-b39a-495b-ba2b-59b54cb079ba', 'server'],
+        ['2294d3ab-58f1-4672-9bdb-d7e3bd216e93', 'client-1'],
+      ]);
+    expect(harness.responseBodies.map((body) => JSON.parse(body).requestId))
+      .toEqual(['601e7596-b39a-495b-ba2b-59b54cb079ba', '2294d3ab-58f1-4672-9bdb-d7e3bd216e93']);
+  });
+
+  test('preserves heartbeat, status, cancellation and request order in a mixed batch', async () => {
+    const harness = await createHarness(acceptedResponse);
+    harness.deferSpawns();
+    harness.stream.MessageReceived.fire([
+      { kind: 'heartbeat', timestamp: 123 },
+      { kind: 'status', knownPeer: true, mcpConnected: true },
+      requestEvent('cancelled'),
+      { kind: 'cancel', requestId: 'cancelled', reason: 'timeout' },
+      requestEvent('surviving'),
+    ].map((event) => dataFrame(event)).join(''));
+    harness.flushSpawns();
+
+    expect(harness.onHeartbeat).toHaveBeenCalledWith(123);
+    expect(harness.onStatus).toHaveBeenCalledWith(expect.objectContaining({
+      knownPeer: true, mcpConnected: true,
+    }));
+    expect(harness.dispatchRequest.mock.calls.map(([event]) => event.requestId)).toEqual(['surviving']);
+    expect(harness.responseBodies.map((body) => JSON.parse(body).requestId)).toEqual(['surviving']);
+  });
+
+  test('accepts bare JSON, an un-terminated data line and a complete SSE frame', async () => {
+    const harness = await createHarness(acceptedResponse);
+    harness.stream.MessageReceived.fire(` \r\n${JSON.stringify(requestEvent('bare'))}\n`);
+    harness.stream.MessageReceived.fire(`data: ${JSON.stringify(requestEvent('raw-data'))}`);
+    harness.stream.MessageReceived.fire(dataFrame(requestEvent('framed')));
+
+    expect(harness.dispatchRequest.mock.calls.map(([event]) => event.requestId))
+      .toEqual(['bare', 'raw-data', 'framed']);
+  });
+
+  test('reassembles every split point, including the data prefix and CRLF delimiter', async () => {
+    const harness = await createHarness(acceptedResponse);
+    const expected: string[] = [];
+    const length = dataFrame(requestEvent('fragment-000'), '\r\n').length;
+    for (let split = 1; split < length; split += 1) {
+      const id = `fragment-${String(split).padStart(3, '0')}`;
+      expected.push(id);
+      const frame = dataFrame(requestEvent(id), '\r\n');
+      harness.stream.MessageReceived.fire(frame.slice(0, split));
+      harness.stream.MessageReceived.fire(frame.slice(split));
+    }
+
+    expect(harness.dispatchRequest.mock.calls.map(([event]) => event.requestId)).toEqual(expected);
+  });
+
+  test('keeps a partial following frame while dispatching the complete preceding frame', async () => {
+    const harness = await createHarness(acceptedResponse);
+    const second = dataFrame(requestEvent('second'));
+    harness.stream.MessageReceived.fire(dataFrame(requestEvent('first')) + second.slice(0, 23));
+    expect(harness.dispatchRequest.mock.calls.map(([event]) => event.requestId)).toEqual(['first']);
+    harness.stream.MessageReceived.fire(second.slice(23));
+    expect(harness.dispatchRequest.mock.calls.map(([event]) => event.requestId)).toEqual(['first', 'second']);
+  });
+
+  test('ignores comments and unknown fields and joins multiline data without poisoning later frames', async () => {
+    const harness = await createHarness(acceptedResponse);
+    harness.stream.MessageReceived.fire(
+      ': keepalive\r\n\r\nid: 42\r\nevent: message\r\ndata: {"kind":"heartbeat",\r\ndata: "timestamp":456}\r\n\r\n' +
+      'data: not-json\n\ndata: {"kind":"request","requestId":"invalid"}\n\n' +
+      dataFrame(requestEvent('after-malformed')),
+    );
+    expect(harness.onHeartbeat).toHaveBeenCalledWith(456);
+    expect(harness.dispatchRequest.mock.calls.map(([event]) => event.requestId)).toEqual(['after-malformed']);
+  });
+
+  test('abandons old partial data and CRLF state when the stream reconnects', async () => {
+    const harness = await createHarness(acceptedResponse);
+    harness.stream.MessageReceived.fire('data: {"kind":"request",');
+    harness.module.refresh();
+    harness.stream.MessageReceived.fire(dataFrame(requestEvent('after-refresh')));
+    harness.stream.MessageReceived.fire('data: incomplete\r');
+    harness.stream.Closed.fire();
+    const reconnect = harness.scheduled.find((scheduled) => scheduled.delay === 0.5);
+    expect(reconnect).toBeDefined();
+    reconnect!.callback();
+    harness.stream.MessageReceived.fire(dataFrame(requestEvent('after-close')));
+    expect(harness.dispatchRequest.mock.calls.map(([event]) => event.requestId))
+      .toEqual(['after-refresh', 'after-close']);
+  });
+
+  test('stops dispatching an old batch after status refreshes the stream', async () => {
+    const harness = await createHarness(acceptedResponse);
+    harness.stream.MessageReceived.fire(
+      dataFrame({ kind: 'status', knownPeer: false, mcpConnected: false }) +
+      dataFrame(requestEvent('old-stream-request')),
+    );
+    harness.stream.MessageReceived.fire(dataFrame(requestEvent('new-stream-request')));
+    expect(harness.dispatchRequest.mock.calls.map(([event]) => event.requestId)).toEqual(['new-stream-request']);
+  });
+
+  test('drops an oversized unfinished frame and recovers at the next frame delimiter', async () => {
+    const harness = await createHarness(acceptedResponse);
+    const prefix = JSON.stringify(requestEvent('oversized')).slice(0, -1);
+    harness.stream.MessageReceived.fire(`data: ${prefix},"padding":"`);
+    const block = 'x'.repeat(1024 * 1024);
+    for (let index = 0; index < 65; index += 1) {
+      harness.stream.MessageReceived.fire(block);
+    }
+    harness.stream.MessageReceived.fire(`"}\n\n${dataFrame(requestEvent('after-oversized'))}`);
+    expect(harness.dispatchRequest.mock.calls.map(([event]) => event.requestId)).toEqual(['after-oversized']);
   });
 });

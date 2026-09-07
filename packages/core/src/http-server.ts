@@ -178,7 +178,7 @@ export const TOOL_HANDLERS: Record<string, ToolHandler> = {
   manage_instance: (tools, body) => tools.manageInstance(body),
   solo_playtest: (tools, body) => tools.soloPlaytest(body.action, body.mode, body.timeout, body.instance_id),
   multiplayer_playtest: (tools, body) => tools.multiplayerPlaytest(body.action, body.numPlayers, body.target, body.testArgs, body.value, body.timeout, body.instance_id),
-  get_runtime_logs: (tools, body) => tools.getRuntimeLogs(body.instance_id, body.multiplayer_group_id, body.cursor, body.cursor_by_instance, body.tail, body.filter),
+  get_runtime_logs: (tools, body, context) => tools.getRuntimeLogs(body.instance_id, body.multiplayer_group_id, body.cursor, body.cursor_by_instance, body.tail, body.filter, context?.signal),
   capture_script_profiler: (tools, body) => tools.captureScriptProfiler(body.target, {
     duration_ms: body.duration_ms,
     frequency: body.frequency,
