@@ -1,7 +1,16 @@
 export { RobloxStudioMCPServer } from './server.js';
 export type { ServerConfig } from './server.js';
-export { createHttpServer } from './http-server.js';
-export { BridgeService } from './bridge-service.js';
+export { createHttpServer, listenWithRetry } from './http-server.js';
+export type { RobloxStudioHttpApp } from './http-server.js';
+export {
+  WebSocketStudioTransport,
+  STUDIO_PROTOCOL_VERSION,
+  MAX_ACTIVE_STUDIO_SOCKETS,
+  MAX_STUDIO_FRAME_BYTES,
+} from './studio-transport.js';
+export type { StudioServerEvent, StudioSocket, StudioSocketHandle } from './studio-transport.js';
+export { BridgeService, RequestFailure } from './bridge-service.js';
+export type { ExecutionOutcome, RequestStage, RequestObservations, RequestStatus, RequestFailureDetails } from './bridge-service.js';
 export { RobloxStudioTools } from './tools/index.js';
 export { StudioHttpClient } from './tools/studio-client.js';
 export {

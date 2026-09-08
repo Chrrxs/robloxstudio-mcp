@@ -5,6 +5,7 @@ import { createConnection } from 'node:net';
 import { writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
+import { WebSocket } from 'ws';
 import { BASE_PORT, McpClient, DIST, assert } from './lib/mcp-client.mjs';
 import { resolveAuthToken } from '../packages/core/dist/auth.js';
 import {
@@ -16,6 +17,7 @@ import {
 const PLACE_UUID = randomUUID();
 const PLACE_KEY = `anon:${PLACE_UUID}`;
 const REPRO_PLUGIN_NAME = '000_RSMCP_EditHistoryRepro.rbxmx';
+const SAVED_INSTANCE_ID = 'instance:old-000';
 const SERVER_ENV = {
   ROBLOX_STUDIO_PROXY_PROMOTION_INTERVAL_MS: '600000',
 };
@@ -36,27 +38,29 @@ function isPortOpen(port) {
   });
 }
 
-function stringAttributeBlob(name, value) {
-  const nameBytes = Buffer.from(name, 'utf8');
-  const valueBytes = Buffer.from(value, 'utf8');
-  const blob = Buffer.alloc(4 + 4 + nameBytes.length + 1 + 4 + valueBytes.length);
-  let offset = 0;
-  blob.writeUInt32LE(1, offset);
-  offset += 4;
-  blob.writeUInt32LE(nameBytes.length, offset);
-  offset += 4;
-  nameBytes.copy(blob, offset);
-  offset += nameBytes.length;
-  blob[offset] = 2; // Roblox AttributesSerialize string value tag.
-  offset += 1;
-  blob.writeUInt32LE(valueBytes.length, offset);
-  offset += 4;
-  valueBytes.copy(blob, offset);
-  return blob.toString('base64');
+function stringAttributeBlob(attributes) {
+  const count = Buffer.alloc(4);
+  count.writeUInt32LE(Object.keys(attributes).length);
+  const chunks = [count];
+  for (const [name, value] of Object.entries(attributes)) {
+    const nameBytes = Buffer.from(name, 'utf8');
+    const valueBytes = Buffer.from(value, 'utf8');
+    const nameLength = Buffer.alloc(4);
+    const valueLength = Buffer.alloc(4);
+    nameLength.writeUInt32LE(nameBytes.length);
+    valueLength.writeUInt32LE(valueBytes.length);
+    chunks.push(nameLength, nameBytes, Buffer.from([2]), valueLength, valueBytes);
+  }
+  return Buffer.concat(chunks).toString('base64');
 }
 
 function lifecyclePlaceXml() {
-  const attributes = stringAttributeBlob('__MCPPlaceId', PLACE_UUID);
+  const attributes = stringAttributeBlob({ __MCPPlaceId: PLACE_UUID });
+  const savedTopology = stringAttributeBlob({
+    __MCPTopologyMode: 'shared',
+    __MCPTopologyInstanceId: SAVED_INSTANCE_ID,
+    __MCPTopologyToken: 'saved-session-token',
+  });
   return `<?xml version="1.0" encoding="utf-8"?>
 <roblox version="4">
   <External>null</External>
@@ -68,6 +72,12 @@ function lifecyclePlaceXml() {
     <Properties>
       <string name="Name">ServerStorage</string>
       <BinaryString name="AttributesSerialize">${attributes}</BinaryString>
+    </Properties>
+  </Item>
+  <Item class="ReplicatedStorage" referent="RBX2">
+    <Properties>
+      <string name="Name">ReplicatedStorage</string>
+      <BinaryString name="AttributesSerialize">${savedTopology}</BinaryString>
     </Properties>
   </Item>
 </roblox>
@@ -226,6 +236,8 @@ async function main() {
       'first launch reports its Studio process Instance ID');
     assert(firstInstanceId !== PLACE_KEY,
       'process Instance identity is distinct from persisted place metadata');
+    assert(firstInstanceId !== SAVED_INSTANCE_ID,
+      'fresh edit session ignores persisted runtime topology identity');
     const firstPeers = matchingEditPeers(await serverTopology(), firstInstanceId);
     assert(firstPeers.length === 1, 'first launch has one edit Peer');
     const firstPeerId = firstPeers[0].peerId;
@@ -233,6 +245,13 @@ async function main() {
     assert(firstPeerId === firstTransportPeerId, 'edit Peer directly owns its event transport');
     assert(firstPeers[0].placeKey === PLACE_KEY,
       'persisted anonymous place identity remains non-routing metadata');
+    const cachedIdentity = await client.callTool('execute_luau', {
+      instance_id: firstInstanceId,
+      target: 'edit',
+      code: 'local identity = game:GetService("CoreGui"):FindFirstChild("__MCPSessionIdentity"); assert(identity and identity:IsA("StringValue") and not identity.Archivable); return identity.Value',
+    });
+    assert(cachedIdentity.success === true && cachedIdentity.returnValue === firstInstanceId,
+      'native session identity uses a non-archivable CoreGui cache');
     const startupInvalidEntries = await assertLogMarker(client, firstInstanceId, markerA, 1);
     assert(
       startupInvalidEntries[0].message.includes(`${markerA}\\xA3\\xB7\\xC7`),
@@ -252,34 +271,31 @@ async function main() {
     assert(stalePeer, 'terminated Studio Peer remains registered for coexistence reproduction');
     const stalePeerActivity = stalePeer.lastActivity;
 
+    const readyResponse = await fetch(`http://127.0.0.1:${BASE_PORT}/ready`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        ...stalePeer,
+        dataModelName: stalePeer.dataModelName ?? stalePeer.placeName,
+        isRunning: false,
+        timestamp: Date.now() / 1000,
+      }),
+    });
+    assert(readyResponse.ok, 'stale native transport can renew its session credential');
+    const ready = await readyResponse.json();
+    assert(typeof ready.transportToken === 'string', 'native registration returns a transport credential');
     const oldStreamController = new AbortController();
-    keepOldPeerAlive = {
-      controller: oldStreamController,
-      completion: (async () => {
-        const response = await fetch(
-          `http://127.0.0.1:${BASE_PORT}/events?peerId=${encodeURIComponent(firstTransportPeerId)}`,
-          {
-            headers: { Accept: 'text/event-stream' },
-            signal: oldStreamController.signal,
-          },
-        );
-        if (!response.ok) {
-          throw new Error(`Held stale-Peer event stream returned HTTP ${response.status}`);
-        }
-        if (!response.body) throw new Error('Held stale-Peer event stream has no response body');
-        const reader = response.body.getReader();
-        while (!oldStreamController.signal.aborted) {
-          const event = await reader.read();
-          if (event.done) {
-            if (oldStreamController.signal.aborted) break;
-            throw new Error('Held stale-Peer event stream closed unexpectedly');
-          }
-        }
-      })().then(
-        () => undefined,
-        (error) => error,
-      ),
-    };
+    const completion = Promise.withResolvers();
+    const heldSocket = new WebSocket(
+      `ws://127.0.0.1:${BASE_PORT}/studio?peerId=${encodeURIComponent(firstTransportPeerId)}&protocolVersion=1`,
+      { headers: { 'X-Studio-Token': ready.transportToken }, handshakeTimeout: 5000 },
+    );
+    heldSocket.on('error', error => completion.resolve(error));
+    heldSocket.on('close', () => completion.resolve(
+      oldStreamController.signal.aborted ? undefined : new Error('Held stale-Peer WebSocket closed unexpectedly'),
+    ));
+    oldStreamController.signal.addEventListener('abort', () => heldSocket.terminate(), { once: true });
+    keepOldPeerAlive = { controller: oldStreamController, completion: completion.promise };
     await waitForPeerActivityAdvance(firstPeerId, stalePeerActivity);
 
     console.log('\n=== same-place relaunch creates a distinct process Instance ===');

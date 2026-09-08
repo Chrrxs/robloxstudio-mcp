@@ -116,6 +116,12 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
     inputSchema: {
       type: 'object',
       properties: {
+        operation_id: {
+          type: 'string',
+          minLength: 1,
+          maxLength: 128,
+          description: 'Unique recovery ID; reuse only for identical arguments.'
+        },
         instancePath: {
           type: 'string',
           description: 'Canonical path of the target instance.'
@@ -344,6 +350,12 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
     inputSchema: {
       type: 'object',
       properties: {
+        operation_id: {
+          type: 'string',
+          minLength: 1,
+          maxLength: 128,
+          description: 'Unique recovery ID; reuse only for identical arguments.'
+        },
         code: {
           type: 'string',
           description: 'Luau code to execute.'
@@ -1190,6 +1202,23 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
     inputSchema: {
       type: 'object',
       properties: {}
+    }
+  },
+  {
+    name: 'get_request_status',
+    category: 'read',
+    description: 'Use to recover a retained Studio operation outcome after a timeout.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        request_id: {
+          type: 'string',
+          minLength: 1,
+          maxLength: 128,
+          description: 'Caller operation ID or request ID from a server error.'
+        }
+      },
+      required: ['request_id']
     }
   },
 

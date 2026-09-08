@@ -28,6 +28,7 @@ screenshots, memory reports, and profiler captures from each peer.
 
 - Run Luau in Studio's edit context with `execute_luau`.
 - Use `set_properties` for instance properties and `find_and_replace_in_scripts` for script text. For project-specific bulk edits, use `execute_luau`.
+- For large generated Luau, use the [verified chunk-staging workflow](docs/large-inputs.md): explicit instance routing, UTF-8 byte/hash readback, ownership-checked cleanup, and bounded recovery without blindly replaying mutations.
 - Use `selection` to inspect or update Studio selection and frame a part or model before capturing the viewport.
 - Capture the viewport with `capture_screenshot`, then send mouse or keyboard input.
 
@@ -108,6 +109,7 @@ claude mcp add robloxstudio-inspector -- npx -y @chrrxs/robloxstudio-mcp-inspect
 ## More
 
 - [Configuration and HTTP bridge](docs/configuration.md)
+- [Large Luau inputs, staged transfers, and recovery](docs/large-inputs.md)
 - [Creator Store asset workflow](docs/creator-store-assets.md)
 - [Report a security vulnerability](SECURITY.md)
 - [Building from source](docs/building-from-source.md)

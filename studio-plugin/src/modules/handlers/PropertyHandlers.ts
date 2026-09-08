@@ -4,6 +4,9 @@ import Recording from "../Recording";
 const { getInstanceByPath, convertPropertyValue } = Utils;
 const { beginRecording, finishRecording } = Recording;
 
+// Native StringValue rejects UTF-8 strings of 200000 bytes or more.
+const STRING_VALUE_MAX_BYTES = 199999;
+
 function setProperties(requestData: Record<string, unknown>) {
 	const instancePath = requestData.instancePath as string;
 	const properties = requestData.properties as Record<string, unknown>;
@@ -44,11 +47,21 @@ function setProperties(requestData: Record<string, unknown>) {
 			results.push({ property: propName, success: true });
 		} else {
 			failureCount++;
-			results.push({ property: propName, success: false, error: tostring(err) });
+			const failure = { property: propName, success: false, error: tostring(err) };
+			if (instance.IsA("StringValue") && propName === "Value" && typeIs(propValue, "string")) {
+				results.push({
+					...failure,
+					details: { stage: "property_write", bytes: propValue.size(), limitBytes: STRING_VALUE_MAX_BYTES },
+				});
+			} else {
+				results.push(failure);
+			}
 		}
 	}
 
-	finishRecording(recordingId, successCount > 0);
+	// This tool is not a rollback transaction. Cancel can undo earlier unrecorded
+	// execute_luau edits as well, even when every assignment in this call failed.
+	finishRecording(recordingId, true);
 
 	return {
 		instancePath,

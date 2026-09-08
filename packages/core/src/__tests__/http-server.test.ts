@@ -46,8 +46,9 @@ describe('HTTP Server', () => {
     app = createHttpServer(tools, bridge, undefined, TEST_SERVER_CONFIG);
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     bridge.clearAllPendingRequests();
+    await app.cleanup();
   });
 
   describe('Health Check', () => {
@@ -70,7 +71,7 @@ describe('HTTP Server', () => {
         peers: [],
         multiplayerGroups: [],
         mcpServerActive: false,
-        activeEventStreams: 0,
+        activeWebSockets: 0,
       });
     });
 
@@ -322,10 +323,12 @@ describe('HTTP Server', () => {
         peerId: 'peer-1',
         instanceId: 'instance:test',
       });
+      expect(response.body.protocolVersion).toBe(1);
+      expect(response.body.transportToken).toMatch(/^[a-f0-9]{64}$/);
       expect(app.isPluginConnected()).toBe(true);
     });
 
-    test('maps client Peers to a server transport Peer and rejects proxied event streams', async () => {
+    test('maps client Peers to a server transport Peer without issuing a second transport token', async () => {
       await request(app).post('/ready').send({
         ...READY_BODY,
         peerId: 'server-peer',
@@ -350,17 +353,8 @@ describe('HTTP Server', () => {
       expect(publicStatus.body.peers[0]).not.toHaveProperty('transportPeerId');
       expect(publicStatus.body.peers[1]).not.toHaveProperty('peerId');
       expect(publicStatus.body.peers[1]).not.toHaveProperty('transportPeerId');
-      const proxiedEvents = await request(app)
-        .get('/events?peerId=client-peer')
-        .expect(409);
-      expect(proxiedEvents.body).toEqual({
-        error: 'peer_has_no_event_stream',
-        transportPeerId: 'server-peer',
-      });
-      await request(app).get('/events?peerId=unknown-peer').expect(404, {
-        error: 'unknown_peer',
-        knownPeer: false,
-      });
+      expect(clientReady.body.transportToken).toBeUndefined();
+      expect(clientReady.body.protocolVersion).toBeUndefined();
       await request(app)
         .post('/disconnect')
         .send({ peerId: 'server-peer' })
@@ -645,24 +639,14 @@ describe('HTTP Server', () => {
       expect(bridge.getPeerById('peer-1')?.multiplayerGroupId).toBeUndefined();
     });
 
-    test('forwards a validated proxy timeout to the Studio bridge', async () => {
-      const sendRequest = jest.spyOn(bridge, 'sendRequest').mockResolvedValue({ results: [] });
-
-      const response = await request(app).post('/proxy').send({
-        endpoint: '/api/grep-scripts',
-        data: { pattern: 'needle' },
+    test('rejects invalid operation IDs before dispatching proxy work', async () => {
+      await request(app).post('/proxy').send({
+        endpoint: '/api/execute-luau',
+        data: { code: 'return true' },
         targetPeerId: 'edit-peer',
-        timeoutMs: 120_000,
-      }).expect(200);
-
-      expect(response.body).toEqual({ response: { results: [] } });
-      expect(sendRequest).toHaveBeenCalledWith(
-        '/api/grep-scripts',
-        { pattern: 'needle' },
-        'edit-peer',
-        120_000,
-        expect.any(AbortSignal),
-      );
+        operationId: '',
+      }).expect(400);
+      expect(bridge.getPendingRequestCount()).toBe(0);
     });
 
     test('aborts the primary Studio request when a proxy connection closes', async () => {
@@ -757,56 +741,25 @@ describe('HTTP Server', () => {
   });
 
 
-  describe('Response Handling', () => {
-    test('acknowledges accepted and repeated successful responses', async () => {
+  describe('Studio transport upgrade requirement', () => {
+    test('does not deliver commands or accept responses through the retired HTTP transport', async () => {
       await request(app).post('/ready').send(READY_BODY).expect(200);
-      const requestPromise = bridge.sendRequest('/api/test', {}, 'peer-1');
-      const pending = bridge.claimNextRequestForTransport('peer-1', 'test-success-response')!;
-
-      const accepted = await request(app)
-        .post('/response')
-        .send({ requestId: pending.requestId, response: { result: 'success' } })
-        .expect(200);
-      expect(accepted.body).toEqual({ success: true, disposition: 'accepted' });
-
-      const repeated = await request(app)
-        .post('/response')
-        .send({ requestId: pending.requestId, response: { result: 'duplicate' } })
-        .expect(200);
-      expect(repeated.body).toEqual({ success: true, disposition: 'already_settled' });
-      await expect(requestPromise).resolves.toEqual({ result: 'success' });
+      const pendingResult = bridge.sendRequest('/api/mutate', {}, 'peer-1');
+      pendingResult.catch(() => {});
+      const pending = bridge.claimNextRequestForTransport('peer-1', 'test-owner');
+      if (!pending) throw new Error('expected request');
+      await request(app).get('/events?peerId=peer-1').expect(426);
+      await request(app).get('/studio?peerId=peer-1').expect(426);
+      await request(app).post('/response').send({
+        requestId: pending.requestId, response: { forged: true },
+      }).expect(426);
+      expect(bridge.getPendingRequestCount()).toBe(1);
     });
 
-    test('treats an empty-string error as an accepted rejection', async () => {
-      await request(app).post('/ready').send(READY_BODY).expect(200);
-      const requestPromise = bridge.sendRequest('/api/test', {}, 'peer-1');
-      requestPromise.catch(() => {});
-      const pending = bridge.claimNextRequestForTransport('peer-1', 'test-error-response')!;
-
-      const response = await request(app)
-        .post('/response')
-        .send({ requestId: pending.requestId, error: '' })
-        .expect(200);
-      expect(response.body).toEqual({ success: true, disposition: 'accepted' });
-      await expect(requestPromise).rejects.toBe('');
-    });
-
-    test('reports an unknown settlement with HTTP 404', async () => {
-      const response = await request(app)
-        .post('/response')
-        .send({ requestId: 'never-issued', response: { result: 'late' } })
-        .expect(404);
-      expect(response.body).toEqual({ success: false, disposition: 'unknown' });
-    });
-
-    test('rejects malformed request IDs with HTTP 400', async () => {
-      for (const body of [{}, { requestId: '' }, { requestId: 42 }, { requestId: null }]) {
-        const response = await request(app).post('/response').send(body).expect(400);
-        expect(response.body).toEqual({
-          success: false,
-          error: 'invalid_request_id',
-        });
-      }
+    test('returns explicit absence for unknown request status and validates request IDs', async () => {
+      await request(app).get('/request-status?requestId=unknown').expect(200, { status: null });
+      await request(app).get('/request-status').expect(400);
+      await request(app).get('/request-status?requestId=a&requestId=b').expect(400);
     });
   });
 

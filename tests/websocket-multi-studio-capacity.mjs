@@ -230,7 +230,7 @@ async function waitForServerCapacity(control, port, expectedInstanceIds) {
           roles.includes('server') &&
           roles.some((role) => /^client-[1-9]\d*$/.test(role));
       });
-      if (allRuntimePeersPresent && lastHealth?.activeEventStreams >= EXPECTED_PHYSICAL_STREAMS) {
+      if (allRuntimePeersPresent && lastHealth?.activeWebSockets >= EXPECTED_PHYSICAL_STREAMS) {
         return { connected: lastConnected, health: lastHealth };
       }
       lastError = undefined;
@@ -255,7 +255,7 @@ function assertCapacityEvidence(connected, health, expectedInstanceIds) {
   if (physicalPeers.length !== EXPECTED_PHYSICAL_STREAMS) {
     throw new Error(`Expected four edit/server peer pairs, got ${JSON.stringify(physicalPeers)}`);
   }
-  if (!Number.isInteger(health.activeEventStreams) || health.activeEventStreams < EXPECTED_PHYSICAL_STREAMS) {
+  if (!Number.isInteger(health.activeWebSockets) || health.activeWebSockets < EXPECTED_PHYSICAL_STREAMS) {
     throw new Error(`Health did not report at least ${EXPECTED_PHYSICAL_STREAMS} active event streams: ${JSON.stringify(health)}`);
   }
 
@@ -265,9 +265,9 @@ function assertCapacityEvidence(connected, health, expectedInstanceIds) {
   if (instancesWithoutClients.length > 0) {
     throw new Error(`Expected a logical client peer for every playtest; missing ${JSON.stringify(instancesWithoutClients)}`);
   }
-  if (health.activeEventStreams !== physicalPeers.length) {
+  if (health.activeWebSockets !== physicalPeers.length) {
     throw new Error(
-      `Logical client peers must not add physical SSE responses. Physical edit/server peers: ` +
+      `Logical client peers must not add physical WebSocket connections. Physical edit/server peers: ` +
       `${physicalPeers.length}; logical clients: ${JSON.stringify(clientPeers)}; health: ${JSON.stringify(health)}`,
     );
   }
@@ -380,8 +380,8 @@ async function assertScopedRuntimeLogs(control, instanceId, expectedRoles, label
 
 async function assertLogReadsThroughBothRoutes(controls, instanceIds, expectedRoles, label) {
   for (const [index, instanceId] of instanceIds.entries()) {
-    // The primary synchronously fans out to server and client on one SSE stream.
-    // A proxy hop can space out the writes and hide broken coalesced-frame decoding.
+    // Exercise synchronous server/client fanout on one physical WebSocket,
+    // as well as calls forwarded through a proxy process.
     await assertScopedRuntimeLogs(controls[0], instanceId, expectedRoles, `${label} Studio ${index + 1} primary`);
     const proxy = controls[1 + (index % (controls.length - 1))];
     await assertScopedRuntimeLogs(proxy, instanceId, expectedRoles, `${label} Studio ${index + 1} proxy`);
@@ -418,7 +418,7 @@ try {
   await configureStudioDirectoryIsolation({ requireStudioClosed: false });
   const launched = await settleOrThrow(
     controls.map((control, index) => launchWorker(control, workers[index], index, launches)),
-    'Launching four managed Studio processes',
+    'Launching four managed Studio processes concurrently',
   );
   const launchIdentities = launched.map((launch) =>
     `${launch.pid}:${launch.process_started_at_file_time}`);
@@ -428,7 +428,7 @@ try {
 
   const expectedInstanceIds = await settleOrThrow(
     launched.map((launch, index) => waitForLaunchEditPeer(controls[index], launch, index)),
-    'Waiting for four managed edit peers',
+    'Waiting for four concurrently launched edit peers',
   );
   if (new Set(expectedInstanceIds).size !== STUDIO_COUNT) {
     throw new Error(`Managed launches did not register four distinct place ids: ${JSON.stringify(expectedInstanceIds)}`);
@@ -462,7 +462,7 @@ try {
       await assertScopedRuntimeLogs(controls[index], id, 1, `cycle ${cycle} stopped Studio ${index + 1} owner`);
     }
   }
-  console.log(`SSE multi-Studio capacity and log delivery passed across ${PLAY_CYCLES} Play cycles.`);
+  console.log(`WebSocket multi-Studio capacity and log delivery passed across ${PLAY_CYCLES} Play cycles.`);
 } catch (error) {
   primaryError = asError(error);
   throw error;
@@ -522,10 +522,10 @@ try {
     if (primaryError) {
       throw new AggregateError(
         [primaryError, ...cleanupFailures],
-        `SSE capacity test failed and cleanup also failed: ${cleanupFailures.map((error) => error.message).join('; ')}`,
+        `WebSocket capacity test failed and cleanup also failed: ${cleanupFailures.map((error) => error.message).join('; ')}`,
         { cause: primaryError },
       );
     }
-    throw new AggregateError(cleanupFailures, 'SSE capacity cleanup failed');
+    throw new AggregateError(cleanupFailures, 'WebSocket capacity cleanup failed');
   }
 }

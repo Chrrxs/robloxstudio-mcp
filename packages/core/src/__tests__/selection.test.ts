@@ -44,6 +44,7 @@ describe('selection lifecycle tool', () => {
       'edit-session',
       undefined,
       undefined,
+      undefined,
     );
 
     await tools.selection('set', { paths: [], mode: 'set' }, 'instance:test');
@@ -51,6 +52,7 @@ describe('selection lifecycle tool', () => {
       '/api/set-selection',
       { paths: [], mode: 'set' },
       'edit-session',
+      undefined,
       undefined,
       undefined,
     );
@@ -68,6 +70,7 @@ describe('selection lifecycle tool', () => {
         angleY: undefined,
       },
       'client-session',
+      undefined,
       undefined,
       undefined,
     );

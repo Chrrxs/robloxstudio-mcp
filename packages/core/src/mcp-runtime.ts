@@ -7,7 +7,7 @@ import {
   type McpRequestContext,
   type ToolAnnotations,
 } from '@modelcontextprotocol/server';
-import { RoutingFailure } from './bridge-service.js';
+import { RequestFailure, RoutingFailure } from './bridge-service.js';
 import { registerResourceHandlers } from './mcp-compat.js';
 import { StudioLaunchPreDispatchError } from './studio-instance-manager.js';
 import type { RobloxStudioTools } from './tools/index.js';
@@ -60,7 +60,6 @@ const INTERNAL_RESULT_KEYS = new Set([
   'transportPeerId',
   'pluginVariant',
   'pluginVersion',
-  'requestId',
   'serverVersion',
 ]);
 
@@ -199,9 +198,12 @@ export function publicToolErrorBody(name: string, error: unknown): Record<string
     return compactPublicValue(error.toResponseBody()) as Record<string, unknown>;
   }
   if (error instanceof RoutingFailure) return publicRoutingError(error);
+  if (error instanceof RequestFailure) {
+    return { error: error.code, message: error.message.slice(0, 500), ...error.details };
+  }
 
   console.error(`[tool:${name}]`, error);
-  const message = error instanceof Error ? error.message : 'Tool execution failed.';
+  const message = error instanceof Error ? error.message : typeof error === 'string' ? error : 'Tool execution failed.';
   return { error: 'tool_failed', message: message.slice(0, 500) };
 }
 
@@ -264,6 +266,12 @@ export function serverInstructions(definitions: readonly ToolDefinition[]): stri
   if (has('get_connected_instances')) {
     instructions.push(
       "When more than one Studio process scope is connected, call get_connected_instances and pass either a top-level instance id or a multiplayer group's role-suffixed instance id as instance_id.",
+    );
+  }
+  if (has('get_request_status', 'execute_luau', 'set_properties')) {
+    instructions.push(
+      'Supply a unique operation_id to execute_luau or set_properties when retry safety matters. After a timeout, query get_request_status with that ID before retrying. Identical arguments reuse a retained outcome; changed arguments are rejected. Recovery and deduplication are bounded to the current server session and five-minute retention window; result payloads may be evicted earlier. Unknown status does not mean unexecuted, and cancellation cannot roll back mutations.',
+      'Request stages are queued, dispatched, executing (plugin handler entered), and response_delivery (handler returned or admission rejected). executionOutcome is separate from waiter state and delivery outcome; handler observations do not prove user Luau instructions ran. A waiter timeout is not an execution deadline or rollback. Neither missing progress nor connection loss proves completion.',
     );
   }
   if (has('search_objects', 'get_project_structure', 'grep_scripts', 'execute_luau')) {

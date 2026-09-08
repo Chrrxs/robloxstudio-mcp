@@ -1,14 +1,25 @@
 import request from 'supertest';
-import { createHttpServer } from '../http-server.js';
+import { createHttpServer, listenWithRetry, type RobloxStudioHttpApp } from '../http-server.js';
 import { BridgeService } from '../bridge-service.js';
 import { RobloxStudioTools } from '../tools/index.js';
+import { once } from 'node:events';
+import type { Server } from 'node:http';
+import WebSocket from 'ws';
+import type { RawData } from 'ws';
+import type { StudioServerEvent } from '../studio-transport.js';
+
+class HttpTestBridgeService extends BridgeService {
+  protected override notifyPeerRegistered(): void {
+    // Transport security tests do not associate Peers with managed Studio processes.
+  }
+}
 
 describe('HTTP security', () => {
   let bridge: BridgeService;
   let tools: RobloxStudioTools;
 
   beforeEach(() => {
-    bridge = new BridgeService();
+    bridge = new HttpTestBridgeService();
     tools = new RobloxStudioTools(bridge);
   });
 
@@ -87,6 +98,36 @@ describe('HTTP security', () => {
       expect(viaHeader.status).toBe(200);
       const viaBearer = await request(app).get('/topology').set('Authorization', `Bearer ${TOKEN}`);
       expect(viaBearer.status).toBe(200);
+      const recovery = await request(app).get('/request-status?requestId=unknown');
+      expect(recovery.status).toBe(401);
+      await request(app).get('/request-status?requestId=unknown').set('X-MCP-Auth', TOKEN)
+        .expect(200, { status: null });
+    });
+
+    it('protects retained results through case-insensitive and trailing-slash route aliases', async () => {
+      const app = authedApp();
+      bridge.registerPeer({
+        peerId: 'recovery-peer', transportPeerId: 'recovery-peer',
+        instanceId: 'instance:recovery', role: 'edit',
+      });
+      const result = bridge.sendRequest('/api/private-result', {}, 'recovery-peer');
+      const pending = bridge.claimNextRequestForTransport('recovery-peer', 'recovery-owner');
+      if (!pending) throw new Error('expected dispatched request');
+      bridge.settleTransportResponse('recovery-peer', pending.requestId, { privateValue: 'retained-result' });
+      await result;
+
+      try {
+        for (const path of ['/request-status', '/REQUEST-STATUS', '/request-status/', '/REQUEST-STATUS/']) {
+          await request(app).get(path).query({ requestId: pending.requestId }).expect(401);
+          const authenticated = await request(app).get(path).query({ requestId: pending.requestId })
+            .set('X-MCP-Auth', TOKEN).expect(200);
+          expect(authenticated.body.status).toMatchObject({
+            requestId: pending.requestId, state: 'settled', response: { privateValue: 'retained-result' },
+          });
+        }
+      } finally {
+        await app.cleanup();
+      }
     });
 
     it('leaves plugin-facing endpoints tokenless', async () => {
@@ -96,7 +137,7 @@ describe('HTTP security', () => {
       const status = await request(app).get('/status');
       expect(status.status).toBe(200);
       const events = await request(app).get('/events?peerId=unknown-peer');
-      expect(events.status).toBe(404); // unknown Peer — but not 401
+      expect(events.status).toBe(426);
       const disconnect = await request(app).post('/disconnect').send({});
       expect(disconnect.status).toBe(200);
     });
@@ -106,5 +147,235 @@ describe('HTTP security', () => {
       const res = await request(app).get('/topology');
       expect(res.status).toBe(200);
     });
+  });
+});
+
+const STUDIO_READY = {
+  peerId: 'studio-peer',
+  transportPeerId: 'studio-peer',
+  instanceId: 'instance:studio',
+  role: 'edit',
+  placeId: 1,
+  placeName: 'Place',
+  dataModelName: 'Place',
+  isRunning: false,
+  pluginVersion: 'test-version',
+  pluginVariant: 'main',
+  timestamp: 1_700_000_000_000,
+};
+
+class SocketInbox {
+  private readonly frames: StudioServerEvent[] = [];
+  private readonly waiting: Array<(event: StudioServerEvent) => void> = [];
+
+  constructor(socket: WebSocket) {
+    socket.on('message', (data: RawData, isBinary: boolean) => {
+      expect(isBinary).toBe(false);
+      const frame = JSON.parse(data.toString()) as StudioServerEvent;
+      const waiter = this.waiting.shift();
+      if (waiter) waiter(frame);
+      else this.frames.push(frame);
+    });
+  }
+
+  next(): Promise<StudioServerEvent> {
+    const frame = this.frames.shift();
+    if (frame) return Promise.resolve(frame);
+    const { promise, resolve } = Promise.withResolvers<StudioServerEvent>();
+    this.waiting.push(resolve);
+    return promise;
+  }
+}
+
+describe('Studio WebSocket authentication and upgrade', () => {
+  let bridge: BridgeService;
+  let app: RobloxStudioHttpApp;
+  let server: Server;
+  let baseUrl: string;
+  const sockets = new Set<WebSocket>();
+
+  beforeEach(async () => {
+    jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate', 'queueMicrotask'] });
+    bridge = new HttpTestBridgeService();
+    app = createHttpServer(new RobloxStudioTools(bridge), bridge, new Set(), {
+      name: 'test-server', version: STUDIO_READY.pluginVersion, tools: [],
+    }, { authToken: 'local-tool-secret', allowedOrigins: ['https://allowed.example'] });
+    ({ server } = await listenWithRetry(app, '127.0.0.1', 0, 1));
+    const address = server.address();
+    if (!address || typeof address === 'string') throw new Error('expected TCP address');
+    baseUrl = `ws://127.0.0.1:${address.port}`;
+  });
+
+  afterEach(async () => {
+    for (const socket of sockets) {
+      if (socket.readyState !== WebSocket.CLOSED) socket.terminate();
+    }
+    sockets.clear();
+    bridge.clearAllPendingRequests();
+    await app.cleanup();
+    const closed = once(server, 'close');
+    server.close();
+    await closed;
+    jest.useRealTimers();
+  });
+
+  async function ready(peerId = STUDIO_READY.peerId): Promise<string> {
+    const response = await request(server).post('/ready').send({
+      ...STUDIO_READY, peerId, transportPeerId: peerId, instanceId: `instance:${peerId}`,
+    }).expect(200);
+    const token: unknown = response.body.transportToken;
+    if (typeof token !== 'string') throw new Error('expected transport token');
+    return token;
+  }
+
+  function connect(peerId: string, token?: string, options?: { origin?: string; version?: string }) {
+    const query = new URLSearchParams({ peerId, protocolVersion: options?.version ?? '1' });
+    const socket = new WebSocket(`${baseUrl}/studio?${query}`, {
+      headers: {
+        ...(token === undefined ? {} : { 'X-Studio-Token': token }),
+        ...(options?.origin === undefined ? {} : { Origin: options.origin }),
+      },
+    });
+    socket.on('error', () => {});
+    sockets.add(socket);
+    const inbox = new SocketInbox(socket);
+    return { socket, inbox };
+  }
+
+  async function rejected(peerId: string, token?: string, options?: { origin?: string; version?: string }): Promise<number> {
+    const { socket } = connect(peerId, token, options);
+    const response = Promise.withResolvers<number>();
+    socket.once('unexpected-response', (_req, res) => {
+      res.resume();
+      response.resolve(res.statusCode ?? 0);
+      socket.terminate();
+    });
+    socket.once('open', () => response.reject(new Error('Unexpected authenticated upgrade')));
+    return response.promise;
+  }
+
+  test('requires a peer-bound token and rejects browser origins before upgrading', async () => {
+    const ownerToken = await ready();
+    const otherToken = await ready('other-peer');
+    expect(await rejected(STUDIO_READY.peerId)).toBe(401);
+    expect(await rejected(STUDIO_READY.peerId, 'incorrect')).toBe(401);
+    expect(await rejected(STUDIO_READY.peerId, otherToken)).toBe(401);
+    expect(await rejected(STUDIO_READY.peerId, ownerToken, { origin: 'https://evil.example' })).toBe(403);
+    expect(await rejected('unknown-peer', ownerToken)).toBe(404);
+    expect(await rejected(STUDIO_READY.peerId, ownerToken, { version: '2' })).toBe(426);
+    const { socket, inbox } = connect(STUDIO_READY.peerId, ownerToken, { origin: 'https://allowed.example' });
+    await once(socket, 'open');
+    expect(await inbox.next()).toMatchObject({ kind: 'status', knownPeer: true });
+  });
+
+  test('does not give a proxied client its own transport or token', async () => {
+    const owner = await request(server).post('/ready').send({
+      ...STUDIO_READY, role: 'server', isRunning: true,
+    }).expect(200);
+    const client = await request(server).post('/ready').send({
+      ...STUDIO_READY, peerId: 'client-peer', role: 'client', isRunning: true,
+    }).expect(200);
+    expect(client.body.transportToken).toBeUndefined();
+    expect(await rejected('client-peer', owner.body.transportToken)).toBe(403);
+  });
+
+  test('preserves refresh tokens, revokes on unregister, and issues a fresh secret on re-registration', async () => {
+    const first = await ready();
+    expect(await ready()).toBe(first);
+    await request(server).post('/disconnect').send({ peerId: STUDIO_READY.peerId }).expect(200);
+    expect(await rejected(STUDIO_READY.peerId, first)).toBe(404);
+    const replacement = await ready();
+    expect(replacement).not.toBe(first);
+    expect(await rejected(STUDIO_READY.peerId, first)).toBe(401);
+    const { socket, inbox } = connect(STUDIO_READY.peerId, replacement);
+    await once(socket, 'open');
+    expect(await inbox.next()).toMatchObject({ kind: 'status', knownPeer: true });
+    const closed = once(socket, 'close');
+    await request(server).post('/disconnect').send({ peerId: STUDIO_READY.peerId }).expect(200);
+    expect((await closed)[0]).toBe(1000);
+  });
+
+  test('records results and sends healthy duplicate-safe acknowledgements without HTTP responses', async () => {
+    const token = await ready();
+    const { socket, inbox } = connect(STUDIO_READY.peerId, token);
+    await once(socket, 'open');
+    await inbox.next();
+    const result = bridge.sendRequest('/api/mutate', { value: 1 }, STUDIO_READY.peerId);
+    const command = await inbox.next();
+    if (command.kind !== 'request') throw new Error('expected request');
+    expect(command).toMatchObject({ peerId: STUDIO_READY.peerId, endpoint: '/api/mutate', data: { value: 1 } });
+    socket.send(JSON.stringify({ kind: 'response', requestId: command.requestId, response: { value: 2 } }));
+    expect(await inbox.next()).toEqual({ kind: 'ack', requestId: command.requestId, disposition: 'accepted' });
+    await expect(result).resolves.toEqual({ value: 2 });
+    const recovery = await request(server).get(`/request-status?requestId=${command.requestId}`)
+      .set('X-MCP-Auth', 'local-tool-secret').expect(200);
+    expect(recovery.body.status).toMatchObject({ state: 'settled', response: { value: 2 } });
+    socket.send(JSON.stringify({ kind: 'response', requestId: command.requestId, response: { value: 3 } }));
+    expect(await inbox.next()).toEqual({ kind: 'ack', requestId: command.requestId, disposition: 'already_settled' });
+  });
+
+  test.each<[string, string, boolean, number]>([
+    ['malformed JSON', '{', false, 1007],
+    ['binary frame', '{}', true, 1003],
+    ['invalid response shape', '{"kind":"request","requestId":"x"}', false, 1008],
+  ])('closes %s at the live protocol seam', async (_name, data, binary, expectedCode) => {
+    const token = await ready();
+    const { socket, inbox } = connect(STUDIO_READY.peerId, token);
+    await once(socket, 'open');
+    await inbox.next();
+    const closed = once(socket, 'close');
+    socket.send(data, { binary });
+    expect((await closed)[0]).toBe(expectedCode);
+  });
+
+  test('replaces an authenticated socket and closes it on app cleanup', async () => {
+    const token = await ready();
+    const stale = connect(STUDIO_READY.peerId, token);
+    await once(stale.socket, 'open');
+    await stale.inbox.next();
+    const staleClosed = once(stale.socket, 'close');
+    const replacement = connect(STUDIO_READY.peerId, token);
+    await once(replacement.socket, 'open');
+    expect((await staleClosed)[0]).toBe(1012);
+    expect(await replacement.inbox.next()).toMatchObject({ kind: 'status', knownPeer: true });
+    const replacementClosed = once(replacement.socket, 'close');
+    await app.cleanup();
+    expect((await replacementClosed)[0]).toBe(1001);
+  });
+
+  test('rejects socket capacity overflow while preserving an existing peer replacement slot', async () => {
+    let firstToken = '';
+    let firstSocket: WebSocket | undefined;
+    for (let index = 0; index < 64; index += 1) {
+      const peerId = `capacity-${index}`;
+      const token = await ready(peerId);
+      const { socket, inbox } = connect(peerId, token);
+      await once(socket, 'open');
+      await inbox.next();
+      if (index === 0) {
+        firstToken = token;
+        firstSocket = socket;
+      }
+    }
+    const overflowToken = await ready('overflow');
+    expect(await rejected('overflow', overflowToken)).toBe(503);
+    if (!firstSocket) throw new Error('expected first socket');
+    const replaced = once(firstSocket, 'close');
+    const replacement = connect('capacity-0', firstToken);
+    await once(replacement.socket, 'open');
+    expect((await replaced)[0]).toBe(1012);
+    expect(await replacement.inbox.next()).toMatchObject({ kind: 'status', knownPeer: true });
+  });
+
+  test('bounds session secrets while allowing same-peer refresh and reclaim after unregister', async () => {
+    const first = await ready('session-0');
+    for (let index = 1; index < 256; index += 1) await ready(`session-${index}`);
+    await request(server).post('/ready').send({
+      ...STUDIO_READY, peerId: 'overflow', transportPeerId: 'overflow', instanceId: 'instance:overflow',
+    }).expect(503);
+    expect(await ready('session-0')).toBe(first);
+    await request(server).post('/disconnect').send({ peerId: 'session-1' }).expect(200);
+    const replacement = await ready('overflow');
+    expect(replacement).not.toBe(first);
   });
 });

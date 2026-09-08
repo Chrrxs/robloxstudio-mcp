@@ -92,9 +92,9 @@ If you encounter issues, you may need to run it through `cmd`. Update your confi
 ## How It Works
 
 1. **AI calls tool** > MCP server queues request
-2. **Plugin receives it** over a persistent server-sent event stream
+2. **Plugin receives it** over an authenticated persistent WebSocket
 3. **Plugin executes** Studio API calls
-4. **Plugin posts the response** with the extracted data
+4. **Plugin sends progress and the response** over the same socket; the server acknowledges retained responses
 5. **AI receives** comprehensive Studio information
 
 **Available Tools:** 37+ specialized tools for file trees, scripts, properties, attributes, tags, and more!
@@ -135,15 +135,15 @@ and network settings. Report suspected vulnerabilities through the
 
 ### Plugin Features
 - **Real-time status**: Visual connection indicators
-- **Persistent delivery**: One event stream per edit or play-server peer
-- **Multiplexed playtests**: Client routes share the play-server stream
-- **Error recovery**: Automatic reconnect, redelivery, and duplicate suppression
+- **Persistent delivery**: One authenticated WebSocket per edit or play-server peer
+- **Multiplexed playtests**: Client routes share the play-server socket
+- **Bounded recovery**: Reconnection resends retained progress/responses, not commands; use saved operation IDs and [verified staging/recovery](../docs/large-inputs.md) instead of blindly replaying mutations
 - **Debug friendly**: Comprehensive logging in Output window
 
 ### Customization
 - **Server URL**: Modify the single plugin URL field (default: http://localhost:58741)
 - **Multiple Studio places**: Connect every place to the same MCP server, then use `get_connected_instances` and `instance_id` to choose the target game
-- **Timeout settings**: 30-second request timeouts
+- **Timeout semantics**: A request waiter's timeout is not an execution deadline or rollback; inspect `get_request_status` and actual effects before retrying
 
 ### Development Mode
 ```lua

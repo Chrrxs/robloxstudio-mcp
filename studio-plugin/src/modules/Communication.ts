@@ -23,7 +23,7 @@ import EvalRuntimeHandlers from "./handlers/EvalRuntimeHandlers";
 import ClientBroker from "./ClientBroker";
 import ServerUrlSettings from "./ServerUrlSettings";
 import PluginSession from "./PluginSession";
-import StudioEventStream from "./StudioEventStream";
+import StudioWebSocket from "./StudioWebSocket";
 import type {
 	RequestPayload,
 	ReadyResponse,
@@ -119,7 +119,7 @@ function getConnectionStatus(): string {
 	return "connecting";
 }
 
-function dispatchStreamRequest(request: StudioRequestEvent, context: StudioRequestContext): unknown {
+function dispatchSocketRequest(request: StudioRequestEvent, context: StudioRequestContext): unknown {
 	if (request.peerId !== PluginSession.peerId) {
 		return ClientBroker.dispatchClientRequest(
 			request.peerId,
@@ -205,7 +205,7 @@ function ensureIdentityWatchers(): void {
 	if (!nameChangeConn) {
 		const [signalOk, signal] = pcall(() => game.GetPropertyChangedSignal("Name"));
 		if (signalOk && signal) {
-			nameChangeConn = signal.Connect(() => StudioEventStream.refresh());
+			nameChangeConn = signal.Connect(() => StudioWebSocket.refresh());
 		}
 	}
 	if (!placeIdChangeConn) {
@@ -214,7 +214,7 @@ function ensureIdentityWatchers(): void {
 			placeIdChangeConn = signal.Connect(() => {
 				PluginSession.invalidatePlaceName();
 				lastReadyPlaceKey = PluginSession.getPlaceKey();
-				StudioEventStream.refresh();
+				StudioWebSocket.refresh();
 			});
 		}
 	}
@@ -254,9 +254,9 @@ function activatePlugin() {
 	lastReadyPlaceKey = PluginSession.getPlaceKey();
 	UI.updateUIState();
 
-	StudioEventStream.start({
+	StudioWebSocket.start({
 		serverUrl: conn.serverUrl,
-		dispatchRequest: dispatchStreamRequest,
+		dispatchRequest: dispatchSocketRequest,
 		onStatus: handleStatus,
 		onHeartbeat: handleHeartbeat,
 		onReady: handleReady,
@@ -274,7 +274,7 @@ function activatePlugin() {
 			if (lastReadyPlaceKey !== undefined && currentPlaceKey !== lastReadyPlaceKey) {
 				lastReadyPlaceKey = currentPlaceKey;
 				PluginSession.invalidatePlaceName();
-				StudioEventStream.refresh();
+				StudioWebSocket.refresh();
 			}
 		});
 	}
@@ -293,7 +293,7 @@ function deactivatePlugin() {
 	conn.lastMcpOk = false;
 	conn.mcpWaitStartTime = undefined;
 
-	StudioEventStream.stop();
+	StudioWebSocket.stop();
 	disconnectIdentityWatchers();
 	if (initialRole === "server") ClientBroker.disconnectAllProxies();
 	if (conn.heartbeatConnection) {

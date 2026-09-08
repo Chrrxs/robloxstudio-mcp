@@ -2,7 +2,7 @@ import { EventEmitter, once } from 'node:events';
 import { Client, InMemoryTransport, StreamableHTTPClientTransport } from '@modelcontextprotocol/client';
 import { serveStdio } from '@modelcontextprotocol/server/stdio';
 import type { Server as HttpServer } from 'node:http';
-import { BridgeService, RoutingFailure } from '../bridge-service.js';
+import { BridgeService, RequestFailure, RoutingFailure } from '../bridge-service.js';
 import { createHttpServer, TOOL_HANDLERS } from '../http-server.js';
 import {
   createToolServer,
@@ -156,18 +156,46 @@ describe('MCP v2 tool runtime', () => {
     ]);
   });
 
-  test('keeps the catalog within the 3.0 token budget', () => {
+  test('preserves recovery identity and wire failure diagnostics at the public boundary', () => {
+    const details = { requestId: 'op-large', targetPeerId: 'edit', stage: 'queued' as const, outcome: 'not_executed' as const, bytes: 100, limitBytes: 50 };
+    expect(publicToolErrorBody('execute_luau', new RequestFailure('Request op-large is too large', 'request_too_large', details)))
+      .toEqual({ error: 'request_too_large', message: 'Request op-large is too large', ...details });
+    const normalized = normalizeToolResult({
+      content: [{ type: 'text', text: JSON.stringify({ requestId: 'op-large', outcome: 'success', response: { value: 42 } }) }],
+    }, 'modern');
+    expect(normalized.structuredContent).toMatchObject({ requestId: 'op-large', outcome: 'success', response: { value: 42 } });
+  });
+
+  test('retained Studio delivery errors preserve execution proof through MCP error projection', async () => {
+    const bridge = new BridgeService();
+    bridge.registerPeer({ peerId: 'peer', transportPeerId: 'peer', instanceId: 'instance:error', role: 'edit' });
+    const invoke = () => bridge.sendRequest('/api/mutate', {}, 'peer', 1000, undefined, 'delivery-failure');
+    const pending = invoke().catch((error: unknown) => publicToolErrorBody('execute_luau', error));
+    bridge.claimNextRequestForTransport('peer', 'socket');
+    bridge.settleTransportResponse('peer', 'delivery-failure', undefined, 'Result encoding failed', 'success');
+    expect(await pending).toMatchObject({
+      error: 'studio_response_error', requestId: 'delivery-failure', stage: 'response_delivery',
+      outcome: 'unknown', executionOutcome: 'success', executionCompletedAt: expect.any(Number),
+    });
+    expect(await invoke().catch((error: unknown) => publicToolErrorBody('execute_luau', error))).toMatchObject({
+      error: 'studio_response_error', requestId: 'delivery-failure', stage: 'response_delivery',
+      outcome: 'unknown', executionOutcome: 'success', executionCompletedAt: expect.any(Number),
+    });
+    expect(bridge.claimNextRequestForTransport('peer', 'socket')).toBeNull();
+  });
+
+  test('keeps the expanded catalog within its token budget', () => {
     const catalog = TOOL_DEFINITIONS.map(publicToolDefinition);
     const names = new Set(catalog.map((tool) => tool.name));
     const byName = new Map(catalog.map((tool) => [tool.name, tool]));
     const serialized = JSON.stringify(catalog);
     const inspectorCatalog = getReadOnlyTools().map(publicToolDefinition);
 
-    expect(catalog).toHaveLength(47);
-    expect(serialized.length).toBeLessThanOrEqual(43_000);
-    expect(catalog.filter((tool) => tool.outputSchema)).toHaveLength(46);
+    expect(catalog).toHaveLength(48);
+    expect(serialized.length).toBeLessThanOrEqual(44_000);
+    expect(catalog.filter((tool) => tool.outputSchema)).toHaveLength(47);
     expect(catalog.every((tool) => tool.description.length <= 120)).toBe(true);
-    expect(inspectorCatalog).toHaveLength(24);
+    expect(inspectorCatalog).toHaveLength(25);
     expect(JSON.stringify(inspectorCatalog).length).toBeLessThanOrEqual(20_000);
     expect(byName.get('selection')?.outputSchema).toEqual({
       type: 'object',

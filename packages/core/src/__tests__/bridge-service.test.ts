@@ -1,4 +1,4 @@
-import { BridgeService } from '../bridge-service.js';
+import { BridgeService, RequestFailure } from '../bridge-service.js';
 import type { RegisterPeerInput } from '../bridge-service.js';
 
 function register(
@@ -642,7 +642,7 @@ describe('BridgeService', () => {
       await rejected;
     });
 
-    test('release redelivers the same request to the same transport and Peer', async () => {
+    test('release never replays a possibly executing mutation on reconnect', async () => {
       register(bridge, {
         peerId: 'client-peer',
         transportPeerId: 'server-peer',
@@ -655,9 +655,9 @@ describe('BridgeService', () => {
       bridge.releaseDeliveryClaims('old-stream');
       const second = bridge.claimNextRequestForTransport('server-peer', 'new-stream');
 
-      expect(second).toEqual(first);
-      expect(second?.peerId).toBe('client-peer');
-      bridge.resolveRequest(second!.requestId, { ok: true });
+      expect(second).toBeNull();
+      expect(first?.peerId).toBe('client-peer');
+      bridge.resolveRequest(first!.requestId, { ok: true });
       await expect(response).resolves.toEqual({ ok: true });
     });
 
@@ -695,6 +695,208 @@ describe('BridgeService', () => {
       expect(bridge.rejectRequest(delivery.requestId, new Error('late'))).toBe('already_settled');
       expect(bridge.resolveRequest('unknown', {})).toBe('unknown');
       await expect(response).resolves.toEqual({ ok: true });
+    });
+  });
+
+  describe('recoverable operations', () => {
+    beforeEach(() => {
+      register(bridge, { peerId: 'edit-peer', instanceId: 'instance:edit', role: 'edit' });
+      register(bridge, { peerId: 'other-peer', instanceId: 'instance:other', role: 'edit' });
+    });
+
+    test('timeout removes only the waiter and authenticates late success and duplicate responses', async () => {
+      const pending = bridge.sendRequest('/api/mutate', { value: 1 }, 'edit-peer', 1000, undefined, 'late-success');
+      const failure = expect(pending).rejects.toMatchObject({
+        code: 'request_timeout',
+        details: { requestId: 'late-success', stage: 'dispatched', outcome: 'unknown' },
+      });
+      const queuedAt = Date.now();
+      jest.advanceTimersByTime(100);
+      bridge.claimNextRequestForTransport('edit-peer', 'old-socket');
+      expect(bridge.settleTransportResponse('other-peer', 'late-success', { poisoned: true })).toBe('unknown');
+      jest.advanceTimersByTime(900);
+      await failure;
+      expect(bridge.getPendingRequestCount()).toBe(0);
+      expect(bridge.getRequestStatus('late-success')).toMatchObject({
+        requestId: 'late-success', targetPeerId: 'edit-peer', queuedAt,
+        dispatchedAt: queuedAt + 100, stage: 'dispatched', state: 'timed_out', outcome: 'unknown',
+      });
+      bridge.releaseDeliveryClaims('old-socket');
+      expect(bridge.claimNextRequestForTransport('edit-peer', 'new-socket')).toBeNull();
+      expect(bridge.settleTransportResponse('edit-peer', 'late-success', { value: 2 })).toBe('accepted');
+      expect(bridge.settleTransportResponse('other-peer', 'late-success', { poisoned: true })).toBe('unknown');
+      expect(bridge.settleTransportResponse('edit-peer', 'late-success', { value: 3 })).toBe('already_settled');
+      expect(bridge.getRequestStatus('late-success')).toMatchObject({
+        state: 'settled', outcome: 'success', response: { value: 2 }, settledAt: queuedAt + 1000,
+      });
+    });
+
+    test('queued timeouts are not executed and cannot be settled through an unclaimed transport', async () => {
+      const pending = bridge.sendRequest('/api/mutate', {}, 'edit-peer', 1000, undefined, 'queued-timeout');
+      const failure = expect(pending).rejects.toMatchObject({
+        details: { requestId: 'queued-timeout', stage: 'queued', outcome: 'not_executed' },
+      });
+      jest.advanceTimersByTime(1000);
+      await failure;
+      expect(bridge.getRequestStatus('queued-timeout')).toMatchObject({ state: 'timed_out', outcome: 'not_executed' });
+      expect(bridge.settleTransportResponse('edit-peer', 'queued-timeout', {})).toBe('unknown');
+      expect(bridge.claimNextCancellationForTransport('edit-peer', 'socket')).toBeNull();
+      expect(bridge.claimNextRequestForTransport('edit-peer', 'socket')).toBeNull();
+    });
+
+    test('abort preserves a dispatched late structured error and safe detached status', async () => {
+      const controller = new AbortController();
+      const pending = bridge.sendRequest('/api/mutate', {}, 'edit-peer', 30_000, controller.signal, 'aborted-operation');
+      const failure = expect(pending).rejects.toMatchObject({ details: { outcome: 'unknown' } });
+      bridge.claimNextRequestForTransport('edit-peer', 'socket');
+      controller.abort();
+      await failure;
+      const error = { code: 'execution_failed', message: 'mutation failed after starting', details: { line: 2 } };
+      expect(bridge.settleTransportResponse('edit-peer', 'aborted-operation', undefined, error)).toBe('accepted');
+      const status = bridge.getRequestStatus('aborted-operation')!;
+      expect(status).toMatchObject({ state: 'settled', outcome: 'error', error });
+      status.outcome = 'success';
+      error.details.line = 99;
+      expect(bridge.getRequestStatus('aborted-operation')).toMatchObject({
+        outcome: 'error', error: { details: { line: 2 } },
+      });
+    });
+
+    test('disconnect is unknown after dispatch, preserves evidence, and rejects a replacement owner', async () => {
+      const pending = bridge.sendRequest('/api/mutate', {}, 'edit-peer', 30_000, undefined, 'disconnect');
+      const failure = expect(pending).rejects.toMatchObject({
+        details: { stage: 'dispatched', outcome: 'unknown' },
+      });
+      bridge.claimNextRequestForTransport('edit-peer', 'socket');
+      bridge.unregisterPeer('edit-peer');
+      await failure;
+      expect(bridge.getRequestStatus('disconnect')).toMatchObject({ state: 'disconnected', outcome: 'unknown' });
+      register(bridge, { peerId: 'edit-peer', transportPeerId: 'other-peer', instanceId: 'instance:edit', role: 'edit' });
+      expect(bridge.settleTransportResponse('edit-peer', 'disconnect', {})).toBe('unknown');
+      expect(bridge.settleTransportResponse('other-peer', 'disconnect', {})).toBe('unknown');
+    });
+
+    test('stable operation IDs reuse pending and retained results without replay or payload collisions', async () => {
+      const invoke = (data: unknown = { value: 1 }, target = 'edit-peer') =>
+        bridge.sendRequest('/api/mutate', data, target, 1000, undefined, 'stable-id');
+      const first = invoke();
+      expect(invoke()).toBe(first);
+      bridge.claimNextRequestForTransport('edit-peer', 'socket');
+      await expect(invoke({ value: 2 })).rejects.toMatchObject({ code: 'operation_id_collision' });
+      await expect(invoke({ value: 1 }, 'other-peer')).rejects.toMatchObject({ code: 'operation_id_collision' });
+      bridge.settleTransportResponse('edit-peer', 'stable-id', { mutationCount: 1 });
+      await expect(first).resolves.toEqual({ mutationCount: 1 });
+      await expect(invoke()).resolves.toEqual({ mutationCount: 1 });
+      expect(bridge.claimNextRequestForTransport('edit-peer', 'replacement')).toBeNull();
+
+      const timed = bridge.sendRequest('/api/mutate', {}, 'edit-peer', 1000, undefined, 'timed-id');
+      const failure = expect(timed).rejects.toBeInstanceOf(RequestFailure);
+      bridge.claimNextRequestForTransport('edit-peer', 'socket');
+      jest.advanceTimersByTime(1000);
+      await failure;
+      await expect(bridge.sendRequest('/api/mutate', {}, 'edit-peer', 1000, undefined, 'timed-id'))
+        .rejects.toMatchObject({ code: 'operation_not_replayed', details: { outcome: 'unknown' } });
+      expect(bridge.claimNextRequestForTransport('edit-peer', 'replacement')).toBeNull();
+    });
+
+    test('late settlement extends five-minute retention; expiry is explicitly unknown', async () => {
+      const pending = bridge.sendRequest('/api/mutate', {}, 'edit-peer', 1000, undefined, 'expiring');
+      const failure = expect(pending).rejects.toBeInstanceOf(RequestFailure);
+      bridge.claimNextRequestForTransport('edit-peer', 'socket');
+      jest.advanceTimersByTime(1000);
+      await failure;
+      jest.advanceTimersByTime(299_999);
+      expect(bridge.settleTransportResponse('edit-peer', 'expiring', { recovered: true })).toBe('accepted');
+      jest.advanceTimersByTime(299_999);
+      expect(bridge.getRequestStatus('expiring')?.response).toEqual({ recovered: true });
+      jest.advanceTimersByTime(1);
+      expect(bridge.getRequestStatus('expiring')).toBeUndefined();
+      expect(bridge.settleTransportResponse('edit-peer', 'expiring', {})).toBe('unknown');
+    });
+
+    test('bounds retained result count while preserving compact deduplication history', async () => {
+      for (let index = 0; index < 1025; index++) {
+        const id = `retained-${index}`;
+        const pending = bridge.sendRequest('/api/mutate', {}, 'edit-peer', 30_000, undefined, id);
+        bridge.claimNextRequestForTransport('edit-peer', 'socket');
+        bridge.settleTransportResponse('edit-peer', id, { index });
+        await pending;
+      }
+      expect(bridge.getRequestStatus('retained-0')).toMatchObject({
+        outcome: 'success', resultUnavailable: { reason: 'retention_capacity' },
+      });
+      expect(bridge.getRequestStatus('retained-0')).not.toHaveProperty('response');
+      expect(bridge.getRequestStatus('retained-1024')?.response).toEqual({ index: 1024 });
+      expect(bridge.settleTransportResponse('edit-peer', 'retained-0', {})).toBe('already_settled');
+      await expect(bridge.sendRequest('/api/mutate', {}, 'edit-peer', 30_000, undefined, 'retained-0'))
+        .rejects.toMatchObject({ code: 'operation_not_replayed' });
+      for (let index = 1025; index < 32769; index++) {
+        const id = `retained-${index}`;
+        const pending = bridge.sendRequest('/api/mutate', {}, 'edit-peer', 30_000, undefined, id);
+        bridge.resolveRequest(id, index);
+        await pending;
+      }
+      expect(bridge.getRequestStatus('retained-0')).toBeUndefined();
+      expect(bridge.settleTransportResponse('edit-peer', 'retained-0', {})).toBe('unknown');
+      expect(bridge.getRequestStatus('retained-32768')?.response).toBe(32768);
+    });
+
+    test('bounds result bytes independently of compact outcome retention', async () => {
+      const payload = 'x'.repeat(33 * 1024 * 1024);
+      for (const id of ['large-first', 'large-second']) {
+        const pending = bridge.sendRequest('/api/mutate', {}, 'edit-peer', 30_000, undefined, id);
+        bridge.claimNextRequestForTransport('edit-peer', 'socket');
+        bridge.settleTransportResponse('edit-peer', id, payload);
+        await pending;
+      }
+      expect(bridge.getRequestStatus('large-first')).toMatchObject({
+        outcome: 'success', resultUnavailable: { reason: 'retention_capacity', limitBytes: 64 * 1024 * 1024 },
+      });
+      expect(bridge.getRequestStatus('large-second')?.response).toBe(payload);
+      expect(bridge.settleTransportResponse('edit-peer', 'large-first', {})).toBe('already_settled');
+      const oversized = bridge.sendRequest('/api/mutate', {}, 'edit-peer', 30_000, undefined, 'oversized-result');
+      bridge.claimNextRequestForTransport('edit-peer', 'socket');
+      bridge.settleTransportResponse('edit-peer', 'oversized-result', 'x'.repeat(64 * 1024 * 1024));
+      await oversized;
+      expect(bridge.getRequestStatus('oversized-result')).toMatchObject({
+        outcome: 'success', resultUnavailable: { reason: 'size_limit', limitBytes: 64 * 1024 * 1024 },
+      });
+      expect(bridge.getRequestStatus('oversized-result')?.resultUnavailable?.bytes).toBeGreaterThan(64 * 1024 * 1024);
+      expect(bridge.getRequestStatus('oversized-result')).not.toHaveProperty('response');
+    });
+
+    test('oversized requests fail at admission with measured UTF-8 bytes and never queue', async () => {
+      const data = 'é'.repeat(32 * 1024 * 1024);
+      const failure = bridge.sendRequest('/api/mutate', data, 'edit-peer', 30_000, undefined, 'oversized')
+        .catch((error: unknown) => error);
+      const error = await failure;
+      expect(error).toBeInstanceOf(RequestFailure);
+      if (!(error instanceof RequestFailure)) throw new Error('expected RequestFailure');
+      expect(error.code).toBe('request_too_large');
+      expect(error.details).toMatchObject({
+        requestId: 'oversized', stage: 'queued', outcome: 'not_executed', limitBytes: 64 * 1024 * 1024,
+        transportStage: 'server_send',
+      });
+      expect(error.details.bytes).toBeGreaterThan(64 * 1024 * 1024);
+      expect(bridge.getPendingRequestCount()).toBe(0);
+      expect(bridge.claimNextRequestForTransport('edit-peer', 'socket')).toBeNull();
+    });
+
+    test('pending admission is bounded and releases capacity after cancellation', async () => {
+      const controllers = Array.from({ length: 1024 }, () => new AbortController());
+      const pending = controllers.map((controller, index) =>
+        bridge.sendRequest('/api/mutate', {}, 'edit-peer', 30_000, controller.signal, `pending-${index}`)
+          .catch((error: unknown) => error));
+      await expect(bridge.sendRequest('/api/mutate', {}, 'edit-peer')).rejects.toMatchObject({
+        code: 'request_capacity_exceeded', details: { outcome: 'not_executed' },
+      });
+      for (const controller of controllers) controller.abort();
+      await Promise.all(pending);
+      expect(bridge.getPendingRequestCount()).toBe(0);
+      const admitted = bridge.sendRequest('/api/mutate', {}, 'edit-peer', 30_000, undefined, 'admitted');
+      bridge.claimNextRequestForTransport('edit-peer', 'socket');
+      bridge.settleTransportResponse('edit-peer', 'admitted', true);
+      await expect(admitted).resolves.toBe(true);
     });
   });
 

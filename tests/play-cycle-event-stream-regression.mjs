@@ -81,7 +81,7 @@ async function activeEventStreamCount() {
   const response = await fetch(`http://127.0.0.1:${BASE_PORT}/health`);
   if (!response.ok) throw new Error(`/health returned HTTP ${response.status}`);
   const health = await response.json();
-  return health.activeEventStreams;
+  return health.activeWebSockets;
 }
 
 async function waitForActiveEventStreamCount(expected, timeoutMs = 15_000) {

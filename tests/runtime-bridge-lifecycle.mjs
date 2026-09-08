@@ -203,6 +203,31 @@ async function startManagedMultiplayer(client) {
 }
 
 
+async function assertManualPlayIdentity(client, label) {
+  // Bypass the MCP start handler: ordinary Studio Play must inherit the edit
+  // identity even after a previous managed test has cleaned up its marker.
+  // Peer disconnects precede Studio's native StoppingPlayTest -> edit transition.
+  // The direct engine call bypasses MCP's normal start flow; let the UI finish
+  // tearing down the previous test before issuing this manual Play action.
+  // JS fake timers cannot advance this external native Studio transition.
+  await delay(2000);
+  try {
+    const started = await client.callTool('execute_luau', {
+      target: 'edit',
+      code: 'task.spawn(function() game:GetService("StudioTestService"):ExecutePlayModeAsync({}) end) return true',
+    });
+    assert(started.success === true, `${label}: direct engine play started`);
+    await waitForRoles(client, ['edit', 'server', 'client-1'], { timeoutSec: 45 });
+    await assertSharedSoloProcessLogs(client);
+    await assertRuntimeEvalWorks(client);
+  } finally {
+    await safeStopPlaytest(client);
+    await waitForNoRuntime(client).catch(() => {});
+    await delay(2000);
+  }
+  await assertEditBridgesAbsent(client, label);
+}
+
 await runTest('runtime eval bridges stay out of edit mode', async ({ track }) => {
   const client = track(new McpClient('runtime-bridge'));
   await client.start();
@@ -220,6 +245,7 @@ await runTest('runtime eval bridges stay out of edit mode', async ({ track }) =>
     await waitForNoRuntime(client).catch(() => {});
   }
   await assertEditBridgesAbsent(client, 'after managed playtest');
+  await assertManualPlayIdentity(client, 'manual play after managed solo');
 
 
   const startedMultiplayerGroupId = await startManagedMultiplayer(client);
@@ -298,4 +324,5 @@ await runTest('runtime eval bridges stay out of edit mode', async ({ track }) =>
     await waitForNoRuntime(client).catch(() => {});
   }
   await assertEditBridgesAbsent(client, 'after managed multiplayer test');
+  await assertManualPlayIdentity(client, 'manual play after managed multiplayer');
 }).then((ok) => process.exit(ok ? 0 : 1));

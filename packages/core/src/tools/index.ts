@@ -1107,8 +1107,9 @@ export class RobloxStudioTools {
     targetPeerId: string,
     timeoutMs?: number,
     signal?: AbortSignal,
+    operationId?: string,
   ): Promise<StudioToolResponse> {
-    return this.client.request(endpoint, data, targetPeerId, timeoutMs, signal) as Promise<StudioToolResponse>;
+    return this.client.request(endpoint, data, targetPeerId, timeoutMs, signal, operationId) as Promise<StudioToolResponse>;
   }
 
   private _request(
@@ -1138,6 +1139,7 @@ export class RobloxStudioTools {
     instance_id: string | undefined,
     timeoutMs?: number,
     signal?: AbortSignal,
+    operationId?: string,
   ): Promise<StudioToolResponse> {
     const resolved = this.bridge.resolveTarget({ instance_id, target });
     if (!resolved.ok) throw new RoutingFailure(resolved.error);
@@ -1148,7 +1150,7 @@ export class RobloxStudioTools {
         data: this._routingErrorData(),
       });
     }
-    return this._requestPeer(endpoint, data, resolved.targetPeerId, timeoutMs, signal);
+    return this._requestPeer(endpoint, data, resolved.targetPeerId, timeoutMs, signal, operationId);
   }
 
   // Prefer the first client role in the selected process/group scope for live
@@ -1645,11 +1647,11 @@ export class RobloxStudioTools {
     };
   }
 
-  async setProperties(instancePath: string, properties: Record<string, unknown>, instance_id?: string) {
+  async setProperties(instancePath: string, properties: Record<string, unknown>, instance_id?: string, operation_id?: string) {
     if (!instancePath || !properties) {
       throw new Error('instancePath and properties are required for set_properties');
     }
-    const response = await this._callSingle('/api/set-properties', { instancePath, properties }, undefined, instance_id);
+    const response = await this._callSingle('/api/set-properties', { instancePath, properties }, undefined, instance_id, undefined, undefined, operation_id);
     return { content: [{ type: 'text', text: JSON.stringify(response) }] };
   }
 
@@ -1896,11 +1898,11 @@ export class RobloxStudioTools {
     };
   }
 
-  async executeLuau(code: string, target?: string, instance_id?: string) {
+  async executeLuau(code: string, target?: string, instance_id?: string, operation_id?: string) {
     if (!code) {
       throw new Error('Code is required for execute_luau');
     }
-    const response = await this._callSingle('/api/execute-luau', { code }, target || 'edit', instance_id);
+    const response = await this._callSingle('/api/execute-luau', { code }, target || 'edit', instance_id, undefined, undefined, operation_id);
     return {
       content: [
         {
@@ -3949,6 +3951,20 @@ export class RobloxStudioTools {
     return this._textResult({
       instances: this.bridge.getConnectedInstances(),
       multiplayerGroups: this.bridge.getConnectedMultiplayerGroups(),
+    });
+  }
+
+  async getRequestStatus(request_id: string) {
+    if (typeof request_id !== 'string' || request_id.length === 0 || request_id.length > 128) {
+      throw new Error('request_id must contain between 1 and 128 characters');
+    }
+    const status = await this.bridge.getRequestStatusEverywhere(request_id);
+    if (status) return this._textResult({ ...status });
+    return this._textResult({
+      requestId: request_id,
+      state: 'unknown',
+      outcome: 'unknown',
+      message: 'No retained operation record. It may have expired, been evicted, or belonged to an earlier server session. Do not infer that the mutation was not executed.',
     });
   }
 

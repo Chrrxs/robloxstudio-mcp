@@ -181,7 +181,7 @@ describe('runtime log responsiveness', () => {
       expect(bridge.claimNextCancellationForTransport(peerId('client-1'), 'cancel')).toEqual({
         requestId: stalled.requestId, reason: 'timeout',
       });
-      expect(bridge.resolveRequest(stalled.requestId, logResponse('late needle', 999))).toBe('unknown');
+      expect(bridge.resolveRequest(stalled.requestId, logResponse('late needle', 999))).toBe('accepted');
     }
 
     const recovered = query({ cursor: partial.nextCursor });
@@ -249,13 +249,13 @@ describe('runtime log responsiveness', () => {
     const claimed = claim('server');
     controller.abort();
     await jest.advanceTimersByTimeAsync(0);
-    expect(pending).toEqual([{ error: expect.objectContaining({ message: 'Request aborted' }) }]);
+    expect(pending).toEqual([{ error: expect.objectContaining({ message: expect.stringContaining('Request aborted') }) }]);
     expect(bridge.getPendingRequestCount()).toBe(0);
     expect(bridge.claimNextRequestForTransport(peerId('client-1', clientInstance), 'next')).toBeNull();
     expect(bridge.claimNextCancellationForTransport(peerId('server'), 'cancel')).toEqual({
       requestId: claimed.requestId, reason: 'aborted',
     });
-    expect(bridge.resolveRequest(claimed.requestId, logResponse('late needle', 999))).toBe('unknown');
+    expect(bridge.resolveRequest(claimed.requestId, logResponse('late needle', 999))).toBe('accepted');
     const recovered = query();
     answer('edit', 2);
     answer('server', 2);
@@ -280,6 +280,6 @@ describe('runtime log responsiveness', () => {
     expect(bridge.claimNextRequestForTransport(peerId('edit'), 'next')).toBeNull();
     expect(bridge.claimNextRequestForTransport(peerId('server'), 'next')).toBeNull();
     await jest.advanceTimersByTimeAsync(0);
-    expect(pending).toEqual([{ error: expect.objectContaining({ message: 'Request aborted' }) }]);
+    expect(pending).toEqual([{ error: expect.objectContaining({ message: expect.stringContaining('Request aborted') }) }]);
   });
 });

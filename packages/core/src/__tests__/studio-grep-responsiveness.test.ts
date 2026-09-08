@@ -343,6 +343,7 @@ describe('Studio grep responsiveness', () => {
       'peer:test',
       120_000,
       controller.signal,
+      undefined,
     );
   });
 

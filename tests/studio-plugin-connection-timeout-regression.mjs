@@ -83,7 +83,7 @@ async function assertBurst(instanceId, round) {
   `round ${round}: every response contains the exact complete numbered source`);
 
   const health = await readHealth();
-  assert(health.pluginConnected === true && health.activeEventStreams > 0,
+  assert(health.pluginConnected === true && health.activeWebSockets > 0,
     `round ${round}: Studio remains connected (${JSON.stringify(health)})`);
   assert(health.pendingRequests === 0,
     `round ${round}: no requests remain pending (${JSON.stringify(health)})`);

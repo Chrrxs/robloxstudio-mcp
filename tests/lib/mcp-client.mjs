@@ -64,7 +64,9 @@ export class McpClient {
     this.nextId = 1;
     this.pending = new Map();
     this.stderrLines = [];
-    this.stdoutBuf = '';
+    this.stdoutFragments = [];
+    this.stdoutBytesReceived = 0;
+    this.stdoutBufferedBytes = 0;
     this.stderrBuf = '';
     this.exitCode = null;
   }
@@ -92,11 +94,23 @@ export class McpClient {
     this.proc.stderr.setEncoding('utf8');
 
     this.proc.stdout.on('data', (chunk) => {
-      this.stdoutBuf += chunk;
-      let nl;
-      while ((nl = this.stdoutBuf.indexOf('\n')) !== -1) {
-        const line = this.stdoutBuf.slice(0, nl).trim();
-        this.stdoutBuf = this.stdoutBuf.slice(nl + 1);
+      this.stdoutBytesReceived += Buffer.byteLength(chunk);
+      let start = 0;
+      // Scan only newly received characters. Searching an ever-growing string
+      // repeatedly flattened/scanned 128MiB MCP responses quadratically.
+      for (let nl = chunk.indexOf('\n'); nl !== -1; nl = chunk.indexOf('\n', start)) {
+        const segment = chunk.slice(start, nl);
+        start = nl + 1;
+        let line;
+        if (this.stdoutFragments.length === 0) {
+          line = segment;
+        } else {
+          this.stdoutFragments.push(segment);
+          line = this.stdoutFragments.join('');
+          this.stdoutFragments.length = 0;
+        }
+        this.stdoutBufferedBytes = 0;
+        line = line.trim();
         if (!line) continue;
         try {
           const msg = JSON.parse(line);
@@ -110,6 +124,11 @@ export class McpClient {
         } catch {
           // Not a JSON-RPC line — ignore (could be MCP framing noise)
         }
+      }
+      if (start < chunk.length) {
+        const fragment = chunk.slice(start);
+        this.stdoutFragments.push(fragment);
+        this.stdoutBufferedBytes += Buffer.byteLength(fragment);
       }
     });
 

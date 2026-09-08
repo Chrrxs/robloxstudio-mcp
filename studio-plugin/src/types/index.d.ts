@@ -28,9 +28,20 @@ export interface ReadyResponse {
 	peerId: string;
 	instanceId: string;
 	multiplayerGroupId?: string;
+	protocolVersion: 1;
+	transportToken: string;
 }
 
 export type StudioCancellationReason = "timeout" | "aborted" | "connection_closed";
+
+export type StudioExecutionOutcome = "success" | "error" | "not_executed" | "unknown";
+
+export interface StudioProgressEvent {
+	kind: "progress";
+	requestId: string;
+	phase: "executing" | "response_delivery";
+	outcome?: StudioExecutionOutcome;
+}
 
 export interface StudioRequestContext {
 	requestId: string;
@@ -52,6 +63,12 @@ export interface StudioCancelEvent {
 	kind: "cancel";
 	requestId: string;
 	reason: StudioCancellationReason;
+}
+
+export interface StudioAckEvent {
+	kind: "ack";
+	requestId: string;
+	disposition: "accepted" | "already_settled" | "unknown";
 }
 
 export interface StudioStatusEvent {

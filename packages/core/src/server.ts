@@ -8,6 +8,7 @@ import { BridgeService } from './bridge-service.js';
 import { ProxyBridgeService } from './proxy-bridge-service.js';
 import type { ToolDefinition } from './tools/definitions.js';
 import { createToolServer } from './mcp-runtime.js';
+import { BoundedStdioTransport } from './stdio-transport.js';
 
 export interface ServerConfig {
   name: string;
@@ -155,7 +156,10 @@ export class RobloxStudioMCPServer {
           return handler(tools, args, invocation);
         },
       }),
-      { onerror: (error) => console.error('[mcp:stdio]', error) },
+      {
+        transport: new BoundedStdioTransport(),
+        onerror: (error) => console.error('[mcp:stdio]', error),
+      },
     );
     console.error(`${this.config.name} v${this.config.version} running on stdio`);
 

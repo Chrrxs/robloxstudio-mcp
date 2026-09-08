@@ -1,19 +1,24 @@
 import express from 'express';
-import type { Express } from 'express';
+import type { ErrorRequestHandler, Express } from 'express';
 import http from 'http';
+import { randomBytes } from 'node:crypto';
+import type { Duplex } from 'node:stream';
+import { WebSocketServer } from 'ws';
 import { toNodeHandler } from '@modelcontextprotocol/node';
 import { RobloxStudioTools } from './tools/index.js';
-import { BridgeService, RoutingFailure } from './bridge-service.js';
+import { BridgeService, RequestFailure, RoutingFailure } from './bridge-service.js';
 import type { PublicStudioInstance, PublicStudioPeer, RegisterPeerResult } from './bridge-service.js';
 import type { ToolDefinition } from './tools/definitions.js';
 import { createToolHttpHandler, normalizeToolResult, publicToolErrorBody } from './mcp-runtime.js';
 import type { ToolInvocationContext } from './mcp-runtime.js';
 import { tokensMatch } from './auth.js';
 import { StudioLaunchPreDispatchError } from './studio-instance-manager.js';
+import { HTTP_BODY_LIMIT_BYTES } from './http-body-limits.js';
 import {
-  SseStudioTransport,
-  MAX_ACTIVE_EVENT_STREAMS,
-  type EventStreamHandle,
+  WebSocketStudioTransport,
+  MAX_ACTIVE_STUDIO_SOCKETS,
+  MAX_STUDIO_FRAME_BYTES,
+  STUDIO_PROTOCOL_VERSION,
   type StudioStatusEvent,
 } from './studio-transport.js';
 
@@ -32,6 +37,7 @@ export interface RobloxStudioHttpApp extends Express {
   isMCPServerActive(): boolean;
   trackMCPActivity(): void;
   closeMcpHandler(): Promise<void> | undefined;
+  attachStudioTransport(server: http.Server): void;
   cleanup(): Promise<void>;
 }
 
@@ -136,13 +142,14 @@ function requiredClosedLineRange(body: any, toolName: string): { startLine: numb
 }
 
 export const TOOL_HANDLERS: Record<string, ToolHandler> = {
+  get_request_status: (tools, body) => tools.getRequestStatus(body.request_id),
   get_roblox_skills: (tools, body) => tools.getRobloxSkills(body.action, body.name),
   get_roblox_docs: (tools, body) => tools.getRobloxDocs(body.name, body.doc_type, body.section),
   get_place_info: (tools, body) => tools.getPlaceInfo(body.instance_id),
   search_objects: (tools, body) => tools.searchObjects(body.query, body.searchType, body.propertyName, body.instance_id),
   get_instance_properties: (tools, body) => tools.getInstanceProperties(body.instancePath, body.excludeSource, body.instance_id),
   get_project_structure: (tools, body) => tools.getProjectStructure(body.path, body.maxDepth, body.scriptsOnly, body.instance_id),
-  set_properties: (tools, body) => tools.setProperties(body.instancePath, body.properties, body.instance_id),
+  set_properties: (tools, body) => tools.setProperties(body.instancePath, body.properties, body.instance_id, body.operation_id),
   grep_scripts: (tools, body, context) => tools.grepScripts(body.pattern, {
     caseSensitive: body.caseSensitive,
     usePattern: body.usePattern,
@@ -166,7 +173,7 @@ export const TOOL_HANDLERS: Record<string, ToolHandler> = {
   },
   get_attributes: (tools, body) => tools.getAttributes(body.instancePath, body.instance_id),
   selection: (tools, body) => tools.selection(body.action, body, body.instance_id),
-  execute_luau: (tools, body) => tools.executeLuau(body.code, body.target, body.instance_id),
+  execute_luau: (tools, body) => tools.executeLuau(body.code, body.target, body.instance_id, body.operation_id),
   eval_server_runtime: (tools, body) => tools.evalServerRuntime(body.code, body.instance_id),
   eval_client_runtime: (tools, body) => tools.evalClientRuntime(body.code, body.target, body.instance_id),
   set_network_profile: (tools, body) => tools.setNetworkProfile(body.profile, body.target, body.overrides, body.instance_id),
@@ -242,6 +249,17 @@ export const TOOL_HANDLERS: Record<string, ToolHandler> = {
   }, body.instance_id),
 };
 
+const MAX_STUDIO_SESSIONS = 256;
+
+function rejectStudioUpgrade(socket: Duplex, status: number, error: string): void {
+  const body = JSON.stringify({ error });
+  socket.end(
+    `HTTP/1.1 ${status} ${http.STATUS_CODES[status]}\r\n` +
+    'Connection: close\r\nContent-Type: application/json\r\n' +
+    `Content-Length: ${Buffer.byteLength(body)}\r\n\r\n${body}`,
+  );
+}
+
 export function createHttpServer(tools: RobloxStudioTools, bridge: BridgeService, allowedTools?: Set<string>, serverConfig?: StreamableHttpConfig, security?: HttpSecurityOptions): RobloxStudioHttpApp {
   // Express cannot know about the lifecycle controls attached below.
   const app = express() as unknown as RobloxStudioHttpApp;
@@ -254,8 +272,19 @@ export function createHttpServer(tools: RobloxStudioTools, bridge: BridgeService
   let mcpServerStartTime = 0;
   const proxyInstances = new Set<string>();
   const rejectedVersionPeers = new Set<string>();
-  const eventTransport = new SseStudioTransport(bridge);
-  const eventStreamHandles = new Set<EventStreamHandle>();
+  const studioTransport = new WebSocketStudioTransport(bridge);
+  const transportTokens = new Map<string, string>();
+  const boundServers = new Set<http.Server>();
+  const webSocketServer = new WebSocketServer({
+    noServer: true,
+    clientTracking: false,
+    perMessageDeflate: false,
+    maxPayload: MAX_STUDIO_FRAME_BYTES,
+  });
+  let closed = false;
+  const unsubscribePeerClosed = bridge.onPeerClosed((peer) => {
+    transportTokens.delete(peer.peerId);
+  });
 
   const setMCPServerActive = (active: boolean) => {
     mcpServerActive = active;
@@ -266,14 +295,14 @@ export function createHttpServer(tools: RobloxStudioTools, bridge: BridgeService
       mcpServerStartTime = 0;
       lastMCPActivity = 0;
     }
-    eventTransport.refreshStatus();
+    studioTransport.refreshStatus();
   };
 
   const trackMCPActivity = () => {
     if (mcpServerActive) {
       const wasConnected = (Date.now() - lastMCPActivity) < 30000;
       lastMCPActivity = Date.now();
-      if (!wasConnected) eventTransport.refreshStatus();
+      if (!wasConnected) studioTransport.refreshStatus();
     }
   };
 
@@ -307,6 +336,68 @@ export function createHttpServer(tools: RobloxStudioTools, bridge: BridgeService
   // previous blanket `cors()` (allow-all), which let any web page drive the
   // API via the victim's browser.
   const allowedOrigins = new Set(security?.allowedOrigins ?? []);
+  const upgradeStudio = (req: http.IncomingMessage, socket: Duplex, head: Buffer): void => {
+    socket.on('error', () => socket.destroy());
+    if (closed) {
+      rejectStudioUpgrade(socket, 503, 'server_shutdown');
+      return;
+    }
+    let url: URL;
+    try {
+      url = new URL(req.url ?? '/', 'http://localhost');
+    } catch {
+      rejectStudioUpgrade(socket, 400, 'invalid_websocket_url');
+      return;
+    }
+    if (url.pathname !== '/studio') {
+      rejectStudioUpgrade(socket, 404, 'unknown_websocket_endpoint');
+      return;
+    }
+    const origin = req.headers.origin;
+    if (origin && !allowedOrigins.has(origin)) {
+      rejectStudioUpgrade(socket, 403, 'forbidden_origin');
+      return;
+    }
+    if (req.method !== 'GET' || url.searchParams.getAll('protocolVersion').length !== 1
+      || url.searchParams.get('protocolVersion') !== String(STUDIO_PROTOCOL_VERSION)) {
+      rejectStudioUpgrade(socket, 426, 'studio_protocol_mismatch');
+      return;
+    }
+    const peerId = url.searchParams.get('peerId');
+    if (!peerId || url.searchParams.getAll('peerId').length !== 1) {
+      rejectStudioUpgrade(socket, 400, 'missing_peer_id');
+      return;
+    }
+    const peer = bridge.getPeerById(peerId);
+    if (!peer) {
+      rejectStudioUpgrade(socket, 404, 'unknown_peer');
+      return;
+    }
+    if (peer.transportPeerId !== peerId) {
+      rejectStudioUpgrade(socket, 403, 'peer_has_no_socket');
+      return;
+    }
+    const token = transportTokens.get(peerId);
+    const provided = req.headers['x-studio-token'];
+    if (!token || typeof provided !== 'string' || !tokensMatch(provided, token)) {
+      rejectStudioUpgrade(socket, 401, 'invalid_studio_token');
+      return;
+    }
+    if (!studioTransport.canOpen(peerId)) {
+      rejectStudioUpgrade(socket, 503, 'studio_socket_capacity_reached');
+      return;
+    }
+    webSocketServer.handleUpgrade(req, socket, head, (webSocket) => {
+      // ws rejects oversized frames before delivering a message to the adapter.
+      webSocket.on('error', (error) => {
+        if ('code' in error && error.code === 'WS_ERR_UNSUPPORTED_MESSAGE_LENGTH') {
+          console.error(`[studio-websocket] server_receive frame exceeds limitBytes=${MAX_STUDIO_FRAME_BYTES}`);
+        }
+      });
+      const handle = studioTransport.open(peerId, webSocket, () => eventStatus(peerId));
+      if (!handle) webSocket.close(1013, 'studio_socket_capacity_reached');
+    });
+  };
   app.use((req, res, next) => {
     const origin = req.headers.origin;
     if (typeof origin !== 'string' || origin === '') {
@@ -333,15 +424,17 @@ export function createHttpServer(tools: RobloxStudioTools, bridge: BridgeService
   });
 
   // -- Shared-secret auth --
-  // Tool-invoking endpoints require the token; plugin-facing endpoints
-  // (/ready, /events, /response, /disconnect) and passive status endpoints
-  // stay open because the Studio plugin cannot read local files. These routes
-  // only register or receive downstream work; they cannot invoke tools.
+  // Tool-invoking and recovery endpoints require the local shared secret.
+  // Native plugin bootstrap retains its existing Origin policy; the duplex
+  // /studio upgrade requires a separate secret bound to its registered Peer.
   const authToken = security?.authToken;
-  const authRequired = (path: string) =>
-    path === '/mcp' || path.startsWith('/mcp/') ||
-    path === '/proxy' || path === '/topology' || path === '/unregister-instance-id' ||
-    path === '/create-multiplayer-group' || path === '/remove-multiplayer-group';
+  const authRequired = (requestPath: string): boolean => {
+    // Match Express's default case-insensitive, non-strict route aliases.
+    const path = requestPath.toLowerCase().replace(/\/+$/, '');
+    return path === '/mcp' || path.startsWith('/mcp/') ||
+      path === '/proxy' || path === '/topology' || path === '/request-status' || path === '/unregister-instance-id' ||
+      path === '/create-multiplayer-group' || path === '/remove-multiplayer-group';
+  };
   app.use((req, res, next) => {
     if (!authToken || !authRequired(req.path)) {
       next();
@@ -363,8 +456,31 @@ export function createHttpServer(tools: RobloxStudioTools, bridge: BridgeService
     });
   });
 
-  app.use(express.json({ limit: '50mb' }));
-  app.use(express.urlencoded({ limit: '50mb', extended: true }));
+  app.use(express.json({ limit: HTTP_BODY_LIMIT_BYTES }));
+  app.use(express.urlencoded({ limit: HTTP_BODY_LIMIT_BYTES, extended: true }));
+  const handleBodySizeError: ErrorRequestHandler = (error: unknown, _req, res, next) => {
+    if (!error || typeof error !== 'object' || !('type' in error) || error.type !== 'entity.too.large') {
+      next(error);
+      return;
+    }
+    // raw-body reports the declared length when rejecting before reading, or
+    // the received byte count when a streamed/inflated body crosses the cap.
+    const bytes = 'received' in error && typeof error.received === 'number' ? error.received
+      : 'length' in error && typeof error.length === 'number' ? error.length : undefined;
+    if (bytes === undefined) {
+      next(error);
+      return;
+    }
+    res.status(413).json({
+      error: `HTTP request body is ${bytes} bytes at http_receive; limit ${HTTP_BODY_LIMIT_BYTES} bytes; queued; not_executed`,
+      code: 'request_too_large',
+      details: {
+        bytes, limitBytes: HTTP_BODY_LIMIT_BYTES, stage: 'queued',
+        outcome: 'not_executed', transportStage: 'http_receive',
+      },
+    });
+  };
+  app.use(handleBodySizeError);
 
 
   app.get('/health', (req, res) => {
@@ -396,7 +512,8 @@ export function createHttpServer(tools: RobloxStudioTools, bridge: BridgeService
       uptime: mcpServerActive ? Date.now() - mcpServerStartTime : 0,
       pendingRequests: bridge.getPendingRequestCount(),
       proxyInstanceCount: proxyInstances.size,
-      activeEventStreams: eventTransport.activeStreamCount,
+      activeWebSockets: studioTransport.activeSocketCount,
+      studioSocketCapacity: MAX_ACTIVE_STUDIO_SOCKETS,
       streamableHttp: !!serverConfig,
     });
   });
@@ -534,6 +651,10 @@ export function createHttpServer(tools: RobloxStudioTools, bridge: BridgeService
         return;
       }
     }
+    if (closed || (!isProxiedPeer && !transportTokens.has(peerId) && transportTokens.size >= MAX_STUDIO_SESSIONS)) {
+      res.status(503).json({ success: false, error: closed ? 'server_shutdown' : 'studio_session_capacity_reached' });
+      return;
+    }
 
     let result: RegisterPeerResult;
     try {
@@ -572,7 +693,12 @@ export function createHttpServer(tools: RobloxStudioTools, bridge: BridgeService
       });
       return;
     }
-    eventTransport.refreshStatus(transportPeerId);
+    let transportToken: string | undefined;
+    if (!isProxiedPeer) {
+      transportToken = transportTokens.get(peerId) ?? randomBytes(32).toString('hex');
+      transportTokens.set(peerId, transportToken);
+    }
+    studioTransport.refreshStatus(transportPeerId);
 
     res.json({
       success: true,
@@ -581,6 +707,7 @@ export function createHttpServer(tools: RobloxStudioTools, bridge: BridgeService
       instanceId: result.instanceId,
       multiplayerGroupId: result.multiplayerGroupId,
       serverVersion,
+      ...(!isProxiedPeer ? { protocolVersion: STUDIO_PROTOCOL_VERSION, transportToken } : {}),
     });
   });
 
@@ -656,90 +783,31 @@ export function createHttpServer(tools: RobloxStudioTools, bridge: BridgeService
     });
   });
 
-  app.get('/events', (req, res) => {
-    const peerId = typeof req.query.peerId === 'string'
-      ? req.query.peerId
-      : undefined;
-    if (!peerId) {
-      res.status(400).json({
-        error: 'missing_peer_id',
-        message: 'peerId is required',
-      });
-      return;
-    }
-
-    const peer = bridge.getPeerById(peerId);
-    if (!peer) {
-      res.status(404).json({
-        error: 'unknown_peer',
-        knownPeer: false,
-      });
-      return;
-    }
-    if (peer.transportPeerId !== peerId) {
-      res.status(409).json({
-        error: 'peer_has_no_event_stream',
-        transportPeerId: peer.transportPeerId,
-      });
-      return;
-    }
-    if (!eventTransport.canOpen(peerId)) {
-      res.setHeader('Retry-After', '1');
-      res.status(503).json({
-        error: 'event_stream_capacity_reached',
-        capacity: MAX_ACTIVE_EVENT_STREAMS,
-      });
-      return;
-    }
-
-    bridge.updatePeerActivity(peerId);
-    res.status(200);
-    res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
-    res.setHeader('Cache-Control', 'no-cache, no-transform');
-    res.setHeader('Connection', 'keep-alive');
-    res.setHeader('X-Accel-Buffering', 'no');
-    res.flushHeaders();
-
-    const handle = eventTransport.open(
-      peerId,
-      res,
-      () => eventStatus(peerId),
-    );
-    if (!handle) {
-      res.end();
-      return;
-    }
-    eventStreamHandles.add(handle);
-    res.once('close', () => eventStreamHandles.delete(handle));
+  app.get(['/studio', '/events'], (_req, res) => {
+    res.setHeader('Upgrade', 'websocket');
+    res.status(426).json({ error: 'studio_websocket_required', protocolVersion: STUDIO_PROTOCOL_VERSION });
   });
 
 
 
 
-  app.post('/response', (req, res) => {
-    const { requestId, response, error } = req.body;
-    if (typeof requestId !== 'string' || requestId.length === 0) {
-      res.status(400).json({
-        success: false,
-        error: 'invalid_request_id',
-      });
+  app.post('/response', (_req, res) => {
+    res.setHeader('Upgrade', 'websocket');
+    res.status(426).json({ error: 'studio_websocket_required', protocolVersion: STUDIO_PROTOCOL_VERSION });
+  });
+
+  app.get('/request-status', (req, res) => {
+    const requestId = req.query.requestId;
+    if (typeof requestId !== 'string' || requestId.length === 0 || requestId.length > 1024) {
+      res.status(400).json({ error: 'invalid_request_id' });
       return;
     }
-
-    const disposition = error !== undefined
-      ? bridge.rejectRequest(requestId, error)
-      : bridge.resolveRequest(requestId, response);
-    if (disposition === 'unknown') {
-      res.status(404).json({ success: false, disposition });
-      return;
-    }
-
-    res.json({ success: true, disposition });
+    res.json({ status: bridge.getRequestStatus(requestId) ?? null });
   });
 
 
   app.post('/proxy', async (req, res) => {
-    const { endpoint, data, targetPeerId, proxyInstanceId, timeoutMs } = req.body;
+    const { endpoint, data, targetPeerId, proxyInstanceId, timeoutMs, operationId } = req.body;
 
     if (!endpoint || !targetPeerId) {
       res.status(400).json({ error: 'endpoint and targetPeerId are required' });
@@ -757,6 +825,10 @@ export function createHttpServer(tools: RobloxStudioTools, bridge: BridgeService
     if (proxyInstanceId) {
       proxyInstances.add(proxyInstanceId);
     }
+    if (operationId !== undefined && (typeof operationId !== 'string' || operationId.trim().length === 0 || operationId.length > 128)) {
+      res.status(400).json({ error: 'operationId must be a non-empty string of at most 128 characters' });
+      return;
+    }
 
     const controller = new AbortController();
     const abort = () => controller.abort();
@@ -769,12 +841,14 @@ export function createHttpServer(tools: RobloxStudioTools, bridge: BridgeService
         targetPeerId,
         timeoutMs,
         controller.signal,
+        operationId,
       );
       res.json({ response });
     } catch (error) {
       if (!res.headersSent && !res.destroyed) {
         res.status(500).json({
-          error: error instanceof Error ? error.message : 'Proxy request failed',
+          error: error instanceof Error ? error.message : error === undefined ? 'Proxy request failed' : error,
+          ...(error instanceof RequestFailure ? { code: error.code, details: error.details } : {}),
         });
       }
     } finally {
@@ -839,10 +913,25 @@ export function createHttpServer(tools: RobloxStudioTools, bridge: BridgeService
   app.isMCPServerActive = isMCPServerActive;
   app.trackMCPActivity = trackMCPActivity;
   app.closeMcpHandler = () => mcpHandler?.close();
+  app.attachStudioTransport = (server) => {
+    if (closed) throw new Error('Cannot attach a closed Studio transport');
+    if (boundServers.has(server)) return;
+    boundServers.add(server);
+    server.on('upgrade', upgradeStudio);
+    server.once('close', () => {
+      boundServers.delete(server);
+      server.removeListener('upgrade', upgradeStudio);
+    });
+  };
   app.cleanup = async () => {
-    for (const handle of eventStreamHandles) handle.close();
-    eventStreamHandles.clear();
-    eventTransport.close();
+    if (closed) return;
+    closed = true;
+    for (const server of boundServers) server.removeListener('upgrade', upgradeStudio);
+    boundServers.clear();
+    unsubscribePeerClosed();
+    transportTokens.clear();
+    studioTransport.close();
+    webSocketServer.close();
     await mcpHandler?.close();
   };
 
@@ -881,16 +970,24 @@ export async function listenWithRetry(
 }
 
 function bindPort(app: express.Express, host: string, port: number): Promise<http.Server> {
-  return new Promise((resolve, reject) => {
-    const server = http.createServer(app);
-    const onError = (err: NodeJS.ErrnoException) => {
-      server.removeListener('error', onError);
-      reject(err);
-    };
-    server.once('error', onError);
-    server.listen(port, host, () => {
-      server.removeListener('error', onError);
+  const { promise, resolve, reject } = Promise.withResolvers<http.Server>();
+  const server = http.createServer(app);
+  const onError = (err: NodeJS.ErrnoException) => {
+    server.removeListener('error', onError);
+    reject(err);
+  };
+  server.once('error', onError);
+  server.listen(port, host, () => {
+    server.removeListener('error', onError);
+    try {
+      if ('attachStudioTransport' in app && typeof app.attachStudioTransport === 'function') {
+        app.attachStudioTransport(server);
+      }
       resolve(server);
-    });
+    } catch (error) {
+      server.close();
+      reject(error);
+    }
   });
+  return promise;
 }

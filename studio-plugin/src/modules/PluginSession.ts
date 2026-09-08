@@ -3,14 +3,38 @@ import State from "./State";
 import PeerRole from "./PeerRole";
 import TopologyId from "./TopologyId";
 
+const CoreGui = game.GetService("CoreGui");
+
 const MCP_PLACE_ID_ATTRIBUTE = "__MCPPlaceId";
 const TOPOLOGY_MODE_ATTRIBUTE = "__MCPTopologyMode";
 const TOPOLOGY_INSTANCE_ID_ATTRIBUTE = "__MCPTopologyInstanceId";
 const TOPOLOGY_GROUP_ID_ATTRIBUTE = "__MCPTopologyGroupId";
 const TOPOLOGY_TOKEN_ATTRIBUTE = "__MCPTopologyToken";
+const SESSION_IDENTITY_NAME = "__MCPSessionIdentity";
 
 const peerId = TopologyId.createPeerId();
-const processInstanceId = TopologyId.currentProcessInstanceId();
+const isEditSession = PeerRole.detect() === "edit";
+const existingSessionIdentity = CoreGui.FindFirstChild(SESSION_IDENTITY_NAME);
+let sessionInstanceId: string;
+let createdSessionIdentity = false;
+if (
+	existingSessionIdentity !== undefined &&
+	existingSessionIdentity.IsA("StringValue") &&
+	!existingSessionIdentity.Archivable &&
+	existingSessionIdentity.Value.match("^instance:[0-9a-z][0-9a-z][0-9a-z]%-[0-9a-z][0-9a-z][0-9a-z]$")[0] !== undefined
+) {
+	sessionInstanceId = existingSessionIdentity.Value;
+} else {
+	existingSessionIdentity?.Destroy();
+	sessionInstanceId = TopologyId.createInstanceId();
+	const sessionIdentity = new Instance("StringValue");
+	sessionIdentity.Name = SESSION_IDENTITY_NAME;
+	sessionIdentity.Value = sessionInstanceId;
+	sessionIdentity.Archivable = false;
+	sessionIdentity.Parent = CoreGui;
+	createdSessionIdentity = true;
+}
+let inheritedInstanceId: string | undefined;
 
 type TopologyMode = "shared" | "multiplayer";
 
@@ -23,13 +47,15 @@ function getMarkerMode(): TopologyMode | undefined {
 }
 
 function getInstanceId(): string {
-	if (getMarkerMode() === "shared") {
+	if (inheritedInstanceId !== undefined) return inheritedInstanceId;
+	if (!isEditSession && getMarkerMode() === "shared") {
 		const sharedInstanceId = ReplicatedStorage.GetAttribute(TOPOLOGY_INSTANCE_ID_ATTRIBUTE);
 		if (typeIs(sharedInstanceId, "string") && sharedInstanceId !== "") {
+			inheritedInstanceId = sharedInstanceId;
 			return sharedInstanceId;
 		}
 	}
-	return processInstanceId;
+	return sessionInstanceId;
 }
 
 function getMultiplayerGroupId(): string | undefined {
@@ -62,7 +88,7 @@ function setTopologyMarker(mode: TopologyMode, instanceId: string | undefined, g
 }
 
 function prepareSharedTopology(): string {
-	return setTopologyMarker("shared", processInstanceId, undefined);
+	return setTopologyMarker("shared", sessionInstanceId, undefined);
 }
 
 function prepareMultiplayerTopology(groupId: string): string {
@@ -71,6 +97,10 @@ function prepareMultiplayerTopology(groupId: string): string {
 
 function clearTopologyMarker(token: string): void {
 	if (ReplicatedStorage.GetAttribute(TOPOLOGY_TOKEN_ATTRIBUTE) !== token) return;
+	if (isEditSession) {
+		prepareSharedTopology();
+		return;
+	}
 	ReplicatedStorage.SetAttribute(TOPOLOGY_MODE_ATTRIBUTE, undefined);
 	ReplicatedStorage.SetAttribute(TOPOLOGY_INSTANCE_ID_ATTRIBUTE, undefined);
 	ReplicatedStorage.SetAttribute(TOPOLOGY_GROUP_ID_ATTRIBUTE, undefined);
@@ -130,6 +160,14 @@ function createReadyPayload(
 		pluginVariant: State.PLUGIN_VARIANT,
 		timestamp: tick(),
 	};
+}
+
+// CoreGui survives plugin reloads without saving or replicating this identity.
+// Preserve active test markers on reload; fresh edits replace saved place markers.
+if (isEditSession) {
+	if (createdSessionIdentity || getMarkerMode() === undefined) prepareSharedTopology();
+} else {
+	getInstanceId();
 }
 
 export = {

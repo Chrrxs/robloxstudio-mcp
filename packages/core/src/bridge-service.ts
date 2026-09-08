@@ -1,4 +1,4 @@
-import { randomUUID } from 'crypto';
+import { createHash, randomUUID } from 'crypto';
 import type {
   StudioCancellationReason,
   StudioQueuedRequest,
@@ -132,6 +132,134 @@ export type RegisterPeerResult =
     };
 
 export type SettlementDisposition = 'accepted' | 'already_settled' | 'unknown';
+export type RequestStage = 'queued' | 'dispatched' | 'executing' | 'response_delivery';
+export type ExecutionOutcome = 'success' | 'error' | 'not_executed' | 'unknown';
+
+export interface RequestObservations {
+  /** Server observation times for plugin handler entry/return, not user Luau instruction execution. */
+  executionStartedAt?: number;
+  executionCompletedAt?: number;
+  executionOutcome?: ExecutionOutcome;
+  connectionLostAt?: number;
+  connectionRestoredAt?: number;
+}
+
+export function isExecutionOutcome(value: unknown): value is ExecutionOutcome {
+  return value === 'success' || value === 'error' || value === 'not_executed' || value === 'unknown';
+}
+
+export function isRequestStage(value: unknown): value is RequestStage {
+  return value === 'queued' || value === 'dispatched' || value === 'executing' || value === 'response_delivery';
+}
+
+function handlerOutcome(response: unknown): ExecutionOutcome {
+  if (!response || typeof response !== 'object') return 'success';
+  if (('error' in response && response.error !== undefined && response.error !== null)
+    || ('success' in response && response.success === false)
+    || ('ok' in response && response.ok === false)) return 'error';
+  if ('summary' in response && response.summary && typeof response.summary === 'object'
+    && 'failed' in response.summary && typeof response.summary.failed === 'number' && response.summary.failed > 0) return 'error';
+  return 'success';
+}
+
+function observations(status: RequestObservations): RequestObservations {
+  return {
+    executionStartedAt: status.executionStartedAt, executionCompletedAt: status.executionCompletedAt,
+    executionOutcome: status.executionOutcome, connectionLostAt: status.connectionLostAt,
+    connectionRestoredAt: status.connectionRestoredAt,
+  };
+}
+
+export interface RequestStatus extends RequestObservations {
+  requestId: string;
+  targetPeerId: string;
+  queuedAt: number;
+  dispatchedAt?: number;
+  settledAt?: number;
+  waiterEndedAt?: number;
+  stage: RequestStage;
+  state: 'pending' | 'timed_out' | 'aborted' | 'disconnected' | 'settled';
+  outcome: 'pending' | 'not_executed' | 'unknown' | 'success' | 'error';
+  response?: unknown;
+  error?: unknown;
+  resultUnavailable?: { reason: 'size_limit' | 'serialization_failed' | 'retention_capacity'; bytes?: number; limitBytes: number };
+}
+
+export interface RequestFailureDetails extends RequestObservations {
+  requestId: string;
+  targetPeerId: string;
+  stage: RequestStage;
+  outcome: 'not_executed' | 'unknown';
+  bytes?: number;
+  limitBytes?: number;
+  transportStage?: 'server_send' | 'proxy_send' | 'http_receive';
+}
+
+export class RequestFailure extends Error {
+  constructor(
+    message: string,
+    readonly code: string,
+    readonly details: RequestFailureDetails,
+  ) {
+    super(message);
+    this.name = 'RequestFailure';
+  }
+}
+
+export function parseObservations(value: object): RequestObservations {
+  const result: RequestObservations = {};
+  if ('executionOutcome' in value) {
+    if (!isExecutionOutcome(value.executionOutcome)) throw new Error('Invalid execution outcome');
+    result.executionOutcome = value.executionOutcome;
+  }
+  for (const key of ['executionStartedAt', 'executionCompletedAt', 'connectionLostAt', 'connectionRestoredAt'] as const) {
+    if (!(key in value)) continue;
+    const timestamp = Reflect.get(value, key);
+    if (typeof timestamp !== 'number' || !Number.isFinite(timestamp)) throw new Error('Invalid observation timestamp');
+    result[key] = timestamp;
+  }
+  return result;
+}
+
+export function parseFailureDetails(
+  value: unknown,
+  identity: Pick<RequestFailureDetails, 'requestId' | 'targetPeerId'>,
+): RequestFailureDetails | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  // The HTTP parser rejects before decoding the envelope, so only the caller
+  // can attach the operation identity to that transport's diagnostics.
+  const isHttpRejection = 'transportStage' in value && value.transportStage === 'http_receive';
+  const requestId = 'requestId' in value ? value.requestId : isHttpRejection ? identity.requestId : undefined;
+  const targetPeerId = 'targetPeerId' in value ? value.targetPeerId : isHttpRejection ? identity.targetPeerId : undefined;
+  if (
+    typeof requestId !== 'string'
+    || typeof targetPeerId !== 'string'
+    || requestId !== identity.requestId || targetPeerId !== identity.targetPeerId
+    || !('stage' in value) || !isRequestStage(value.stage)
+    || !('outcome' in value) || (value.outcome !== 'not_executed' && value.outcome !== 'unknown')
+  ) return undefined;
+  return {
+    requestId,
+    targetPeerId,
+    stage: value.stage,
+    outcome: value.outcome,
+    ...parseObservations(value),
+    ...('bytes' in value && typeof value.bytes === 'number' ? { bytes: value.bytes } : {}),
+    ...('limitBytes' in value && typeof value.limitBytes === 'number' ? { limitBytes: value.limitBytes } : {}),
+    ...('transportStage' in value && (
+      value.transportStage === 'server_send' || value.transportStage === 'proxy_send' || value.transportStage === 'http_receive'
+    ) ? { transportStage: value.transportStage } : {}),
+  };
+}
+
+interface OperationRecord {
+  status: RequestStatus;
+  fingerprint: string;
+  transportPeerId?: string;
+  updatedAt: number;
+  serializedResult?: string;
+  resultBytes: number;
+}
 
 interface PendingRequest {
   id: string;
@@ -142,9 +270,11 @@ interface PendingRequest {
   claimOwner?: string;
   lastDeliveryTransportPeerId?: string;
   resolve: (value: unknown) => void;
+  promise: Promise<unknown>;
   reject: (error: unknown) => void;
-  timeoutId: ReturnType<typeof setTimeout>;
+  timeoutId: NodeJS.Timeout;
   timeoutMs: number;
+  requestBytes: number;
   abortSignal?: AbortSignal;
   abortListener?: () => void;
 }
@@ -223,13 +353,18 @@ export function toPublicPeer(peer: StudioPeer): PublicStudioPeer {
 }
 
 const STALE_PEER_MS = 30_000;
-const ACCEPTED_REQUEST_TOMBSTONE_TTL_MS = 60_000;
-const MAX_ACCEPTED_REQUEST_TOMBSTONES = 4096;
+const OPERATION_RETENTION_MS = 5 * 60_000;
+const MAX_OPERATION_RECORDS = 32768;
+const MAX_RETAINED_RESULTS = 1024;
+const MAX_RETAINED_RESULT_BYTES = 64 * 1024 * 1024;
+const MAX_REQUEST_BYTES = 64 * 1024 * 1024;
+const MAX_PENDING_REQUESTS = 1024;
+const MAX_PENDING_REQUEST_BYTES = 64 * 1024 * 1024;
 const CANCELLATION_TOMBSTONE_TTL_MS = 60_000;
 const MAX_CANCELLATION_TOMBSTONES = 4096;
 // Node socket backpressure does not represent Studio's MessageReceived capacity.
 // Keep each consumer's outstanding execution window small enough to avoid flooding it.
-const MAX_OUTSTANDING_REQUESTS_PER_DELIVERY_OWNER = 4;
+const MAX_OUTSTANDING_REQUESTS_PER_TRANSPORT = 4;
 
 function roleOrder(role: string): number {
   if (role === 'edit') return 0;
@@ -269,7 +404,10 @@ function copyGroup(group: MultiplayerGroup): MultiplayerGroup {
 
 export class BridgeService implements StudioTransportQueue {
   private readonly pendingRequests = new Map<string, PendingRequest>();
-  private readonly acceptedRequestIds = new Map<string, number>();
+  private readonly operations = new Map<string, OperationRecord>();
+  private readonly retainedResults = new Map<string, OperationRecord>();
+  private retainedResultBytes = 0;
+  private pendingRequestBytes = 0;
   private readonly pendingCancellations = new Map<string, PendingCancellation>();
   private readonly peersById = new Map<string, StudioPeer>();
   private readonly multiplayerGroupsById = new Map<string, MultiplayerGroup>();
@@ -319,11 +457,24 @@ export class BridgeService implements StudioTransportQueue {
         this.deliveryOwnersByTransportPeer.set(transportPeerId, owners);
       }
       owners.add(owner);
+      for (const operation of this.operations.values()) {
+        if (operation.transportPeerId === transportPeerId && operation.status.state !== 'settled'
+          && operation.status.connectionLostAt !== undefined && operation.status.connectionRestoredAt === undefined) {
+          operation.status.connectionRestoredAt = Date.now();
+        }
+      }
       return;
     }
     if (!owners) return;
     owners.delete(owner);
-    if (owners.size === 0) this.deliveryOwnersByTransportPeer.delete(transportPeerId);
+    if (owners.size === 0) {
+      this.deliveryOwnersByTransportPeer.delete(transportPeerId);
+      for (const operation of this.operations.values()) {
+        if (operation.transportPeerId !== transportPeerId || operation.status.state === 'settled') continue;
+        operation.status.connectionLostAt = Date.now();
+        delete operation.status.connectionRestoredAt;
+      }
+    }
   }
 
   private notifyRequestAvailable(transportPeerId: string): void {
@@ -611,8 +762,7 @@ export class BridgeService implements StudioTransportQueue {
     for (const request of Array.from(this.pendingRequests.values())) {
       if (request.targetPeerId !== peerId) continue;
       const deliveryTransportPeerId = request.lastDeliveryTransportPeerId;
-      this.removePendingRequest(request);
-      request.reject(new Error(`Target Peer "${peerId}" disconnected`));
+      this.endRequestWaiter(request, 'disconnected', `Target Peer "${peerId}" disconnected`);
       if (deliveryTransportPeerId) this.notifyRequestAvailable(deliveryTransportPeerId);
     }
     for (const dependentPeerId of dependentPeerIds) {
@@ -916,45 +1066,128 @@ export class BridgeService implements StudioTransportQueue {
     targetPeerId: string,
     timeoutMs = this.requestTimeout,
     signal?: AbortSignal,
+    operationId?: string,
   ): Promise<unknown> {
-    const requestId = randomUUID();
+    const requestId = operationId ?? randomUUID();
     const effectiveTimeoutMs = Math.max(1, timeoutMs);
-    if (signal?.aborted) return Promise.reject(new Error('Request aborted'));
+    const details: RequestFailureDetails = { requestId, targetPeerId, stage: 'queued', outcome: 'not_executed', executionOutcome: 'not_executed' };
+    if (typeof requestId !== 'string' || requestId.trim().length === 0 || requestId.length > 128) {
+      return Promise.reject(new RequestFailure('operationId must be a nonempty string of at most 128 characters', 'invalid_operation_id', details));
+    }
+    if (signal?.aborted) {
+      return Promise.reject(new RequestFailure(`Request aborted: ${requestId}; queued; not_executed`, 'request_aborted', details));
+    }
+    let requestBytes: number;
+    let fingerprint: string;
+    try {
+      const target = this.getPeerById(targetPeerId);
+      fingerprint = createHash('sha256').update(JSON.stringify({ targetPeerId, endpoint, data })).digest('hex');
+      requestBytes = Buffer.byteLength(JSON.stringify({
+        kind: 'request', requestId, peerId: targetPeerId, target: target?.role,
+        endpoint, data: data ?? null, remainingMs: effectiveTimeoutMs,
+      }));
+    } catch {
+      return Promise.reject(new RequestFailure(`Request ${requestId} cannot be serialized; queued; not_executed`, 'request_serialization_failed', details));
+    }
+    this.pruneOperations(Date.now());
+    const existing = this.operations.get(requestId);
+    if (existing) {
+      if (existing.fingerprint !== fingerprint) {
+        return Promise.reject(new RequestFailure(
+          `Request ${requestId} already identifies a different operation; existing operation ${existing.status.stage}; not replayed`,
+          'operation_id_collision',
+          { requestId, targetPeerId: existing.status.targetPeerId, stage: existing.status.stage, outcome: 'unknown', ...observations(existing.status) },
+        ));
+      }
+      const pending = this.pendingRequests.get(requestId);
+      if (pending) return pending.promise;
+      const status = this.getRequestStatus(requestId)!;
+      if (status.state === 'settled' && !status.resultUnavailable) {
+        const error = status.error;
+        if (error && typeof error === 'object'
+          && 'name' in error && error.name === 'RequestFailure'
+          && 'code' in error && typeof error.code === 'string'
+          && 'message' in error && typeof error.message === 'string' && 'details' in error) {
+          const failureDetails = parseFailureDetails(error.details, { requestId, targetPeerId });
+          if (failureDetails) return Promise.reject(new RequestFailure(error.message, error.code, failureDetails));
+        }
+        return Object.hasOwn(status, 'error') ? Promise.reject(status.error) : Promise.resolve(status.response);
+      }
+      return Promise.reject(new RequestFailure(
+        `Request ${requestId} already exists: ${status.state}; ${status.stage}; ${status.outcome}; use get_request_status; not replayed`,
+        'operation_not_replayed',
+        { requestId, targetPeerId, stage: status.stage, outcome: status.executionOutcome === 'not_executed' ? 'not_executed' : 'unknown', ...observations(status) },
+      ));
+    }
+    if (requestBytes > MAX_REQUEST_BYTES) {
+      return Promise.reject(new RequestFailure(
+        `Request ${requestId} is ${requestBytes} bytes at server_send; limit ${MAX_REQUEST_BYTES} bytes; queued; not_executed`,
+        'request_too_large', { ...details, bytes: requestBytes, limitBytes: MAX_REQUEST_BYTES, transportStage: 'server_send' },
+      ));
+    }
+    if (this.pendingRequests.size >= MAX_PENDING_REQUESTS || this.pendingRequestBytes + requestBytes > MAX_PENDING_REQUEST_BYTES) {
+      return Promise.reject(new RequestFailure(
+        `Request ${requestId} rejected at admission: pending capacity exceeded (${this.pendingRequests.size}/${MAX_PENDING_REQUESTS} requests, ${this.pendingRequestBytes + requestBytes}/${MAX_PENDING_REQUEST_BYTES} bytes); queued; not_executed`,
+        'request_capacity_exceeded', { ...details, bytes: this.pendingRequestBytes + requestBytes, limitBytes: MAX_PENDING_REQUEST_BYTES },
+      ));
+    }
 
     const { promise, resolve, reject } = Promise.withResolvers<unknown>();
-    const cancelPending = (reason: StudioCancellationReason, error: Error): void => {
+    const abortListener = () => {
       const pending = this.pendingRequests.get(requestId);
-      if (!pending || !this.removePendingRequest(pending)) return;
-      this.notifyRequestCancelled(pending, reason);
-      pending.reject(error);
+      if (pending) this.endRequestWaiter(pending, 'aborted', 'Request aborted');
     };
-    const timeoutId = setTimeout(
-      () => cancelPending('timeout', new Error('Request timeout')),
-      effectiveTimeoutMs,
-    );
-    const abortListener = () => cancelPending('aborted', new Error('Request aborted'));
+    const timeoutId = setTimeout(() => {
+      const pending = this.pendingRequests.get(requestId);
+      if (pending) this.endRequestWaiter(pending, 'timed_out', 'Request timeout');
+    }, effectiveTimeoutMs);
+    const now = Date.now();
     const request: PendingRequest = {
-      id: requestId,
-      endpoint,
-      data,
-      targetPeerId,
-      timestamp: Date.now(),
-      resolve,
-      reject,
-      timeoutId,
-      timeoutMs: effectiveTimeoutMs,
-      abortSignal: signal,
-      abortListener,
+      id: requestId, endpoint, data, targetPeerId, timestamp: now,
+      resolve, reject, promise, timeoutId, timeoutMs: effectiveTimeoutMs, requestBytes,
+      abortSignal: signal, abortListener,
     };
-
     this.pendingRequests.set(requestId, request);
+    this.pendingRequestBytes += requestBytes;
+    this.operations.set(requestId, {
+      status: { requestId, targetPeerId, queuedAt: now, stage: 'queued', state: 'pending', outcome: 'pending', executionOutcome: 'unknown' },
+      fingerprint, updatedAt: now, resultBytes: 0,
+    });
+    this.pruneOperations(now);
     signal?.addEventListener('abort', abortListener, { once: true });
     if (signal?.aborted) abortListener();
     const target = this.getPeerById(targetPeerId);
-    if (this.pendingRequests.has(requestId) && target) {
-      this.notifyRequestAvailable(target.transportPeerId);
-    }
+    if (this.pendingRequests.has(requestId) && target) this.notifyRequestAvailable(target.transportPeerId);
     return promise;
+  }
+
+  private endRequestWaiter(
+    request: PendingRequest,
+    state: 'timed_out' | 'aborted' | 'disconnected',
+    message: string,
+  ): void {
+    if (!this.removePendingRequest(request)) return;
+    const operation = this.operations.get(request.id);
+    const stage = operation?.status.stage ?? (request.lastDeliveryTransportPeerId ? 'dispatched' : 'queued');
+    const outcome = stage === 'queued' || operation?.status.executionOutcome === 'not_executed' ? 'not_executed' : 'unknown';
+    if (operation) {
+      operation.status.state = state;
+      operation.status.outcome = outcome;
+      if (stage === 'queued') operation.status.executionOutcome = 'not_executed';
+      operation.status.waiterEndedAt = Date.now();
+      operation.updatedAt = Date.now();
+      this.operations.delete(request.id);
+      this.operations.set(request.id, operation);
+    }
+    if (state !== 'disconnected') {
+      this.notifyRequestCancelled(request, state === 'timed_out' ? 'timeout' : 'aborted');
+    }
+    const connectionLost = operation?.status.connectionLostAt !== undefined && operation.status.connectionRestoredAt === undefined;
+    request.reject(new RequestFailure(
+      `${message}: ${request.id}; ${stage}; ${outcome}${connectionLost ? '; connection lost' : ''}; waiter ended, execution is not cancelled or rolled back`,
+      state === 'timed_out' ? (connectionLost ? 'request_connection_lost' : 'request_timeout') : `request_${state}`,
+      { requestId: request.id, targetPeerId: request.targetPeerId, stage, outcome, ...(operation ? observations(operation.status) : {}) },
+    ));
   }
 
   private removePendingRequest(request: PendingRequest): boolean {
@@ -964,6 +1197,7 @@ export class BridgeService implements StudioTransportQueue {
       request.abortSignal.removeEventListener('abort', request.abortListener);
     }
     this.pendingRequests.delete(request.id);
+    this.pendingRequestBytes -= request.requestBytes;
     return true;
   }
 
@@ -973,9 +1207,9 @@ export class BridgeService implements StudioTransportQueue {
   ): StudioQueuedRequest | null {
     let outstandingCount = 0;
     for (const request of this.pendingRequests.values()) {
-      if (request.claimOwner === claimOwner) outstandingCount++;
+      if (request.lastDeliveryTransportPeerId === transportPeerId) outstandingCount++;
     }
-    if (outstandingCount >= MAX_OUTSTANDING_REQUESTS_PER_DELIVERY_OWNER) return null;
+    if (outstandingCount >= MAX_OUTSTANDING_REQUESTS_PER_TRANSPORT) return null;
 
     let oldestRequest: PendingRequest | undefined;
     for (const request of this.pendingRequests.values()) {
@@ -989,6 +1223,13 @@ export class BridgeService implements StudioTransportQueue {
     if (!peer) return null;
     oldestRequest.claimOwner = claimOwner;
     oldestRequest.lastDeliveryTransportPeerId = transportPeerId;
+    const operation = this.operations.get(oldestRequest.id);
+    if (operation) {
+      operation.transportPeerId = transportPeerId;
+      operation.status.stage = 'dispatched';
+      operation.status.dispatchedAt = Date.now();
+      operation.updatedAt = Date.now();
+    }
     return {
       requestId: oldestRequest.id,
       peerId: oldestRequest.targetPeerId,
@@ -1016,12 +1257,7 @@ export class BridgeService implements StudioTransportQueue {
 
   releaseDeliveryClaims(claimOwner: string): void {
     const transportPeerIds = new Set<string>();
-    for (const request of this.pendingRequests.values()) {
-      if (request.claimOwner !== claimOwner) continue;
-      request.claimOwner = undefined;
-      const peer = this.getPeerById(request.targetPeerId);
-      if (peer) transportPeerIds.add(peer.transportPeerId);
-    }
+    // A claimed mutation may already be executing. Reconnect must never replay it.
     for (const cancellation of this.pendingCancellations.values()) {
       if (cancellation.claimOwner !== claimOwner) continue;
       cancellation.claimOwner = undefined;
@@ -1030,41 +1266,169 @@ export class BridgeService implements StudioTransportQueue {
     for (const transportPeerId of transportPeerIds) this.notifyRequestAvailable(transportPeerId);
   }
 
-  resolveRequest(requestId: string, response: unknown): SettlementDisposition {
-    return this.settleRequest(requestId, (request) => request.resolve(response));
+  private ownedOperation(transportPeerId: string, requestId: string): OperationRecord | undefined {
+    this.pruneOperations(Date.now());
+    const operation = this.operations.get(requestId);
+    if (!operation || operation.transportPeerId !== transportPeerId) return undefined;
+    const peer = this.getPeerById(operation.status.targetPeerId);
+    const transport = this.getPeerById(transportPeerId);
+    return peer?.transportPeerId === transportPeerId && transport?.transportPeerId === transportPeerId ? operation : undefined;
   }
 
-  rejectRequest(requestId: string, error: unknown): SettlementDisposition {
-    return this.settleRequest(requestId, (request) => request.reject(error));
-  }
-
-  private settleRequest(
-    requestId: string,
-    settle: (request: PendingRequest) => void,
-  ): SettlementDisposition {
+  observeTransportProgress(
+    transportPeerId: string, requestId: string, phase: 'executing' | 'response_delivery', outcome?: ExecutionOutcome,
+  ): void {
+    const operation = this.ownedOperation(transportPeerId, requestId);
+    if (!operation || operation.status.state === 'settled' || operation.status.stage === 'response_delivery'
+      || (phase === 'executing' && operation.status.stage !== 'dispatched')) return;
     const now = Date.now();
-    this.pruneAcceptedRequestIds(now);
-    const request = this.pendingRequests.get(requestId);
-    if (!request) return this.acceptedRequestIds.has(requestId) ? 'already_settled' : 'unknown';
+    operation.status.stage = phase;
+    if (phase === 'executing') operation.status.executionStartedAt = now;
+    else {
+      operation.status.executionOutcome = outcome ?? 'unknown';
+      if (outcome !== 'not_executed') operation.status.executionCompletedAt = now;
+    }
+    operation.updatedAt = now;
+    this.operations.delete(requestId);
+    this.operations.set(requestId, operation);
+  }
 
-    const deliveryTransportPeerId = request.lastDeliveryTransportPeerId;
-    this.removePendingRequest(request);
-    this.acceptedRequestIds.set(requestId, now);
-    this.pruneAcceptedRequestIds(now);
-    settle(request);
-    if (deliveryTransportPeerId) this.notifyRequestAvailable(deliveryTransportPeerId);
+  settleTransportResponse(
+    transportPeerId: string,
+    requestId: string,
+    response: unknown,
+    error?: unknown,
+    executionOutcome?: ExecutionOutcome,
+  ): SettlementDisposition {
+    const operation = this.ownedOperation(transportPeerId, requestId);
+    if (!operation) return 'unknown';
+    if (error !== undefined && executionOutcome !== undefined) {
+      error = new RequestFailure(
+        typeof error === 'string' ? error : 'Studio response failed',
+        'studio_response_error',
+        {
+          requestId, targetPeerId: operation.status.targetPeerId, ...observations(operation.status),
+          executionCompletedAt: executionOutcome === 'not_executed' ? undefined : operation.status.executionCompletedAt ?? Date.now(),
+          stage: 'response_delivery', outcome: executionOutcome === 'not_executed' ? 'not_executed' : 'unknown', executionOutcome,
+        },
+      );
+    }
+    return this.recordResponse(requestId, response, error, executionOutcome);
+  }
+
+  /** Trusted in-process settlement; transport handlers must use settleTransportResponse. */
+  resolveRequest(requestId: string, response: unknown): SettlementDisposition {
+    return this.recordResponse(requestId, response);
+  }
+
+  /** Trusted in-process settlement; transport handlers must use settleTransportResponse. */
+  rejectRequest(requestId: string, error: unknown): SettlementDisposition {
+    return this.recordResponse(requestId, undefined, error);
+  }
+
+  private recordResponse(requestId: string, response: unknown, error?: unknown, executionOutcome?: ExecutionOutcome): SettlementDisposition {
+    const now = Date.now();
+    this.pruneOperations(now);
+    const operation = this.operations.get(requestId);
+    if (!operation) return 'unknown';
+    if (operation.status.state === 'settled') return 'already_settled';
+
+    const hasError = error !== undefined;
+    operation.status.state = 'settled';
+    const localRejection = error instanceof RequestFailure && error.details.transportStage === 'server_send';
+    const responseOutcome = handlerOutcome(response);
+    const completedOutcome = !hasError && responseOutcome === 'error' ? 'error'
+      : executionOutcome ?? (localRejection ? 'not_executed' : hasError
+        ? operation.status.executionOutcome === 'success' ? 'success' : 'error' : responseOutcome);
+    operation.status.executionOutcome = completedOutcome;
+    operation.status.outcome = hasError || completedOutcome === 'error' || completedOutcome === 'not_executed' ? 'error' : 'success';
+    if (!localRejection) {
+      operation.status.stage = 'response_delivery';
+      if (completedOutcome !== 'not_executed') operation.status.executionCompletedAt ??= now;
+    }
+    operation.status.settledAt = now;
+    operation.updatedAt = now;
+    try {
+      const recordedError = error instanceof Error
+        ? { ...error, name: error.name, message: error.message }
+        : error;
+      const serialized = JSON.stringify(hasError ? { error: recordedError } : { response });
+      const bytes = Buffer.byteLength(serialized);
+      if (bytes > MAX_RETAINED_RESULT_BYTES) {
+        operation.status.resultUnavailable = { reason: 'size_limit', bytes, limitBytes: MAX_RETAINED_RESULT_BYTES };
+      } else {
+        operation.serializedResult = serialized;
+        operation.resultBytes = bytes;
+        this.retainedResultBytes += bytes;
+        this.retainedResults.set(requestId, operation);
+      }
+    } catch {
+      operation.status.resultUnavailable = { reason: 'serialization_failed', limitBytes: MAX_RETAINED_RESULT_BYTES };
+    }
+    // Nonpending entries stay ordered by their latest lifecycle transition.
+    this.operations.delete(requestId);
+    this.operations.set(requestId, operation);
+    const request = this.pendingRequests.get(requestId);
+    if (request && this.removePendingRequest(request)) {
+      if (hasError) request.reject(error);
+      else request.resolve(response);
+    }
+    this.pendingCancellations.delete(requestId);
+    this.pruneOperations(now);
+    if (operation.transportPeerId) this.notifyRequestAvailable(operation.transportPeerId);
     return 'accepted';
   }
 
-  private pruneAcceptedRequestIds(now: number): void {
-    for (const [requestId, acceptedAt] of this.acceptedRequestIds) {
-      if (now - acceptedAt < ACCEPTED_REQUEST_TOMBSTONE_TTL_MS) break;
-      this.acceptedRequestIds.delete(requestId);
+  getRequestStatus(requestId: string): RequestStatus | undefined {
+    this.pruneOperations(Date.now());
+    const operation = this.operations.get(requestId);
+    if (!operation) return undefined;
+    const status = { ...operation.status };
+    if (status.resultUnavailable) status.resultUnavailable = { ...status.resultUnavailable };
+    if (operation.serializedResult !== undefined) {
+      const result: unknown = JSON.parse(operation.serializedResult);
+      if (result && typeof result === 'object') {
+        if ('response' in result) status.response = result.response;
+        if ('error' in result) status.error = result.error;
+      }
     }
-    while (this.acceptedRequestIds.size > MAX_ACCEPTED_REQUEST_TOMBSTONES) {
-      const oldestRequestId = this.acceptedRequestIds.keys().next().value;
-      if (oldestRequestId === undefined) break;
-      this.acceptedRequestIds.delete(oldestRequestId);
+    return status;
+  }
+
+  async getRequestStatusEverywhere(requestId: string): Promise<RequestStatus | undefined> {
+    return this.getRequestStatus(requestId);
+  }
+
+  private pruneOperations(now: number): void {
+    for (const [requestId, operation] of this.operations) {
+      if (this.pendingRequests.has(requestId)) continue;
+      if (now - operation.updatedAt < OPERATION_RETENTION_MS) break;
+      this.operations.delete(requestId);
+      this.retainedResults.delete(requestId);
+      this.retainedResultBytes -= operation.resultBytes;
+    }
+    while (this.operations.size > MAX_OPERATION_RECORDS) {
+      let removed = false;
+      for (const [requestId, operation] of this.operations) {
+        if (this.pendingRequests.has(requestId)) continue;
+        this.operations.delete(requestId);
+        this.retainedResults.delete(requestId);
+        this.retainedResultBytes -= operation.resultBytes;
+        removed = true;
+        break;
+      }
+      if (!removed) break;
+    }
+    if (this.retainedResults.size <= MAX_RETAINED_RESULTS && this.retainedResultBytes <= MAX_RETAINED_RESULT_BYTES) return;
+    for (const [requestId, operation] of this.retainedResults) {
+      operation.status.resultUnavailable = {
+        reason: 'retention_capacity', bytes: operation.resultBytes, limitBytes: MAX_RETAINED_RESULT_BYTES,
+      };
+      this.retainedResultBytes -= operation.resultBytes;
+      operation.resultBytes = 0;
+      operation.serializedResult = undefined;
+      this.retainedResults.delete(requestId);
+      if (this.retainedResults.size <= MAX_RETAINED_RESULTS && this.retainedResultBytes <= MAX_RETAINED_RESULT_BYTES) break;
     }
   }
 
@@ -1083,17 +1447,16 @@ export class BridgeService implements StudioTransportQueue {
   cleanupOldRequests(): void {
     const now = Date.now();
     for (const request of this.pendingRequests.values()) {
-      if (now - request.timestamp > request.timeoutMs && this.removePendingRequest(request)) {
-        this.notifyRequestCancelled(request, 'timeout');
-        request.reject(new Error('Request timeout'));
+      if (now - request.timestamp >= request.timeoutMs) {
+        this.endRequestWaiter(request, 'timed_out', 'Request timeout');
       }
     }
+    this.pruneOperations(now);
   }
 
   clearAllPendingRequests(): void {
     for (const request of Array.from(this.pendingRequests.values())) {
-      this.removePendingRequest(request);
-      request.reject(new Error('Connection closed'));
+      this.endRequestWaiter(request, 'disconnected', 'Connection closed');
     }
     this.pendingCancellations.clear();
   }

@@ -28,14 +28,14 @@ suite for any specialized area the feature changes.
 # Required for every feature
 npm run test:e2e
 
-# Required before release; runs every live Studio suite
+# Release gate; also run affected standalone transport probes listed below
 npm run test:e2e:full
 
 # Full managed functional suite, without installer/lifecycle/isolation E2Es
 npm run test:studio:runner
 
 # Reuse a specific already-connected instance for the full functional suite
-MCP_INSTANCE_ID=anon:... ROBLOX_STUDIO_PORT=43123 node tests/run-all.mjs
+MCP_INSTANCE_ID=instance:... ROBLOX_STUDIO_PORT=43123 node tests/run-all.mjs
 
 # Run an individual regression while iterating
 node tests/execute-luau-error-preservation.mjs
@@ -52,7 +52,10 @@ independent auto-install, lifecycle, and parallel-isolation suites.
 | Installer, package artifacts, variants, or version repair | Feature gate plus `npm run test:e2e:auto-install` |
 | Studio launch, takeover, or startup-log lifecycle | Feature gate plus `npm run test:e2e:lifecycle` |
 | Port allocation, worker directories, or concurrent Studio isolation | Feature gate plus `npm run test:studio:parallel` |
-| Release | `npm run test:e2e:full` (replaces all commands above) |
+| Large Luau source staging, hash verification, ownership cleanup, or replay safety | `npm run test:studio:large-input-workflow` |
+| Payload admission, property-size rejection, or native response boundaries | `npm run test:studio:payload-boundaries` |
+| WebSocket progress, response loss/recovery, or multi-Studio capacity | `npm run test:studio:websocket-recovery` and `npm run test:studio:websocket-capacity` |
+| Release | `npm run test:e2e:full`, plus affected standalone payload/WebSocket probes above |
 
 When `MCP_INSTANCE_ID` is unset, the runner starts the built MCP server as the
 required primary on the configured port and gives it a random, run-scoped auth
@@ -108,8 +111,8 @@ npm run test:asset-security
 ## Managed runner profiles
 
 `npm run test:studio:smoke` invokes `run-all.mjs --managed --smoke`; it runs the
-two representative live tests used by the feature gate. `npm run
-test:studio:runner` omits `--smoke` and runs all twelve functional tests. Both
+representative live tests used by the feature gate. `npm run
+test:studio:runner` omits `--smoke` and runs the functional regression set. Both
 ignore inherited instance or Studio worker selection, lease an isolated port,
 install the matching main plugin, and own the primary server and Studio
 lifecycle.
@@ -206,6 +209,8 @@ node scripts/studio-lifecycle.mjs wait-connected --variant main --version <expec
   via stdio JSON-RPC, plus minimal assertion helpers.
 - `lib/mcp-http-client.mjs` — explicit-token authenticated direct calls to
   `/mcp/<tool>`, including structured HTTP/tool error handling.
+- `lib/large-input-workflow.mjs` — shared Luau step generator for the
+  [documented large-input workflow](../docs/large-inputs.md) and its native regression.
 - `lib/managed-studio-session.mjs` — owned-primary launch, process-identity
   handoff, lost-response reconciliation, reuse, and strict cleanup.
 - `lib/studio-test-lease.mjs` — heartbeating, stale-owner-aware serialization

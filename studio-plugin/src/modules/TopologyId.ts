@@ -34,15 +34,7 @@ function createInstanceId(): string {
 	return formatId("instance", randomValue());
 }
 
-function currentProcessInstanceId(): string {
-	// Roblox exposes process uptime through os.clock(). Quantizing the recovered
-	// launch wall-clock to 10 ms gives every VM in one Studio process the same ID.
-	const launchTick = math.round((DateTime.now().UnixTimestampMillis - os.clock() * 1000) / 10);
-	return formatId("instance", launchTick);
-}
-
 export = {
 	createPeerId,
 	createInstanceId,
-	currentProcessInstanceId,
 };

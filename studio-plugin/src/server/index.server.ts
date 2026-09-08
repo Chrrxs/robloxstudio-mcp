@@ -6,7 +6,7 @@ import ServerUrlSettings from "../modules/ServerUrlSettings";
 import { cleanupEditBridgeArtifacts, ensureRuntimeBridgeInstalled } from "../modules/EvalBridges";
 import RuntimeLogBuffer from "../modules/RuntimeLogBuffer";
 import StopPlayMonitor from "../modules/StopPlayMonitor";
-import StudioEventStream from "../modules/StudioEventStream";
+import StudioWebSocket from "../modules/StudioWebSocket";
 import BreakpointHandlers from "../modules/handlers/BreakpointHandlers";
 import * as RenderMonitor from "../modules/RenderMonitor";
 
@@ -47,11 +47,11 @@ applyRememberedServerUrl();
 // Play DataModels do not reliably fire Plugin.Unloading before Studio tears
 // down their VM. Close the persistent WebStreamClient while BindToClose still
 // gives this server peer a live execution context; otherwise each play cycle
-// can retain one native event stream until Studio itself is restarted. The
-// transport releases that native stream before yielding to unregister the
+// can retain one native WebSocket until Studio itself is restarted. The
+// transport releases that native socket before yielding to unregister the
 // logical server peer.
 if (startupRole === "server") {
-	game.BindToClose(StudioEventStream.suspendForShutdown);
+	game.BindToClose(StudioWebSocket.suspendForShutdown);
 }
 
 UI.init(plugin);
@@ -145,8 +145,8 @@ function autoActivatePeer(): void {
 		// legal, so the stop-play monitor lives here. It consumes tokenized
 		// stop requests from plugin settings and acknowledges EndTest results.
 		StopPlayMonitor.startMonitor({
-			beforeEndTest: StudioEventStream.suspendForShutdown,
-			afterEndTestFailure: StudioEventStream.resumeAfterShutdownFailure,
+			beforeEndTest: StudioWebSocket.suspendForShutdown,
+			afterEndTestFailure: StudioWebSocket.resumeAfterShutdownFailure,
 		});
 	} else if (role === "client") {
 		ClientBroker.setupClientBroker();

@@ -229,6 +229,7 @@ describe('Tool schema compatibility', () => {
     'get_asset_thumbnail',
     'upload_asset',
     'get_connected_instances',
+    'get_request_status',
     'manage_instance',
     'get_roblox_docs',
     'get_roblox_skills',

@@ -17,10 +17,15 @@ X-MCP-Auth: <token>
 Authorization: Bearer <token>
 ```
 
-Plugin-facing endpoints (`/ready`, `/events`, `/response`, and `/disconnect`)
-remain tokenless because Roblox Studio plugins cannot read the local token.
-The plugin receives queued bridge messages over a persistent `/events` stream
-and posts results to `/response`. These endpoints cannot directly invoke tools.
+Plugin registration (`/ready`) and disconnect (`/disconnect`) do not require the
+local HTTP client token because Roblox Studio plugins cannot read that file.
+Registration issues a per-transport token for the authenticated `/studio`
+WebSocket upgrade. Commands, observed execution progress, responses, and
+acknowledgements share that persistent socket; playtest client routes are
+multiplexed through their play-server transport. These plugin endpoints cannot
+directly invoke tools. The retired Studio `/events` stream and `/response`
+posting routes return HTTP 426 (`studio_websocket_required`), not an SSE fallback.
+This Studio transport is separate from MCP clients' HTTP subscription streams.
 Passive health and status endpoints are also tokenless.
 
 Setting `ROBLOX_STUDIO_HOST` to a non-loopback address exposes the bridge to

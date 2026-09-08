@@ -3,6 +3,12 @@ import { createHttpServer, type RobloxStudioHttpApp } from '../http-server.js';
 import { RobloxStudioTools } from '../tools/index.js';
 import { BridgeService } from '../bridge-service.js';
 
+class HttpTestBridgeService extends BridgeService {
+  protected override notifyPeerRegistered(): void {
+    // Request routing tests do not associate Peers with managed Studio processes.
+  }
+}
+
 interface ReadyOverrides {
   peerId?: string;
   transportPeerId?: string;
@@ -40,7 +46,7 @@ describe('Integration', () => {
   let tools: RobloxStudioTools;
 
   beforeEach(() => {
-    bridge = new BridgeService();
+    bridge = new HttpTestBridgeService();
     tools = new RobloxStudioTools(bridge);
     app = createHttpServer(tools, bridge, undefined, TEST_SERVER_CONFIG);
   });
@@ -86,13 +92,9 @@ describe('Integration', () => {
         data: { testData: 'hello', value: 123 },
       });
 
-      await request(app)
-        .post('/response')
-        .send({
-          requestId: delivery!.requestId,
-          response: { success: true, result: 'processed', echo: 'hello' },
-        })
-        .expect(200);
+      expect(bridge.settleTransportResponse('peer-1', delivery!.requestId, {
+        success: true, result: 'processed', echo: 'hello',
+      })).toBe('accepted');
 
       await expect(responsePromise).resolves.toEqual({
         success: true,
@@ -107,10 +109,9 @@ describe('Integration', () => {
       responsePromise.catch(() => {});
       const delivery = bridge.claimNextRequestForTransport('peer-1', 'integration-stream');
 
-      await request(app)
-        .post('/response')
-        .send({ requestId: delivery!.requestId, error: 'Operation failed: Invalid input' })
-        .expect(200);
+      expect(bridge.settleTransportResponse(
+        'peer-1', delivery!.requestId, undefined, 'Operation failed: Invalid input',
+      )).toBe('accepted');
 
       await expect(responsePromise).rejects.toEqual('Operation failed: Invalid input');
     });
@@ -134,10 +135,7 @@ describe('Integration', () => {
       const delivery = bridge.claimNextRequestForTransport('peer-2', 'new-stream');
       expect(delivery?.endpoint).toBe('/api/test3');
 
-      await request(app)
-        .post('/response')
-        .send({ requestId: delivery!.requestId, response: { success: true } })
-        .expect(200);
+      expect(bridge.settleTransportResponse('peer-2', delivery!.requestId, { success: true })).toBe('accepted');
       await expect(resumed).resolves.toEqual({ success: true });
     });
   });
@@ -173,12 +171,8 @@ describe('Integration', () => {
       expect(deliveryA?.data).toEqual({ who: 'A' });
       expect(deliveryB?.data).toEqual({ who: 'B' });
 
-      await request(app).post('/response')
-        .send({ requestId: deliveryA!.requestId, response: { ok: 'A' } })
-        .expect(200);
-      await request(app).post('/response')
-        .send({ requestId: deliveryB!.requestId, response: { ok: 'B' } })
-        .expect(200);
+      expect(bridge.settleTransportResponse('peer-a', deliveryA!.requestId, { ok: 'A' })).toBe('accepted');
+      expect(bridge.settleTransportResponse('peer-b', deliveryB!.requestId, { ok: 'B' })).toBe('accepted');
       await expect(responseA).resolves.toEqual({ ok: 'A' });
       await expect(responseB).resolves.toEqual({ ok: 'B' });
     });

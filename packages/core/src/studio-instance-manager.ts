@@ -1183,6 +1183,32 @@ async function resolveStudioExeAsync(): Promise<string> {
   return candidates[0];
 }
 
+const WINDOWS_STUDIO_PROCESS_QUERY = [
+  "$ErrorActionPreference = 'Stop'",
+  // Get-Process reports a missing name as an error, not a successful empty set.
+  '$studio = @(); try { $studio = @(Get-Process RobloxStudioBeta -ErrorAction Stop) } catch { if ($_.FullyQualifiedErrorId -notlike "NoProcessFoundForGivenName,*") { throw } }',
+  '$processes = @($studio | ForEach-Object { [PSCustomObject]@{ Id = $_.Id; Name = $_.Name; Path = $_.Path; ' +
+    'MainWindowTitle = $_.MainWindowTitle; StartTimeUtcFileTime = $_.StartTime.ToUniversalTime().ToFileTimeUtc().ToString() } })',
+  'ConvertTo-Json -InputObject $processes -Compress',
+].join('; ');
+
+function parseWindowsStudioProcesses(output: string): StudioProcessInfo[] {
+  const parsed: unknown = JSON.parse(output);
+  const processes: unknown[] = Array.isArray(parsed) ? parsed : [parsed];
+  if (!processes.every((value): value is StudioProcessInfo =>
+    value !== null && typeof value === 'object' &&
+    'Id' in value && typeof value.Id === 'number' && Number.isSafeInteger(value.Id) && value.Id > 0 &&
+    'Name' in value && typeof value.Name === 'string' &&
+    'Path' in value && typeof value.Path === 'string' &&
+    'MainWindowTitle' in value && typeof value.MainWindowTitle === 'string' &&
+    'StartTimeUtcFileTime' in value && typeof value.StartTimeUtcFileTime === 'string' &&
+    /^[1-9]\d*$/u.test(value.StartTimeUtcFileTime)
+  )) {
+    throw new Error('Malformed Roblox Studio process enumeration result.');
+  }
+  return processes;
+}
+
 export function listStudioProcesses(): StudioProcessInfo[] {
   if (process.platform === 'darwin') {
     let out = '';
@@ -1204,20 +1230,11 @@ export function listStudioProcesses(): StudioProcessInfo[] {
 
   if (process.platform !== 'win32' && !isWsl()) return [];
 
-  let out = '';
   try {
-    out = powershell(
-      'Get-Process RobloxStudioBeta -ErrorAction SilentlyContinue | ' +
-      'ForEach-Object { [PSCustomObject]@{ Id = $_.Id; Name = $_.Name; Path = $_.Path; ' +
-      'MainWindowTitle = $_.MainWindowTitle; StartTimeUtcFileTime = $_.StartTime.ToUniversalTime().ToFileTimeUtc().ToString() } } | ' +
-      'ConvertTo-Json -Compress',
-    );
+    return parseWindowsStudioProcesses(powershell(WINDOWS_STUDIO_PROCESS_QUERY));
   } catch (error) {
     throw new Error(`Could not enumerate Roblox Studio processes: ${error instanceof Error ? error.message : String(error)}`);
   }
-  if (!out) return [];
-  const parsed = JSON.parse(out);
-  return Array.isArray(parsed) ? parsed : [parsed];
 }
 
 export async function observeStudioProcesses(): Promise<StudioProcessSnapshot> {
@@ -1247,15 +1264,8 @@ export async function observeStudioProcesses(): Promise<StudioProcessSnapshot> {
       return { status: 'ok', observedAt, processes: [] };
     }
 
-    const out = await powershellAsync(
-      'Get-Process RobloxStudioBeta -ErrorAction SilentlyContinue | ' +
-      'ForEach-Object { [PSCustomObject]@{ Id = $_.Id; Name = $_.Name; Path = $_.Path; ' +
-      'MainWindowTitle = $_.MainWindowTitle; StartTimeUtcFileTime = $_.StartTime.ToUniversalTime().ToFileTimeUtc().ToString() } } | ' +
-      'ConvertTo-Json -Compress',
-    );
-    if (!out) return { status: 'ok', observedAt, processes: [] };
-    const parsed = JSON.parse(out);
-    return { status: 'ok', observedAt, processes: Array.isArray(parsed) ? parsed : [parsed] };
+    const out = await powershellAsync(WINDOWS_STUDIO_PROCESS_QUERY);
+    return { status: 'ok', observedAt, processes: parseWindowsStudioProcesses(out) };
   } catch (error) {
     return {
       status: 'error',

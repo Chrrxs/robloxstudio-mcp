@@ -33,6 +33,8 @@ if (forceManagedSession) {
 const FULL_TESTS = [
   'path-resolution.mjs',
   'property-value-conversion.mjs',
+  'luau-payload-transfers.mjs',
+  'large-input-workflow.mjs',
   'studio-tooling-smoke.mjs',
   'eval-bridge-error-preservation.mjs',
   'eval-context-routing.mjs',
@@ -47,19 +49,22 @@ const FULL_TESTS = [
   'simulation-state-lifecycle.mjs',
   'multiplayer-add-player-end-regression.mjs',
   'multiplayer-test-lifecycle.mjs',
+  'studio-websocket-transport.mjs',
 ];
 const FEATURE_TESTS = [
   'studio-tooling-smoke.mjs',
   'eval-context-routing.mjs',
   'micro-profiler-responsiveness.mjs',
 ];
+// Long-running/inherently failing investigation scenarios are explicit opt-ins.
+const DIAGNOSTIC_TESTS = ['luau-recipe-stress.mjs', 'luau-http-budget-repro.mjs', 'studio-websocket-quota.mjs'];
 const featureSmoke = process.argv.includes('--smoke');
 const requestedTestIndex = process.argv.indexOf('--test');
 const requestedTest = requestedTestIndex === -1 ? undefined : process.argv[requestedTestIndex + 1];
 if (requestedTestIndex !== -1 && !requestedTest) {
   throw new Error('--test requires a test filename');
 }
-if (requestedTest && !FULL_TESTS.includes(requestedTest)) {
+if (requestedTest && !FULL_TESTS.includes(requestedTest) && !DIAGNOSTIC_TESTS.includes(requestedTest)) {
   throw new Error(`Unknown Studio test ${JSON.stringify(requestedTest)}`);
 }
 const TESTS = requestedTest ? [requestedTest] : (featureSmoke ? FEATURE_TESTS : FULL_TESTS);
