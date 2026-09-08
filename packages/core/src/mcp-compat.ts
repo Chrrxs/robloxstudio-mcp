@@ -29,7 +29,7 @@ Tool descriptions explain selection. Input schemas explain arguments. This guide
 
 - Use selection with action=get when the user's Studio selection should define the scope.
 - Use action=set with instance paths to replace, add to, or remove from the selection. An empty paths array in set mode clears it.
-- Use action=view with a BasePart or Model path to frame it. The current viewing direction is preserved unless from or angleY overrides it. padding below 1 crops closer and above 1 pulls back.
+- Use action=view with a BasePart or Model path to frame it, or omit path to frame exactly one selected BasePart or Model. Empty, multiple, or unsupported selections require an explicit target or a changed selection. The original camera type is restored after framing, including on failure. The current viewing direction is preserved unless from or angleY overrides it. padding below 1 crops closer and above 1 pulls back.
 - For visual proof, change the instance, frame it with selection, then call capture_screenshot.
 
 ## Script changes

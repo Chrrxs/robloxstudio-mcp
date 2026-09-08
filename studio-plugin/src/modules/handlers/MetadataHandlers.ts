@@ -150,11 +150,25 @@ function setSelection(requestData: Record<string, unknown>) {
 // focus, screenshot. Framing distance comes from the bounding box and the
 // camera's own field of view so any subject fills a similar share of frame.
 function focusViewport(requestData: Record<string, unknown>) {
-	const instancePath = requestData.path as string;
-	if (!instancePath) return { error: "path is required (the instance to frame)" };
-
-	const instance = getInstanceByPath(instancePath);
-	if (!instance) return { error: `Instance not found: ${instancePath}` };
+	const instancePath = requestData.path;
+	let instance: Instance;
+	if (instancePath === undefined) {
+		const selection = Selection.Get();
+		if (selection.size() === 0) {
+			return { error: "No objects selected. Select a BasePart or Model, or provide path." };
+		}
+		if (selection.size() !== 1) {
+			return { error: "Select exactly one BasePart or Model to frame, or provide path." };
+		}
+		instance = selection[0];
+	} else {
+		if (!typeIs(instancePath, "string") || instancePath === "") {
+			return { error: "path must be a non-empty instance path when provided" };
+		}
+		const resolved = getInstanceByPath(instancePath);
+		if (!resolved) return { error: `Instance not found: ${instancePath}` };
+		instance = resolved;
+	}
 
 	const workspace = game.GetService("Workspace");
 	const camera = workspace.CurrentCamera;
@@ -180,6 +194,7 @@ function focusViewport(requestData: Record<string, unknown>) {
 		return { error: "angleY must be between -89 and 89" };
 	}
 
+	const originalCameraType = camera.CameraType;
 	const [ok, err] = pcall(() => {
 		let boundsCF: CFrame;
 		let boundsSize: Vector3;
@@ -228,6 +243,14 @@ function focusViewport(requestData: Record<string, unknown>) {
 		}
 		camera.Focus = new CFrame(center);
 	});
+	const [restored, restoreError] = pcall(() => {
+		camera.CameraType = originalCameraType;
+	});
+	if (!restored) {
+		return {
+			error: `${ok ? "focus completed" : `focus failed: ${tostring(err)}`}; failed to restore camera type: ${tostring(restoreError)}`,
+		};
+	}
 
 	if (!ok) return { error: `focus failed: ${tostring(err)}` };
 

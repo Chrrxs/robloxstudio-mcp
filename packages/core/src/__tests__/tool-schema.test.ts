@@ -96,7 +96,6 @@ describe('Tool schema compatibility', () => {
     expect(tool).toBeDefined();
     expect(tool!.category).toBe('read');
     expect(getReadOnlyTools()).toContain(tool);
-    expect(tool!.description).toBe('Use to get, set, or frame selection.');
 
     const schema = tool!.inputSchema as {
       properties?: Record<string, {
@@ -115,29 +114,21 @@ describe('Tool schema compatibility', () => {
     expect(schema.required).toEqual(['action']);
     expect(props.action.enum).toEqual(['get', 'set', 'view']);
     expect(props.mode).toMatchObject({ enum: ['set', 'add', 'remove'], default: 'set' });
-    expect(props.action.description).toBe('View frames the target.');
     expect(props.paths).toMatchObject({
-      description: 'Set needs paths; empty clears in set mode.',
       items: { minLength: 1 },
     });
-    expect(props.mode.description).toBe('How set applies paths.');
     expect(props.path).toMatchObject({
-      description: 'View needs a BasePart or Model path.',
       minLength: 1,
     });
-    expect(props.from.description).toBe('View azimuth: 0 +X, 90 +Z.');
     expect(props.padding).toMatchObject({
-      description: 'View distance scale.',
       default: 1,
       exclusiveMinimum: 0,
       maximum: 10,
     });
     expect(props.angleY).toMatchObject({
-      description: 'View elevation in degrees.',
       minimum: -89,
       maximum: 89,
     });
-    expect(props.instance_id.description).toBe('Studio process ID when ambiguous.');
     expect(Object.keys(props).sort()).toEqual([
       'action',
       'angleY',

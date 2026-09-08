@@ -299,7 +299,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
         action: {
           type: 'string',
           enum: ['get', 'set', 'view'],
-          description: 'View frames the target.'
+          description: 'View frames a target or the current selection and preserves the camera type.'
         },
         paths: {
           type: 'array',
@@ -315,7 +315,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
         path: {
           type: 'string',
           minLength: 1,
-          description: 'View needs a BasePart or Model path.'
+          description: 'Optional BasePart or Model path for view; omit to frame exactly one selected BasePart or Model.'
         },
         from: {
           type: 'number',

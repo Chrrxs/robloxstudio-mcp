@@ -1822,9 +1822,6 @@ export class RobloxStudioTools {
       return this.setSelection(opts.paths, opts.mode, instance_id);
     }
 
-    if (!opts.path) {
-      throw new Error('selection action=view requires path');
-    }
     return this.focusViewport(opts.path, opts.from, opts.padding, opts.angleY, instance_id);
   }
 
@@ -1865,14 +1862,14 @@ export class RobloxStudioTools {
   }
 
   async focusViewport(
-    instancePath: string,
+    instancePath?: string,
     from?: number,
     padding?: number,
     angleY?: number,
     instance_id?: string,
   ) {
-    if (!instancePath) {
-      throw new Error('selection action=view requires path');
+    if (instancePath !== undefined && (typeof instancePath !== 'string' || instancePath.length === 0)) {
+      throw new Error('selection path must be a non-empty instance path when provided');
     }
     if (padding !== undefined && (padding <= 0 || padding > 10)) {
       throw new Error('selection padding must be greater than 0 and at most 10');
