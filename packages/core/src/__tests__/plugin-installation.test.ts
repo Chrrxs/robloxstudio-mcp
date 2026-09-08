@@ -1,6 +1,7 @@
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
+import { randomUUID } from 'crypto';
 import {
   configurePluginAssetForPort,
   installPluginAsset,
@@ -17,6 +18,7 @@ describe('Studio plugin installation', () => {
   ].join('\n'));
   const expectedPluginVersion = '1.2.3';
   const installLockName = '.robloxstudio-mcp-plugin-install.lock';
+  const otherPid = process.pid === 1234 ? 1235 : 1234;
 
   const pluginAsset = ({
     version = expectedPluginVersion,
@@ -51,7 +53,27 @@ describe('Studio plugin installation', () => {
     return directory;
   };
 
+  const installMainPlugin = (pluginsFolder: string) => installPluginAsset({
+    pluginsFolder,
+    assetName: 'MCPPlugin.rbxmx',
+    otherAssetName: 'MCPInspectorPlugin.rbxmx',
+    source: pluginAsset(),
+    expectedVersion: expectedPluginVersion,
+    expectedVariant: 'main',
+    rawPort: '',
+    log: () => {},
+  });
+
+  const createInstallLock = (pluginsFolder: string, pid: number) => {
+    const lock = path.join(pluginsFolder, installLockName);
+    const owner = { pid, token: randomUUID(), createdAt: Date.now() };
+    fs.mkdirSync(lock);
+    fs.writeFileSync(path.join(lock, 'owner.json'), JSON.stringify(owner));
+    return { lock, owner };
+  };
+
   afterEach(() => {
+    jest.restoreAllMocks();
     for (const directory of tempDirectories.splice(0)) {
       fs.rmSync(directory, { recursive: true, force: true });
     }
@@ -147,7 +169,9 @@ describe('Studio plugin installation', () => {
     fs.writeFileSync(target, 'working-main');
     fs.writeFileSync(conflict, 'working-inspector');
     fs.mkdirSync(lock);
-    fs.writeFileSync(path.join(lock, 'owner.json'), '{"pid":1234}\n');
+    const owner = { pid: process.pid, token: randomUUID(), createdAt: 0 };
+    fs.writeFileSync(path.join(lock, 'owner.json'), JSON.stringify(owner));
+    fs.utimesSync(lock, new Date(0), new Date(0));
 
     expect(() => installPluginAsset({
       pluginsFolder,
@@ -161,9 +185,18 @@ describe('Studio plugin installation', () => {
 
     expect(fs.readFileSync(target, 'utf8')).toBe('working-main');
     expect(fs.readFileSync(conflict, 'utf8')).toBe('working-inspector');
+    expect(JSON.parse(fs.readFileSync(path.join(lock, 'owner.json'), 'utf8'))).toEqual(owner);
   });
 
-  test('requires manual recovery instead of racing to reclaim an old lock', () => {
+  test.each([
+    ['missing metadata', undefined],
+    ['malformed JSON', '{'],
+    ['null metadata', 'null'],
+    ['incomplete metadata', '{"pid":1234}'],
+    ['invalid PID', JSON.stringify({ pid: -1, token: randomUUID(), createdAt: 0 })],
+    ['invalid token', JSON.stringify({ pid: 1234, token: '../other', createdAt: 0 })],
+    ['invalid creation time', JSON.stringify({ pid: 1234, token: randomUUID(), createdAt: 'old' })],
+  ])('preserves locks with %s for manual recovery', (_name, metadata) => {
     const pluginsFolder = createPluginsFolder();
     const target = path.join(pluginsFolder, 'MCPPlugin.rbxmx');
     const conflict = path.join(pluginsFolder, 'MCPInspectorPlugin.rbxmx');
@@ -171,23 +204,125 @@ describe('Studio plugin installation', () => {
     fs.writeFileSync(target, 'working-main');
     fs.writeFileSync(conflict, 'working-inspector');
     fs.mkdirSync(lock);
-    fs.writeFileSync(path.join(lock, 'owner.json'), '{"pid":1234}\n');
-    const oldTime = new Date(Date.now() - 10 * 60_000);
-    fs.utimesSync(lock, oldTime, oldTime);
+    if (metadata !== undefined) fs.writeFileSync(path.join(lock, 'owner.json'), metadata);
+    fs.utimesSync(lock, new Date(0), new Date(0));
 
-    expect(() => installPluginAsset({
-      pluginsFolder,
-      assetName: 'MCPPlugin.rbxmx',
-      otherAssetName: 'MCPInspectorPlugin.rbxmx',
-      source: pluginAsset(),
-      expectedVersion: expectedPluginVersion,
-      expectedVariant: 'main',
-      rawPort: '',
-    })).toThrow(/remove that lock directory and retry/i);
+    expect(() => installMainPlugin(pluginsFolder)).toThrow(/remove that lock directory and retry/i);
 
     expect(fs.readFileSync(target, 'utf8')).toBe('working-main');
     expect(fs.readFileSync(conflict, 'utf8')).toBe('working-inspector');
     expect(fs.existsSync(lock)).toBe(true);
+    expect(fs.readdirSync(lock)).toEqual(metadata === undefined ? [] : ['owner.json']);
+  });
+
+  test('recovers a dead owner and releases the replacement lock after installing', () => {
+    const pluginsFolder = createPluginsFolder();
+    createInstallLock(pluginsFolder, otherPid);
+    fs.writeFileSync(path.join(pluginsFolder, 'MCPInspectorPlugin.rbxmx'), 'old-inspector');
+    jest.spyOn(process, 'kill').mockImplementation(() => {
+      throw Object.assign(new Error('No such process'), { code: 'ESRCH' });
+    });
+
+    expect(installMainPlugin(pluginsFolder).installed).toBe(true);
+    expect(fs.readFileSync(path.join(pluginsFolder, 'MCPPlugin.rbxmx'))).toEqual(pluginAsset());
+    expect(fs.readdirSync(pluginsFolder)).toEqual(['MCPPlugin.rbxmx']);
+    expect(installMainPlugin(pluginsFolder).installed).toBe(false);
+    expect(fs.readdirSync(pluginsFolder)).toEqual(['MCPPlugin.rbxmx']);
+  });
+
+  test.each(['EPERM', 'EACCES', 'UNKNOWN'])('preserves a lock when owner probing fails with %s', (code) => {
+    const pluginsFolder = createPluginsFolder();
+    const { lock, owner } = createInstallLock(pluginsFolder, otherPid);
+    jest.spyOn(process, 'kill').mockImplementation(() => {
+      throw Object.assign(new Error('Cannot inspect process'), { code });
+    });
+
+    expect(() => installMainPlugin(pluginsFolder)).toThrow(/cannot confirm.*owner.*exited/i);
+    expect(JSON.parse(fs.readFileSync(path.join(lock, 'owner.json'), 'utf8'))).toEqual(owner);
+    expect(fs.readdirSync(pluginsFolder)).toEqual([installLockName]);
+    expect(fs.readdirSync(lock)).toEqual(['owner.json']);
+  });
+
+  test('preserves an owner that is still running in another process', () => {
+    const pluginsFolder = createPluginsFolder();
+    const { lock, owner } = createInstallLock(pluginsFolder, otherPid);
+    jest.spyOn(process, 'kill').mockReturnValue(true);
+
+    expect(() => installMainPlugin(pluginsFolder)).toThrow(/already in progress/i);
+    expect(JSON.parse(fs.readFileSync(path.join(lock, 'owner.json'), 'utf8'))).toEqual(owner);
+    expect(fs.readdirSync(pluginsFolder)).toEqual([installLockName]);
+  });
+
+  test('leaves an interrupted recovery claim intact for manual recovery', () => {
+    const pluginsFolder = createPluginsFolder();
+    const { lock, owner } = createInstallLock(pluginsFolder, otherPid);
+    const claim = `recovery-${owner.token}`;
+    fs.mkdirSync(path.join(lock, claim));
+    jest.spyOn(process, 'kill').mockImplementation(() => {
+      throw Object.assign(new Error('No such process'), { code: 'ESRCH' });
+    });
+
+    expect(() => installMainPlugin(pluginsFolder)).toThrow(/remove that lock directory and retry/i);
+    expect(fs.readdirSync(lock).sort()).toEqual(['owner.json', claim]);
+    expect(fs.readdirSync(pluginsFolder)).toEqual([installLockName]);
+  });
+
+  test('serializes competing recovery attempts before moving an abandoned lock', () => {
+    const pluginsFolder = createPluginsFolder();
+    createInstallLock(pluginsFolder, otherPid);
+    let probes = 0;
+    let competingError: unknown;
+    jest.spyOn(process, 'kill').mockImplementation(() => {
+      probes += 1;
+      if (probes === 2) {
+        try {
+          installMainPlugin(pluginsFolder);
+        } catch (error) {
+          competingError = error;
+        }
+        expect(fs.existsSync(path.join(pluginsFolder, 'MCPPlugin.rbxmx'))).toBe(false);
+      }
+      throw Object.assign(new Error('No such process'), { code: 'ESRCH' });
+    });
+
+    expect(installMainPlugin(pluginsFolder).installed).toBe(true);
+    expect(competingError).toEqual(expect.objectContaining({
+      message: expect.stringMatching(/recovery.*in progress/i),
+    }));
+    expect(fs.readdirSync(pluginsFolder)).toEqual(['MCPPlugin.rbxmx']);
+  });
+
+  test('does not reclaim a replacement live lock after observing the previous dead owner', () => {
+    const pluginsFolder = createPluginsFolder();
+    const { lock } = createInstallLock(pluginsFolder, otherPid);
+    const replacement = { pid: process.pid, token: randomUUID(), createdAt: Date.now() };
+    jest.spyOn(process, 'kill').mockImplementation(() => {
+      // Another reclaimer wins before this contender acquires its recovery claim.
+      fs.rmSync(lock, { recursive: true });
+      fs.mkdirSync(lock);
+      fs.writeFileSync(path.join(lock, 'owner.json'), JSON.stringify(replacement));
+      throw Object.assign(new Error('No such process'), { code: 'ESRCH' });
+    });
+
+    expect(() => installMainPlugin(pluginsFolder)).toThrow(/lock owner changed/i);
+    expect(JSON.parse(fs.readFileSync(path.join(lock, 'owner.json'), 'utf8'))).toEqual(replacement);
+    expect(fs.readdirSync(lock)).toEqual(['owner.json']);
+    expect(fs.readdirSync(pluginsFolder)).toEqual([installLockName]);
+  });
+
+  test('cleans a recovered lock and staging file when the plugin commit fails', () => {
+    const pluginsFolder = createPluginsFolder();
+    createInstallLock(pluginsFolder, otherPid);
+    const target = path.join(pluginsFolder, 'MCPPlugin.rbxmx');
+    fs.mkdirSync(target);
+    fs.writeFileSync(path.join(target, 'sentinel'), 'unchanged');
+    jest.spyOn(process, 'kill').mockImplementation(() => {
+      throw Object.assign(new Error('No such process'), { code: 'ESRCH' });
+    });
+
+    expect(() => installMainPlugin(pluginsFolder)).toThrow();
+    expect(fs.readFileSync(path.join(target, 'sentinel'), 'utf8')).toBe('unchanged');
+    expect(fs.readdirSync(pluginsFolder)).toEqual(['MCPPlugin.rbxmx']);
   });
 
   test('commits the configured target before removing the conflicting variant', () => {
@@ -211,6 +346,27 @@ describe('Studio plugin installation', () => {
     expect(fs.readFileSync(target, 'utf8')).toContain('http://localhost:43123');
     expect(fs.existsSync(conflict)).toBe(false);
     expect(fs.readdirSync(pluginsFolder)).toEqual(['MCPPlugin.rbxmx']);
+  });
+
+  test('does not release a lock whose ownership changed during installation', () => {
+    const pluginsFolder = createPluginsFolder();
+    const lock = path.join(pluginsFolder, installLockName);
+    const replacement = { pid: process.pid, token: randomUUID(), createdAt: Date.now() };
+    fs.writeFileSync(path.join(pluginsFolder, 'MCPInspectorPlugin.rbxmx'), 'old-inspector');
+
+    installPluginAsset({
+      pluginsFolder,
+      assetName: 'MCPPlugin.rbxmx',
+      otherAssetName: 'MCPInspectorPlugin.rbxmx',
+      source: pluginAsset(),
+      expectedVersion: expectedPluginVersion,
+      expectedVariant: 'main',
+      rawPort: '',
+      log: () => fs.writeFileSync(path.join(lock, 'owner.json'), JSON.stringify(replacement)),
+    });
+
+    expect(JSON.parse(fs.readFileSync(path.join(lock, 'owner.json'), 'utf8'))).toEqual(replacement);
+    expect(fs.readFileSync(path.join(pluginsFolder, 'MCPPlugin.rbxmx'))).toEqual(pluginAsset());
   });
 
   test('preserves the conflicting variant and cleans staging files when commit fails', () => {

@@ -5,6 +5,7 @@ import {
   readFileSync,
   renameSync,
   rmSync,
+  rmdirSync,
   statSync,
   unlinkSync,
   writeFileSync,
@@ -278,8 +279,123 @@ export interface PluginInstallResult {
 
 const PLUGIN_INSTALL_LOCK_NAME = '.robloxstudio-mcp-plugin-install.lock';
 
+interface PluginInstallLockOwner {
+  pid: number;
+  token: string;
+  createdAt: number;
+}
+
 function errorCode(error: unknown): string | undefined {
-  return (error as NodeJS.ErrnoException).code;
+  return error !== null && typeof error === 'object' && 'code' in error &&
+    typeof error.code === 'string' ? error.code : undefined;
+}
+
+function pluginInstallLockError(lockPath: string, reason: string): Error {
+  return new Error(
+    `${reason}: ${lockPath}. ` +
+      'If no installer or lock recovery is running, remove that lock directory and retry.',
+  );
+}
+
+function readPluginInstallLockOwner(lockPath: string): PluginInstallLockOwner {
+  const ownerPath = join(lockPath, 'owner.json');
+  if (!lstatSync(lockPath).isDirectory() || !lstatSync(ownerPath).isFile()) {
+    throw new Error('Lock and owner metadata must be a directory and regular file');
+  }
+  const owner: unknown = JSON.parse(readFileSync(ownerPath, 'utf8'));
+  if (
+    owner === null || typeof owner !== 'object' ||
+    !('pid' in owner) || typeof owner.pid !== 'number' ||
+    !Number.isSafeInteger(owner.pid) || owner.pid <= 0 || owner.pid > 2_147_483_647 ||
+    !('token' in owner) || typeof owner.token !== 'string' ||
+    !/^[a-zA-Z0-9-]{1,128}$/.test(owner.token) ||
+    !('createdAt' in owner) || typeof owner.createdAt !== 'number' ||
+    !Number.isFinite(owner.createdAt) || owner.createdAt < 0
+  ) {
+    throw new Error('Invalid lock owner metadata');
+  }
+  return { pid: owner.pid, token: owner.token, createdAt: owner.createdAt };
+}
+
+function assertPluginInstallOwnerExited(lockPath: string, owner: PluginInstallLockOwner): void {
+  if (owner.pid !== process.pid) {
+    try {
+      process.kill(owner.pid, 0);
+    } catch (error) {
+      if (errorCode(error) === 'ESRCH') return;
+      throw pluginInstallLockError(
+        lockPath,
+        `Cannot confirm that plugin installation owner PID ${owner.pid} has exited (${errorCode(error) ?? error})`,
+      );
+    }
+  }
+  throw pluginInstallLockError(
+    lockPath,
+    `Another Studio plugin installation is already in progress (owner PID ${owner.pid})`,
+  );
+}
+
+function recoverPluginInstallLock(lockPath: string, warn: (message: string) => void): void {
+  let owner: PluginInstallLockOwner;
+  try {
+    owner = readPluginInstallLockOwner(lockPath);
+  } catch (error) {
+    // Missing metadata also occurs between mkdir and publishing a live owner's file.
+    throw pluginInstallLockError(lockPath, `Cannot safely read plugin installation lock owner (${error})`);
+  }
+  assertPluginInstallOwnerExited(lockPath, owner);
+
+  // Claim this generation before rechecking it. An identity check alone followed by
+  // rename/rm lets two reclaimers accidentally remove a newly acquired live lock.
+  // Token-specific claims also keep delayed contenders' cleanup off newer claims.
+  const claimPath = join(lockPath, `recovery-${owner.token}`);
+  try {
+    mkdirSync(claimPath);
+  } catch (error) {
+    throw pluginInstallLockError(
+      lockPath,
+      errorCode(error) === 'EEXIST'
+        ? 'Plugin installation lock recovery is already in progress or was interrupted'
+        : `Could not claim plugin installation lock recovery (${error})`,
+    );
+  }
+
+  const abandonedPath = `${lockPath}.${randomUUID()}.abandoned`;
+  let moved = false;
+  try {
+    let currentOwner: PluginInstallLockOwner;
+    try {
+      currentOwner = readPluginInstallLockOwner(lockPath);
+    } catch (error) {
+      throw pluginInstallLockError(lockPath, `Cannot safely recheck plugin installation lock owner (${error})`);
+    }
+    if (
+      currentOwner.pid !== owner.pid || currentOwner.token !== owner.token ||
+      currentOwner.createdAt !== owner.createdAt
+    ) {
+      throw pluginInstallLockError(lockPath, 'Plugin installation lock owner changed; retry installation');
+    }
+    assertPluginInstallOwnerExited(lockPath, currentOwner);
+    renameSync(lockPath, abandonedPath);
+    moved = true;
+  } finally {
+    if (!moved) {
+      try {
+        rmdirSync(claimPath);
+      } catch (error) {
+        if (errorCode(error) !== 'ENOENT') {
+          warn(`[install-plugin] Could not release lock recovery claim ${claimPath}: ${error}`);
+        }
+      }
+    }
+  }
+
+  // Only delete the detached generation, never the path another installer can acquire.
+  try {
+    rmSync(abandonedPath, { recursive: true, force: true });
+  } catch (error) {
+    warn(`[install-plugin] Could not clean abandoned install lock ${abandonedPath}: ${error}`);
+  }
 }
 
 function acquirePluginInstallLock(
@@ -298,10 +414,14 @@ function acquirePluginInstallLock(
     mkdirSync(lockPath);
   } catch (error) {
     if (errorCode(error) !== 'EEXIST') throw error;
-    throw new Error(
-      `Another Studio plugin installation is already in progress: ${lockPath}. ` +
-        'If no installer is running, remove that lock directory and retry.',
-    );
+    recoverPluginInstallLock(lockPath, warn);
+    // One retry only: another installer may win the newly available directory.
+    try {
+      mkdirSync(lockPath);
+    } catch (retryError) {
+      if (errorCode(retryError) !== 'EEXIST') throw retryError;
+      throw pluginInstallLockError(lockPath, 'Another Studio plugin installation is already in progress');
+    }
   }
 
   try {
@@ -320,10 +440,7 @@ function acquirePluginInstallLock(
 
   return () => {
     try {
-      const currentOwner = JSON.parse(readFileSync(ownerPath, 'utf8')) as {
-        pid?: unknown;
-        token?: unknown;
-      };
+      const currentOwner = readPluginInstallLockOwner(lockPath);
       if (currentOwner.pid === owner.pid && currentOwner.token === owner.token) {
         rmSync(lockPath, { recursive: true, force: true });
       }
