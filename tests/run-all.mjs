@@ -39,6 +39,7 @@ const FULL_TESTS = [
   'eval-bridge-error-preservation.mjs',
   'eval-context-routing.mjs',
   'runtime-bridge-lifecycle.mjs',
+  'playtest-control-repro.mjs',
   'play-cycle-event-stream-regression.mjs',
   'micro-profiler-responsiveness.mjs',
   'studio-grep-responsiveness.mjs',

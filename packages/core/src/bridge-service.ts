@@ -888,6 +888,12 @@ export class BridgeService implements StudioTransportQueue {
     };
   }
 
+  /** Local topology is authoritative; remote adapters must refresh before fanout. */
+  refreshTopologyForRouting(signal?: AbortSignal): Promise<void> | undefined {
+    if (signal?.aborted) throw new Error('Request aborted before topology resolution');
+    return undefined;
+  }
+
   resolveConnectedInstanceId(instanceId: string): string | undefined {
     const exact = this.getInstances().find((instance) => instance.id === instanceId);
     const groupedRuntime = this.getPeers().find((peer) =>

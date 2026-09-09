@@ -3148,6 +3148,157 @@ describe('Smoke', () => {
     });
   });
 
+  test.each([false, true])('solo_playtest preserves stop request errors with runtime present=%s', async (runtimePresent) => {
+    const bridge = new BridgeService();
+    const tools = new RobloxStudioTools(bridge);
+    bridge.registerPeer(READY);
+    if (runtimePresent) {
+      bridge.registerPeer({
+        ...READY,
+        peerId: 'server-1',
+        transportPeerId: 'server-1',
+        role: 'server',
+        isRunning: true,
+      });
+    }
+
+    const resultPromise = tools.soloPlaytest('stop', undefined, 1, READY.instanceId);
+    const pending = claimQueuedRequest(bridge, READY.transportPeerId);
+    expect(pending).toBeTruthy();
+    bridge.rejectRequest(pending!.requestId, new Error('edit peer timed out; outcome unknown'));
+
+    const body: unknown = JSON.parse((await resultPromise).content[0].text);
+    expect(body).toMatchObject({
+      success: false,
+      action: 'stop',
+      detail: 'edit peer timed out; outcome unknown',
+    });
+    if (runtimePresent) {
+      expect(body).toMatchObject({
+        runtimeStopped: false,
+        timedOut: false,
+        stopSignalAccepted: false,
+        stopRequestError: 'edit peer timed out; outcome unknown',
+        runtimeRoles: ['server'],
+        possibleCause: expect.any(String),
+      });
+    }
+  });
+
+  test('solo_playtest preserves teardown timeout diagnostics and observes late scoped recovery', async () => {
+    const bridge = new BridgeService();
+    const tools = new RobloxStudioTools(bridge);
+    bridge.registerPeer(READY);
+    bridge.registerPeer({
+      ...READY,
+      peerId: 'server-1',
+      transportPeerId: 'server-1',
+      role: 'server',
+      isRunning: true,
+    });
+    bridge.registerPeer({
+      ...READY,
+      peerId: 'other-edit',
+      transportPeerId: 'other-edit',
+      instanceId: 'instance:other',
+    });
+    bridge.registerPeer({
+      ...READY,
+      peerId: 'other-server',
+      transportPeerId: 'other-server',
+      instanceId: 'instance:other',
+      role: 'server',
+      isRunning: true,
+    });
+
+    // A zero observation deadline exercises the real timeout path without sleeping.
+    const resultPromise = tools.soloPlaytest('stop', undefined, 0, READY.instanceId);
+    const pending = claimQueuedRequest(bridge, READY.transportPeerId);
+    expect(pending).toBeTruthy();
+    expect(claimQueuedRequest(bridge, 'other-edit')).toBeNull();
+    bridge.resolveRequest(pending!.requestId, { success: true, message: 'stopping' });
+    const body: unknown = JSON.parse((await resultPromise).content[0].text);
+    expect(body).toMatchObject({
+      success: false,
+      action: 'stop',
+      runtimeStopped: false,
+      timedOut: true,
+      stopSignalAccepted: true,
+      roles: ['edit', 'server'],
+      runtimeRoles: ['server'],
+      possibleCause: expect.any(String),
+    });
+
+    // Teardown completes after the timeout; reconnect only the selected edit peer.
+    bridge.unregisterPeer('server-1');
+    bridge.unregisterPeer(READY.peerId);
+    bridge.registerPeer(READY);
+    const status = await tools.soloPlaytest('status', undefined, undefined, READY.instanceId);
+    expect(JSON.parse(status.content[0].text)).toEqual({
+      success: true, action: 'status', running: false, roles: ['edit'],
+    });
+    const otherStatus = await tools.soloPlaytest('status', undefined, undefined, 'instance:other');
+    expect(JSON.parse(otherStatus.content[0].text)).toMatchObject({
+      running: true, roles: ['edit', 'server'],
+    });
+    const recovered = tools.soloPlaytest('stop', undefined, 1, READY.instanceId);
+    const recoveryRequest = claimQueuedRequest(bridge, READY.transportPeerId);
+    expect(recoveryRequest).toBeTruthy();
+    bridge.resolveRequest(recoveryRequest!.requestId, { success: true });
+    expect(JSON.parse((await recovered).content[0].text)).toEqual({
+      success: true, action: 'stop', message: 'Playtest stopped.',
+    });
+  });
+
+  test('solo_playtest preserves startup readiness timeout diagnostics', async () => {
+    const bridge = new BridgeService();
+    const tools = new RobloxStudioTools(bridge);
+    bridge.registerPeer(READY);
+    const resultPromise = tools.soloPlaytest('start', 'run', 0, READY.instanceId);
+    const pending = claimQueuedRequest(bridge, READY.transportPeerId);
+    expect(pending).toBeTruthy();
+    bridge.resolveRequest(pending!.requestId, { success: true, message: 'starting' });
+    expect(JSON.parse((await resultPromise).content[0].text)).toMatchObject({
+      success: false,
+      action: 'start',
+      message: 'Playtest did not become ready before timeout.',
+      runtimeReady: false,
+      timedOut: true,
+      roles: ['edit'],
+    });
+  });
+
+  test.each([false, true])('solo_playtest preserves native teardown failure with runtime present=%s', async (runtimePresent) => {
+    const bridge = new BridgeService();
+    const tools = new RobloxStudioTools(bridge);
+    bridge.registerPeer(READY);
+    if (runtimePresent) {
+      bridge.registerPeer({
+        ...READY,
+        peerId: 'server-1',
+        transportPeerId: 'server-1',
+        role: 'server',
+        isRunning: true,
+      });
+    }
+    const resultPromise = tools.soloPlaytest('stop', undefined, 1, READY.instanceId);
+    const pending = claimQueuedRequest(bridge, READY.transportPeerId);
+    expect(pending).toBeTruthy();
+    const failure = {
+      success: false,
+      error: 'Playtest teardown did not complete.',
+      message: 'Stop signal was accepted, but Studio did not return to edit mode before timeout.',
+      stopSignalAccepted: true,
+      editModeReady: false,
+      timedOut: true,
+    };
+    bridge.resolveRequest(pending!.requestId, failure);
+    expect(JSON.parse((await resultPromise).content[0].text)).toMatchObject({
+      ...failure,
+      action: 'stop',
+    });
+  });
+
   test('multiplayer_playtest status returns a brief state summary', async () => {
     const bridge = new BridgeService();
     const tools = new RobloxStudioTools(bridge);

@@ -2421,6 +2421,11 @@ export class RobloxStudioTools {
       throw new Error('get_runtime_logs tail must be a non-negative integer.');
     }
 
+    // Discovery may use a cached proxy view, but log fanout must not target peers
+    // that the primary has already removed during playtest teardown.
+    const refresh = this.bridge.refreshTopologyForRouting(signal);
+    if (refresh) await refresh;
+
     const instances = this.bridge.getInstances();
     const groups = this.bridge.getMultiplayerGroups();
     let selectedGroup = multiplayer_group_id === undefined
@@ -3321,6 +3326,8 @@ export class RobloxStudioTools {
         });
       }
       return this._textResult({
+        // Keep lifecycle diagnostics on failures; only successful responses are brief.
+        ...body,
         success: false,
         action,
         error: body.error ?? 'start_failed',
@@ -3340,6 +3347,7 @@ export class RobloxStudioTools {
       });
     }
     return this._textResult({
+      ...body,
       success: false,
       action,
       error: body.error ?? 'stop_failed',
@@ -3435,7 +3443,7 @@ export class RobloxStudioTools {
       wait = {
         ok: false,
         roles: this._rolesForScope(instanceId),
-        timedOut: false,
+        timedOut: response.timedOut === true,
       };
     }
     const body = wait
@@ -3452,12 +3460,14 @@ export class RobloxStudioTools {
         ...body,
         success: false,
         error: 'Playtest teardown did not complete.',
-        message: response?.success === true
-          ? wait.timedOut
-            ? 'Stop signal was accepted, but runtime peers did not disconnect before timeout.'
-            : 'Stop signal was accepted, but runtime peers are still connected.'
-          : 'Edit stop request failed, and runtime peers are still connected.',
-        stopSignalAccepted: response?.success === true,
+        message: response.stopSignalAccepted === true && typeof response.message === 'string'
+          ? response.message
+          : response?.success === true
+            ? wait.timedOut
+              ? 'Stop signal was accepted, but runtime peers did not disconnect before timeout.'
+              : 'Stop signal was accepted, but runtime peers are still connected.'
+            : 'Edit stop request failed, and runtime peers are still connected.',
+        stopSignalAccepted: response?.success === true || response.stopSignalAccepted === true,
         stopRequestError,
         runtimeRoles,
         possibleCause:

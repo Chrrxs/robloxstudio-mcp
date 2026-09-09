@@ -78,6 +78,17 @@ function startPlaytest(requestData: Record<string, unknown>) {
 		return { error: "start_playtest is single-player only. Use multiplayer_test_start for multi-client StudioTestService sessions." };
 	}
 
+	// Peer teardown and ExecutePlayModeAsync completion can precede native edit
+	// readiness. Do not acknowledge a new start that the engine cannot execute.
+	if (!StudioTestService.EditModeActive) {
+		return {
+			success: false,
+			error: "Studio is not ready to start a playtest.",
+			message: "Wait for Studio to finish its current playtest transition before starting another.",
+			editModeReady: false,
+		};
+	}
+
 	// Self-heal: if testRunning is stuck true but Studio reports no active
 	// playtest, the previous start_playtest's task.spawn was orphaned
 	// (plugin reload mid-test, Studio entered some inconsistent state, etc).
@@ -157,22 +168,24 @@ function stopPlaytest(_requestData: Record<string, unknown>) {
 		return { error: "No active playtest to stop.", detail: consumption.error };
 	}
 	StopPlayMonitor.clearPending(stopRequest.requestId);
-	// Request was consumed (EndTest called). ExecutePlayModeAsync in our
-	// startPlaytest task.spawn is still unwinding though — testRunning stays
-	// true until that yield completes and the post-block runs. Wait so
-	// back-to-back stop -> start sequences don't race against the prior
-	// teardown and get "A test is already running". 10s covers play-DM
-	// teardown on heavier places; if it still hasn't cleared we return
-	// anyway so users aren't stuck — but note that in the response so the
-	// caller knows a subsequent start may need a moment.
+	// EndTest consumption, task completion, and native edit readiness are distinct
+	// milestones. In particular, testRunning can clear before Studio accepts another
+	// ExecutePlayModeAsync call (and is never set for manually started playtests).
+	// Only report completion after both tracked execution and native teardown settle.
 	const deadline = tick() + 10;
-	while (testRunning && tick() < deadline) {
+	while ((testRunning || !StudioTestService.EditModeActive) && tick() < deadline) {
 		task.wait(0.1);
 	}
-	if (testRunning) {
+	const editModeReady = StudioTestService.EditModeActive;
+	if (testRunning || !editModeReady) {
 		return {
-			success: true,
-			message: "Playtest stop signal sent; teardown still in progress.",
+			success: false,
+			error: "Playtest teardown did not complete.",
+			message: "Stop signal was accepted, but Studio teardown did not settle before timeout.",
+			stopSignalAccepted: true,
+			editModeReady,
+			playtestTaskPending: testRunning,
+			timedOut: true,
 		};
 	}
 	return { success: true, message: "Playtest stopped." };

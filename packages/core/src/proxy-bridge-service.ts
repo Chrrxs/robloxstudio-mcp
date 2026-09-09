@@ -75,6 +75,9 @@ export class ProxyBridgeService extends BridgeService {
   private readonly initialRefresh: Promise<void>;
   private refreshTimer?: NodeJS.Timeout;
   private static REFRESH_INTERVAL_MS = 1000;
+  private static TOPOLOGY_TIMEOUT_MS = 2_000;
+  private topologyGeneration = 0;
+  private appliedTopologyGeneration = 0;
 
   constructor(primaryBaseUrl: string, authToken?: string) {
     super();
@@ -100,20 +103,40 @@ export class ProxyBridgeService extends BridgeService {
     return headers;
   }
 
-  private async refreshTopology(): Promise<void> {
+  override refreshTopologyForRouting(signal?: AbortSignal): Promise<void> {
+    return this.refreshTopology(signal, true);
+  }
+
+  private async refreshTopology(signal?: AbortSignal, requireFresh = false): Promise<void> {
+    const generation = ++this.topologyGeneration;
+    const controller = new AbortController();
+    const abort = () => controller.abort(signal?.reason);
+    signal?.addEventListener('abort', abort, { once: true });
+    if (signal?.aborted) abort();
+    const timeout = setTimeout(
+      () => controller.abort(new Error('Studio topology refresh timed out')),
+      ProxyBridgeService.TOPOLOGY_TIMEOUT_MS,
+    );
     try {
+      controller.signal.throwIfAborted();
       const res = await fetch(`${this.primaryBaseUrl}/topology`, {
         headers: this.authHeaders(),
+        signal: controller.signal,
       });
-      if (!res.ok) return;
+      if (!res.ok) throw new Error(`Studio topology returned HTTP ${res.status}`);
       const body = (await res.json()) as Partial<TopologySnapshot>;
+      controller.signal.throwIfAborted();
       if (
+        !body ||
         !Array.isArray(body.peers)
         || !Array.isArray(body.instances)
         || !Array.isArray(body.multiplayerGroups)
       ) {
-        return;
+        throw new Error('Primary returned invalid Studio topology');
       }
+      // A slow older poll must not resurrect peers removed by a newer snapshot.
+      if (generation < this.appliedTopologyGeneration) return;
+      this.appliedTopologyGeneration = generation;
 
       const previousPeers = new Map(this.cachedPeers.map((peer) => [peer.peerId, peer]));
       this.cachedPeers = body.peers;
@@ -124,9 +147,13 @@ export class ProxyBridgeService extends BridgeService {
           this.notifyPeerRegistered(toPublicPeer(peer));
         }
       }
-    } catch {
-      // Primary unreachable — keep the last-known topology rather than
-      // silently reporting empty.
+    } catch (error) {
+      if (requireFresh) throw error;
+      // Discovery can retain its last-known view when the primary is unreachable.
+      // Routing refreshes instead fail explicitly, without queuing stale work.
+    } finally {
+      clearTimeout(timeout);
+      signal?.removeEventListener('abort', abort);
     }
   }
 
