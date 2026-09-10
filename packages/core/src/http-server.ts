@@ -47,6 +47,47 @@ interface StreamableHttpConfig {
   tools: ToolDefinition[];
 }
 
+// Explicit wire endpoints: public tool names do not always match Studio handlers.
+// Never grant execute-luau through a read tool that happens to use generated Luau.
+const TOOL_PROXY_ENDPOINTS: Record<string, readonly string[]> = {
+  get_place_info: ['/api/place-info'],
+  search_objects: ['/api/search-objects'],
+  get_instance_properties: ['/api/instance-properties'],
+  get_project_structure: ['/api/project-structure'],
+  set_properties: ['/api/set-properties'],
+  get_script_source: ['/api/get-script-source'],
+  set_script_source: ['/api/set-script-source'],
+  edit_script_lines: ['/api/edit-script-lines'],
+  insert_script_lines: ['/api/insert-script-lines'],
+  delete_script_lines: ['/api/delete-script-lines'],
+  get_attributes: ['/api/get-attributes'],
+  selection: ['/api/get-selection', '/api/set-selection', '/api/focus-viewport'],
+  execute_luau: ['/api/execute-luau'],
+  eval_server_runtime: ['/api/eval-runtime'],
+  eval_client_runtime: ['/api/eval-runtime'],
+  grep_scripts: ['/api/grep-scripts'],
+  solo_playtest: ['/api/start-playtest', '/api/stop-playtest', '/api/multiplayer-test-state'],
+  multiplayer_playtest: [
+    '/api/multiplayer-test-start', '/api/multiplayer-test-add-players',
+    '/api/multiplayer-test-leave-client', '/api/multiplayer-test-end', '/api/multiplayer-test-state',
+  ],
+  get_runtime_logs: ['/api/get-runtime-logs'],
+  capture_script_profiler: ['/api/capture-script-profiler'],
+  capture_micro_profiler: ['/api/capture-micro-profiler'],
+  breakpoints: ['/api/breakpoints'],
+  insert_asset: ['/api/insert-asset'],
+  generate_model: ['/api/generate-model'],
+  preview_asset: ['/api/preview-asset'],
+  capture_screenshot: ['/api/capture-screenshot', '/api/capture-begin', '/api/capture-read'],
+  simulate_mouse_input: ['/api/simulate-mouse-input'],
+  simulate_keyboard_input: ['/api/simulate-keyboard-input'],
+  get_memory_breakdown: ['/api/get-memory-breakdown'],
+  get_scene_analysis: ['/api/get-scene-analysis'],
+  export_rbxm: ['/api/export-rbxm'],
+  import_rbxm: ['/api/import-rbxm'],
+  find_and_replace_in_scripts: ['/api/find-and-replace-in-scripts'],
+};
+
 type PassiveStudioPeer = Omit<PublicStudioPeer, 'peerId'>;
 type PassiveStudioInstance = Omit<PublicStudioInstance, 'peers'> & {
   peers: PassiveStudioPeer[];
@@ -263,6 +304,11 @@ function rejectStudioUpgrade(socket: Duplex, status: number, error: string): voi
 export function createHttpServer(tools: RobloxStudioTools, bridge: BridgeService, allowedTools?: Set<string>, serverConfig?: StreamableHttpConfig, security?: HttpSecurityOptions): RobloxStudioHttpApp {
   // Express cannot know about the lifecycle controls attached below.
   const app = express() as unknown as RobloxStudioHttpApp;
+  const allowedProxyEndpoints = allowedTools
+    ? new Set(Object.entries(TOOL_PROXY_ENDPOINTS)
+      .filter(([toolName]) => allowedTools.has(toolName))
+      .flatMap(([, endpoints]) => endpoints))
+    : undefined;
   const studioLifecycleCallable = !allowedTools || allowedTools.has('manage_instance');
   const studioLifecycleCapabilities = studioLifecycleCallable
     ? tools.getStudioLifecycleCapabilities()
@@ -824,6 +870,11 @@ export function createHttpServer(tools: RobloxStudioTools, bridge: BridgeService
 
     if (!endpoint || !targetPeerId) {
       res.status(400).json({ error: 'endpoint and targetPeerId are required' });
+      return;
+    }
+
+    if (allowedProxyEndpoints && !allowedProxyEndpoints.has(endpoint)) {
+      res.status(403).json({ error: 'forbidden_endpoint' });
       return;
     }
 
