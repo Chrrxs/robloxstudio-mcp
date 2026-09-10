@@ -48,20 +48,20 @@ type ToolResultLike = {
   isError?: boolean;
 };
 
-const INTERNAL_RESULT_KEYS = new Set([
-  'bundleModifiedAt',
-  'bundlePath',
-  'bundleSha256',
-  'connectedAt',
-  'debug',
-  'diagnostics',
-  'internal',
-  'lastActivity',
-  'transportPeerId',
-  'pluginVariant',
-  'pluginVersion',
-  'serverVersion',
-]);
+const INTERNAL_ENVELOPE_KEYS: Record<string, true> = {
+  bundleModifiedAt: true,
+  bundlePath: true,
+  bundleSha256: true,
+  connectedAt: true,
+  debug: true,
+  diagnostics: true,
+  internal: true,
+  lastActivity: true,
+  transportPeerId: true,
+  pluginVariant: true,
+  pluginVersion: true,
+  serverVersion: true,
+};
 
 const TEXT_RESULT_TOOLS = new Set(['get_roblox_docs']);
 // These remain in the inspector catalog because they do not mutate the
@@ -113,17 +113,24 @@ function compactPublicValue(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(compactPublicValue);
   if (!value || typeof value !== 'object') return value;
 
-  const compact: Record<string, unknown> = {};
-  for (const [key, child] of Object.entries(value)) {
-    if (child === undefined || INTERNAL_RESULT_KEYS.has(key)) continue;
-    compact[key] = compactPublicValue(child);
-  }
-  return compact;
+  // Nested objects can contain user-defined keys (attributes, properties, etc.).
+  // Only omit undefined values; fromEntries also preserves own "__proto__" keys.
+  return Object.fromEntries(Object.entries(value)
+    .filter(([, child]) => child !== undefined)
+    .map(([key, child]) => [key, compactPublicValue(child)]));
+}
+
+function compactPublicEnvelope(value: object): Record<string, unknown> {
+  // Metadata names are reserved on the tool response envelope, not its payload.
+  // Producers of nested server metadata must explicitly project public fields.
+  return Object.fromEntries(Object.entries(value)
+    .filter(([key, child]) => child !== undefined && !Object.hasOwn(INTERNAL_ENVELOPE_KEYS, key))
+    .map(([key, child]) => [key, compactPublicValue(child)]));
 }
 
 function asStructuredObject(value: unknown): Record<string, unknown> | undefined {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
-  return compactPublicValue(value) as Record<string, unknown>;
+  return compactPublicEnvelope(value);
 }
 
 function parseJsonObject(text: string): Record<string, unknown> | undefined {
@@ -198,7 +205,7 @@ export function publicToolErrorBody(name: string, error: unknown): Record<string
     return { error: error.code, message: error.message, multiplayer_group_id: error.groupId };
   }
   if (error instanceof StudioLaunchPreDispatchError) {
-    return compactPublicValue(error.toResponseBody()) as Record<string, unknown>;
+    return compactPublicEnvelope(error.toResponseBody());
   }
   if (error instanceof RoutingFailure) return publicRoutingError(error);
   if (error instanceof RequestFailure) {
