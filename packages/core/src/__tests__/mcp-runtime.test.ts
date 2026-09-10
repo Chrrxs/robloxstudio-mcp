@@ -146,6 +146,50 @@ describe('MCP v2 tool runtime', () => {
       nested: { warnings: [] },
     });
   });
+
+  describe.each(['modern', 'legacy'] as const)('%s user-defined result keys', (era) => {
+    test.each(['text', 'structuredContent'] as const)('preserves nested keys from %s while removing envelope metadata', (source) => {
+      const attributes = Object.fromEntries([
+        'bundleModifiedAt', 'bundlePath', 'bundleSha256', 'connectedAt',
+        'debug', 'diagnostics', 'internal', 'lastActivity', 'transportPeerId',
+        'pluginVariant', 'pluginVersion', 'serverVersion',
+      ].map((name) => [name, { value: name, type: 'string' }]));
+      const payload = {
+        instancePath: 'game.Workspace.Part',
+        count: Object.keys(attributes).length,
+        attributes,
+        results: [{ properties: { debug: false, internal: null, diagnostics: [] } }],
+      };
+      const envelope = {
+        ...payload,
+        transportPeerId: 'private-peer',
+        diagnostics: { elapsed: 10 },
+        internal: { secret: 'private' },
+      };
+      const original = JSON.stringify(envelope);
+      const result = normalizeToolResult(source === 'text'
+        ? { content: [{ type: 'text', text: original }] }
+        : { structuredContent: envelope }, era);
+
+      expect(result.structuredContent).toEqual(payload);
+      expect(result.content).toEqual(era === 'modern'
+        ? []
+        : [{ type: 'text', text: JSON.stringify(payload) }]);
+      expect(JSON.stringify(envelope)).toBe(original);
+    });
+
+    test('preserves prototype-like user keys as own JSON properties', () => {
+      const payload = JSON.parse('{"__proto__":{"value":"root"},"attributes":{"__proto__":{"value":"nested"},"constructor":{"value":"ctor"},"toString":{"value":"string"}}}');
+      const result = normalizeToolResult({
+        content: [{ type: 'text', text: JSON.stringify(payload) }],
+      }, era);
+
+      expect(result.structuredContent).toEqual(payload);
+      expect(JSON.stringify(result.structuredContent)).toBe(JSON.stringify(payload));
+      expect(Object.getPrototypeOf(result.structuredContent)).toBe(Object.prototype);
+    });
+  });
+
   test('serializes routing choices as compact role-keyed Peer maps', () => {
     const failure = new RoutingFailure({
       code: 'multiple_instances_connected',
