@@ -76,6 +76,56 @@ describe('MCP v2 tool runtime', () => {
     ]);
   });
 
+  describe.each(['modern', 'legacy'] as const)('%s handler failure projection', (era) => {
+    test.each([
+      { error: 'Instance not found' },
+      { success: false, message: 'Operation refused' },
+      {
+        success: false,
+        instancePath: 'game.Workspace.Part',
+        summary: { total: 2, succeeded: 1, failed: 1 },
+        results: [
+          { property: 'Name', success: true },
+          { property: 'Missing', success: false, error: 'Invalid property' },
+        ],
+      },
+    ])('flags explicit failure and preserves details: %j', (payload) => {
+      for (const raw of [
+        { content: [{ type: 'text', text: JSON.stringify(payload) }] },
+        { content: [], structuredContent: payload },
+      ]) {
+        const result = normalizeToolResult(raw, era);
+        expect(result.isError).toBe(true);
+        expect(result.structuredContent).toEqual(payload);
+        expect(result.content).toEqual(era === 'modern'
+          ? []
+          : [{ type: 'text', text: JSON.stringify(payload) }]);
+      }
+    });
+
+    test.each([
+      { success: true },
+      { error: '' },
+      { error: null },
+      { error: false },
+      { returnValue: { success: false, error: 'User data' } },
+      { output: ['error: example'], message: 'No error occurred' },
+    ])('does not infer failure from ordinary data: %j', (payload) => {
+      expect(normalizeToolResult({
+        content: [{ type: 'text', text: JSON.stringify(payload) }],
+      }, era).isError).not.toBe(true);
+    });
+
+    test('preserves explicit MCP errors with text or structured content', () => {
+      for (const text of ['plain error', JSON.stringify({ success: true })]) {
+        expect(normalizeToolResult({
+          isError: true,
+          content: [{ type: 'text', text }],
+        }, era).isError).toBe(true);
+      }
+    });
+  });
+
   test('preserves public empty collections and null values', () => {
     const result = normalizeToolResult({
       content: [{

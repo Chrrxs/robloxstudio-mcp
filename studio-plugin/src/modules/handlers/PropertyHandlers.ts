@@ -64,6 +64,7 @@ function setProperties(requestData: Record<string, unknown>) {
 	finishRecording(recordingId, true);
 
 	return {
+		success: failureCount === 0,
 		instancePath,
 		summary: { total: successCount + failureCount, succeeded: successCount, failed: failureCount },
 		results,
