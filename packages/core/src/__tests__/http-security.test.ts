@@ -7,6 +7,7 @@ import type { Server } from 'node:http';
 import WebSocket from 'ws';
 import type { RawData } from 'ws';
 import type { StudioServerEvent } from '../studio-transport.js';
+import { getAllTools, getReadOnlyTools } from '../tools/definitions.js';
 
 class HttpTestBridgeService extends BridgeService {
   protected override notifyPeerRegistered(): void {
@@ -25,6 +26,78 @@ describe('HTTP security', () => {
 
   afterEach(() => {
     bridge.clearAllPendingRequests();
+  });
+
+  describe('proxy tool permissions', () => {
+    const token = 'proxy-test-token';
+
+    it.each([
+      { label: 'unrestricted', allowed: undefined, endpoint: '/api/execute-luau', status: 200 },
+      { label: 'main', allowed: new Set(getAllTools().map(tool => tool.name)),
+        endpoint: '/api/execute-luau', status: 200 },
+      { label: 'empty', allowed: new Set<string>(), endpoint: '/api/place-info', status: 403 },
+      { label: 'narrow', allowed: new Set(['get_script_source']), endpoint: '/api/place-info', status: 403 },
+      { label: 'narrow read', allowed: new Set(['get_script_source']),
+        endpoint: '/api/get-script-source', status: 200 },
+      { label: 'simulation read', allowed: new Set(['get_simulation_state', 'get_device_simulator_state']),
+        endpoint: '/api/execute-luau', status: 403 },
+    ])('enforces $label configuration', async ({ allowed, endpoint, status }) => {
+      const app = createHttpServer(tools, bridge, allowed, undefined, { authToken: token });
+      const dispatch = jest.spyOn(bridge, 'sendRequest').mockResolvedValue({ success: true });
+      try {
+        await request(app).post('/proxy').set('X-MCP-Auth', token)
+          .send({ endpoint, targetPeerId: 'studio-peer' }).expect(status);
+        expect(dispatch).toHaveBeenCalledTimes(status === 200 ? 1 : 0);
+      } finally {
+        dispatch.mockRestore();
+        await app.cleanup();
+      }
+    });
+
+    it.each([
+      '/api/execute-luau',
+      '/api/eval-runtime',
+      '/api/set-properties',
+      '/api/set-script-source',
+      '/api/import-rbxm',
+      '/api/unknown-operation',
+    ])('rejects Inspector endpoint %s before dispatch', async (endpoint) => {
+      const app = createHttpServer(tools, bridge, new Set(getReadOnlyTools().map(tool => tool.name)),
+        undefined, { authToken: token });
+      const dispatch = jest.spyOn(bridge, 'sendRequest').mockResolvedValue({ success: true });
+      try {
+        const response = await request(app).post('/proxy').set('X-MCP-Auth', token)
+          .send({ endpoint, data: { code: 'return true' }, targetPeerId: 'studio-peer' });
+        expect(response.status).toBe(403);
+        expect(response.body.error).toBe('forbidden_endpoint');
+        expect(dispatch).not.toHaveBeenCalled();
+      } finally {
+        dispatch.mockRestore();
+        await app.cleanup();
+      }
+    });
+
+    it.each(['/api/place-info', '/api/instance-properties', '/api/get-script-source',
+      '/api/get-selection', '/api/set-selection', '/api/focus-viewport',
+      '/api/capture-begin', '/api/capture-read', '/api/get-runtime-logs'])(
+      'forwards permitted Inspector endpoint %s', async (endpoint) => {
+        const app = createHttpServer(tools, bridge, new Set(getReadOnlyTools().map(tool => tool.name)),
+          undefined, { authToken: token });
+        const result = { value: 'read-result' };
+        const dispatch = jest.spyOn(bridge, 'sendRequest').mockResolvedValue(result);
+        try {
+          const response = await request(app).post('/proxy').set('Authorization', `Bearer ${token}`)
+            .send({ endpoint, data: { instancePath: 'game.Workspace' }, targetPeerId: 'studio-peer',
+              timeoutMs: 1000, operationId: 'read-operation' });
+          expect(response.status).toBe(200);
+          expect(response.body).toEqual({ response: result });
+          expect(dispatch).toHaveBeenCalledWith(endpoint, { instancePath: 'game.Workspace' },
+            'studio-peer', 1000, expect.any(AbortSignal), 'read-operation');
+        } finally {
+          dispatch.mockRestore();
+          await app.cleanup();
+        }
+      });
   });
 
   describe('origin policy', () => {
