@@ -72,9 +72,12 @@ const CLIENT_BROKER_ALLOWED_ENDPOINTS = new Set<string>([
 	"/api/capture-micro-profiler",
 	"/api/multiplayer-test-state",
 	"/api/multiplayer-test-leave-client",
-	// Screenshot capture must run in the client peer (CaptureService captures
-	// the play viewport there); the edit DM reads the temp id back separately.
+	// Screenshot capture must run in the client peer: CaptureService captures
+	// the play viewport there (the edit DM reads the temp id back separately),
+	// and StudioCaptureService only completes in the DataModel that is being
+	// rendered — during a playtest that is the client, never the edit peer.
 	"/api/capture-begin",
+	"/api/capture-studio",
 	// Virtual input (CreateVirtualInput) drives the running client's input
 	// pipeline, so it must execute in the client peer's VM.
 	"/api/simulate-mouse-input",
@@ -233,6 +236,9 @@ function setupClientBroker(attempt = 0) {
 		}
 		if (payload && payload.endpoint === "/api/capture-begin") {
 			return CaptureHandlers.captureBegin();
+		}
+		if (payload && payload.endpoint === "/api/capture-studio") {
+			return CaptureHandlers.captureStudio(payload.data ?? {});
 		}
 		if (payload && payload.endpoint === "/api/simulate-mouse-input") {
 			return InputHandlers.simulateMouseInput(payload.data ?? {});

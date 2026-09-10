@@ -2,12 +2,60 @@ import * as RenderMonitor from "../RenderMonitor";
 
 const CaptureService = game.GetService("CaptureService");
 const AssetService = game.GetService("AssetService");
+const Workspace = game.GetService("Workspace");
 
 const MAX_TILE_SIZE = 1024;
 const MAX_RAW_PIXEL_BYTES = 36 * 1024 * 1024;
 const MAX_CREATED_IMAGE_DIM = 2048;
 const BASE64_CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 const PAD_BYTE = string.byte("=")[0];
+
+// StudioCaptureService (Studio-only, PluginSecurity) is the fast path: it hands
+// back the framebuffer directly, so it needs neither CaptureService's
+// asynchronous callback nor an EditableImage round-trip — and it captures at
+// ViewportSize, which is exactly the coordinate space simulate_mouse_input
+// expects. It is gated behind Studio FFlags and is missing from @rbxts/types,
+// hence the local structural declarations below.
+interface CaptureEnumItem {
+	readonly Name: string;
+}
+
+interface StudioScreenshotOptions {
+	CaptureSize: Vector2;
+	OutputSize?: Vector2;
+	ResampleMode?: Enum.ResamplerMode;
+	Position?: Vector2;
+	Format?: CaptureEnumItem;
+	UICaptureMode?: Enum.UICaptureMode;
+}
+
+interface StudioScreenshotCapture {
+	readonly BufferStatus: CaptureEnumItem;
+	readonly BufferFormat: CaptureEnumItem;
+	readonly OriginalSize: Vector2;
+	readonly Resolution: Vector2;
+	GetBuffer(this: StudioScreenshotCapture): buffer;
+	GetErrors(this: StudioScreenshotCapture): unknown[];
+}
+
+interface StudioCaptureServiceLike {
+	CanCaptureScreenshot(this: StudioCaptureServiceLike): boolean;
+	CaptureScreenshot(
+		this: StudioCaptureServiceLike,
+		options: StudioScreenshotOptions,
+	): StudioScreenshotCapture | undefined;
+}
+
+// Unchecked cast, single reason: these enums exist in Studio but are missing
+// from @rbxts/types, so the global Enum table has to be read dynamically.
+const ENUM_TABLE = Enum as unknown as Record<string, Record<string, CaptureEnumItem> | undefined>;
+const STUDIO_CAPTURE_FORMATS = ENUM_TABLE.StudioCaptureScreenshotFormat;
+
+// Measured on a 1980x1032 viewport: RGBA8 completes in ~0.16s and PNG in ~1s.
+// A capture that is still Pending well past that never completes (it happens
+// while a playtest owns the renderer), so we stop waiting and let the caller
+// fall back instead of stalling the tool call.
+const STUDIO_CAPTURE_TIMEOUT = 3;
 
 const B64: number[] = [];
 for (let i = 0; i < 64; i++) {
@@ -168,6 +216,102 @@ function readContentToBase64(contentId: string): unknown {
 	return { success: true, width: w, height: h, data: base64Data, nativeWidth: nativeW, nativeHeight: nativeH };
 }
 
+let cachedStudioService: StudioCaptureServiceLike | undefined;
+
+function getStudioCaptureService(): StudioCaptureServiceLike | undefined {
+	if (cachedStudioService !== undefined) return cachedStudioService;
+	// Unchecked cast, single reason: StudioCaptureService is absent from
+	// @rbxts/types, so GetService cannot be called through the typed overload.
+	const dynamicGame = game as unknown as { GetService(name: string): unknown };
+	const [ok, service] = pcall(() => dynamicGame.GetService("StudioCaptureService"));
+	if (!ok || service === undefined) return undefined;
+	cachedStudioService = service as StudioCaptureServiceLike;
+	return cachedStudioService;
+}
+
+// Captures through StudioCaptureService. Returns undefined when the service
+// cannot capture right now (missing FFlag, permission not granted, or this
+// DataModel is not the active one) so the caller can fall back to the
+// CaptureService + EditableImage path.
+function doStudioCapture(wantPng: boolean): unknown | undefined {
+	if (STUDIO_CAPTURE_FORMATS === undefined) return undefined;
+
+	const service = getStudioCaptureService();
+	if (service === undefined) return undefined;
+
+	const [canOk, can] = pcall(() => service.CanCaptureScreenshot());
+	if (!canOk || can !== true) return undefined;
+
+	const camera = Workspace.CurrentCamera;
+	if (camera === undefined) return undefined;
+
+	const viewport = camera.ViewportSize;
+	const nativeW = math.max(1, math.floor(viewport.X));
+	const nativeH = math.max(1, math.floor(viewport.Y));
+	const captureSize = new Vector2(nativeW, nativeH);
+
+	const options: StudioScreenshotOptions = {
+		CaptureSize: captureSize,
+		Format: wantPng ? STUDIO_CAPTURE_FORMATS.PNG : STUDIO_CAPTURE_FORMATS.RGBA8,
+	};
+
+	let w = nativeW;
+	let h = nativeH;
+
+	// Raw RGBA rides back base64-encoded, so an oversized viewport is
+	// downscaled by the engine during the capture itself — no second pass.
+	if (!wantPng && nativeW * nativeH * 4 > MAX_RAW_PIXEL_BYTES) {
+		const scale = math.sqrt(MAX_RAW_PIXEL_BYTES / (nativeW * nativeH * 4));
+		w = math.max(1, math.floor(nativeW * scale));
+		h = math.max(1, math.floor(nativeH * scale));
+		options.OutputSize = new Vector2(w, h);
+		options.ResampleMode = Enum.ResamplerMode.Default;
+	}
+
+	const [captureOk, captureResult] = pcall(() => service.CaptureScreenshot(options));
+	if (!captureOk) return { error: `StudioCaptureService:CaptureScreenshot failed: ${tostring(captureResult)}` };
+	if (captureResult === undefined) return undefined;
+
+	const capture = captureResult;
+	const startTime = tick();
+	while (capture.BufferStatus.Name === "Pending" || capture.BufferStatus.Name === "NotStarted") {
+		if (tick() - startTime > STUDIO_CAPTURE_TIMEOUT) return undefined;
+		task.wait(0.02);
+	}
+
+	if (capture.BufferStatus.Name !== "Ready") {
+		const [errorsOk, errors] = pcall(() => capture.GetErrors());
+		const detail = errorsOk ? game.GetService("HttpService").JSONEncode(errors) : "unavailable";
+		return { error: `StudioCaptureService capture failed (status ${capture.BufferStatus.Name}): ${detail}` };
+	}
+
+	const [bufferOk, captureBuffer] = pcall(() => capture.GetBuffer());
+	if (!bufferOk) return { error: `StudioCaptureService:GetBuffer failed: ${tostring(captureBuffer)}` };
+
+	const resolution = capture.Resolution;
+	return {
+		success: true,
+		encoding: wantPng ? "png" : "rgba8",
+		source: "StudioCaptureService",
+		width: math.max(1, math.floor(resolution.X)),
+		height: math.max(1, math.floor(resolution.Y)),
+		nativeWidth: nativeW,
+		nativeHeight: nativeH,
+		data: encodeBase64(captureBuffer as buffer),
+	};
+}
+
+// Studio-only capture endpoint. Reports `unavailable` (instead of an error) so
+// the server can fall back to the legacy CaptureService path.
+function captureStudio(requestData: Record<string, unknown>): unknown {
+	const wantPng = requestData.encoding === "png";
+	const result = doStudioCapture(wantPng);
+	if (result === undefined) {
+		return { unavailable: "StudioCaptureService cannot capture this DataModel right now" };
+	}
+	return result;
+}
+
 // Edit-mode single shot: capture and read back in the same (edit) context.
 function captureScreenshotData(): unknown {
 	const cap = doCaptureScreenshot();
@@ -194,6 +338,7 @@ function captureRead(requestData: Record<string, unknown>): unknown {
 export = {
 	captureScreenshotData,
 	captureScreenshot,
+	captureStudio,
 	captureBegin,
 	captureRead,
 };

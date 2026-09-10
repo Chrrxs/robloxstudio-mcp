@@ -4273,7 +4273,7 @@ describe('Smoke', () => {
 
     await new Promise((resolve) => setTimeout(resolve, 0));
     const capturePending = claimQueuedRequest(bridge, 'session-1');
-    expect(capturePending?.request).toMatchObject({ endpoint: '/api/capture-screenshot' });
+    expect(capturePending?.request).toMatchObject({ endpoint: '/api/capture-studio' });
     bridge.resolveRequest(capturePending!.requestId, { error: 'screenshot boom' });
 
     await new Promise((resolve) => setTimeout(resolve, 0));
@@ -4379,7 +4379,7 @@ describe('Smoke', () => {
 
     await new Promise((resolve) => setTimeout(resolve, 0));
     const capturePending = claimQueuedRequest(bridge, 'session-1');
-    expect(capturePending?.request).toMatchObject({ endpoint: '/api/capture-screenshot' });
+    expect(capturePending?.request).toMatchObject({ endpoint: '/api/capture-studio' });
     bridge.resolveRequest(capturePending!.requestId, {
       width: 1,
       height: 1,
@@ -4423,7 +4423,7 @@ describe('Smoke', () => {
 
     await new Promise((resolve) => setTimeout(resolve, 0));
     const capturePending = claimQueuedRequest(bridge, 'session-1');
-    expect(capturePending?.request).toMatchObject({ endpoint: '/api/capture-screenshot' });
+    expect(capturePending?.request).toMatchObject({ endpoint: '/api/capture-studio' });
     bridge.resolveRequest(capturePending!.requestId, {
       width: 3,
       height: 1,
@@ -4439,6 +4439,130 @@ describe('Smoke', () => {
     expect(meta).toMatchObject({ width: 3, height: 1, format: 'jpeg' });
     expect(meta.message).toContain('downscaled from the 4x2 viewport');
     expect(meta.message).toContain('multiply x read off this image by 1.3333 and y by 2.0000');
+  });
+
+  test('capture_screenshot falls back to CaptureService when StudioCaptureService is unavailable', async () => {
+    const bridge = new BridgeService();
+    const tools = new RobloxStudioTools(bridge);
+    bridge.registerPeer(READY);
+
+    const resultPromise = tools.captureScreenshot('instance:test', 'jpeg', 80);
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const studioPending = claimQueuedRequest(bridge, 'session-1');
+    expect(studioPending?.request).toMatchObject({ endpoint: '/api/capture-studio' });
+    bridge.resolveRequest(studioPending!.requestId, { unavailable: 'no flag' });
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const legacyPending = claimQueuedRequest(bridge, 'session-1');
+    expect(legacyPending?.request).toMatchObject({ endpoint: '/api/capture-screenshot' });
+    bridge.resolveRequest(legacyPending!.requestId, {
+      width: 1,
+      height: 1,
+      data: Buffer.from([12, 34, 56, 255]).toString('base64'),
+    });
+
+    const result = await resultPromise;
+    const firstContent = result.content[0];
+    if (firstContent.type !== 'text' || firstContent.text === undefined) throw new Error('Expected screenshot metadata text first');
+    expect(JSON.parse(firstContent.text)).toMatchObject({ width: 1, height: 1, format: 'jpeg' });
+    expect(result.content.some((item) => item.type === 'image')).toBe(true);
+  });
+
+  test('capture_screenshot falls back when the installed plugin has no capture-studio endpoint', async () => {
+    const bridge = new BridgeService();
+    const tools = new RobloxStudioTools(bridge);
+    bridge.registerPeer(READY);
+
+    const resultPromise = tools.captureScreenshot('instance:test', 'jpeg', 80);
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const studioPending = claimQueuedRequest(bridge, 'session-1');
+    bridge.resolveRequest(studioPending!.requestId, { error: 'Unknown endpoint: /api/capture-studio' });
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const legacyPending = claimQueuedRequest(bridge, 'session-1');
+    expect(legacyPending?.request).toMatchObject({ endpoint: '/api/capture-screenshot' });
+    bridge.resolveRequest(legacyPending!.requestId, {
+      width: 1,
+      height: 1,
+      data: Buffer.from([9, 9, 9, 255]).toString('base64'),
+    });
+
+    const result = await resultPromise;
+    expect(result.content.some((item) => item.type === 'image')).toBe(true);
+  });
+
+  test('capture_screenshot runs the studio fast path in the play client peer', async () => {
+    const bridge = new BridgeService();
+    const tools = new RobloxStudioTools(bridge);
+    bridge.registerPeer(READY);
+    bridge.registerPeer({
+      peerId: 'client-1',
+      transportPeerId: 'client-session',
+      instanceId: 'instance:test',
+      role: 'client',
+      placeId: 0,
+      placeName: 'TestPlace',
+      dataModelName: 'Game',
+      isRunning: true,
+    });
+
+    const resultPromise = tools.captureScreenshot('instance:test', 'jpeg', 80);
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const studioPending = claimQueuedRequest(bridge, 'client-session');
+    expect(studioPending?.request).toMatchObject({ endpoint: '/api/capture-studio', data: { encoding: 'rgba8' } });
+    bridge.resolveRequest(studioPending!.requestId, { unavailable: 'no flag' });
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const beginPending = claimQueuedRequest(bridge, 'client-session');
+    expect(beginPending?.request).toMatchObject({ endpoint: '/api/capture-begin' });
+    bridge.resolveRequest(beginPending!.requestId, { contentId: 'rbxtemp://1' });
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const readPending = claimQueuedRequest(bridge, 'session-1');
+    expect(readPending?.request).toMatchObject({ endpoint: '/api/capture-read' });
+    bridge.resolveRequest(readPending!.requestId, {
+      width: 1,
+      height: 1,
+      data: Buffer.from([1, 2, 3, 255]).toString('base64'),
+    });
+
+    const result = await resultPromise;
+    expect(result.content.some((item) => item.type === 'image')).toBe(true);
+  });
+
+  test('capture_screenshot returns the PNG encoded in Studio without re-encoding it', async () => {
+    const bridge = new BridgeService();
+    const tools = new RobloxStudioTools(bridge);
+    bridge.registerPeer(READY);
+
+    const resultPromise = tools.captureScreenshot('instance:test', 'png');
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const studioPending = claimQueuedRequest(bridge, 'session-1');
+    expect(studioPending?.request).toMatchObject({ endpoint: '/api/capture-studio', data: { encoding: 'png' } });
+
+    // 1x1 red PNG produced by Studio; the server must pass these bytes through.
+    const pngBytes = Buffer.from(
+      'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFAAH/q842iQAAAABJRU5ErkJggg==',
+      'base64',
+    );
+    bridge.resolveRequest(studioPending!.requestId, {
+      success: true,
+      encoding: 'png',
+      source: 'StudioCaptureService',
+      width: 1,
+      height: 1,
+      data: pngBytes.toString('base64'),
+    });
+
+    const result = await resultPromise;
+    const image = result.content.find((item) => item.type === 'image');
+    if (!image || image.type !== 'image') throw new Error('Expected an image content item');
+    expect(image.mimeType).toBe('image/png');
+    expect(image.data).toBe(pngBytes.toString('base64'));
   });
 
   test('capture_device_matrix keeps the total inline image payload within the aggregate budget', async () => {
@@ -4491,7 +4615,7 @@ describe('Smoke', () => {
 
       await new Promise((resolve) => setTimeout(resolve, 0));
       const capturePending = claimQueuedRequest(bridge, 'session-1');
-      expect(capturePending?.request).toMatchObject({ endpoint: '/api/capture-screenshot' });
+      expect(capturePending?.request).toMatchObject({ endpoint: '/api/capture-studio' });
       bridge.resolveRequest(capturePending!.requestId, {
         width: noiseSide,
         height: noiseSide,
