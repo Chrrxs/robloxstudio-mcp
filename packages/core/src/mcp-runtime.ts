@@ -166,6 +166,12 @@ export function normalizeToolResult(raw: unknown, era: ProtocolEra): CallToolRes
     };
   }
 
+  // Handler failures are returned as data, not necessarily thrown. Only inspect
+  // the response envelope: nested Luau return values and logs are ordinary data.
+  const isError = result.isError
+    || structured.success === false
+    || (typeof structured.error === 'string' && structured.error.length > 0);
+
   const content = era === 'modern'
     ? originalContent.filter((_, index) => index !== jsonTextIndex)
     : [
@@ -176,7 +182,7 @@ export function normalizeToolResult(raw: unknown, era: ProtocolEra): CallToolRes
   return {
     content: content as CallToolResult['content'],
     structuredContent: structured,
-    ...(result.isError ? { isError: true } : {}),
+    ...(isError ? { isError: true } : {}),
   };
 }
 

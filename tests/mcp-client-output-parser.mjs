@@ -38,6 +38,8 @@ async function fixture() {
       await writeOutput(unicodeBytes.subarray(1));
       for (let offset = 0; offset < LARGE_BYTES; offset += CHUNK.length) await writeOutput(CHUNK);
       await writeOutput('"}}\n');
+    } else if (request.method === 'tools/call') {
+      await writeOutput(`${JSON.stringify({ jsonrpc: '2.0', id: request.id, result: request.params.arguments.response })}\n`);
     } else {
       await writeOutput(`${JSON.stringify({ jsonrpc: '2.0', id: request.id, result: request.params })}\n`);
     }
@@ -57,6 +59,15 @@ async function regression() {
       client.rpc('paired', first), client.rpc('paired', second),
     ]);
     assert.deepEqual(paired, [first, second], 'Coalesced responses resolve by ID despite reversed order and framing noise');
+
+    const failureBody = { success: false, error: 'Expected handler failure', summary: { succeeded: 1, failed: 1 } };
+    const failure = { response: { isError: true, content: [{ type: 'text', text: JSON.stringify(failureBody) }] } };
+    const success = { response: { content: [{ type: 'text', text: '{"success":true}' }] } };
+    assert.deepEqual(await client.callToolResult('fixture', failure), { body: failureBody, isError: true });
+    assert.deepEqual(await client.callToolError('fixture', failure), failureBody);
+    await assert.rejects(client.callTool('fixture', failure), /returned isError/);
+    await assert.rejects(client.callToolError('fixture', success), /did not return isError: true/);
+    assert.deepEqual(await client.callTool('fixture', success), { success: true });
 
     const expectedHash = createHash('sha256').update(UNICODE);
     for (let offset = 0; offset < LARGE_BYTES; offset += CHUNK.length) expectedHash.update(CHUNK);

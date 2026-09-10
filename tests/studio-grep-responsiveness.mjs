@@ -82,7 +82,7 @@ return root ~= nil
 async function waitForReleasedSearch(client, instanceId, deadline) {
   let last;
   while (Date.now() < deadline) {
-    last = await client.callTool('grep_scripts', {
+    const result = await client.callToolResult('grep_scripts', {
       instance_id: instanceId,
       pattern: 'RSMCP_NEEDLE_0001',
       caseSensitive: true,
@@ -91,7 +91,9 @@ async function waitForReleasedSearch(client, instanceId, deadline) {
       path: FIXTURE_PATH,
       classFilter: 'ModuleScript',
     }, 15_000);
-    if (last?.error !== 'plugin_busy') return last;
+    last = result.body;
+    assert(result.isError === (last?.error === 'plugin_busy'), 'only plugin_busy is an expected search failure');
+    if (!result.isError) return last;
     await delay(25);
   }
   throw new Error(`cancelled grep did not release its exclusive job: ${JSON.stringify(last)}`);
@@ -130,7 +132,7 @@ await runTest('large external grep remains responsive and cancellable', async ({
     const probeStartedAt = Date.now();
     const [placeInfo, overlap] = await Promise.all([
       client.callTool('get_place_info', { instance_id: instanceId }, 10_000),
-      client.callTool('grep_scripts', {
+      client.callToolError('grep_scripts', {
         instance_id: instanceId,
         pattern: 'different-pattern',
         caseSensitive: true,
