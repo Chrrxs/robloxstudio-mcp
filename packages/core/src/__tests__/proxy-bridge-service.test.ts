@@ -245,6 +245,30 @@ describe('ProxyBridgeService', () => {
     }
   });
 
+  test('a primary refusal preserves the proxy group, peers, instances and runtime alias', async () => {
+    const snapshot = topology();
+    const fetchMock = jest.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+      if (String(input) === 'http://primary/topology') return jsonResponse(snapshot);
+      expect(String(input)).toBe('http://primary/remove-multiplayer-group');
+      return new Response(JSON.stringify({
+        success: false, error: 'multiplayer_group_in_use', groupId: 'group-1',
+      }), { status: 409, headers: { 'Content-Type': 'application/json' } });
+    });
+    const proxy = new ProxyBridgeService('http://primary');
+    try {
+      await proxy.waitForInitialRefresh();
+      const before = structuredClone(proxy.getTopologySnapshot());
+      await expect(proxy.removeMultiplayerGroupEverywhere('group-1')).rejects.toMatchObject({
+        code: 'multiplayer_group_in_use', groupId: 'group-1',
+      });
+      expect(proxy.getTopologySnapshot()).toEqual(before);
+      expect(proxy.resolveConnectedInstanceId('instance:server-server')).toBe('instance:server');
+    } finally {
+      proxy.stop();
+      fetchMock.mockRestore();
+    }
+  });
+
   test('preserves generated recovery identity on a non-abort network failure', async () => {
     let requestId: unknown;
     const fetchMock = jest.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {

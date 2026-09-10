@@ -81,6 +81,15 @@ export interface MultiplayerGroup {
 
 export type PublicMultiplayerGroup = MultiplayerGroup;
 
+export class MultiplayerGroupInUseError extends Error {
+  readonly code = 'multiplayer_group_in_use';
+
+  constructor(readonly groupId: string) {
+    super(`Multiplayer Group "${groupId}" still has connected runtime peers and cannot be removed.`);
+    this.name = 'MultiplayerGroupInUseError';
+  }
+}
+
 export interface TopologySnapshot {
   peers: StudioPeer[];
   instances: StudioInstance[];
@@ -581,6 +590,12 @@ export class BridgeService implements StudioTransportQueue {
   removeMultiplayerGroup(groupId: string): MultiplayerGroup | undefined {
     const group = this.multiplayerGroupsById.get(groupId);
     if (!group) return undefined;
+    // Check the authoritative registry without yielding before deleting or detaching.
+    for (const peer of this.peersById.values()) {
+      if (peer.multiplayerGroupId === groupId && isRuntimeRole(peer.role)) {
+        throw new MultiplayerGroupInUseError(groupId);
+      }
+    }
     this.multiplayerGroupsById.delete(groupId);
     for (const peer of this.peersById.values()) {
       if (peer.multiplayerGroupId === groupId) peer.multiplayerGroupId = undefined;

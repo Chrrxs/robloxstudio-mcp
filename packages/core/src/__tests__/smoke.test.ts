@@ -3500,6 +3500,9 @@ describe('Smoke', () => {
       message: 'Multiplayer Studio test end requested.',
       value: 'done',
     });
+    // A successful teardown must remove the runtime, not just report it absent
+    // through the mocked wait helpers.
+    bridge.unregisterPeer('server-1');
 
     const wrapperResult = await wrapperPromise;
     const wrapperBody = JSON.parse(wrapperResult.content[0].text);

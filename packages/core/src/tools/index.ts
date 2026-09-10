@@ -1112,7 +1112,7 @@ export class RobloxStudioTools {
     return this.client.request(endpoint, data, targetPeerId, timeoutMs, signal, operationId) as Promise<StudioToolResponse>;
   }
 
-  private _request(
+  private async _request(
     endpoint: string,
     data: unknown,
     instanceId: string,
@@ -1120,6 +1120,8 @@ export class RobloxStudioTools {
     timeoutMs?: number,
     signal?: AbortSignal,
   ) {
+    const refresh = this.bridge.refreshTopologyForRouting(signal);
+    if (refresh) await refresh;
     const peer = this._peerForRoleInScope(instanceId, role);
     if (!peer) {
       throw new RoutingFailure({
@@ -1141,6 +1143,8 @@ export class RobloxStudioTools {
     signal?: AbortSignal,
     operationId?: string,
   ): Promise<StudioToolResponse> {
+    const refresh = this.bridge.refreshTopologyForRouting(signal);
+    if (refresh) await refresh;
     const resolved = this.bridge.resolveTarget({ instance_id, target });
     if (!resolved.ok) throw new RoutingFailure(resolved.error);
     if (resolved.mode !== 'single') {
@@ -1174,6 +1178,7 @@ export class RobloxStudioTools {
     };
   }
 
+  // Resolve synchronously after the caller has refreshed and captured its topology.
   private _resolveInstanceIdOnly(instance_id?: string): string {
     if (instance_id !== undefined) {
       const resolvedInstanceId = this.bridge.resolveConnectedInstanceId(instance_id);
@@ -1451,6 +1456,8 @@ export class RobloxStudioTools {
   ): Promise<{ ok: boolean; roles: string[]; timedOut: boolean }> {
     const deadline = Date.now() + timeoutSec * 1000;
     while (Date.now() < deadline) {
+      const refresh = this.bridge.refreshTopologyForRouting();
+      if (refresh) await refresh;
       const roles = this._rolesForScope(instanceId);
       const clientRoles = this._clientRolesForScope(instanceId);
       const hasServer = !opts.server || roles.includes('server');
@@ -1479,6 +1486,8 @@ export class RobloxStudioTools {
     let exactSince: number | undefined;
 
     while (Date.now() < deadline) {
+      const refresh = this.bridge.refreshTopologyForRouting();
+      if (refresh) await refresh;
       const roles = this._rolesForScope(instanceId);
       const clientCount = this._clientRolesForScope(instanceId).length;
       if (clientCount > expectedClientCount) {
@@ -1508,6 +1517,8 @@ export class RobloxStudioTools {
   ): Promise<{ ok: boolean; roles: string[]; timedOut: boolean }> {
     const deadline = Date.now() + timeoutSec * 1000;
     while (Date.now() < deadline) {
+      const refresh = this.bridge.refreshTopologyForRouting();
+      if (refresh) await refresh;
       const peers = this.bridge.getPeersInScope(instanceId);
       const roles = peers.map((peer) => peer.role);
       const freshRoles = new Set(
@@ -1878,6 +1889,8 @@ export class RobloxStudioTools {
       throw new Error('selection angleY must be between -89 and 89');
     }
 
+    const refresh = this.bridge.refreshTopologyForRouting();
+    if (refresh) await refresh;
     const { instanceId, clientRole } = this._resolveRuntime(instance_id);
     const response = await this._callSingle('/api/focus-viewport', {
       path: instancePath,
@@ -1946,6 +1959,8 @@ export class RobloxStudioTools {
 
   async setNetworkProfile(profile: string, target?: string, overrides?: Record<string, unknown>, instance_id?: string) {
     const values = normalizeNetworkProfile(profile, overrides);
+    const refresh = this.bridge.refreshTopologyForRouting();
+    if (refresh) await refresh;
     const instanceId = this._resolveInstanceIdOnly(instance_id);
     const clientRoles = this._clientRolesForScope(instanceId);
     const selectedTarget = target ?? 'client-1';
@@ -2021,6 +2036,8 @@ export class RobloxStudioTools {
     const selectedInclude = this._normalizeSimulationInclude(include);
     const includeNetwork = selectedInclude === 'network' || selectedInclude === 'both';
     const includeDeviceSimulator = selectedInclude === 'deviceSimulator' || selectedInclude === 'both';
+    const refresh = this.bridge.refreshTopologyForRouting();
+    if (refresh) await refresh;
     const resolved = this._resolveSimulationTargets(target, instance_id, 'get_simulation_state');
 
     const roleEntries = await Promise.all(resolved.roles.map(async (role) => {
@@ -2080,6 +2097,8 @@ export class RobloxStudioTools {
       throw new Error('reset_simulation_state requires network=true and/or deviceSimulator=true; both default to true');
     }
 
+    const refresh = this.bridge.refreshTopologyForRouting();
+    if (refresh) await refresh;
     const resolved = this._resolveSimulationTargets(target, instance_id, 'reset_simulation_state');
     const roleEntries = await Promise.all(resolved.roles.map(async (role) => {
       const result: Record<string, unknown> = {};
@@ -2151,6 +2170,8 @@ export class RobloxStudioTools {
     if (deviceId !== undefined && (typeof deviceId !== 'string' || deviceId.trim() === '')) {
       throw new Error('deviceId must be a non-empty string when provided');
     }
+    const refresh = this.bridge.refreshTopologyForRouting();
+    if (refresh) await refresh;
     const resolved = this._resolveDeviceSimulatorSingleTarget(target, instance_id, 'get_device_simulator_state');
     const state = await this._executeDeviceSimulatorOperation(
       resolved.instanceId,
@@ -2191,6 +2212,8 @@ export class RobloxStudioTools {
       throw new Error('set_device_simulator requires stopSimulation=true or at least one simulator setting');
     }
 
+    const refresh = this.bridge.refreshTopologyForRouting();
+    if (refresh) await refresh;
     const resolved = this._resolveDeviceSimulatorSetTargets(target, instance_id);
     const responses = await Promise.allSettled(
       resolved.roles.map(async (role) => {
@@ -2270,6 +2293,8 @@ export class RobloxStudioTools {
       };
     });
 
+    const refresh = this.bridge.refreshTopologyForRouting();
+    if (refresh) await refresh;
     const resolved = this._resolveDeviceSimulatorSingleTarget(target, instance_id, 'capture_device_matrix');
     if (resolved.role.startsWith('client-') && await this._isMultiplayerTestRunning(resolved.instanceId)) {
       throw new Error('capture_device_matrix does not support StudioTestService multiplayer client targets because Roblox scopes temporary screenshot textures per client process');
@@ -2421,8 +2446,8 @@ export class RobloxStudioTools {
       throw new Error('get_runtime_logs tail must be a non-negative integer.');
     }
 
-    // Discovery may use a cached proxy view, but log fanout must not target peers
-    // that the primary has already removed during playtest teardown.
+    // Capture one fresh topology before resolving the log scope and its fanout.
+    // Keep subsequent snapshot reads synchronous so they cannot refresh midway.
     const refresh = this.bridge.refreshTopologyForRouting(signal);
     if (refresh) await refresh;
 
@@ -2731,6 +2756,8 @@ export class RobloxStudioTools {
       data.__mcp_include_raw_json = true;
     }
 
+    const refresh = this.bridge.refreshTopologyForRouting();
+    if (refresh) await refresh;
     const resolved = this.bridge.resolveTarget({ instance_id, target: targetRole });
     if (!resolved.ok) throw new RoutingFailure(resolved.error);
     if (resolved.mode !== 'single') {
@@ -2803,6 +2830,8 @@ export class RobloxStudioTools {
       data.__mcp_include_comparison_index = true;
     }
 
+    const refresh = this.bridge.refreshTopologyForRouting();
+    if (refresh) await refresh;
     const resolved = this.bridge.resolveTarget({ instance_id, target: targetRole });
     if (!resolved.ok) throw new RoutingFailure(resolved.error);
     if (resolved.mode !== 'single') {
@@ -2870,6 +2899,8 @@ export class RobloxStudioTools {
     const data: Record<string, unknown> = { ...request, action };
     delete data.target;
     delete data.instance_id;
+    const refresh = this.bridge.refreshTopologyForRouting();
+    if (refresh) await refresh;
     const resolved = this.bridge.resolveTarget({ instance_id, target: targetRole });
     if (!resolved.ok) throw new RoutingFailure(resolved.error);
     if (resolved.mode !== 'single') {
@@ -3302,6 +3333,8 @@ export class RobloxStudioTools {
     }
 
     if (action === 'status') {
+      const refresh = this.bridge.refreshTopologyForRouting();
+      if (refresh) await refresh;
       const instanceId = this._resolveInstanceIdOnly(instance_id);
       const { roles, runtimeRoles } = this._briefRoles(instanceId);
       return this._textResult({
@@ -3367,6 +3400,8 @@ export class RobloxStudioTools {
     }
     const data: Record<string, unknown> = { mode };
     const startedAt = Date.now();
+    const refresh = this.bridge.refreshTopologyForRouting();
+    if (refresh) await refresh;
     const resolved = this.bridge.resolveTarget({ instance_id, target: undefined });
     if (!resolved.ok) throw new RoutingFailure(resolved.error);
     if (resolved.mode !== 'single') {
@@ -3423,6 +3458,8 @@ export class RobloxStudioTools {
     // that StopPlayMonitor reads from inside the play-server DM (the only DM where
     // StudioTestService:EndTest is legal). The cross-DM signal works independently
     // of MCP server state, peer-role bookkeeping, or restart cycles.
+    const refresh = this.bridge.refreshTopologyForRouting();
+    if (refresh) await refresh;
     const { instanceId } = this._resolveSingleTarget('edit', instance_id);
     let response: Record<string, unknown>;
     let stopRequestError: string | undefined;
@@ -3484,6 +3521,8 @@ export class RobloxStudioTools {
   }
 
   private async _buildMultiplayerState(instanceId: string): Promise<Record<string, unknown>> {
+    const refresh = this.bridge.refreshTopologyForRouting();
+    if (refresh) await refresh;
     const peers = this.bridge.getPublicPeers()
       .filter((peer) => this.bridge.getInstanceIdsInScope(instanceId).includes(peer.instanceId))
       .sort((a, b) => a.role.localeCompare(b.role));
@@ -3541,6 +3580,8 @@ export class RobloxStudioTools {
   private async _waitForMultiplayerEditDone(instanceId: string, timeoutSec = 30): Promise<boolean> {
     const deadline = Date.now() + timeoutSec * 1000;
     while (Date.now() < deadline) {
+      const refresh = this.bridge.refreshTopologyForRouting();
+      if (refresh) await refresh;
       if (!this._rolesForScope(instanceId).includes('edit')) return false;
       try {
         const editState = await this._request('/api/multiplayer-test-state', {}, instanceId, 'edit');
@@ -3555,6 +3596,8 @@ export class RobloxStudioTools {
   }
 
   private async _isMultiplayerTestRunning(instanceId: string): Promise<boolean> {
+    const refresh = this.bridge.refreshTopologyForRouting();
+    if (refresh) await refresh;
     return this.bridge.getMultiplayerGroups().some((group) =>
       group.instanceIds.includes(instanceId)
     );
@@ -3620,6 +3663,8 @@ export class RobloxStudioTools {
     }
 
     const briefState = async (instanceId?: string) => {
+      const refresh = this.bridge.refreshTopologyForRouting();
+      if (refresh) await refresh;
       const state = await this._buildMultiplayerState(this._resolveInstanceIdOnly(instanceId));
       const roles = Array.isArray(state.peers)
         ? state.peers.flatMap((peer) =>
@@ -3748,6 +3793,8 @@ export class RobloxStudioTools {
     if (!Number.isInteger(numPlayers) || numPlayers < 1 || numPlayers > 8) {
       throw new Error('numPlayers must be an integer from 1 to 8');
     }
+    const refresh = this.bridge.refreshTopologyForRouting();
+    if (refresh) await refresh;
     const editTarget = this._resolveSingleTarget('edit', instance_id);
     const existingRuntime = this._runtimeTargetsForScope(editTarget.instanceId);
     if (existingRuntime.length > 0) {
@@ -3811,6 +3858,8 @@ export class RobloxStudioTools {
   }
 
   async multiplayerTestState(instance_id?: string) {
+    const refresh = this.bridge.refreshTopologyForRouting();
+    if (refresh) await refresh;
     const instanceId = this._resolveInstanceIdOnly(instance_id);
     const state = await this._buildMultiplayerState(instanceId);
     return { content: [{ type: 'text', text: JSON.stringify(state) }] };
@@ -3820,6 +3869,8 @@ export class RobloxStudioTools {
     if (!Number.isInteger(numPlayers) || numPlayers < 1 || numPlayers > 8) {
       throw new Error('numPlayers must be an integer from 1 to 8');
     }
+    const refresh = this.bridge.refreshTopologyForRouting();
+    if (refresh) await refresh;
     const serverTarget = this._resolveSingleTarget('server', instance_id);
     const group = this.bridge.getMultiplayerGroups().find((candidate) =>
       candidate.instanceIds.includes(serverTarget.instanceId)
@@ -3859,6 +3910,8 @@ export class RobloxStudioTools {
     if (!/^client-\d+$/.test(target)) {
       throw new Error(`multiplayer_test_leave_client requires target=client-N (got: ${target})`);
     }
+    const refresh = this.bridge.refreshTopologyForRouting();
+    if (refresh) await refresh;
     const clientTarget = this._resolveSingleTarget(target, instance_id);
     const group = this.bridge.getMultiplayerGroups().find((candidate) =>
       candidate.instanceIds.includes(clientTarget.instanceId)
@@ -3893,6 +3946,9 @@ export class RobloxStudioTools {
   }
 
   async multiplayerTestEnd(value?: unknown, timeout?: number, instance_id?: string) {
+    // A refresh failure must not be mistaken for an already-ended playtest.
+    const refresh = this.bridge.refreshTopologyForRouting();
+    if (refresh) await refresh;
     let serverTarget: { targetPeerId: string; instanceId: string; role: string };
     try {
       serverTarget = this._resolveSingleTarget('server', instance_id);
@@ -3955,6 +4011,8 @@ export class RobloxStudioTools {
   }
 
   async getConnectedInstances() {
+    const refresh = this.bridge.refreshTopologyForRouting();
+    if (refresh) await refresh;
     return this._textResult({
       instances: this.bridge.getConnectedInstances(),
       multiplayerGroups: this.bridge.getConnectedMultiplayerGroups(),
@@ -4634,6 +4692,8 @@ export class RobloxStudioTools {
     }
     // Default to the running playtest client (where the input pipeline lives)
     // when the caller didn't pick a target; fall back to edit otherwise.
+    const refresh = this.bridge.refreshTopologyForRouting();
+    if (refresh) await refresh;
     const { instanceId, clientRole } = this._resolveRuntime(instance_id);
     const response = await this._callSingle('/api/simulate-mouse-input', {
       action, x, y, button
@@ -4650,6 +4710,8 @@ export class RobloxStudioTools {
     if (!keyCode && text === undefined) {
       throw new Error('keyCode or text is required for simulate_keyboard_input');
     }
+    const refresh = this.bridge.refreshTopologyForRouting();
+    if (refresh) await refresh;
     const { instanceId, clientRole } = this._resolveRuntime(instance_id);
     const response = await this._callSingle('/api/simulate-keyboard-input', {
       keyCode, action, duration, text
@@ -4699,6 +4761,8 @@ export class RobloxStudioTools {
     const data: Record<string, unknown> = {};
     if (tags !== undefined) data.tags = tags;
 
+    const refresh = this.bridge.refreshTopologyForRouting();
+    if (refresh) await refresh;
     const resolved = this.bridge.resolveTarget({ instance_id, target: tgt });
     if (!resolved.ok) throw new RoutingFailure(resolved.error);
 
@@ -4737,6 +4801,8 @@ export class RobloxStudioTools {
     if (topN !== undefined) data.topN = topN;
     if (raw !== undefined) data.raw = raw;
 
+    const refresh = this.bridge.refreshTopologyForRouting();
+    if (refresh) await refresh;
     const resolved = this.bridge.resolveTarget({ instance_id, target: tgt });
     if (!resolved.ok) throw new RoutingFailure(resolved.error);
 
@@ -5030,6 +5096,8 @@ export class RobloxStudioTools {
   }
 
   async captureScreenshot(instance_id?: string, format?: string, quality?: number) {
+    const refresh = this.bridge.refreshTopologyForRouting();
+    if (refresh) await refresh;
     const { instanceId, clientRole } = this._resolveRuntime(instance_id);
     const capture = await this._captureViewportImage(instanceId, clientRole ?? 'edit', format, quality);
     if (!capture.success) {

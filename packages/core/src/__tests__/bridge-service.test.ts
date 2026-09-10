@@ -1,4 +1,4 @@
-import { BridgeService, RequestFailure } from '../bridge-service.js';
+import { BridgeService, MultiplayerGroupInUseError, RequestFailure } from '../bridge-service.js';
 import type { RegisterPeerInput } from '../bridge-service.js';
 
 function register(
@@ -506,32 +506,28 @@ describe('BridgeService', () => {
       ]);
     });
 
-    test('removing a group makes every member Instance standalone', () => {
+    test.each(['server', 'client-1'])('refuses removal while a %s peer is connected without invalidating its alias', (role) => {
+      register(bridge, { peerId: 'edit-peer', instanceId: 'instance:edit', role: 'edit' });
+      bridge.createMultiplayerGroup('test:remove', 'instance:edit');
       register(bridge, {
-        peerId: 'server-peer',
-        instanceId: 'instance:server',
-        multiplayerGroupId: 'test:remove',
-        role: 'server',
+        peerId: 'runtime-peer', instanceId: 'instance:runtime',
+        multiplayerGroupId: 'test:remove', role,
       });
-      register(bridge, {
-        peerId: 'client-peer',
-        instanceId: 'instance:client',
-        multiplayerGroupId: 'test:remove',
-        role: 'client',
+      const before = structuredClone(bridge.getTopologySnapshot());
+      const alias = `instance:runtime-${role}`;
+
+      expect(() => bridge.removeMultiplayerGroup('test:remove')).toThrow(MultiplayerGroupInUseError);
+      expect(bridge.getTopologySnapshot()).toEqual(before);
+      expect(bridge.resolveConnectedInstanceId(alias)).toBe('instance:runtime');
+      expect(bridge.resolveTarget({ instance_id: alias, target: role })).toMatchObject({
+        ok: true, mode: 'single', targetPeerId: 'runtime-peer',
       });
 
-      const removed = bridge.removeMultiplayerGroup('test:remove');
-
-      expect(removed?.instanceIds).toEqual(['instance:server', 'instance:client']);
+      bridge.unregisterPeer('runtime-peer');
+      expect(bridge.removeMultiplayerGroup('test:remove')?.instanceIds).toEqual(['instance:edit']);
       expect(bridge.getMultiplayerGroups()).toEqual([]);
-      expect(bridge.getInstances()).toEqual([
-        expect.objectContaining({ id: 'instance:server', multiplayerGroupId: undefined }),
-        expect.objectContaining({ id: 'instance:client', multiplayerGroupId: undefined }),
-      ]);
-      expect(bridge.resolveTarget({})).toMatchObject({
-        ok: false,
-        error: { code: 'multiple_instances_connected' },
-      });
+      expect(bridge.getPeerById('edit-peer')?.multiplayerGroupId).toBeUndefined();
+      expect(bridge.removeMultiplayerGroup('test:remove')).toBeUndefined();
     });
   });
 

@@ -639,6 +639,30 @@ describe('HTTP Server', () => {
       expect(bridge.getPeerById('peer-1')?.multiplayerGroupId).toBeUndefined();
     });
 
+    test('group removal rechecks live runtime membership on the primary and returns a conflict', async () => {
+      await request(app).post('/ready').send(READY_BODY).expect(200);
+      bridge.createMultiplayerGroup('group-proxy', 'instance:test');
+      await request(app).post('/ready').send({
+        ...READY_BODY, peerId: 'runtime-peer', transportPeerId: 'runtime-peer',
+        instanceId: 'instance:runtime', role: 'server', isRunning: true,
+        multiplayerGroupId: 'group-proxy',
+      }).expect(200);
+      const before = structuredClone(bridge.getTopologySnapshot());
+
+      const response = await request(app).post('/remove-multiplayer-group')
+        .send({ groupId: 'group-proxy' }).expect(409);
+      expect(response.body).toMatchObject({
+        success: false, error: 'multiplayer_group_in_use', groupId: 'group-proxy',
+      });
+      expect(bridge.getTopologySnapshot()).toEqual(before);
+      expect(bridge.resolveConnectedInstanceId('instance:runtime-server')).toBe('instance:runtime');
+
+      await request(app).post('/disconnect').send({ peerId: 'runtime-peer' }).expect(200);
+      await request(app).post('/remove-multiplayer-group').send({ groupId: 'group-proxy' }).expect(200);
+      await request(app).post('/remove-multiplayer-group').send({ groupId: 'group-proxy' }).expect(200);
+      expect(bridge.getMultiplayerGroups()).toEqual([]);
+    });
+
     test('rejects invalid operation IDs before dispatching proxy work', async () => {
       await request(app).post('/proxy').send({
         endpoint: '/api/execute-luau',

@@ -9,7 +9,7 @@ export {
   MAX_STUDIO_FRAME_BYTES,
 } from './studio-transport.js';
 export type { StudioServerEvent, StudioSocket, StudioSocketHandle } from './studio-transport.js';
-export { BridgeService, RequestFailure } from './bridge-service.js';
+export { BridgeService, MultiplayerGroupInUseError, RequestFailure } from './bridge-service.js';
 export type { ExecutionOutcome, RequestStage, RequestObservations, RequestStatus, RequestFailureDetails } from './bridge-service.js';
 export { RobloxStudioTools } from './tools/index.js';
 export { StudioHttpClient } from './tools/studio-client.js';

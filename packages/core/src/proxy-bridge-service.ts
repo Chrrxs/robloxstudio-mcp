@@ -1,4 +1,4 @@
-import { BridgeService, isRequestStage, parseFailureDetails, parseObservations, RequestFailure, toPublicPeer } from './bridge-service.js';
+import { BridgeService, isRequestStage, MultiplayerGroupInUseError, parseFailureDetails, parseObservations, RequestFailure, toPublicPeer } from './bridge-service.js';
 import type {
   MultiplayerGroup,
   PublicStudioPeer,
@@ -149,8 +149,8 @@ export class ProxyBridgeService extends BridgeService {
       }
     } catch (error) {
       if (requireFresh) throw error;
-      // Discovery can retain its last-known view when the primary is unreachable.
-      // Routing refreshes instead fail explicitly, without queuing stale work.
+      // Background polling can retain its last-known view when the primary is unreachable.
+      // Discovery and routing refreshes fail explicitly, without queuing stale work.
     } finally {
       clearTimeout(timeout);
       signal?.removeEventListener('abort', abort);
@@ -224,6 +224,18 @@ export class ProxyBridgeService extends BridgeService {
       headers: this.authHeaders({ 'Content-Type': 'application/json' }),
       body: JSON.stringify({ groupId }),
     });
+    if (response.status === 409) {
+      const refusal: unknown = await response.json().catch(() => undefined);
+      if (
+        refusal && typeof refusal === 'object' && !Array.isArray(refusal)
+        && 'success' in refusal && refusal.success === false
+        && 'error' in refusal && refusal.error === 'multiplayer_group_in_use'
+        && 'groupId' in refusal && refusal.groupId === groupId
+      ) {
+        throw new MultiplayerGroupInUseError(groupId);
+      }
+      throw new Error('Proxy Multiplayer Group removal returned an invalid refusal.');
+    }
     if (!response.ok) {
       const body = await response.text().catch(() => '');
       throw new Error(`Proxy Multiplayer Group removal failed (${response.status}): ${body || response.statusText}`);

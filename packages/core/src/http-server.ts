@@ -6,7 +6,7 @@ import type { Duplex } from 'node:stream';
 import { WebSocketServer } from 'ws';
 import { toNodeHandler } from '@modelcontextprotocol/node';
 import { RobloxStudioTools } from './tools/index.js';
-import { BridgeService, RequestFailure, RoutingFailure } from './bridge-service.js';
+import { BridgeService, MultiplayerGroupInUseError, RequestFailure, RoutingFailure } from './bridge-service.js';
 import type { PublicStudioInstance, PublicStudioPeer, RegisterPeerResult } from './bridge-service.js';
 import type { ToolDefinition } from './tools/definitions.js';
 import { createToolHttpHandler, normalizeToolResult, publicToolErrorBody } from './mcp-runtime.js';
@@ -745,14 +745,27 @@ export function createHttpServer(tools: RobloxStudioTools, bridge: BridgeService
     const group = await bridge.createMultiplayerGroupEverywhere(groupId, controllerInstanceId);
     res.json({ success: true, group });
   });
-  app.post('/remove-multiplayer-group', async (req, res) => {
+  app.post('/remove-multiplayer-group', async (req, res, next) => {
     const { groupId } = req.body;
     if (typeof groupId !== 'string' || groupId.length === 0) {
       res.status(400).json({ error: 'groupId is required' });
       return;
     }
-    const removed = await bridge.removeMultiplayerGroupEverywhere(groupId);
-    res.json({ success: true, removed });
+    try {
+      const removed = await bridge.removeMultiplayerGroupEverywhere(groupId);
+      res.json({ success: true, removed });
+    } catch (error) {
+      if (error instanceof MultiplayerGroupInUseError) {
+        res.status(409).json({
+          success: false,
+          error: error.code,
+          message: error.message,
+          groupId: error.groupId,
+        });
+        return;
+      }
+      next(error);
+    }
   });
 
 

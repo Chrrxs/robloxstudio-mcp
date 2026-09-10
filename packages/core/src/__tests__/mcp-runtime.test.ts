@@ -2,7 +2,7 @@ import { EventEmitter, once } from 'node:events';
 import { Client, InMemoryTransport, StreamableHTTPClientTransport } from '@modelcontextprotocol/client';
 import { serveStdio } from '@modelcontextprotocol/server/stdio';
 import type { Server as HttpServer } from 'node:http';
-import { BridgeService, RequestFailure, RoutingFailure } from '../bridge-service.js';
+import { BridgeService, MultiplayerGroupInUseError, RequestFailure, RoutingFailure } from '../bridge-service.js';
 import { createHttpServer, TOOL_HANDLERS } from '../http-server.js';
 import {
   createToolServer,
@@ -141,6 +141,14 @@ describe('MCP v2 tool runtime', () => {
           'instance:567-890-server': 'peer:567-890',
         },
       }],
+    });
+  });
+
+  test('exposes authoritative group-removal refusal without reporting successful teardown', () => {
+    expect(publicToolErrorBody('multiplayer_playtest', new MultiplayerGroupInUseError('test:live'))).toEqual({
+      error: 'multiplayer_group_in_use',
+      message: expect.stringContaining('test:live'),
+      multiplayer_group_id: 'test:live',
     });
   });
 

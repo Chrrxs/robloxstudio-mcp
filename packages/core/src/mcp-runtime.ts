@@ -7,7 +7,7 @@ import {
   type McpRequestContext,
   type ToolAnnotations,
 } from '@modelcontextprotocol/server';
-import { RequestFailure, RoutingFailure } from './bridge-service.js';
+import { MultiplayerGroupInUseError, RequestFailure, RoutingFailure } from './bridge-service.js';
 import { registerResourceHandlers } from './mcp-compat.js';
 import { StudioLaunchPreDispatchError } from './studio-instance-manager.js';
 import type { RobloxStudioTools } from './tools/index.js';
@@ -194,6 +194,9 @@ function publicRoutingError(error: RoutingFailure): Record<string, unknown> {
 }
 
 export function publicToolErrorBody(name: string, error: unknown): Record<string, unknown> {
+  if (error instanceof MultiplayerGroupInUseError) {
+    return { error: error.code, message: error.message, multiplayer_group_id: error.groupId };
+  }
   if (error instanceof StudioLaunchPreDispatchError) {
     return compactPublicValue(error.toResponseBody()) as Record<string, unknown>;
   }

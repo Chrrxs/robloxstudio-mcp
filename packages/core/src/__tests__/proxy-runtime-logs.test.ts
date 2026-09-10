@@ -1,4 +1,4 @@
-import { BridgeService, RequestFailure } from '../bridge-service.js';
+import { BridgeService, MultiplayerGroupInUseError, RequestFailure } from '../bridge-service.js';
 import { ProxyBridgeService } from '../proxy-bridge-service.js';
 import { RobloxStudioTools } from '../tools/index.js';
 
@@ -33,6 +33,7 @@ async function fixture(authToken?: string) {
   const requests: Array<{ peerId: string; data: unknown }> = [];
   const stalled = new Set<string>();
   const sequences = new Map<string, number>();
+  const endpointResponses = new Map<string, unknown>();
   const register = (
     role: string,
     instanceId = 'instance:test',
@@ -49,6 +50,20 @@ async function fixture(authToken?: string) {
   register('edit', 'instance:other');
   const fetchMock = jest.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
     if (String(input) === 'http://primary/topology') return jsonResponse(primary.getTopologySnapshot());
+    if (String(input) === 'http://primary/remove-multiplayer-group') {
+      const removal: unknown = JSON.parse(String(init?.body));
+      if (!removal || typeof removal !== 'object' || !('groupId' in removal) || typeof removal.groupId !== 'string') {
+        throw new Error('Invalid group removal request');
+      }
+      try {
+        return jsonResponse({ removed: primary.removeMultiplayerGroup(removal.groupId) });
+      } catch (error) {
+        if (!(error instanceof MultiplayerGroupInUseError)) throw error;
+        return jsonResponse({
+          success: false, error: error.code, message: error.message, groupId: error.groupId,
+        }, 409);
+      }
+    }
     expect(String(input)).toBe('http://primary/proxy');
     const body: unknown = JSON.parse(String(init?.body));
     if (!body || typeof body !== 'object'
@@ -65,7 +80,7 @@ async function fixture(authToken?: string) {
     if (queued && !stalled.has(body.targetPeerId)) {
       const seq = (sequences.get(body.targetPeerId) ?? 0) + 1;
       sequences.set(body.targetPeerId, seq);
-      primary.resolveRequest(queued.requestId, {
+      primary.resolveRequest(queued.requestId, endpointResponses.get(body.endpoint) ?? {
         entries: [{ seq, ts: seq, level: 'INFO', message: body.targetPeerId }], totalDropped: 0, nextSince: seq,
       });
     }
@@ -81,7 +96,7 @@ async function fixture(authToken?: string) {
   const proxy = new ProxyBridgeService('http://primary', authToken);
   await proxy.waitForInitialRefresh();
   return {
-    primary, proxy, forwarded, requests, stalled, register, fetchMock,
+    primary, proxy, forwarded, requests, stalled, register, fetchMock, endpointResponses,
     tools: new RobloxStudioTools(proxy),
     close() {
       proxy.stop();
@@ -329,6 +344,178 @@ describe('proxy runtime logs across lifecycle transitions', () => {
     } finally {
       harness.close();
       await jest.advanceTimersByTimeAsync(0);
+    }
+  });
+});
+
+describe('proxy discovery and tool routing before the next topology poll', () => {
+  beforeEach(() => jest.useFakeTimers());
+  afterEach(() => jest.useRealTimers());
+
+  test('discovery includes a newly connected process without advancing the polling clock', async () => {
+    const harness = await fixture();
+    try {
+      harness.register('edit', 'instance:new');
+      const primaryTools = new RobloxStudioTools(harness.primary);
+      expect(await harness.tools.getConnectedInstances()).toEqual(await primaryTools.getConnectedInstances());
+      expect(harness.forwarded).toEqual([]);
+    } finally {
+      harness.close();
+    }
+  });
+
+  test('a primary-discovered ID routes through the proxy without prior proxy discovery', async () => {
+    const harness = await fixture();
+    try {
+      harness.register('edit', 'instance:new');
+      await harness.tools.getPlaceInfo('instance:new');
+      expect(harness.forwarded).toEqual(['instance:new/edit']);
+    } finally {
+      harness.close();
+    }
+  });
+
+  test('a disconnected discovered ID is rejected without substituting a remaining process', async () => {
+    const harness = await fixture();
+    try {
+      await harness.tools.getConnectedInstances();
+      harness.primary.unregisterPeer('instance:other/edit');
+      await expect(harness.tools.getPlaceInfo('instance:other')).rejects.toMatchObject({
+        routingError: { code: 'unrecognized_instance_id' },
+      });
+      expect(harness.forwarded).toEqual([]);
+      expect(harness.primary.getPendingRequestCount()).toBe(0);
+    } finally {
+      harness.close();
+    }
+  });
+
+  test('an omitted instance cannot silently select the sole cached process when another has connected', async () => {
+    const harness = await fixture();
+    try {
+      harness.primary.unregisterPeer('instance:other/edit');
+      await harness.proxy.refreshTopologyForRouting();
+      harness.register('edit', 'instance:new');
+      await expect(harness.tools.getPlaceInfo()).rejects.toMatchObject({
+        routingError: { code: 'multiple_instances_connected' },
+      });
+      expect(harness.forwarded).toEqual([]);
+    } finally {
+      harness.close();
+    }
+  });
+
+  test('fanout includes a newly connected role in the selected process only', async () => {
+    const harness = await fixture();
+    try {
+      harness.register('client-2');
+      await harness.tools.getMemoryBreakdown('all', undefined, 'instance:test');
+      expect(harness.forwarded.sort()).toEqual([
+        'instance:test/client-1', 'instance:test/client-2', 'instance:test/edit', 'instance:test/server',
+      ]);
+    } finally {
+      harness.close();
+    }
+  });
+
+  test('runtime target resolution sees a new process before choosing its peer', async () => {
+    const harness = await fixture();
+    try {
+      harness.register('edit', 'instance:new');
+      await harness.tools.simulateMouseInput('click', 10, 20, undefined, undefined, undefined, 'instance:new');
+      expect(harness.forwarded).toEqual(['instance:new/edit']);
+    } finally {
+      harness.close();
+    }
+  });
+
+  test('discovery and inspection fail explicitly when the primary topology is unavailable', async () => {
+    const harness = await fixture();
+    try {
+      harness.fetchMock.mockRejectedValue(new Error('primary unavailable'));
+      await expect(harness.tools.getConnectedInstances()).rejects.toThrow('primary unavailable');
+      await expect(harness.tools.getPlaceInfo('instance:other')).rejects.toThrow('primary unavailable');
+      expect(harness.forwarded).toEqual([]);
+      expect(harness.primary.getPendingRequestCount()).toBe(0);
+    } finally {
+      harness.close();
+    }
+  });
+
+  test('a stale controller cannot erase a live group and invalidate another session’s discovered runtime ID', async () => {
+    const harness = await fixture();
+    let observer: ProxyBridgeService | undefined;
+    try {
+      harness.primary.unregisterInstanceId('instance:test');
+      harness.primary.createMultiplayerGroup('test:live', 'instance:other');
+      await harness.proxy.refreshTopologyForRouting();
+      // The controller caches only the edit process. The runtime connects before
+      // its next background poll, while an observer session sees the live group.
+      harness.register('server', 'instance:runtime', 'runtime-peer', 'test:live');
+      observer = new ProxyBridgeService('http://primary');
+      await observer.waitForInitialRefresh();
+      const observerTools = new RobloxStudioTools(observer);
+      const before = await observerTools.getConnectedInstances();
+      expect(JSON.parse(before.content[0].text)).toMatchObject({
+        multiplayerGroups: [{ instances: { 'instance:runtime-server': 'runtime-peer' } }],
+      });
+      await observerTools.getMemoryBreakdown('server', undefined, 'instance:runtime-server');
+
+      harness.endpointResponses.set('/api/multiplayer-test-end', { error: 'runtime refuses teardown' });
+      const ended = await harness.tools.multiplayerTestEnd(undefined, 1, 'instance:other');
+      expect(JSON.parse(ended.content[0].text)).toMatchObject({ error: 'runtime refuses teardown' });
+      // Same observer and exact same discovered alias must still route. Before
+      // the fix, the controller silently removed the group as "already ended".
+      expect(await observerTools.getConnectedInstances()).toEqual(before);
+      await observerTools.getMemoryBreakdown('server', undefined, 'instance:runtime-server');
+      expect(harness.forwarded).toEqual(['runtime-peer', 'runtime-peer', 'runtime-peer']);
+      expect(harness.primary.getInstances()).toHaveLength(2);
+      expect(harness.primary.getMultiplayerGroups()).toHaveLength(1);
+    } finally {
+      observer?.stop();
+      harness.close();
+    }
+  });
+
+  test('runtime registration between a fresh topology read and removal cannot invalidate another session’s alias', async () => {
+    const harness = await fixture();
+    const readStarted = Promise.withResolvers<void>();
+    const heldTopology = Promise.withResolvers<Response>();
+    let observer: ProxyBridgeService | undefined;
+    try {
+      harness.primary.unregisterInstanceId('instance:test');
+      harness.primary.createMultiplayerGroup('test:race', 'instance:other');
+      const beforeRuntime = jsonResponse(harness.primary.getTopologySnapshot());
+      harness.fetchMock.mockImplementationOnce((input) => {
+        expect(String(input)).toBe('http://primary/topology');
+        readStarted.resolve();
+        return heldTopology.promise;
+      });
+      const end = harness.tools.multiplayerTestEnd(undefined, 1, 'instance:other');
+      const refused = expect(end).rejects.toMatchObject({
+        code: 'multiplayer_group_in_use', groupId: 'test:race',
+      });
+      await readStarted.promise;
+      harness.register('server', 'instance:runtime', 'runtime-peer', 'test:race');
+      observer = new ProxyBridgeService('http://primary');
+      await observer.waitForInitialRefresh();
+      const observerTools = new RobloxStudioTools(observer);
+      const discovered = await observerTools.getConnectedInstances();
+      await observerTools.getMemoryBreakdown('server', undefined, 'instance:runtime-server');
+      heldTopology.resolve(beforeRuntime);
+      await refused;
+
+      expect(await observerTools.getConnectedInstances()).toEqual(discovered);
+      await observerTools.getMemoryBreakdown('server', undefined, 'instance:runtime-server');
+      expect(harness.forwarded).toEqual(['runtime-peer', 'runtime-peer']);
+      expect(harness.primary.getInstances()).toHaveLength(2);
+      expect(harness.primary.getMultiplayerGroups()).toHaveLength(1);
+      expect(harness.proxy.getMultiplayerGroups()).toHaveLength(1);
+      expect(harness.proxy.getPeerById('instance:other/edit')?.multiplayerGroupId).toBe('test:race');
+    } finally {
+      heldTopology.resolve(jsonResponse(harness.primary.getTopologySnapshot()));
+      observer?.stop();
+      harness.close();
     }
   });
 });
