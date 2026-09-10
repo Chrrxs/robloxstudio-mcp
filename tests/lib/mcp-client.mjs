@@ -209,9 +209,8 @@ export class McpClient {
     this.notify('notifications/initialized', {});
   }
 
-  /** tools/call wrapper. Returns the parsed first text-content body (the
-      common shape used by the Roblox Studio MCP). Throws if no text content. */
-  async callTool(name, args = {}, timeoutMs = 30_000) {
+  /** Return the parsed body and protocol status for tests of either outcome. */
+  async callToolResult(name, args = {}, timeoutMs = 30_000) {
     const routedArgs = { ...args };
     if (
       process.env.MCP_INSTANCE_ID &&
@@ -226,14 +225,28 @@ export class McpClient {
     if (text == null) {
       throw new Error(`Tool ${name} returned no text content: ${JSON.stringify(res)}`);
     }
-    if (res?.isError) {
-      throw new Error(`Tool ${name} returned isError: ${text}`);
-    }
     try {
-      return JSON.parse(text);
+      return { body: JSON.parse(text), isError: res.isError === true };
     } catch {
-      return text;
+      return { body: text, isError: res.isError === true };
     }
+  }
+
+  /** Successful calls remain fail-fast; expected failures must opt in. */
+  async callTool(name, args = {}, timeoutMs = 30_000) {
+    const result = await this.callToolResult(name, args, timeoutMs);
+    if (result.isError) {
+      throw new Error(`Tool ${name} returned isError: ${JSON.stringify(result.body)}`);
+    }
+    return result.body;
+  }
+
+  async callToolError(name, args = {}, timeoutMs = 30_000) {
+    const result = await this.callToolResult(name, args, timeoutMs);
+    if (!result.isError) {
+      throw new Error(`Tool ${name} did not return isError: true: ${JSON.stringify(result.body)}`);
+    }
+    return result.body;
   }
 
   async stop() {

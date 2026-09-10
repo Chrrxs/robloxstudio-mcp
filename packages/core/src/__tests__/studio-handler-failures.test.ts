@@ -8,6 +8,7 @@ import { createToolServer } from '../mcp-runtime.js';
 import { TOOL_HANDLERS } from '../http-server.js';
 import { RobloxStudioTools } from '../tools/index.js';
 import { TOOL_DEFINITIONS } from '../tools/definitions.js';
+import { StudioInstanceManager } from '../studio-instance-manager.js';
 
 // Execute the actual handler with only Roblox services/globals replaced. This
 // verifies its aggregate status without requiring a running Studio instance.
@@ -66,6 +67,8 @@ describe.each(['modern', 'legacy'] as const)('Studio handler failures over %s MC
     const bridge = new BridgeService();
     bridge.registerPeer({ peerId: 'edit', transportPeerId: 'edit', instanceId: 'instance:test', role: 'edit' });
     const sendRequest = jest.spyOn(bridge, 'sendRequest').mockResolvedValue(payload);
+    // Synthetic peers must not inspect or mutate the user's live launch registry.
+    const pendingLaunches = jest.spyOn(StudioInstanceManager.prototype, 'pendingLaunches').mockResolvedValue([]);
     const tools = new RobloxStudioTools(bridge);
     const definition = TOOL_DEFINITIONS.find(tool => tool.name === 'set_properties')!;
     const server = createToolServer({
@@ -92,6 +95,7 @@ describe.each(['modern', 'legacy'] as const)('Studio handler failures over %s MC
       await client.close();
       await server.close();
       sendRequest.mockRestore();
+      pendingLaunches.mockRestore();
     }
   });
 });

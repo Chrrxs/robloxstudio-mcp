@@ -23,7 +23,7 @@ await runTest('eval_server_runtime preserves user error', async ({ track }) => {
 
   try {
     // Case 1: explicit error() with distinctive message
-    const r1 = await client.callTool('eval_server_runtime', {
+    const r1 = await client.callToolError('eval_server_runtime', {
       code: `error("${MARKER}-explicit-error")`,
     });
     assert(r1.ok === false, 'eval_server_runtime reports ok=false on error');
@@ -34,7 +34,7 @@ await runTest('eval_server_runtime preserves user error', async ({ track }) => {
       'response does NOT carry the generic require wrapper message');
 
     // Case 2: nil deref (different error class)
-    const r2 = await client.callTool('eval_server_runtime', {
+    const r2 = await client.callToolError('eval_server_runtime', {
       code: `local x = nil\nreturn x.${MARKER}_field`,
     });
     assert(r2.ok === false, 'nil deref reports ok=false');
@@ -74,7 +74,7 @@ return true
 `,
     });
 
-    const r3 = await client.callTool('eval_server_runtime', {
+    const r3 = await client.callToolError('eval_server_runtime', {
       code: `require(workspace.__MCPEvalNestedServerFailure)`,
     });
     assert(r3.ok === false, 'eval_server_runtime nested require reports failure');
@@ -83,7 +83,7 @@ return true
     assertNotContains(r3.error || '', GENERIC,
       'server nested require response does NOT use the generic require wrapper');
 
-    const r3Cached = await client.callTool('eval_server_runtime', {
+    const r3Cached = await client.callToolError('eval_server_runtime', {
       code: `require(workspace.__MCPEvalNestedServerFailure)`,
     });
     assert(r3Cached.ok === false, 'eval_server_runtime cached nested require reports failure');
@@ -92,7 +92,7 @@ return true
     assertNotContains(r3Cached.error || '', GENERIC,
       'server cached nested require response does NOT use the generic require wrapper');
 
-    const r4 = await client.callTool('eval_client_runtime', {
+    const r4 = await client.callToolError('eval_client_runtime', {
       target: 'client-1',
       code: `
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -106,7 +106,7 @@ require(module)
     assertNotContains(r4.error || '', GENERIC,
       'client nested require response does NOT use the generic require wrapper');
 
-    const r4Cached = await client.callTool('eval_client_runtime', {
+    const r4Cached = await client.callToolError('eval_client_runtime', {
       target: 'client-1',
       code: `
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -130,7 +130,7 @@ require(module)
     // Case 5: parse/compile error — engine collapses these into GENERIC
     // from pcall(require, m). Wrapper must recover the real parser
     // diagnostic from LogService.
-    const r6 = await client.callTool('eval_server_runtime', {
+    const r6 = await client.callToolError('eval_server_runtime', {
       code: `this is not valid luau syntax @#$`,
     });
     assert(r6.ok === false, 'eval_server_runtime parse error reports ok=false');
@@ -140,7 +140,7 @@ require(module)
       'parse-error response does NOT fall back to the generic require wrapper');
 
     // Case 6: parse error on client peer too
-    const r7 = await client.callTool('eval_client_runtime', {
+    const r7 = await client.callToolError('eval_client_runtime', {
       code: `!!! syntax error here`,
       target: 'client-1',
     });

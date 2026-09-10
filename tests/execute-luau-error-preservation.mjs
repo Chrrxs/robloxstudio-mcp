@@ -24,7 +24,7 @@ await runTest('execute_luau target=server preserves user error', async ({ track 
 
   try {
     // Case 1: explicit error() — works for target=edit, currently broken for target=server
-    const r1 = await client.callTool('execute_luau', {
+    const r1 = await client.callToolError('execute_luau', {
       target: 'server',
       code: `error("${MARKER}-server-error")`,
     });
@@ -39,7 +39,7 @@ await runTest('execute_luau target=server preserves user error', async ({ track 
     // Case 2: target=edit baseline — should already work, asserts the same
     // marker-preservation contract on the working path so we know our
     // assertions are sensible.
-    const r2 = await client.callTool('execute_luau', {
+    const r2 = await client.callToolError('execute_luau', {
       target: 'edit',
       code: `error("${MARKER}-edit-error")`,
     });
@@ -50,7 +50,7 @@ await runTest('execute_luau target=server preserves user error', async ({ track 
     // Case 3: nested ModuleScript load failures also go through require().
     // Roblox collapses these to GENERIC at the require boundary; execute_luau
     // should recover the real module-load diagnostic from LogService.
-    const r3 = await client.callTool('execute_luau', {
+    const r3 = await client.callToolError('execute_luau', {
       target: 'edit',
       code: `
 local module = Instance.new("ModuleScript")
@@ -91,7 +91,7 @@ return module:GetFullName()
     });
     assert(setupPreexisting.success === true, 'pre-existing failing module setup succeeds');
 
-    const r4 = await client.callTool('execute_luau', {
+    const r4 = await client.callToolError('execute_luau', {
       target: 'edit',
       code: `
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -104,7 +104,7 @@ require(ReplicatedStorage:WaitForChild("__MCPPreexistingRequireFailure"))
     assertNotContains(r4.error || '', GENERIC,
       'pre-existing require response does NOT use the generic require wrapper');
 
-    const r5 = await client.callTool('execute_luau', {
+    const r5 = await client.callToolError('execute_luau', {
       target: 'edit',
       code: `
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -130,7 +130,7 @@ require(ReplicatedStorage:WaitForChild("__MCPPreexistingRequireFailure"))
     // default forces the ModuleScript-fallback path, where require()
     // collapses parse errors into GENERIC). Handler must recover the real
     // parser diagnostic from LogService.
-    const r7 = await client.callTool('execute_luau', {
+    const r7 = await client.callToolError('execute_luau', {
       target: 'server',
       code: `this is not valid luau syntax @#$`,
     });

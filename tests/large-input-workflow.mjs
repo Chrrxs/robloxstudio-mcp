@@ -19,6 +19,7 @@ await runTest('verified staged large-input workflow', async ({ track }) => {
     instance_id: instanceId, target: 'edit', operation_id: randomUUID(), code,
   });
   const invoke = step => client.callTool('execute_luau', step);
+  const reject = step => client.callToolError('execute_luau', step);
   const ok = async step => {
     const result = await invoke(step);
     assert.equal(result.success, true, JSON.stringify(result));
@@ -68,7 +69,7 @@ await runTest('verified staged large-input workflow', async ({ track }) => {
     }
   }
   async function rejectWithoutEffects(value) {
-    const result = await invoke(value.finalize());
+    const result = await reject(value.finalize());
     assert.equal(result.success, false, JSON.stringify(result));
     await truth(`return workspace:FindFirstChild(${luauString(value.outputName)}) == nil`);
     assert.equal(await ok(value.inspect()), 'uploading');
@@ -106,20 +107,20 @@ await runTest('verified staged large-input workflow', async ({ track }) => {
 
     const failed = transfer({ failure: 'runtime' });
     await upload(failed);
-    assert.equal((await invoke(failed.finalize())).success, false);
+    assert.equal((await reject(failed.finalize())).success, false);
     assert.equal(await ok(failed.inspect()), 'failed');
     await truth(failed.verification); // A known error did not roll back created geometry.
-    assert.equal((await invoke(failed.finalize())).success, false);
-    assert.equal((await invoke(failed.abort())).success, false);
+    assert.equal((await reject(failed.finalize())).success, false);
+    assert.equal((await reject(failed.abort())).success, false);
     await truth(`local root = game:GetService('ServerStorage')[${luauString(failed.rootName)}] return root:GetAttribute('Attempts') == 1 and root:FindFirstChild('Chunks') ~= nil`);
 
     const failedVerification = transfer({ failure: 'verification' });
     await upload(failedVerification);
-    assert.equal((await invoke(failedVerification.finalize())).success, false);
+    assert.equal((await reject(failedVerification.finalize())).success, false);
     assert.equal(await ok(failedVerification.inspect()), 'failed');
     await truth(failedVerification.effectsVerification);
-    assert.equal((await invoke(failedVerification.finalize())).success, false);
-    assert.equal((await invoke(failedVerification.abort())).success, false);
+    assert.equal((await reject(failedVerification.finalize())).success, false);
+    assert.equal((await reject(failedVerification.abort())).success, false);
     await truth(`local root = game:GetService('ServerStorage')[${luauString(failedVerification.rootName)}] return root:GetAttribute('Attempts') == 1 and root:FindFirstChild('Chunks') ~= nil`);
 
     const failedCompile = transfer({ failure: 'compile' });
@@ -131,7 +132,7 @@ await runTest('verified staged large-input workflow', async ({ track }) => {
     const foreign = transfer();
     await ok(foreign.begin());
     await raw(`local f = Instance.new('Folder') f.Name = 'Unowned' f.Parent = game:GetService('ServerStorage')[${luauString(foreign.rootName)}].Chunks return true`);
-    assert.equal((await invoke(foreign.abort())).success, false);
+    assert.equal((await reject(foreign.abort())).success, false);
     await truth(`return game:GetService('ServerStorage')[${luauString(foreign.rootName)}].Chunks:FindFirstChild('Unowned') ~= nil`);
     // The test created this sentinel; remove it explicitly, not through transfer cleanup.
     await raw(`game:GetService('ServerStorage')[${luauString(foreign.rootName)}].Chunks.Unowned:Destroy() return true`);
@@ -139,8 +140,8 @@ await runTest('verified staged large-input workflow', async ({ track }) => {
 
     const collision = transfer();
     await raw(`local f = Instance.new('Folder') f.Name = ${luauString(collision.rootName)} f.Parent = game:GetService('ServerStorage') return true`);
-    assert.equal((await invoke(collision.begin())).success, false);
-    assert.equal((await invoke(collision.abort())).success, false);
+    assert.equal((await reject(collision.begin())).success, false);
+    assert.equal((await reject(collision.abort())).success, false);
     await truth(`local f = game:GetService('ServerStorage'):FindFirstChild(${luauString(collision.rootName)}) return f ~= nil and f:GetAttribute('Owner') == nil`);
     await raw(`game:GetService('ServerStorage')[${luauString(collision.rootName)}]:Destroy() return true`);
     console.log(JSON.stringify({ cases: ['http-geometry-once', 'missing', 'tampered', 'reordered', 'failed-partial-effects-no-replay', 'failed-verification-no-replay', 'compile-failure-zero-effects', 'abort', 'unowned-descendant', 'unowned-root'], chunks: success.chunkCount }));

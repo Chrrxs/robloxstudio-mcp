@@ -113,6 +113,30 @@ return true
     const positionResult = findResult(positionSet, 'Position');
     assert(positionSet.summary?.failed === 0 && positionResult?.success === true,
       'set_properties preserves {X,Y,Z} for Vector3 properties');
+
+    const missing = await client.callToolError('set_properties', {
+      instancePath: `${partPath}.Missing`,
+      properties: { Anchored: true },
+      instance_id: instanceId,
+    });
+    assert(missing.error?.includes('Instance not found'), 'missing instance is an MCP error with its handler diagnostic');
+
+    const partial = await client.callToolError('set_properties', {
+      instancePath: partPath,
+      properties: { Anchored: true, __InvalidProperty: true },
+      instance_id: instanceId,
+    });
+    assert(partial.success === false && partial.summary?.succeeded === 1 && partial.summary?.failed === 1,
+      'partial property write is an MCP error with accurate counts');
+    assert(findResult(partial, 'Anchored')?.success === true
+      && typeof findResult(partial, '__InvalidProperty')?.error === 'string',
+    'partial property write preserves successful results and failure details');
+    const readback = await client.callTool('execute_luau', {
+      target: 'edit',
+      instance_id: instanceId,
+      code: `return workspace.__RSMCP_Vector3Conversion.Anchored`,
+    });
+    assert(String(readback.returnValue) === 'true', 'a failed batch does not roll back successful property writes');
   } finally {
     await cleanupProbes(client, instanceId);
     if (launchedInstanceId) {
