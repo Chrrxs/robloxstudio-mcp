@@ -21,9 +21,8 @@ interface CaptureEnumItem {
 }
 
 interface StudioScreenshotOptions {
-	CaptureSize: Vector2;
-	OutputSize?: Vector2;
-	ResampleMode?: Enum.ResamplerMode;
+	OutputSize: Vector2;
+	ResampleMode: Enum.ResamplerMode;
 	Position?: Vector2;
 	Format?: CaptureEnumItem;
 	UICaptureMode?: Enum.UICaptureMode;
@@ -248,13 +247,6 @@ function doStudioCapture(wantPng: boolean): unknown | undefined {
 	const viewport = camera.ViewportSize;
 	const nativeW = math.max(1, math.floor(viewport.X));
 	const nativeH = math.max(1, math.floor(viewport.Y));
-	const captureSize = new Vector2(nativeW, nativeH);
-
-	const options: StudioScreenshotOptions = {
-		CaptureSize: captureSize,
-		Format: wantPng ? STUDIO_CAPTURE_FORMATS.PNG : STUDIO_CAPTURE_FORMATS.RGBA8,
-	};
-
 	let w = nativeW;
 	let h = nativeH;
 
@@ -264,9 +256,15 @@ function doStudioCapture(wantPng: boolean): unknown | undefined {
 		const scale = math.sqrt(MAX_RAW_PIXEL_BYTES / (nativeW * nativeH * 4));
 		w = math.max(1, math.floor(nativeW * scale));
 		h = math.max(1, math.floor(nativeH * scale));
-		options.OutputSize = new Vector2(w, h);
-		options.ResampleMode = Enum.ResamplerMode.Default;
 	}
+
+	// CaptureSize is a framebuffer crop, not the logical viewport size. At
+	// fractional display scaling it cuts off the right/bottom of the frame.
+	const options: StudioScreenshotOptions = {
+		OutputSize: new Vector2(w, h),
+		ResampleMode: Enum.ResamplerMode.Default,
+		Format: wantPng ? STUDIO_CAPTURE_FORMATS.PNG : STUDIO_CAPTURE_FORMATS.RGBA8,
+	};
 
 	const [captureOk, captureResult] = pcall(() => service.CaptureScreenshot(options));
 	if (!captureOk) return { error: `StudioCaptureService:CaptureScreenshot failed: ${tostring(captureResult)}` };

@@ -3,6 +3,7 @@ import RuntimeLogBuffer from "./RuntimeLogBuffer";
 import MemoryHandlers from "./handlers/MemoryHandlers";
 import SceneAnalysisHandlers from "./handlers/SceneAnalysisHandlers";
 import CaptureHandlers from "./handlers/CaptureHandlers";
+import CaptureTransfer from "./CaptureTransfer";
 import InputHandlers from "./handlers/InputHandlers";
 import MetadataHandlers from "./handlers/MetadataHandlers";
 import EvalRuntimeHandlers from "./handlers/EvalRuntimeHandlers";
@@ -238,7 +239,13 @@ function setupClientBroker(attempt = 0) {
 			return CaptureHandlers.captureBegin();
 		}
 		if (payload && payload.endpoint === "/api/capture-studio") {
-			return CaptureHandlers.captureStudio(payload.data ?? {});
+			return CaptureTransfer.begin(payload.data ?? {}, () => CaptureHandlers.captureStudio(payload.data ?? {}));
+		}
+		if (payload && payload.endpoint === CaptureTransfer.READ_ENDPOINT) {
+			return CaptureTransfer.read(payload.data ?? {});
+		}
+		if (payload && payload.endpoint === CaptureTransfer.RELEASE_ENDPOINT) {
+			return CaptureTransfer.release(payload.data ?? {});
 		}
 		if (payload && payload.endpoint === "/api/simulate-mouse-input") {
 			return InputHandlers.simulateMouseInput(payload.data ?? {});
@@ -518,6 +525,12 @@ function dispatchClientRequest(
 		return {
 			error: `Client-proxy does not forward ${endpoint}. Allowed: ${allowed.join(", ")}.`,
 		};
+	}
+	if (endpoint === "/api/capture-studio") {
+		return CaptureTransfer.receive(
+			(captureEndpoint, captureData) => entry.remote.InvokeClient(entry.player, { endpoint: captureEndpoint, data: captureData }),
+			data ?? {},
+		);
 	}
 
 	const envelope = { endpoint, data };
