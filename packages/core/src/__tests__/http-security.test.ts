@@ -98,6 +98,47 @@ describe('HTTP security', () => {
           await app.cleanup();
         }
       });
+
+    it('forwards Studio captures when capture_screenshot is enabled', async () => {
+      const app = createHttpServer(tools, bridge, new Set(['capture_screenshot']),
+        undefined, { authToken: token });
+      const capture = {
+        success: true, encoding: 'png', source: 'StudioCaptureService',
+        width: 1, height: 1, nativeWidth: 1, nativeHeight: 1,
+        data: 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aN1cAAAAASUVORK5CYII=',
+      };
+      const dispatch = jest.spyOn(bridge, 'sendRequest').mockResolvedValue(capture);
+      try {
+        const response = await request(app).post('/proxy').set('Authorization', `Bearer ${token}`)
+          .send({ endpoint: '/api/capture-studio', data: { encoding: 'png' },
+            targetPeerId: 'studio-peer', timeoutMs: 1000, operationId: 'capture-operation' });
+        expect(response.status).toBe(200);
+        expect(response.body).toEqual({ response: capture });
+        expect(dispatch).toHaveBeenCalledWith('/api/capture-studio', { encoding: 'png' },
+          'studio-peer', 1000, expect.any(AbortSignal), 'capture-operation');
+      } finally {
+        dispatch.mockRestore();
+        await app.cleanup();
+      }
+    });
+
+    it('rejects Studio captures when capture_screenshot is disabled', async () => {
+      const allowed = new Set(getReadOnlyTools().map(tool => tool.name));
+      allowed.delete('capture_screenshot');
+      const app = createHttpServer(tools, bridge, allowed, undefined, { authToken: token });
+      const dispatch = jest.spyOn(bridge, 'sendRequest').mockResolvedValue({ success: true });
+      try {
+        const response = await request(app).post('/proxy').set('Authorization', `Bearer ${token}`)
+          .send({ endpoint: '/api/capture-studio', data: { encoding: 'png' },
+            targetPeerId: 'studio-peer' });
+        expect(response.status).toBe(403);
+        expect(response.body.error).toBe('forbidden_endpoint');
+        expect(dispatch).not.toHaveBeenCalled();
+      } finally {
+        dispatch.mockRestore();
+        await app.cleanup();
+      }
+    });
   });
 
   describe('origin policy', () => {

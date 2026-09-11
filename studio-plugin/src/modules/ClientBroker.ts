@@ -3,6 +3,7 @@ import RuntimeLogBuffer from "./RuntimeLogBuffer";
 import MemoryHandlers from "./handlers/MemoryHandlers";
 import SceneAnalysisHandlers from "./handlers/SceneAnalysisHandlers";
 import CaptureHandlers from "./handlers/CaptureHandlers";
+import CaptureTransfer from "./CaptureTransfer";
 import InputHandlers from "./handlers/InputHandlers";
 import MetadataHandlers from "./handlers/MetadataHandlers";
 import EvalRuntimeHandlers from "./handlers/EvalRuntimeHandlers";
@@ -72,9 +73,12 @@ const CLIENT_BROKER_ALLOWED_ENDPOINTS = new Set<string>([
 	"/api/capture-micro-profiler",
 	"/api/multiplayer-test-state",
 	"/api/multiplayer-test-leave-client",
-	// Screenshot capture must run in the client peer (CaptureService captures
-	// the play viewport there); the edit DM reads the temp id back separately.
+	// Screenshot capture must run in the client peer: CaptureService captures
+	// the play viewport there (the edit DM reads the temp id back separately),
+	// and StudioCaptureService only completes in the DataModel that is being
+	// rendered — during a playtest that is the client, never the edit peer.
 	"/api/capture-begin",
+	"/api/capture-studio",
 	// Virtual input (CreateVirtualInput) drives the running client's input
 	// pipeline, so it must execute in the client peer's VM.
 	"/api/simulate-mouse-input",
@@ -233,6 +237,15 @@ function setupClientBroker(attempt = 0) {
 		}
 		if (payload && payload.endpoint === "/api/capture-begin") {
 			return CaptureHandlers.captureBegin();
+		}
+		if (payload && payload.endpoint === "/api/capture-studio") {
+			return CaptureTransfer.begin(payload.data ?? {}, () => CaptureHandlers.captureStudio(payload.data ?? {}));
+		}
+		if (payload && payload.endpoint === CaptureTransfer.READ_ENDPOINT) {
+			return CaptureTransfer.read(payload.data ?? {});
+		}
+		if (payload && payload.endpoint === CaptureTransfer.RELEASE_ENDPOINT) {
+			return CaptureTransfer.release(payload.data ?? {});
 		}
 		if (payload && payload.endpoint === "/api/simulate-mouse-input") {
 			return InputHandlers.simulateMouseInput(payload.data ?? {});
@@ -512,6 +525,12 @@ function dispatchClientRequest(
 		return {
 			error: `Client-proxy does not forward ${endpoint}. Allowed: ${allowed.join(", ")}.`,
 		};
+	}
+	if (endpoint === "/api/capture-studio") {
+		return CaptureTransfer.receive(
+			(captureEndpoint, captureData) => entry.remote.InvokeClient(entry.player, { endpoint: captureEndpoint, data: captureData }),
+			data ?? {},
+		);
 	}
 
 	const envelope = { endpoint, data };

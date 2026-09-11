@@ -28,6 +28,9 @@ import * as path from 'path';
 type RawImageCaptureResponse = {
   success?: boolean;
   error?: string;
+  unavailable?: string;
+  encoding?: 'rgba8' | 'png';
+  source?: string;
   width?: number;
   height?: number;
   nativeWidth?: number;
@@ -4982,24 +4985,55 @@ export class RobloxStudioTools {
     quality?: number,
     maxBytes: number = MAX_INLINE_IMAGE_BYTES,
   ): Promise<EncodedViewportCapture> {
-    let response: RawImageCaptureResponse;
-    if (targetRole.startsWith('client-')) {
-      // Play mode. The running game VM can trigger CaptureScreenshot but can't
-      // read the resulting temp texture back (privilege gate). So capture on
-      // the client to get the rbxtemp:// id, then read it back in the edit DM —
-      // the rbxtemp handle is process-scoped and the edit/plugin identity is
-      // allowed to promote it into a readable EditableImage.
-      const begin = await this._callSingle('/api/capture-begin', {}, targetRole, instanceId) as { contentId?: string; error?: string };
-      if (begin.error) {
-        return { success: false, error: begin.error };
+    const fmt: 'jpeg' | 'png' = format === 'png' ? 'png' : 'jpeg';
+    const q = quality === undefined ? 92 : Math.max(1, Math.min(100, Math.floor(quality)));
+
+    // Fast path: StudioCaptureService (Studio-only, FFlag-gated) reads the
+    // framebuffer directly — no CaptureService callback, no EditableImage
+    // promotion, no client-to-edit temp-texture handoff — and it captures what
+    // Studio renders, SurfaceGui.AlwaysOnTop included (the legacy path misses
+    // that layer).
+    //
+    // It MUST run in the DataModel that is being rendered. Verified live: with
+    // a playtest active the edit peer still reports CanCaptureScreenshot()
+    // true, yet the capture never leaves BufferStatus.Pending (no errors, even
+    // after the playtest stops), while the same call in the play client peer
+    // completes. So the request follows targetRole, which is already the
+    // rendering peer: 'edit' when idle, 'client-N' during a playtest.
+    let response = await this._callSingle(
+      '/api/capture-studio',
+      { encoding: fmt === 'png' ? 'png' : 'rgba8' },
+      targetRole,
+      instanceId,
+    ) as RawImageCaptureResponse;
+
+    // A plugin older than this server rejects the endpoint outright — from the
+    // edit peer as "Unknown endpoint", from the play client as "Unsupported
+    // client broker endpoint". Both mean the fast path is absent, same as
+    // `unavailable`.
+    const studioFastPathMissing =
+      response.unavailable !== undefined ||
+      (response.error?.includes('/api/capture-studio') ?? false);
+
+    if (studioFastPathMissing) {
+      if (targetRole.startsWith('client-')) {
+        // Play mode. The running game VM can trigger CaptureScreenshot but can't
+        // read the resulting temp texture back (privilege gate). So capture on
+        // the client to get the rbxtemp:// id, then read it back in the edit DM —
+        // the rbxtemp handle is process-scoped and the edit/plugin identity is
+        // allowed to promote it into a readable EditableImage.
+        const begin = await this._callSingle('/api/capture-begin', {}, targetRole, instanceId) as { contentId?: string; error?: string };
+        if (begin.error) {
+          return { success: false, error: begin.error };
+        }
+        if (!begin.contentId) {
+          return { success: false, error: 'Screenshot capture failed: no content id returned from client.' };
+        }
+        response = await this._callSingle('/api/capture-read', { contentId: begin.contentId }, 'edit', instanceId) as RawImageCaptureResponse;
+      } else {
+        // Edit mode: capture and read back in the same (edit) context.
+        response = await this._callSingle('/api/capture-screenshot', {}, 'edit', instanceId) as RawImageCaptureResponse;
       }
-      if (!begin.contentId) {
-        return { success: false, error: 'Screenshot capture failed: no content id returned from client.' };
-      }
-      response = await this._callSingle('/api/capture-read', { contentId: begin.contentId }, 'edit', instanceId) as RawImageCaptureResponse;
-    } else {
-      // Edit mode: capture and read back in the same (edit) context.
-      response = await this._callSingle('/api/capture-screenshot', {}, 'edit', instanceId) as RawImageCaptureResponse;
     }
 
     if (response.error) {
@@ -5024,9 +5058,6 @@ export class RobloxStudioTools {
       return { success: false, error: 'Screenshot response missing dimensions.' };
     }
 
-    const fmt: 'jpeg' | 'png' = format === 'png' ? 'png' : 'jpeg';
-    const q = quality === undefined ? 92 : Math.max(1, Math.min(100, Math.floor(quality)));
-
     // Cap the inline image size. Measured empirically: an ~8MB image (11MB
     // base64) returns fine, but ~16MB (22MB base64) CLOSES the MCP connection
     // and drops every Studio registration — a catastrophic failure, not a
@@ -5034,9 +5065,20 @@ export class RobloxStudioTools {
     // For PNG we refuse (rather than silently dropping the lossless guarantee
     // the caller asked for); for JPEG we step quality down so the call still
     // succeeds.
-    const encoded = encodeImageFromRgbaResponse(response, fmt, q);
-    let { buffer } = encoded;
-    const { mimeType } = encoded;
+    let buffer: Buffer;
+    let mimeType: string;
+    if (response.encoding === 'png') {
+      // StudioCaptureService already encoded the PNG in Studio.
+      if (!response.data) {
+        return { success: false, error: 'Screenshot response missing PNG data.' };
+      }
+      buffer = Buffer.from(response.data, 'base64');
+      mimeType = 'image/png';
+    } else {
+      const encoded = encodeImageFromRgbaResponse(response, fmt, q);
+      buffer = encoded.buffer;
+      mimeType = encoded.mimeType;
+    }
     let usedQ = q;
     let note = '';
 

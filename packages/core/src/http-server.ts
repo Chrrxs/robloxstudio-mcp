@@ -78,7 +78,7 @@ const TOOL_PROXY_ENDPOINTS: Record<string, readonly string[]> = {
   insert_asset: ['/api/insert-asset'],
   generate_model: ['/api/generate-model'],
   preview_asset: ['/api/preview-asset'],
-  capture_screenshot: ['/api/capture-screenshot', '/api/capture-begin', '/api/capture-read'],
+  capture_screenshot: ['/api/capture-studio', '/api/capture-screenshot', '/api/capture-begin', '/api/capture-read'],
   simulate_mouse_input: ['/api/simulate-mouse-input'],
   simulate_keyboard_input: ['/api/simulate-keyboard-input'],
   get_memory_breakdown: ['/api/get-memory-breakdown'],
