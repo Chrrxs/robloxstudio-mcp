@@ -30,7 +30,7 @@ screenshots, memory reports, and profiler captures from each peer.
 - Use `set_properties` for instance properties and `find_and_replace_in_scripts` for script text. For project-specific bulk edits, use `execute_luau`.
 - For large generated Luau, use the [verified chunk-staging workflow](docs/large-inputs.md): explicit instance routing, UTF-8 byte/hash readback, ownership-checked cleanup, and bounded recovery without blindly replaying mutations.
 - Use `selection` to inspect or update Studio selection and frame a part or model before capturing the viewport.
-- Capture the viewport with `capture_screenshot`, then send mouse or keyboard input.
+- Capture the viewport with `capture_screenshot`, then send mouse or keyboard input. When Studio's own capture APIs cannot see the play viewport (a blank frame or an EditableImage error during a playtest), the server grabs the Studio window through the host OS instead and crops it to the viewport — this works with Studio behind other windows, though not minimized. See [Configuration](docs/configuration.md#host-window-capture).
 
 ### Inspect Creator Store assets
 

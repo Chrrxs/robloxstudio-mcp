@@ -54,6 +54,31 @@ mismatched plugin rather than keeping an unsupported protocol pair connected.
 Restart the MCP server with `--auto-install-plugin`, then fully close and reopen
 Studio to load the matching bundled plugin.
 
+## Host window capture
+
+`capture_screenshot` first asks Studio for the frame (StudioCaptureService, then
+CaptureService + EditableImage). During a solo playtest those paths can come back
+unusable on some Studio builds: StudioCaptureService reports
+`CanCaptureScreenshot() == false` in the play client, and CaptureService hands
+back a fully black frame (observed with the Vulkan renderer), regardless of
+whether the Studio window is focused. When the frame is a single colour, or
+Studio's capture errors outright, the server captures the Studio window through
+the host OS and crops it to the viewport:
+
+- The plugin briefly pins four magenta squares to the viewport corners so the
+  crop is exact under any dock layout or DPI scale; they are removed before the
+  final capture, and the located position is reused for 60 seconds.
+- On Windows the capture uses `PrintWindow(PW_RENDERFULLCONTENT)` via
+  PowerShell, which reads the composited window even when it is behind other
+  windows. A minimized window cannot be captured; the tool says so.
+- Other platforms currently report that host capture is unavailable and return
+  Studio's original result or error.
+
+The returned image keeps the `simulate_mouse_input` coordinate contract: it is
+resampled to the viewport's logical size, so image pixels are viewport pixels.
+The tool message states when the host path was used. Set
+`ROBLOX_STUDIO_HOST_CAPTURE=0` to disable the fallback.
+
 ## Environment variables
 
 | Variable | Default | Purpose |
@@ -63,6 +88,7 @@ Studio to load the matching bundled plugin.
 | `ROBLOX_STUDIO_AUTH_TOKEN` | Auto-generated token file | Explicit shared secret that overrides the token file. |
 | `ROBLOX_STUDIO_NO_AUTH` | Unset | Set to `1` or `true` to disable HTTP tool authentication. This is not recommended. |
 | `ROBLOX_STUDIO_ALLOWED_ORIGINS` | None | Comma-separated browser origins allowed to call the HTTP API cross-origin. |
+| `ROBLOX_STUDIO_HOST_CAPTURE` | Unset | Set to `0`, `false`, or `off` to disable the host window capture fallback for `capture_screenshot`. |
 | `ROBLOX_OPEN_CLOUD_API_KEY` | None | Roblox Open Cloud key used by features such as audio preview and place version access. Required permissions depend on the tool. |
 | `MCP_PLUGINS_DIR` | Platform Studio Plugins folder | Override the destination used by plugin installation. |
 

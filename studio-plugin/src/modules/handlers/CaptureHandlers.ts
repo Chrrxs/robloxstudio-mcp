@@ -3,6 +3,8 @@ import * as RenderMonitor from "../RenderMonitor";
 const CaptureService = game.GetService("CaptureService");
 const AssetService = game.GetService("AssetService");
 const Workspace = game.GetService("Workspace");
+const CoreGui = game.GetService("CoreGui");
+const RunService = game.GetService("RunService");
 
 const MAX_TILE_SIZE = 1024;
 const MAX_RAW_PIXEL_BYTES = 36 * 1024 * 1024;
@@ -163,8 +165,14 @@ function readContentToBase64(contentId: string): unknown {
 	});
 
 	if (!editableOk) {
+		// Lead with Roblox's own message: the Game Settings toggle is only one of
+		// the reasons this can fail (temporary-texture privilege and multiplayer
+		// client handles are others), and telling someone who already enabled
+		// it to enable it again is a dead end.
 		return {
-			error: `Failed to create EditableImage from screenshot. Enable EditableImage API: Game Settings > Security > 'Allow Mesh / Image APIs'. (${tostring(editableResult)})`,
+			error:
+				`Failed to create EditableImage from screenshot: ${tostring(editableResult)}. ` +
+				"If that mentions permissions, check Game Settings > Security > 'Allow Mesh / Image APIs'.",
 		};
 	}
 
@@ -333,10 +341,112 @@ function captureRead(requestData: Record<string, unknown>): unknown {
 	return readContentToBase64(contentId);
 }
 
+// Viewport corner markers for the host-side window capture fallback.
+//
+// Roblox's own capture APIs can be unavailable for the play viewport:
+// StudioCaptureService reports CanCaptureScreenshot() == false in the play
+// client (RequestScreenshotPermissionAsync raises "Feature not supported
+// yet"), and CaptureService:CaptureScreenshot hands back a fully black frame
+// there on some Studio builds (observed with the Vulkan renderer). When that
+// happens the MCP server grabs the whole Studio window through the host OS
+// instead and needs to know where the 3D viewport sits inside that window.
+// Four small magenta squares pinned to the viewport corners give it an exact,
+// DPI-independent answer; the server hides them again before the real capture.
+const MARKER_GUI_NAME = "__MCPCaptureMarkers";
+const MARKER_SIZE = 12;
+const MARKER_COLOR = Color3.fromRGB(255, 0, 255);
+// Safety net: the server always hides the markers itself, but if it dies
+// mid-capture the viewport must not stay decorated.
+const MARKER_AUTO_HIDE_SECONDS = 15;
+const MARKER_RENDER_FRAMES = 3;
+const MARKER_RENDER_TIMEOUT = 2;
+
+function viewportSize(): { viewportWidth: number; viewportHeight: number } | undefined {
+	const camera = Workspace.CurrentCamera;
+	if (camera === undefined) return undefined;
+	const viewport = camera.ViewportSize;
+	return {
+		viewportWidth: math.max(1, math.floor(viewport.X)),
+		viewportHeight: math.max(1, math.floor(viewport.Y)),
+	};
+}
+
+function hideMarkers(): void {
+	const existing = CoreGui.FindFirstChild(MARKER_GUI_NAME);
+	if (existing !== undefined) existing.Destroy();
+}
+
+// Blocks until the markers have been composited into a few rendered frames
+// (bounded, so a non-rendering window cannot hang the request).
+function waitForRenderedFrames(): number {
+	let frames = 0;
+	const [ok, connection] = pcall(() => RunService.RenderStepped.Connect(() => { frames++; }));
+	if (!ok) return 0;
+	const start = os.clock();
+	while (frames < MARKER_RENDER_FRAMES && os.clock() - start < MARKER_RENDER_TIMEOUT) task.wait(0.03);
+	(connection as RBXScriptConnection).Disconnect();
+	return frames;
+}
+
+function showMarkers(): unknown {
+	hideMarkers();
+	const size = viewportSize();
+	if (size === undefined) return { error: "No CurrentCamera; cannot place viewport markers." };
+
+	const gui = new Instance("ScreenGui");
+	gui.Name = MARKER_GUI_NAME;
+	gui.IgnoreGuiInset = true;
+	gui.ScreenInsets = Enum.ScreenInsets.None;
+	gui.DisplayOrder = 2147483647;
+	gui.ResetOnSpawn = false;
+	gui.ZIndexBehavior = Enum.ZIndexBehavior.Global;
+
+	const corners: Array<[number, number]> = [[0, 0], [1, 0], [0, 1], [1, 1]];
+	for (const [x, y] of corners) {
+		const frame = new Instance("Frame");
+		frame.Name = `Corner${x}${y}`;
+		frame.AnchorPoint = new Vector2(x, y);
+		frame.Position = UDim2.fromScale(x, y);
+		frame.Size = UDim2.fromOffset(MARKER_SIZE, MARKER_SIZE);
+		frame.BackgroundColor3 = MARKER_COLOR;
+		frame.BackgroundTransparency = 0;
+		frame.BorderSizePixel = 0;
+		frame.ZIndex = 2147483647;
+		frame.Parent = gui;
+	}
+	gui.Parent = CoreGui;
+
+	task.delay(MARKER_AUTO_HIDE_SECONDS, () => {
+		if (gui.Parent !== undefined) gui.Destroy();
+	});
+
+	const framesRendered = waitForRenderedFrames();
+	return { success: true, ...size, markerSize: MARKER_SIZE, framesRendered };
+}
+
+// Host-capture support endpoint. action="show" draws the corner markers and
+// reports the viewport size, "hide" removes them, "query" only reports the
+// viewport size (used when the server already knows where the viewport is).
+function captureMarkers(requestData: Record<string, unknown>): unknown {
+	const action = requestData.action;
+	if (action === "show") return showMarkers();
+	if (action === "hide") {
+		hideMarkers();
+		return { success: true };
+	}
+	if (action === "query") {
+		const size = viewportSize();
+		if (size === undefined) return { error: "No CurrentCamera; cannot read viewport size." };
+		return { success: true, ...size, markerSize: MARKER_SIZE };
+	}
+	return { error: `capture-markers action must be "show", "hide" or "query" (got ${tostring(action)})` };
+}
+
 export = {
 	captureScreenshotData,
 	captureScreenshot,
 	captureStudio,
 	captureBegin,
 	captureRead,
+	captureMarkers,
 };

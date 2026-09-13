@@ -4276,6 +4276,13 @@ describe('Smoke', () => {
     expect(capturePending?.request).toMatchObject({ endpoint: '/api/capture-studio' });
     bridge.resolveRequest(capturePending!.requestId, { error: 'screenshot boom' });
 
+    // A failed Studio capture is retried through the host window; a plugin
+    // without the marker endpoint ends that attempt and the tool moves on.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const markersPending = claimQueuedRequest(bridge, 'session-1');
+    expect(markersPending?.request).toMatchObject({ endpoint: '/api/capture-markers', data: { action: 'query' } });
+    bridge.resolveRequest(markersPending!.requestId, { error: 'Unknown endpoint: /api/capture-markers' });
+
     await new Promise((resolve) => setTimeout(resolve, 0));
     const restorePending = claimQueuedRequest(bridge, 'session-1');
     expect(restorePending?.request.data.code).toContain('StopSimulationAsync');
@@ -4289,7 +4296,7 @@ describe('Smoke', () => {
       }),
     });
 
-    await expect(resultPromise).rejects.toThrow(/capture_device_matrix failed.*phone.*screenshot boom/);
+    await expect(resultPromise).rejects.toThrow(/capture_device_matrix failed.*phone.*screenshot boom.*Host window capture also failed/);
   });
 
   test('capture_device_matrix rejects the tool call when restore fails', async () => {
@@ -4328,9 +4335,10 @@ describe('Smoke', () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
     const capturePending = claimQueuedRequest(bridge, 'session-1');
     bridge.resolveRequest(capturePending!.requestId, {
-      width: 1,
+      width: 2,
       height: 1,
-      data: Buffer.from([0, 0, 0, 255]).toString('base64'),
+      // Two distinct pixels: a single-colour frame would trigger the host window fallback.
+      data: Buffer.from([0, 0, 0, 255, 40, 80, 120, 255]).toString('base64'),
     });
 
     await new Promise((resolve) => setTimeout(resolve, 0));
@@ -4381,9 +4389,10 @@ describe('Smoke', () => {
     const capturePending = claimQueuedRequest(bridge, 'session-1');
     expect(capturePending?.request).toMatchObject({ endpoint: '/api/capture-studio' });
     bridge.resolveRequest(capturePending!.requestId, {
-      width: 1,
+      width: 2,
       height: 1,
-      data: Buffer.from([0, 0, 0, 255]).toString('base64'),
+      // Two distinct pixels: a single-colour frame would trigger the host window fallback.
+      data: Buffer.from([0, 0, 0, 255, 40, 80, 120, 255]).toString('base64'),
     });
 
     await new Promise((resolve) => setTimeout(resolve, 0));
@@ -4408,7 +4417,7 @@ describe('Smoke', () => {
       target: 'edit',
       role: 'edit',
       restoreAfter: true,
-      entries: [{ label: 'phone', screenshot: { width: 1, height: 1, format: 'jpeg', quality: 80 } }],
+      entries: [{ label: 'phone', screenshot: { width: 2, height: 1, format: 'jpeg', quality: 80 } }],
       restore: { applied: { stopSimulation: true } },
     });
     expect(result.content.some((item) => item.type === 'image')).toBe(true);
@@ -4429,7 +4438,8 @@ describe('Smoke', () => {
       height: 1,
       nativeWidth: 4,
       nativeHeight: 2,
-      data: Buffer.alloc(12, 255).toString('base64'),
+      // Not a single-colour frame, so the host window fallback stays out of the way.
+      data: Buffer.from([255, 255, 255, 255, 0, 0, 0, 255, 128, 128, 128, 255]).toString('base64'),
     });
 
     const result = await resultPromise;
@@ -4457,15 +4467,16 @@ describe('Smoke', () => {
     const legacyPending = claimQueuedRequest(bridge, 'session-1');
     expect(legacyPending?.request).toMatchObject({ endpoint: '/api/capture-screenshot' });
     bridge.resolveRequest(legacyPending!.requestId, {
-      width: 1,
+      width: 2,
       height: 1,
-      data: Buffer.from([12, 34, 56, 255]).toString('base64'),
+      // Two distinct pixels: a single-colour frame would trigger the host window fallback.
+      data: Buffer.from([12, 34, 56, 255, 52, 114, 176, 255]).toString('base64'),
     });
 
     const result = await resultPromise;
     const firstContent = result.content[0];
     if (firstContent.type !== 'text' || firstContent.text === undefined) throw new Error('Expected screenshot metadata text first');
-    expect(JSON.parse(firstContent.text)).toMatchObject({ width: 1, height: 1, format: 'jpeg' });
+    expect(JSON.parse(firstContent.text)).toMatchObject({ width: 2, height: 1, format: 'jpeg' });
     expect(result.content.some((item) => item.type === 'image')).toBe(true);
   });
 
@@ -4484,9 +4495,10 @@ describe('Smoke', () => {
     const legacyPending = claimQueuedRequest(bridge, 'session-1');
     expect(legacyPending?.request).toMatchObject({ endpoint: '/api/capture-screenshot' });
     bridge.resolveRequest(legacyPending!.requestId, {
-      width: 1,
+      width: 2,
       height: 1,
-      data: Buffer.from([9, 9, 9, 255]).toString('base64'),
+      // Two distinct pixels: a single-colour frame would trigger the host window fallback.
+      data: Buffer.from([9, 9, 9, 255, 49, 89, 129, 255]).toString('base64'),
     });
 
     const result = await resultPromise;
@@ -4524,9 +4536,10 @@ describe('Smoke', () => {
     const readPending = claimQueuedRequest(bridge, 'session-1');
     expect(readPending?.request).toMatchObject({ endpoint: '/api/capture-read' });
     bridge.resolveRequest(readPending!.requestId, {
-      width: 1,
+      width: 2,
       height: 1,
-      data: Buffer.from([1, 2, 3, 255]).toString('base64'),
+      // Two distinct pixels: a single-colour frame would trigger the host window fallback.
+      data: Buffer.from([1, 2, 3, 255, 41, 82, 123, 255]).toString('base64'),
     });
 
     const result = await resultPromise;

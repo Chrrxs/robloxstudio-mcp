@@ -79,6 +79,9 @@ const CLIENT_BROKER_ALLOWED_ENDPOINTS = new Set<string>([
 	// rendered — during a playtest that is the client, never the edit peer.
 	"/api/capture-begin",
 	"/api/capture-studio",
+	// Host-side window capture locates the play viewport with markers drawn
+	// in the client DM (the edit DM is not rendered during a playtest).
+	"/api/capture-markers",
 	// Virtual input (CreateVirtualInput) drives the running client's input
 	// pipeline, so it must execute in the client peer's VM.
 	"/api/simulate-mouse-input",
@@ -240,6 +243,9 @@ function setupClientBroker(attempt = 0) {
 		}
 		if (payload && payload.endpoint === "/api/capture-studio") {
 			return CaptureTransfer.begin(payload.data ?? {}, () => CaptureHandlers.captureStudio(payload.data ?? {}));
+		}
+		if (payload && payload.endpoint === "/api/capture-markers") {
+			return CaptureHandlers.captureMarkers(payload.data ?? {});
 		}
 		if (payload && payload.endpoint === CaptureTransfer.READ_ENDPOINT) {
 			return CaptureTransfer.read(payload.data ?? {});
