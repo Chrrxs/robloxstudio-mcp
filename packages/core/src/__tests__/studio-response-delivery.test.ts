@@ -776,6 +776,28 @@ describe('Studio WebSocket registration and framing', () => {
     expect(harness.dispatchRequest).toHaveBeenCalledTimes(1);
   });
 
+  test.each(['error', 'closed'])('re-registers after primary replacement rejects an unopened socket via %s', async (failure) => {
+    const harness = await createHarness();
+    harness.emitRequest('before-primary-exit');
+    expect(harness.dispatchRequest).toHaveBeenCalledTimes(1);
+    harness.stream.Closed.fire();
+    harness.advance(0.5);
+    expect(harness.httpRequests).toHaveLength(1); // First retry reuses the old registration.
+
+    // Studio may report HTTP 404 only in the error text, or close without Opened.
+    for (let attempt = 0; attempt < 5 && harness.httpRequests.length === 1; attempt++) {
+      if (failure === 'error') harness.stream.Error.fire(0, 'HTTP 404: unknown_peer');
+      else harness.stream.Closed.fire();
+      harness.advance(5);
+    }
+
+    expect(harness.httpRequests.filter((request) => request.Url.endsWith('/ready'))).toHaveLength(2);
+    harness.stream.Opened.fire(101, '');
+    harness.emitRequest('after-primary-replacement');
+    expect(harness.dispatchRequest).toHaveBeenCalledTimes(2);
+    harness.module.stop();
+  });
+
   test('rebootstraps an unknown peer and ignores messages from the old transport', async () => {
     const harness = await createHarness();
     const oldStream = harness.stream;
