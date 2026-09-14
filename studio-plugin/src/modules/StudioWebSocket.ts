@@ -540,11 +540,18 @@ function connect(expectedGeneration: number): void {
 			}),
 			createdClient.Error.Connect((statusCode, message) => {
 				if (!active || generation !== expectedGeneration || socketClient !== createdClient) return;
-				if (credentialsRejected(statusCode)) cachedReady = undefined;
+				// A socket that never opened with the cached registration means
+				// that registration is stale (the server restarted and forgot
+				// this peer, so the upgrade fails with 404 unknown_peer). Studio
+				// reports that rejection here with the HTTP status only in the
+				// message text, so keying on statusCode alone left the plugin
+				// retrying the dead credentials forever. Re-register instead.
+				if (!socketOpen || credentialsRejected(statusCode)) cachedReady = undefined;
 				scheduleReconnect(expectedGeneration, `WebSocket error ${statusCode}: ${message}`);
 			}),
 			createdClient.Closed.Connect(() => {
 				if (!active || generation !== expectedGeneration || socketClient !== createdClient) return;
+				if (!socketOpen) cachedReady = undefined;
 				scheduleReconnect(expectedGeneration, "WebSocket closed");
 			}),
 		];

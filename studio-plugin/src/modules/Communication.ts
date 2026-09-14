@@ -82,6 +82,7 @@ const routeMap: Record<string, Handler> = {
 	"/api/capture-studio": CaptureHandlers.captureStudio,
 	"/api/capture-begin": CaptureHandlers.captureBegin,
 	"/api/capture-read": CaptureHandlers.captureRead,
+	"/api/capture-markers": CaptureHandlers.captureMarkers,
 	"/api/simulate-mouse-input": InputHandlers.simulateMouseInput,
 	"/api/simulate-keyboard-input": InputHandlers.simulateKeyboardInput,
 

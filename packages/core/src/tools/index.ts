@@ -17,11 +17,19 @@ import {
 import {
   decodeImagePathToRgba,
   decodePngBase64ToRgba,
+  isUniformPng,
 } from '../image-decode.js';
 import { DOC_CATEGORIES, getRobloxDoc, isDocCategory } from '../roblox-docs.js';
 import { findBuiltInStudioSkill, loadBuiltInStudioSkills } from '../studio-skills.js';
 import { rgbaToJpeg } from '../jpeg-encoder.js';
 import { rgbaToPng } from '../png-encoder.js';
+import {
+  captureStudioWindow,
+  cropToViewport,
+  findViewportRect,
+  isUniformFrame,
+} from '../host-capture.js';
+import type { HostCaptureResult, ViewportRect } from '../host-capture.js';
 import * as fs from 'fs';
 import * as path from 'path';
 
@@ -40,6 +48,38 @@ type RawImageCaptureResponse = {
   instanceName?: string;
   cameraPreset?: string;
 };
+
+type HostViewportRectCacheEntry = {
+  rect: ViewportRect;
+  windowWidth: number;
+  windowHeight: number;
+  viewportWidth: number;
+  viewportHeight: number;
+  cachedAt: number;
+};
+
+type ViewportMarkerResponse = {
+  success?: boolean;
+  error?: string;
+  captureId?: string;
+  viewportChanged?: boolean;
+  stale?: boolean;
+  viewportWidth?: number;
+  viewportHeight?: number;
+  markerSize?: number;
+};
+
+type HostViewportCaptureResult =
+  | { success: true; response: RawImageCaptureResponse }
+  | { success: false; error: string };
+
+// Injection seam so tests can stand in for the PowerShell helper.
+export type HostWindowCaptureFn = (titleHint?: string) => Promise<HostCaptureResult>;
+
+// A cached viewport position is trusted only briefly: Studio's dock layout can
+// change without the window or viewport size changing (e.g. swapping two
+// panels of equal width), and re-locating the viewport costs one extra capture.
+const HOST_VIEWPORT_RECT_TTL_MS = 60_000;
 
 type ToolContent =
   | { type: 'text'; text: string }
@@ -973,6 +1013,9 @@ export class RobloxStudioTools {
   private cookieClient: RobloxCookieClient;
   private instanceManager: StudioInstanceManager;
   private managedConnectionAssociations: Promise<void> = Promise.resolve();
+  private hostWindowCapture: HostWindowCaptureFn = captureStudioWindow;
+  private hostViewportRects = new Map<string, HostViewportRectCacheEntry>();
+  private viewportCaptureQueues = new Map<string, Promise<void>>();
 
   constructor(bridge: BridgeService) {
     this.client = new StudioHttpClient(bridge);
@@ -4978,7 +5021,27 @@ export class RobloxStudioTools {
     return { content: [{ type: 'text', text: JSON.stringify(response) }] };
   }
 
+  // Even native capture must wait while another call has fitted the simulator
+  // or drawn markers. Otherwise it could observe temporary UI or dimensions.
   private async _captureViewportImage(
+    instanceId: string,
+    targetRole: string,
+    format?: string,
+    quality?: number,
+    maxBytes: number = MAX_INLINE_IMAGE_BYTES,
+  ): Promise<EncodedViewportCapture> {
+    const previous = this.viewportCaptureQueues.get(instanceId) ?? Promise.resolve();
+    const capture = previous.then(() => this._captureViewportImageNow(instanceId, targetRole, format, quality, maxBytes));
+    const settled = capture.then(() => undefined, () => undefined);
+    this.viewportCaptureQueues.set(instanceId, settled);
+    try {
+      return await capture;
+    } finally {
+      if (this.viewportCaptureQueues.get(instanceId) === settled) this.viewportCaptureQueues.delete(instanceId);
+    }
+  }
+
+  private async _captureViewportImageNow(
     instanceId: string,
     targetRole: string,
     format?: string,
@@ -5033,6 +5096,36 @@ export class RobloxStudioTools {
       } else {
         // Edit mode: capture and read back in the same (edit) context.
         response = await this._callSingle('/api/capture-screenshot', {}, 'edit', instanceId) as RawImageCaptureResponse;
+      }
+    }
+
+    // Studio-side capture can come back unusable for the play viewport even
+    // though nothing errored: CaptureService hands the play client a fully
+    // black frame on some Studio builds. When the frame is flat (or Studio
+    // failed outright), grab the Studio window through the host OS instead and
+    // crop it to the viewport. That path reads the composited window, so it
+    // also works while Studio sits behind other windows.
+    let hostNote = '';
+    let hostReason: string | undefined;
+    try {
+      hostReason = response.error
+        ? `Studio's capture failed (${response.error})`
+        : this._isUniformCaptureResponse(response)
+          ? "Studio's CaptureService returned a blank (single-colour) frame"
+          : undefined;
+    } catch (error) {
+      response = { ...response, error: `Could not decode Studio's screenshot: ${error instanceof Error ? error.message : String(error)}` };
+      hostReason = `Studio's capture failed (${response.error})`;
+    }
+    if (hostReason !== undefined) {
+      const host = await this._captureViewportFromHostWindow(instanceId, targetRole);
+      if (host.success) {
+        response = host.response;
+        hostNote = ` Captured from the Studio window through the host OS because ${hostReason}.`;
+      } else if (response.error) {
+        response = { ...response, error: `${response.error} Host window capture also failed: ${host.error}.` };
+      } else {
+        hostNote = ` Warning: ${hostReason} and host window capture also failed (${host.error}), so this image may be blank.`;
       }
     }
 
@@ -5115,14 +5208,14 @@ export class RobloxStudioTools {
     const nativeW = response.nativeWidth ?? w;
     const nativeH = response.nativeHeight ?? h;
     const message =
-      nativeW !== w || nativeH !== h
+      (nativeW !== w || nativeH !== h
         ? `Screenshot ${w}x${h}px (${fmt}${fmt === 'jpeg' ? ` q${usedQ}` : ''})${note}, downscaled from the ` +
           `${nativeW}x${nativeH} viewport to fit transport limits. For simulate_mouse_input, multiply x read off ` +
           `this image by ${(nativeW / w).toFixed(4)} and y by ${(nativeH / h).toFixed(4)} to get viewport pixel ` +
           `coordinates ((0,0) at the top-left).`
         : `Screenshot ${w}x${h}px (${fmt}${fmt === 'jpeg' ? ` q${usedQ}` : ''})${note}. ` +
           `For simulate_mouse_input, x/y are pixel coordinates in this exact image with (0,0) at the ` +
-          `top-left; it is not downscaled, so use coordinates as you read them off the image.`;
+          `top-left; it is not downscaled, so use coordinates as you read them off the image.`) + hostNote;
 
     return {
       success: true,
@@ -5134,6 +5227,179 @@ export class RobloxStudioTools {
       data: buffer.toString('base64'),
       mimeType,
       message,
+    };
+  }
+
+  private _isUniformCaptureResponse(response: RawImageCaptureResponse): boolean {
+    if (!response.data || !response.width || !response.height) return false;
+    const data = Buffer.from(response.data, 'base64');
+    if (response.encoding === 'png') return isUniformPng(data);
+    return isUniformFrame(data, response.width, response.height);
+  }
+
+  private _hostCaptureTitleHint(instanceId: string): string | undefined {
+    const peers = this.bridge.getPeers().filter((peer) => peer.instanceId === instanceId);
+    const edit = peers.find((peer) => peer.role === 'edit') ?? peers[0];
+    const name = edit?.dataModelName || edit?.placeName;
+    return name ? name : undefined;
+  }
+
+  private async _callViewportMarkers(
+    action: 'prepare' | 'show' | 'hide' | 'query' | 'finish',
+    targetRole: string,
+    instanceId: string,
+    captureId?: string,
+  ): Promise<ViewportMarkerResponse> {
+    return await this._callSingle('/api/capture-markers', { action, ...(captureId ? { captureId } : {}) }, targetRole, instanceId) as ViewportMarkerResponse;
+  }
+
+  // Always restore the simulator, including failures and cached window grabs.
+  private async _captureViewportFromHostWindow(
+    instanceId: string,
+    targetRole: string,
+  ): Promise<HostViewportCaptureResult> {
+    let prepared: ViewportMarkerResponse | undefined;
+    let result: HostViewportCaptureResult;
+    try {
+      prepared = await this._callViewportMarkers('prepare', targetRole, instanceId);
+      if (prepared.error || !prepared.captureId || !prepared.viewportWidth || !prepared.viewportHeight) {
+        result = { success: false, error: prepared.error ?? 'the Studio plugin could not prepare host capture (update the plugin)' };
+      } else {
+        if (prepared.viewportChanged) this.hostViewportRects.delete(`${instanceId}|${targetRole}`);
+        result = await this._capturePreparedViewportFromHostWindow(instanceId, targetRole, prepared);
+      }
+    } catch (error) {
+      result = { success: false, error: `host capture failed: ${error instanceof Error ? error.message : String(error)}` };
+    } finally {
+      if (prepared?.captureId) {
+        try {
+          const restored = await this._callViewportMarkers('finish', targetRole, instanceId, prepared.captureId);
+          if (restored.error) result = { success: false, error: `could not restore the Studio viewport: ${restored.error}` };
+          else if (restored.stale || !restored.success) result = { success: false, error: 'the host capture transaction expired or lost ownership; retry the capture' };
+        } catch (error) {
+          result = { success: false, error: `could not restore the Studio viewport: ${error instanceof Error ? error.message : String(error)}` };
+        }
+      }
+    }
+    if (!result.success) this.hostViewportRects.delete(`${instanceId}|${targetRole}`);
+    return result;
+  }
+
+  // Grabs the Studio window through the host OS and crops it to the viewport
+  // of `targetRole`. The plugin pins magenta markers to the viewport corners
+  // so the crop is exact regardless of Studio's dock layout or DPI scale; the
+  // located rect is cached briefly so repeated captures cost one window grab.
+  private async _capturePreparedViewportFromHostWindow(
+    instanceId: string,
+    targetRole: string,
+    prepared: ViewportMarkerResponse,
+  ): Promise<HostViewportCaptureResult> {
+    const titleHint = this._hostCaptureTitleHint(instanceId);
+    const cacheKey = `${instanceId}|${targetRole}`;
+    const cached = this.hostViewportRects.get(cacheKey);
+
+    let sizeInfo: ViewportMarkerResponse;
+    try {
+      sizeInfo = await this._callViewportMarkers('query', targetRole, instanceId, prepared.captureId);
+    } catch (error) {
+      return { success: false, error: `viewport markers unavailable: ${error instanceof Error ? error.message : String(error)}` };
+    }
+    if (sizeInfo.error || !sizeInfo.viewportWidth || !sizeInfo.viewportHeight) {
+      return {
+        success: false,
+        error: sizeInfo.error ?? 'the Studio plugin did not report a viewport size (update the plugin to a build with /api/capture-markers)',
+      };
+    }
+    // Fitting the physical presentation can round the camera size by a pixel.
+    // Return the original logical size, which is restored before input resumes.
+    const viewportWidth = prepared.viewportWidth ?? sizeInfo.viewportWidth;
+    const viewportHeight = prepared.viewportHeight ?? sizeInfo.viewportHeight;
+
+    // Fast path: the viewport was located recently and neither the window nor
+    // the viewport changed size, so one grab is enough.
+    if (
+      cached &&
+      Date.now() - cached.cachedAt < HOST_VIEWPORT_RECT_TTL_MS &&
+      cached.viewportWidth === viewportWidth &&
+      cached.viewportHeight === viewportHeight
+    ) {
+      const grab = await this.hostWindowCapture(titleHint);
+      if (!grab.ok) return { success: false, error: grab.error };
+      if (grab.capture.width === cached.windowWidth && grab.capture.height === cached.windowHeight) {
+        return {
+          success: true,
+          response: this._hostResponseFromCrop(grab.capture.rgba, grab.capture.width, grab.capture.height, cached.rect, viewportWidth, viewportHeight),
+        };
+      }
+      this.hostViewportRects.delete(cacheKey);
+    }
+
+    // Locate the viewport: markers on, grab, markers off, grab again clean.
+    let shown: ViewportMarkerResponse;
+    try {
+      shown = await this._callViewportMarkers('show', targetRole, instanceId, prepared.captureId);
+    } catch (error) {
+      return { success: false, error: `could not draw viewport markers: ${error instanceof Error ? error.message : String(error)}` };
+    }
+    if (shown.error) return { success: false, error: `could not draw viewport markers: ${shown.error}` };
+    const markerSize = shown.markerSize ?? 12;
+
+    let markerGrab: HostCaptureResult;
+    let hidden: ViewportMarkerResponse;
+    try {
+      markerGrab = await this.hostWindowCapture(titleHint);
+    } finally {
+      hidden = await this._callViewportMarkers('hide', targetRole, instanceId, prepared.captureId);
+    }
+    if (hidden.error) return { success: false, error: `could not hide viewport markers: ${hidden.error}` };
+    if (!markerGrab.ok) return { success: false, error: markerGrab.error };
+
+    const located = findViewportRect(markerGrab.capture.rgba, markerGrab.capture.width, markerGrab.capture.height, {
+      viewportWidth: shown.viewportWidth ?? viewportWidth,
+      viewportHeight: shown.viewportHeight ?? viewportHeight,
+      markerSize,
+    });
+    if ('error' in located) return { success: false, error: located.error };
+
+    this.hostViewportRects.set(cacheKey, {
+      rect: located.rect,
+      windowWidth: markerGrab.capture.width,
+      windowHeight: markerGrab.capture.height,
+      viewportWidth,
+      viewportHeight,
+      cachedAt: Date.now(),
+    });
+
+    const cleanGrab = await this.hostWindowCapture(titleHint);
+    if (!cleanGrab.ok) return { success: false, error: cleanGrab.error };
+    if (cleanGrab.capture.width !== markerGrab.capture.width || cleanGrab.capture.height !== markerGrab.capture.height) {
+      this.hostViewportRects.delete(cacheKey);
+      return { success: false, error: 'the Studio window was resized while locating the viewport; retry the capture' };
+    }
+    return {
+      success: true,
+      response: this._hostResponseFromCrop(cleanGrab.capture.rgba, cleanGrab.capture.width, cleanGrab.capture.height, located.rect, viewportWidth, viewportHeight),
+    };
+  }
+
+  private _hostResponseFromCrop(
+    rgba: Buffer,
+    width: number,
+    height: number,
+    rect: ViewportRect,
+    viewportWidth: number,
+    viewportHeight: number,
+  ): RawImageCaptureResponse {
+    const cropped = cropToViewport(rgba, width, height, rect, viewportWidth, viewportHeight);
+    return {
+      success: true,
+      encoding: 'rgba8',
+      source: 'host-window',
+      width: cropped.width,
+      height: cropped.height,
+      nativeWidth: viewportWidth,
+      nativeHeight: viewportHeight,
+      data: cropped.rgba.toString('base64'),
     };
   }
 
