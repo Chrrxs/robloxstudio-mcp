@@ -4,10 +4,13 @@ import {
   isHostCaptureDisabled,
   isUniformFrame,
 } from '../host-capture.js';
+import type { HostCaptureResult } from '../host-capture.js';
 import { BridgeService } from '../bridge-service.js';
 import { RobloxStudioTools } from '../tools/index.js';
 import type { HostWindowCaptureFn } from '../tools/index.js';
 import { StudioHttpClient } from '../tools/studio-client.js';
+import { rgbaToPng } from '../png-encoder.js';
+import { decodePngToRgba } from '../image-decode.js';
 
 function solid(width: number, height: number, rgb: [number, number, number]): Buffer {
   const rgba = Buffer.alloc(width * height * 4);
@@ -144,6 +147,13 @@ describe('cropToViewport', () => {
     expect(cropped.rgba[mid + 2]).toBe(128);
   });
 
+  test.each([298, 299, 301, 302])('preserves logical dimensions when fitting rounds the physical width to %i', (physicalWidth) => {
+    const rgba = solid(400, 200, [20, 40, 60]);
+    const cropped = cropToViewport(rgba, 400, 200, { x: 20, y: 20, width: physicalWidth, height: 119 }, 300, 120);
+    expect([cropped.width, cropped.height]).toEqual([300, 120]);
+    expect(cropped.rgba.length).toBe(300 * 120 * 4);
+  });
+
   test('clamps a rect that runs past the window edge', () => {
     const rgba = solid(20, 10, [1, 2, 3]);
     const cropped = cropToViewport(rgba, 20, 10, { x: 15, y: 5, width: 10, height: 10 }, 5, 5);
@@ -192,10 +202,11 @@ describe('capture_screenshot host window fallback', () => {
         return { success: true, encoding: 'rgba8', width: 300, height: 120, nativeWidth: 300, nativeHeight: 120, data: blackFrame };
       }
       if (endpoint === '/api/capture-markers') {
-        const action = (data as { action: string }).action;
+        if (data === null || typeof data !== 'object' || !('action' in data)) throw new Error('Missing marker action');
+        const action = data.action;
         if (action === 'show') markerState.shown = true;
         if (action === 'hide') markerState.shown = false;
-        return { success: true, viewportWidth: 300, viewportHeight: 120, markerSize: 12 };
+        return { success: true, captureId: 'capture:test', viewportWidth: 300, viewportHeight: 120, markerSize: 12 };
       }
       throw new Error(`unexpected endpoint ${endpoint}`);
     };
@@ -236,11 +247,221 @@ describe('capture_screenshot host window fallback', () => {
     const markerActions = request.mock.calls
       .filter(([endpoint]) => endpoint === '/api/capture-markers')
       .map(([, data]) => (data as { action: string }).action);
-    expect(markerActions).toEqual(['query', 'show', 'hide']);
+    expect(markerActions).toEqual(['prepare', 'query', 'show', 'hide', 'finish']);
     // Marker calls follow the rendering peer (the play client), never the edit DM.
     for (const call of request.mock.calls.filter(([endpoint]) => endpoint === '/api/capture-markers')) {
       expect(call[2]).toBe('client-session');
     }
+  });
+
+  test('replaces a successful but black StudioCaptureService PNG with the host viewport', async () => {
+    const markerState = { shown: false };
+    const hostCapture: HostWindowCaptureFn = async () => ({
+      ok: true,
+      capture: { width: 400, height: 200, title: 't', rgba: studioWindow(400, 200, viewport, markerState.shown) },
+    });
+    const studio = studioThatReturnsBlackPlayFrames(markerState);
+    const { tools } = makeTools(hostCapture, async (endpoint, data) => {
+      if (endpoint === '/api/capture-studio') {
+        return {
+          success: true, encoding: 'png', source: 'StudioCaptureService', width: 300, height: 120,
+          data: rgbaToPng(solid(300, 120, [0, 0, 0]), 300, 120).toString('base64'),
+        };
+      }
+      return studio(endpoint, data);
+    });
+
+    const result = await tools.captureScreenshot('instance:test', 'png');
+    const text = result.content.find((item) => 'text' in item);
+    expect(text && 'text' in text && text.text).toContain('Captured from the Studio window through the host OS');
+    const image = result.content.find((item) => 'data' in item);
+    if (!image || !('data' in image) || typeof image.data !== 'string') throw new Error('Screenshot did not include an image');
+    const decoded = decodePngToRgba(Buffer.from(image.data, 'base64'));
+    expect([decoded.width, decoded.height]).toEqual([300, 120]);
+    expect(isUniformFrame(decoded.rgba, decoded.width, decoded.height)).toBe(false);
+    expect(markerState.shown).toBe(false);
+  });
+
+  test('preserves a nonblank PNG without sampling away a small detail above 1024 pixels', async () => {
+    const rgba = solid(2048, 2, [0, 0, 0]);
+    fill(rgba, 2048, 2047, 1, 1, 1, [255, 255, 255]);
+    const png = rgbaToPng(rgba, 2048, 2).toString('base64');
+    const hostCapture = jest.fn(async (): Promise<HostCaptureResult> => ({ ok: false, error: 'should not be called' }));
+    const { tools } = makeTools(hostCapture, async () => ({
+      success: true, encoding: 'png', width: 2048, height: 2, data: png,
+    }));
+
+    const result = await tools.captureScreenshot('instance:test', 'png');
+    const image = result.content.find((item) => 'data' in item);
+    expect(image && 'data' in image && image.data).toBe(png);
+    expect(hostCapture).not.toHaveBeenCalled();
+  });
+
+  test('preserves a healthy 5K PNG above the asset decoder pixel limit', async () => {
+    const width = 5120, height = 2880;
+    const rgba = Buffer.alloc(width * height * 4, 255);
+    rgba[0] = 0;
+    const png = rgbaToPng(rgba, width, height).toString('base64');
+    const hostCapture = jest.fn(async (): Promise<HostCaptureResult> => ({ ok: false, error: 'host capture disabled' }));
+    const { tools } = makeTools(hostCapture, async (endpoint) => {
+      if (endpoint !== '/api/capture-studio') throw new Error(`Unexpected fallback request ${endpoint}`);
+      return { success: true, encoding: 'png', width, height, data: png };
+    });
+
+    const result = await tools.captureScreenshot('instance:test', 'png');
+    const image = result.content.find((item) => 'data' in item);
+    expect(image && 'data' in image && image.data).toBe(png);
+    expect(hostCapture).not.toHaveBeenCalled();
+  });
+
+  test.each(['hide', 'finish'] as const)('discards the host image when its %s operation loses transaction ownership', async (failureAction) => {
+    const markerState = { shown: false };
+    const studio = studioThatReturnsBlackPlayFrames(markerState);
+    const hostCapture = jest.fn(async (): Promise<HostCaptureResult> => ({
+      ok: true, capture: { width: 400, height: 200, title: 't', rgba: studioWindow(400, 200, viewport, markerState.shown) },
+    }));
+    const { tools } = makeTools(hostCapture, async (endpoint, data) => {
+      const action = typeof data === 'object' && data !== null && 'action' in data ? data.action : undefined;
+      if (endpoint === '/api/capture-markers') {
+        if (action === 'finish') markerState.shown = false;
+        if (action === failureAction) {
+          return action === 'hide' ? { error: 'host capture token expired' } : { success: true, stale: true, captureId: 'capture:test' };
+        }
+      }
+      return studio(endpoint, data);
+    });
+
+    const result = await tools.captureScreenshot('instance:test', 'png');
+    const text = result.content.find((item) => 'text' in item);
+    expect(text && 'text' in text && text.text).toContain('expired');
+    expect(text && 'text' in text && text.text).not.toContain('Captured from the Studio window through the host OS');
+    expect(hostCapture).toHaveBeenCalledTimes(failureAction === 'hide' ? 1 : 2);
+    expect(markerState.shown).toBe(false);
+  });
+
+  test('keeps a blank PNG with a warning when host capture is unavailable', async () => {
+    const png = rgbaToPng(solid(300, 120, [0, 0, 0]), 300, 120).toString('base64');
+    const studio = studioThatReturnsBlackPlayFrames({ shown: false });
+    const { tools } = makeTools(async () => ({ ok: false, error: 'the Studio window is minimized' }), async (endpoint, data) => {
+      if (endpoint === '/api/capture-studio') return { encoding: 'png', width: 300, height: 120, data: png };
+      return studio(endpoint, data);
+    });
+
+    const result = await tools.captureScreenshot('instance:test', 'png');
+    const text = result.content.find((item) => 'text' in item);
+    expect(text && 'text' in text && text.text).toContain('may be blank');
+    const image = result.content.find((item) => 'data' in item);
+    expect(image && 'data' in image && image.data).toBe(png);
+  });
+
+  test('fits the host viewport only during capture and restores it on success', async () => {
+    const markerState = { shown: false };
+    let fitted = false;
+    const actions: string[] = [];
+    const studio = studioThatReturnsBlackPlayFrames(markerState);
+    const { tools } = makeTools(async () => {
+      expect(fitted).toBe(true);
+      return { ok: true, capture: { width: 400, height: 200, title: 't', rgba: studioWindow(400, 200, viewport, markerState.shown) } };
+    }, async (endpoint, data) => {
+      if (endpoint === '/api/capture-markers' && data !== null && typeof data === 'object' && 'action' in data) {
+        actions.push(String(data.action));
+        if (data.action === 'prepare') {
+          fitted = true;
+          return { success: true, captureId: 'capture:1', viewportWidth: 300, viewportHeight: 120 };
+        }
+        if (data.action === 'finish') {
+          expect('captureId' in data && data.captureId).toBe('capture:1');
+          fitted = false;
+          return { success: true };
+        }
+        const response = await studio(endpoint, data);
+        // Fitting may round the camera's logical width by one pixel. The
+        // screenshot must still use the pre-capture input coordinate space.
+        return { ...response, viewportWidth: 299 };
+      }
+      return studio(endpoint, data);
+    });
+
+    const result = await tools.captureScreenshot('instance:test', 'png');
+    const image = result.content.find((item) => 'data' in item);
+    if (!image || !('data' in image) || typeof image.data !== 'string') throw new Error('Expected an image');
+    const decoded = decodePngToRgba(Buffer.from(image.data, 'base64'));
+    expect([decoded.width, decoded.height]).toEqual([300, 120]);
+    expect(fitted).toBe(false);
+    expect(actions).toEqual(['prepare', 'query', 'show', 'hide', 'finish']);
+  });
+
+  test('restores the viewport even when grabbing the window throws', async () => {
+    const actions: string[] = [];
+    const studio = studioThatReturnsBlackPlayFrames({ shown: false });
+    const { tools } = makeTools(async () => { throw new Error('window grab failed'); }, async (endpoint, data) => {
+      if (endpoint === '/api/capture-markers' && data !== null && typeof data === 'object' && 'action' in data) {
+        actions.push(String(data.action));
+      }
+      return studio(endpoint, data);
+    });
+    const result = await tools.captureScreenshot('instance:test', 'png');
+    const text = result.content.find((item) => 'text' in item);
+    expect(text && 'text' in text && text.text).toContain('window grab failed');
+    expect(actions).toEqual(['prepare', 'query', 'show', 'hide', 'finish']);
+  });
+
+  test('serializes concurrent host captures until each viewport restoration completes', async () => {
+    const markerState = { shown: false };
+    const studio = studioThatReturnsBlackPlayFrames(markerState);
+    let active = 0;
+    let generation = 0;
+    const { tools } = makeTools(async () => {
+      expect(active).toBe(1);
+      await Promise.resolve();
+      return { ok: true, capture: { width: 400, height: 200, title: 't', rgba: studioWindow(400, 200, viewport, markerState.shown) } };
+    }, async (endpoint, data) => {
+      if (endpoint === '/api/capture-markers' && data !== null && typeof data === 'object' && 'action' in data) {
+        if (data.action === 'prepare') {
+          expect(active).toBe(0);
+          active++;
+          generation++;
+          return { success: true, captureId: `capture:${generation}`, viewportWidth: 300, viewportHeight: 120 };
+        }
+        if (data.action === 'finish') {
+          expect('captureId' in data && data.captureId).toBe(`capture:${generation}`);
+          await Promise.resolve();
+          active--;
+          return { success: true };
+        }
+      }
+      return studio(endpoint, data);
+    });
+
+    const results = await Promise.all([
+      tools.captureScreenshot('instance:test', 'png'),
+      tools.captureScreenshot('instance:test', 'png'),
+    ]);
+    for (const result of results) {
+      const text = result.content.find((item) => 'text' in item);
+      expect(text && 'text' in text && text.text).toContain('Captured from the Studio window through the host OS');
+    }
+    expect(generation).toBe(2);
+    expect(active).toBe(0);
+  });
+
+  test('re-locates a fitted viewport when its presentation changed without a window resize', async () => {
+    const markerState = { shown: false };
+    const studio = studioThatReturnsBlackPlayFrames(markerState);
+    let rect = viewport;
+    const { tools } = makeTools(async () => ({
+      ok: true, capture: { width: 400, height: 200, title: 't', rgba: studioWindow(400, 200, rect, markerState.shown) },
+    }), async (endpoint, data) => {
+      const response = await studio(endpoint, data);
+      return endpoint === '/api/capture-markers' ? { ...response, viewportChanged: true } : response;
+    });
+    await tools.captureScreenshot('instance:test', 'png');
+    rect = { ...viewport, x: 70 };
+    const result = await tools.captureScreenshot('instance:test', 'png');
+    const image = result.content.find((item) => 'data' in item);
+    if (!image || !('data' in image) || typeof image.data !== 'string') throw new Error('Expected an image');
+    const decoded = decodePngToRgba(Buffer.from(image.data, 'base64'));
+    expect(decoded.rgba).toEqual(studioWindow(300, 120, { x: 0, y: 0, width: 300, height: 120 }, false));
   });
 
   test('reuses the located viewport rect for the next capture (one window grab, no markers)', async () => {
@@ -260,7 +481,7 @@ describe('capture_screenshot host window fallback', () => {
     const markerActions = request.mock.calls
       .filter(([endpoint]) => endpoint === '/api/capture-markers')
       .map(([, data]) => (data as { action: string }).action);
-    expect(markerActions).toEqual(['query']);
+    expect(markerActions).toEqual(['prepare', 'query', 'finish']);
   });
 
   test('re-locates the viewport when the Studio window size changes', async () => {
@@ -281,7 +502,7 @@ describe('capture_screenshot host window fallback', () => {
     const markerActions = request.mock.calls
       .filter(([endpoint]) => endpoint === '/api/capture-markers')
       .map(([, data]) => (data as { action: string }).action);
-    expect(markerActions).toEqual(['query', 'show', 'hide']);
+    expect(markerActions).toEqual(['prepare', 'query', 'show', 'hide', 'finish']);
   });
 
   test('falls back to the host window when Studio-side capture fails outright', async () => {

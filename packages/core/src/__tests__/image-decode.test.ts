@@ -6,6 +6,7 @@ import {
   decodeImagePathToRgba,
   decodePngBase64ToRgba,
   decodePngToRgba,
+  isUniformPng,
 } from '../image-decode.js';
 
 const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
@@ -170,6 +171,129 @@ describe('decodePngToRgba', () => {
     expect(() => decodePngToRgba(Buffer.concat(chunks))).toThrow(
       /PNG contains more than the 65536-chunk limit/i,
     );
+  });
+});
+
+describe('isUniformPng', () => {
+  test('treats flat RGB as blank regardless of alpha', () => {
+    const png = rgbaPng(2, 1, Buffer.from([0, 17, 200, 3, 0, 17, 200, 3, 255]));
+
+    expect(isUniformPng(png)).toBe(true);
+  });
+
+  test('finds a single differing source pixel that asset resizing would omit', () => {
+    const width = 2_048;
+    const scanlines = Buffer.alloc(1 + width * 4);
+    scanlines[1 + 1_025 * 4 + 1] = 1;
+    const png = rgbaPng(width, 1, scanlines);
+
+    expect(isUniformPng(png)).toBe(false);
+    expect(decodePngToRgba(png).rgba.equals(Buffer.alloc(1_024 * 4))).toBe(true);
+  });
+
+  test.each<[number, number[]]>([
+    [0, [17, 17]],
+    [2, [17, 200, 3, 17, 200, 3]],
+    [4, [17, 0, 17, 255]],
+  ])('compares source colour type %i without RGBA conversion', (colorType, pixels) => {
+    const ihdr = rgbaIhdr(2, 1);
+    ihdr[9] = colorType;
+    const scanlines = Buffer.from([0, ...pixels]);
+    const makePng = () => Buffer.concat([
+      PNG_SIGNATURE,
+      pngChunk('IHDR', ihdr),
+      pngChunk('IDAT', deflateSync(scanlines)),
+      pngChunk('IEND', Buffer.alloc(0)),
+    ]);
+
+    expect(isUniformPng(makePng())).toBe(true);
+    scanlines[1] = 18;
+    expect(isUniformPng(makePng())).toBe(false);
+  });
+
+  test.each<[number, number[], number[]]>([
+    [0, [10, 20, 30, 10, 20, 30], [10, 20, 30, 10, 20, 30]],
+    [1, [10, 20, 30, 0, 0, 0], [10, 20, 30, 0, 0, 0]],
+    [2, [10, 20, 30, 10, 20, 30], [0, 0, 0, 0, 0, 0]],
+    [3, [10, 20, 30, 5, 10, 15], [5, 10, 15, 0, 0, 0]],
+    [4, [10, 20, 30, 0, 0, 0], [0, 0, 0, 0, 0, 0]],
+  ])('unfilters PNG filter %i before comparing pixels', (filter, firstRow, secondRow) => {
+    const ihdr = rgbaIhdr(2, 2);
+    ihdr[9] = 2;
+    const scanlines = Buffer.from([
+      filter, ...firstRow,
+      filter, ...secondRow,
+    ]);
+    const makePng = () => Buffer.concat([
+      PNG_SIGNATURE,
+      pngChunk('IHDR', ihdr),
+      pngChunk('IDAT', deflateSync(scanlines)),
+      pngChunk('IEND', Buffer.alloc(0)),
+    ]);
+
+    expect(isUniformPng(makePng())).toBe(true);
+    scanlines[scanlines.length - 1] = 1;
+    expect(isUniformPng(makePng())).toBe(false);
+  });
+
+  test.each([
+    [5_120, 2_880],
+    [7_680, 4_320],
+  ])('inspects native %ix%i sources without relaxing asset pixel limits', (width, height) => {
+    const ihdr = rgbaIhdr(width, height);
+    ihdr[9] = 0;
+    const png = Buffer.concat([
+      PNG_SIGNATURE,
+      pngChunk('IHDR', ihdr),
+      pngChunk('IDAT', deflateSync(Buffer.alloc((width + 1) * height))),
+      pngChunk('IEND', Buffer.alloc(0)),
+    ]);
+
+    expect(isUniformPng(png)).toBe(true);
+    expect(() => decodePngToRgba(png)).toThrow(/8388608-pixel limit/);
+    expect(() => decodePngBase64ToRgba(png.toString('base64'))).toThrow(/8388608-pixel limit/);
+  });
+
+  test('rejects screenshot sources above the inspection pixel bound before inflating', () => {
+    expect(() => isUniformPng(
+      rgbaPngWithIdat(8_192, 4_097, Buffer.from('invalid zlib data')),
+    )).toThrow(/33554432-pixel limit/);
+  });
+
+  test('rejects oversized dimensions before inflating', () => {
+    expect(() => isUniformPng(
+      rgbaPngWithIdat(16_385, 1, Buffer.from('invalid zlib data')),
+    )).toThrow(/16384-pixel dimension limit/);
+  });
+
+  test('rejects invalid row filters even after finding nonuniform pixels', () => {
+    const scanlines = Buffer.from([0, 0, 0, 0, 0, 1, 0, 0, 0, 5, 0, 0, 0, 0, 0, 0, 0, 0]);
+
+    expect(() => isUniformPng(rgbaPng(2, 2, scanlines))).toThrow(/Unsupported PNG filter type 5/);
+  });
+
+  test('requires the exact inflated scanline length', () => {
+    expect(() => isUniformPng(rgbaPng(1, 1, Buffer.alloc(4)))).toThrow(/PNG data ended early/);
+    expect(() => isUniformPng(rgbaPng(1, 1, Buffer.alloc(1_024 * 1_024)))).toThrow(
+      /Inflated PNG data exceeds the expected scanline length/,
+    );
+  });
+
+  test('rejects unsupported source shape and malformed compressed data', () => {
+    const ihdr = rgbaIhdr(1, 1);
+    ihdr[12] = 1;
+    const png = Buffer.concat([
+      PNG_SIGNATURE,
+      pngChunk('IHDR', ihdr),
+      pngChunk('IDAT', deflateSync(Buffer.alloc(5))),
+      pngChunk('IEND', Buffer.alloc(0)),
+    ]);
+
+    expect(() => isUniformPng(png)).toThrow(/Interlaced PNG images are not supported/);
+    expect(() => isUniformPng(rgbaPng(0, 1, Buffer.alloc(0)))).toThrow(/dimensions must be positive/);
+    expect(() => isUniformPng(
+      rgbaPngWithIdat(1, 1, Buffer.from('invalid zlib data')),
+    )).toThrow(/Invalid PNG compressed data/);
   });
 });
 

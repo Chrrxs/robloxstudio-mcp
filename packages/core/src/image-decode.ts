@@ -10,16 +10,14 @@ export type DecodedRgbaImage = {
 
 const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 const MAX_EDITABLE_IMAGE_DIMENSION = 1024;
-// Decode runs synchronously and temporarily holds compressed, inflated, and unfiltered
-// buffers together. These bounds keep request work finite while still admitting UHD 4K images.
+// Asset decoding keeps its upload bounds; screenshot inspection admits native UHD 8K.
+// Both paths bound compressed input and inflated scanlines before allocating.
 const MAX_PNG_DIMENSION = 16 * 1024;
 const MAX_PNG_PIXELS = 8 * 1024 * 1024;
+const MAX_SCREENSHOT_PNG_PIXELS = 32 * 1024 * 1024;
 const MAX_PNG_INPUT_BYTES = 32 * 1024 * 1024;
 export const MAX_PNG_BASE64_CHARACTERS = 4 * Math.ceil(MAX_PNG_INPUT_BYTES / 3);
-const MAX_PNG_CHUNK_BYTES = 32 * 1024 * 1024;
-const MAX_PNG_COMPRESSED_BYTES = 32 * 1024 * 1024;
 const MAX_PNG_CHUNKS = 65_536;
-const MAX_PNG_INFLATED_BYTES = MAX_PNG_PIXELS * 4 + MAX_PNG_DIMENSION;
 
 function paethPredictor(a: number, b: number, c: number): number {
   const p = a + b - c;
@@ -39,13 +37,13 @@ function bytesPerPixel(colorType: number): number {
   throw new Error(`Unsupported PNG color type ${colorType}. Supported color types: 0, 2, 4, 6.`);
 }
 
-function validatePngInputSize(byteLength: number): void {
+function validatePngInputSize(byteLength: number, maxInputBytes = MAX_PNG_INPUT_BYTES): void {
   if (!Number.isSafeInteger(byteLength) || byteLength < 0) {
     throw new Error(`Invalid PNG input length ${byteLength}.`);
   }
-  if (byteLength > MAX_PNG_INPUT_BYTES) {
+  if (byteLength > maxInputBytes) {
     throw new Error(
-      `PNG input length ${byteLength} exceeds the ${MAX_PNG_INPUT_BYTES}-byte limit.`,
+      `PNG input length ${byteLength} exceeds the ${maxInputBytes}-byte limit.`,
     );
   }
 }
@@ -139,7 +137,7 @@ function readPngFileWithinLimit(resolved: string, imagePath: string): Buffer {
   }
 }
 
-function validateSourceDimensions(width: number, height: number): void {
+function validateSourceDimensions(width: number, height: number, maxPixels: number): void {
   if (width <= 0 || height <= 0) {
     throw new Error('PNG IHDR dimensions must be positive.');
   }
@@ -150,105 +148,89 @@ function validateSourceDimensions(width: number, height: number): void {
   }
 
   const pixelCount = width * height;
-  if (!Number.isSafeInteger(pixelCount) || pixelCount > MAX_PNG_PIXELS) {
+  if (!Number.isSafeInteger(pixelCount) || pixelCount > maxPixels) {
     throw new Error(
-      `PNG pixel count ${pixelCount} exceeds the ${MAX_PNG_PIXELS}-pixel limit.`,
+      `PNG pixel count ${pixelCount} exceeds the ${maxPixels}-pixel limit.`,
     );
   }
 }
 
-function getExpectedScanlineLength(width: number, height: number, bpp: number): number {
+function getExpectedScanlineLength(
+  width: number,
+  height: number,
+  bpp: number,
+  maxPixels: number,
+): number {
+  const maxInflatedBytes = maxPixels * 4 + MAX_PNG_DIMENSION;
   const stride = width * bpp;
   const expected = height * (stride + 1);
   if (
     !Number.isSafeInteger(stride)
     || !Number.isSafeInteger(expected)
-    || expected > MAX_PNG_INFLATED_BYTES
+    || expected > maxInflatedBytes
   ) {
     throw new Error(
-      `PNG scanline data length ${expected} exceeds the ${MAX_PNG_INFLATED_BYTES}-byte limit.`,
+      `PNG scanline data length ${expected} exceeds the ${maxInflatedBytes}-byte limit.`,
     );
   }
   return expected;
 }
 
-function convertScanlinesToRgba(
-  raw: Buffer,
-  width: number,
-  height: number,
-  colorType: number,
-  bpp: number,
-  expectedLength: number,
-): Buffer {
-  const stride = width * bpp;
-  if (raw.length !== expectedLength) {
-    if (raw.length > expectedLength) {
-      throw new Error(
-        `Inflated PNG data exceeds the expected scanline length of ${expectedLength} bytes.`,
-      );
-    }
-    throw new Error(
-      `PNG data ended early. Expected ${expectedLength} bytes after inflate, got ${raw.length}.`,
-    );
-  }
+type InflatedPng = {
+  width: number;
+  height: number;
+  colorType: number;
+  bpp: number;
+  raw: Buffer;
+};
 
-  const unfiltered = Buffer.alloc(width * height * bpp);
-  let srcOffset = 0;
-
-  for (let y = 0; y < height; y++) {
-    const filter = raw[srcOffset++];
-    const rowOffset = y * stride;
-    const prevRowOffset = (y - 1) * stride;
-
-    for (let x = 0; x < stride; x++) {
-      const value = raw[srcOffset++];
-      const left = x >= bpp ? unfiltered[rowOffset + x - bpp] : 0;
-      const up = y > 0 ? unfiltered[prevRowOffset + x] : 0;
-      const upLeft = y > 0 && x >= bpp ? unfiltered[prevRowOffset + x - bpp] : 0;
-
-      let decoded: number;
-      if (filter === 0) {
-        decoded = value;
-      } else if (filter === 1) {
-        decoded = value + left;
-      } else if (filter === 2) {
-        decoded = value + up;
-      } else if (filter === 3) {
-        decoded = value + Math.floor((left + up) / 2);
-      } else if (filter === 4) {
-        decoded = value + paethPredictor(left, up, upLeft);
-      } else {
-        throw new Error(`Unsupported PNG filter type ${filter}.`);
-      }
-
-      unfiltered[rowOffset + x] = decoded & 0xff;
-    }
-  }
-
-  if (colorType === 6) return unfiltered;
-
-  const rgba = Buffer.alloc(width * height * 4);
-  let si = 0;
-  let di = 0;
-  for (let i = 0; i < width * height; i++) {
-    if (colorType === 2) {
-      rgba[di++] = unfiltered[si++];
-      rgba[di++] = unfiltered[si++];
-      rgba[di++] = unfiltered[si++];
-      rgba[di++] = 255;
-    } else if (colorType === 0) {
-      const gray = unfiltered[si++];
-      rgba[di++] = gray;
-      rgba[di++] = gray;
-      rgba[di++] = gray;
-      rgba[di++] = 255;
+// Reconstruct one row in place, retaining the preceding row for PNG predictors.
+function unfilterPngRow(raw: Buffer, rowOffset: number, stride: number, bpp: number): void {
+  const filter = raw[rowOffset - 1];
+  if (filter === 0) return;
+  const prevRowOffset = rowOffset - stride - 1;
+  for (let x = 0; x < stride; x++) {
+    const left = x >= bpp ? raw[rowOffset + x - bpp] : 0;
+    const up = prevRowOffset > 0 ? raw[prevRowOffset + x] : 0;
+    const upLeft = prevRowOffset > 0 && x >= bpp ? raw[prevRowOffset + x - bpp] : 0;
+    let predictor: number;
+    if (filter === 1) {
+      predictor = left;
+    } else if (filter === 2) {
+      predictor = up;
+    } else if (filter === 3) {
+      predictor = Math.floor((left + up) / 2);
     } else {
-      const gray = unfiltered[si++];
-      const alpha = unfiltered[si++];
-      rgba[di++] = gray;
-      rgba[di++] = gray;
-      rgba[di++] = gray;
-      rgba[di++] = alpha;
+      predictor = paethPredictor(left, up, upLeft);
+    }
+    raw[rowOffset + x] = (raw[rowOffset + x] + predictor) & 0xff;
+  }
+}
+
+function convertScanlinesToRgba({ raw, width, height, colorType, bpp }: InflatedPng): Buffer {
+  const stride = width * bpp;
+  const rgba = Buffer.alloc(width * height * 4);
+  let di = 0;
+  for (let rowOffset = 1; rowOffset < raw.length; rowOffset += stride + 1) {
+    unfilterPngRow(raw, rowOffset, stride, bpp);
+    if (colorType === 6) {
+      raw.copy(rgba, di, rowOffset, rowOffset + stride);
+      di += stride;
+      continue;
+    }
+    for (let si = rowOffset; si < rowOffset + stride; si += bpp) {
+      if (colorType === 2) {
+        rgba[di++] = raw[si];
+        rgba[di++] = raw[si + 1];
+        rgba[di++] = raw[si + 2];
+        rgba[di++] = 255;
+      } else {
+        const gray = raw[si];
+        rgba[di++] = gray;
+        rgba[di++] = gray;
+        rgba[di++] = gray;
+        rgba[di++] = colorType === 4 ? raw[si + 1] : 255;
+      }
     }
   }
   return rgba;
@@ -279,8 +261,9 @@ function resizeRgbaNearest(image: DecodedRgbaImage): DecodedRgbaImage {
   return { width, height, rgba };
 }
 
-export function decodePngToRgba(data: Buffer): DecodedRgbaImage {
-  validatePngInputSize(data.length);
+function inflatePng(data: Buffer, maxPixels: number): InflatedPng {
+  const maxInputBytes = maxPixels * 4;
+  validatePngInputSize(data.length, maxInputBytes);
   if (data.length < PNG_SIGNATURE.length || !data.subarray(0, PNG_SIGNATURE.length).equals(PNG_SIGNATURE)) {
     throw new Error('Unsupported image format. generate_model currently supports PNG images.');
   }
@@ -304,9 +287,9 @@ export function decodePngToRgba(data: Buffer): DecodedRgbaImage {
 
     const length = data.readUInt32BE(offset);
     const type = data.toString('ascii', offset + 4, offset + 8);
-    if (length > MAX_PNG_CHUNK_BYTES) {
+    if (length > maxInputBytes) {
       throw new Error(
-        `PNG chunk ${type} length ${length} exceeds the ${MAX_PNG_CHUNK_BYTES}-byte chunk limit.`,
+        `PNG chunk ${type} length ${length} exceeds the ${maxInputBytes}-byte chunk limit.`,
       );
     }
     if (++chunkCount > MAX_PNG_CHUNKS) {
@@ -346,13 +329,13 @@ export function decodePngToRgba(data: Buffer): DecodedRgbaImage {
       if (interlace !== 0) throw new Error('Interlaced PNG images are not supported.');
 
       bpp = bytesPerPixel(colorType);
-      validateSourceDimensions(width, height);
-      expectedScanlineLength = getExpectedScanlineLength(width, height, bpp);
+      validateSourceDimensions(width, height, maxPixels);
+      expectedScanlineLength = getExpectedScanlineLength(width, height, bpp, maxPixels);
       sawIhdr = true;
     } else if (type === 'IDAT') {
-      if (length > MAX_PNG_COMPRESSED_BYTES - idatLength) {
+      if (length > maxInputBytes - idatLength) {
         throw new Error(
-          `PNG image data exceeds the ${MAX_PNG_COMPRESSED_BYTES}-byte compressed-data limit.`,
+          `PNG image data exceeds the ${maxInputBytes}-byte compressed-data limit.`,
         );
       }
       idatLength += length;
@@ -389,15 +372,52 @@ export function decodePngToRgba(data: Buffer): DecodedRgbaImage {
     throw new Error(`Invalid PNG compressed data: ${detail}`);
   }
 
-  const rgba = convertScanlinesToRgba(
-    raw,
-    width,
-    height,
-    colorType,
-    bpp,
-    expectedScanlineLength,
-  );
-  return resizeRgbaNearest({ width, height, rgba });
+  if (raw.length !== expectedScanlineLength) {
+    throw new Error(
+      `PNG data ended early. Expected ${expectedScanlineLength} bytes after inflate, got ${raw.length}.`,
+    );
+  }
+  // Validate all row filters before inspection can return early on nonuniform RGB.
+  const rowLength = width * bpp + 1;
+  for (let rowOffset = 0; rowOffset < raw.length; rowOffset += rowLength) {
+    if (raw[rowOffset] > 4) {
+      throw new Error(`Unsupported PNG filter type ${raw[rowOffset]}.`);
+    }
+  }
+  return { width, height, colorType, bpp, raw };
+}
+
+// Compare every source RGB value without resizing or allocating a full RGBA image.
+// Alpha variation alone does not make a blank viewport meaningful.
+export function isUniformPng(data: Buffer): boolean {
+  const { raw, width, colorType, bpp } = inflatePng(data, MAX_SCREENSHOT_PNG_PIXELS);
+  const stride = width * bpp;
+  unfilterPngRow(raw, 1, stride, bpp);
+  const red = raw[1];
+  const grayscale = colorType === 0 || colorType === 4;
+  const green = grayscale ? red : raw[2];
+  const blue = grayscale ? red : raw[3];
+  for (let rowOffset = 1; rowOffset < raw.length; rowOffset += stride + 1) {
+    if (rowOffset !== 1) unfilterPngRow(raw, rowOffset, stride, bpp);
+    for (let offset = rowOffset; offset < rowOffset + stride; offset += bpp) {
+      if (
+        raw[offset] !== red
+        || (!grayscale && (raw[offset + 1] !== green || raw[offset + 2] !== blue))
+      ) {
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
+export function decodePngToRgba(data: Buffer): DecodedRgbaImage {
+  const png = inflatePng(data, MAX_PNG_PIXELS);
+  return resizeRgbaNearest({
+    width: png.width,
+    height: png.height,
+    rgba: convertScanlinesToRgba(png),
+  });
 }
 
 export function decodePngBase64ToRgba(encoded: string): DecodedRgbaImage {

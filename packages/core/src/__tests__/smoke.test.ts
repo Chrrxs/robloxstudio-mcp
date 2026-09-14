@@ -9,6 +9,7 @@ import { spawnSync, type SpawnOptions } from 'child_process';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
+import { rgbaToPng } from '../png-encoder.js';
 
 const SMOKE_TEST_CLAIM_OWNER = 'smoke-test';
 
@@ -4280,7 +4281,7 @@ describe('Smoke', () => {
     // without the marker endpoint ends that attempt and the tool moves on.
     await new Promise((resolve) => setTimeout(resolve, 0));
     const markersPending = claimQueuedRequest(bridge, 'session-1');
-    expect(markersPending?.request).toMatchObject({ endpoint: '/api/capture-markers', data: { action: 'query' } });
+    expect(markersPending?.request).toMatchObject({ endpoint: '/api/capture-markers', data: { action: 'prepare' } });
     bridge.resolveRequest(markersPending!.requestId, { error: 'Unknown endpoint: /api/capture-markers' });
 
     await new Promise((resolve) => setTimeout(resolve, 0));
@@ -4557,16 +4558,14 @@ describe('Smoke', () => {
     const studioPending = claimQueuedRequest(bridge, 'session-1');
     expect(studioPending?.request).toMatchObject({ endpoint: '/api/capture-studio', data: { encoding: 'png' } });
 
-    // 1x1 red PNG produced by Studio; the server must pass these bytes through.
-    const pngBytes = Buffer.from(
-      'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFAAH/q842iQAAAABJRU5ErkJggg==',
-      'base64',
-    );
+    // Two distinct pixels: a flat PNG is now checked for the same capture
+    // failure as flat RGBA. Valid encoded images still pass through unchanged.
+    const pngBytes = rgbaToPng(Buffer.from([255, 0, 0, 255, 0, 255, 0, 255]), 2, 1);
     bridge.resolveRequest(studioPending!.requestId, {
       success: true,
       encoding: 'png',
       source: 'StudioCaptureService',
-      width: 1,
+      width: 2,
       height: 1,
       data: pngBytes.toString('base64'),
     });

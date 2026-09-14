@@ -139,8 +139,8 @@ export function findViewportRect(
 
 // Crops the window capture to the viewport rect and resamples it to the
 // viewport's logical size so image pixels equal viewport coordinates even at
-// fractional display scaling. A rect that already matches (within a couple of
-// pixels of rounding) is copied without resampling.
+// fractional display scaling. Only an exactly matching rect can be copied:
+// rounding by even one pixel must not change the restored coordinate space.
 export function cropToViewport(
   rgba: Buffer,
   width: number,
@@ -154,9 +154,9 @@ export function cropToViewport(
   const srcW = Math.max(1, Math.min(rect.width, width - x0));
   const srcH = Math.max(1, Math.min(rect.height, height - y0));
 
-  const exact = Math.abs(srcW - targetWidth) <= 2 && Math.abs(srcH - targetHeight) <= 2;
-  const outW = exact ? Math.min(srcW, targetWidth) : targetWidth;
-  const outH = exact ? Math.min(srcH, targetHeight) : targetHeight;
+  const exact = srcW === targetWidth && srcH === targetHeight;
+  const outW = targetWidth;
+  const outH = targetHeight;
   const out = Buffer.alloc(outW * outH * 4);
 
   if (exact) {
