@@ -762,6 +762,7 @@ describe('Smoke', () => {
     const registryDir = fs.mkdtempSync(path.join(os.tmpdir(), 'robloxstudio-mcp-registry-'));
     const registry = new ManagedInstanceRegistry(registryDir);
     const stopped: Array<{ pid: number; startedAt?: string }> = [];
+    let running = true;
     const processAdapter = {
       currentBootId: () => 'boot-1',
       resolveStudioExe: () => 'RobloxStudioBeta.exe',
@@ -771,15 +772,16 @@ describe('Smoke', () => {
         nativeStartedAt: '133700123460',
         unref: () => {},
       }),
-      listStudioProcesses: () => [{
+      listStudioProcesses: () => running ? [{
         Id: 7659,
         Name: 'RobloxStudioBeta',
         Path: 'RobloxStudioBeta.exe',
         MainWindowTitle: 'Missing Controls Test - Roblox Studio',
         StartTimeUtcFileTime: '133700123460',
-      }],
+      }] : [],
       stopProcess: (pid: number, startedAt?: string) => {
         stopped.push({ pid, startedAt });
+        running = false;
       },
     };
 
@@ -1134,17 +1136,19 @@ describe('Smoke', () => {
       processObservationStatus: 'running',
       processAuthorizationState: 'authorized',
     });
+    let running = true;
     const processAdapter = {
       currentBootId: () => 'boot-1',
-      listStudioProcesses: () => [{
+      listStudioProcesses: () => running ? [{
         Id: 7658,
         Name: 'RobloxStudioBeta',
         Path: 'RobloxStudioBeta.exe',
         MainWindowTitle: 'Orphaned Authorization Test - Roblox Studio',
         StartTimeUtcFileTime: '133700123459',
-      }],
+      }] : [],
       stopProcess: (pid: number, startedAt?: string) => {
         stopped.push({ pid, startedAt });
+        running = false;
       },
     };
 

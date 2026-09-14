@@ -3271,9 +3271,9 @@ export class RobloxStudioTools {
         record = active[0];
       }
 
-      if (record.instanceId) await this.bridge.unregisterInstanceIdEverywhere(record.instanceId);
       const closeResult = await this.instanceManager.close(record);
       if (record.instanceId) {
+        await this.bridge.unregisterInstanceIdEverywhere(record.instanceId);
         await sleep(500);
         await this.bridge.unregisterInstanceIdEverywhere(record.instanceId);
       }

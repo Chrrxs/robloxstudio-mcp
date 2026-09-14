@@ -169,3 +169,85 @@ describe('native Studio process enumeration', () => {
     }
   });
 });
+
+describe('native macOS close verification', () => {
+  let registryDir: string;
+  let manager: StudioInstanceManager;
+  let record: ManagedStudioInstance;
+
+  beforeEach(() => {
+    Object.defineProperty(process, 'platform', { ...originalPlatformDescriptor, value: 'darwin' });
+    mockExecFileSync.mockReset();
+    mockExecFileAsync.mockReset();
+    returnOutput('4242 /Applications/RobloxStudio.app/Contents/MacOS/RobloxStudio');
+    registryDir = mkdtempSync(path.join(os.tmpdir(), 'studio-macos-close-'));
+    manager = new StudioInstanceManager({
+      registryDir,
+      processAdapter: { currentBootId: () => 'macos-close-test' },
+      closeTimeoutMs: 1000,
+    });
+    record = {
+      recordId: 'macos-close-test',
+      bootId: 'macos-close-test',
+      nativeProcessId: 4242,
+      spawnPid: 4242,
+      source: 'local_file',
+      exe: '/Applications/RobloxStudio.app/Contents/MacOS/RobloxStudio',
+      args: [],
+      launchedAt: Date.now(),
+      state: 'connected',
+      processAuthorizationState: 'released',
+      processObservationStatus: 'running',
+    };
+    jest.useFakeTimers();
+  });
+
+  afterEach(() => {
+    jest.clearAllTimers();
+    jest.useRealTimers();
+    jest.restoreAllMocks();
+    Object.defineProperty(process, 'platform', originalPlatformDescriptor);
+    rmSync(registryDir, { recursive: true, force: true });
+  });
+
+  test('SIGTERM success is not exit proof; probe the PID and never escalate to SIGKILL', async () => {
+    const signalled = Promise.withResolvers<void>();
+    const kill = jest.spyOn(process, 'kill').mockImplementation((pid, signal) => {
+      expect(pid).toBe(4242);
+      if (signal === 'SIGTERM') signalled.resolve();
+      return true;
+    });
+    const outcome = manager.close(record).catch((error: unknown) => error);
+    await signalled.promise;
+    await jest.advanceTimersByTimeAsync(1000);
+    expect(await outcome).toEqual(expect.objectContaining({ message: expect.stringMatching(/still running/) }));
+    expect(kill).toHaveBeenCalledWith(4242, 0);
+    expect(kill).not.toHaveBeenCalledWith(4242, 'SIGKILL');
+    expect(record.closedAt).toBeUndefined();
+  });
+
+  test.each(['ESRCH', 'EPERM'])('PID probe %s distinguishes exit from an unverifiable process', async (code) => {
+    jest.spyOn(process, 'kill').mockImplementation((_pid, signal) => {
+      if (signal === 0) throw Object.assign(new Error(code), { code });
+      return true;
+    });
+    if (code === 'ESRCH') {
+      await expect(manager.close(record)).resolves.toMatchObject({ status: 'closed' });
+      expect(record.state).toBe('exited');
+    } else {
+      await expect(manager.close(record)).rejects.toThrow(/EPERM/);
+      expect(record.closedAt).toBeUndefined();
+      expect(record.processObservationStatus).toBe('unknown');
+    }
+  });
+
+  test('absence from name-filtered enumeration is not proof that a retained PID exited', async () => {
+    returnOutput('');
+    const kill = jest.spyOn(process, 'kill').mockReturnValue(true);
+    await expect(manager.close(record)).rejects.toThrow(/still alive/);
+    expect(record.closedAt).toBeUndefined();
+    expect(record.processObservationStatus).toBe('unknown');
+    expect(kill).toHaveBeenCalledWith(4242, 0);
+    expect(kill).not.toHaveBeenCalledWith(4242, 'SIGTERM');
+  });
+});
