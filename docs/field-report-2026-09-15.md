@@ -69,6 +69,7 @@ is in `tests/field-2026-09-15/EVIDENCE.md`.
 ### 9. Minimized Studio window → everything is black; the window handle changes per session
 - **Symptom:** when the user has minimized Studio, `capture_screenshot` is black. Every session needs `Get-Process RobloxStudioBeta | select MainWindowHandle` + `ShowWindow` (three Studios open — which one is which instance is matched by the title).
 - **Request:** `capture_screenshot` (or a new `focus_window`) restores and foregrounds a minimized window (`host-capture.ts` already finds it); add `windowHandle`/`windowTitle` to `get_connected_instances`.
+- **Status (capture half):** fixed in this PR — test `tests/field-2026-09-15/09-minimized-window-capture.mjs`, evidence `tests/field-2026-09-15/evidence/09-minimized-window-capture.md`. The `get_connected_instances` fields are a separate PR.
 
 ### 10. In play mode, `capture_screenshot` never worked on the reference instance because of the "client peer"
 - **Symptom:** for the reference instance (play mode: edit + server + client-1) `capture_screenshot` failed every time (peer ambiguity). No visuals were available for the read-only reference review; code reading had to do.

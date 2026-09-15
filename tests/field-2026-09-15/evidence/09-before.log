@@ -1,0 +1,36 @@
+Test process using port 51727 (automatically assigned)
+Full integration suite using port 51727 (from ROBLOX_STUDIO_PORT)
+Installing worktree plugin C:\Users\<user>\Desktop\mcp\wt\A\studio-plugin\MCPPlugin.rbxmx
+Installed MCPPlugin.rbxmx to C:\Users\<user>\AppData\Local\Temp\robloxstudio-mcp-workers\run-all-6T6BRf\RsmcpIsolatedPlugins\MCPPlugin.rbxmx
+Launched managed Studio instance instance:x7c-tt2
+
+=== TODO#9 capture_screenshot restores a minimized Studio window ===
+  Studio windows before: [{"title":"C:\\Users\\<user>\\AppData\\Local\\Temp\\rsmcp-runner-rI7Vtt\\RunnerBaseplate.rbxl - Roblox Studio","handle":5050374,"iconic":false,"pid":60376},{"title":"<other place A> - Roblox Studio","handle":132328,"iconic":false,"pid":17836},{"title":"<other place B>.rbxl - Roblox Studio","handle":329360,"iconic":true,"pid":22880},{"title":"<other place C>.rbxl - Roblox Studio","handle":67310,"iconic":true,"pid":23144}]
+  manage_instance status -> pid=60376 managed=true state=connected
+  managed window: {"title":"C:\\Users\\<user>\\AppData\\Local\\Temp\\rsmcp-runner-rI7Vtt\\RunnerBaseplate.rbxl - Roblox Studio","handle":5050374,"iconic":false,"pid":60376}; untouched windows: 3
+  ShowWindow(5050374, SW_MINIMIZE) -> {"iconic":true,"ok":true}
+  capture_screenshot (minimized) -> 1570ms {"width":1608,"height":772,"format":"png","mimeType":"image/png","message":"Screenshot 1608x772px (png). For simulate_mouse_input, x/y are pixel coordinates in this exact image with (0,0) at the top-left; it is not downscaled, so use coordinates as you read them off the image. Warning: Studio's CaptureService returned a blank (single-colour) frame and host window capture also failed (could not pick a Studio window for 'RunnerBaseplate.rbxl' among: C:\\Users\\<user>\\AppData\\Local\\Temp\\rsmcp-runner-rI7Vtt\\RunnerBaseplate.rbxl - Roblox Studio | <other place A> - Roblox Studio | <other place B>.rbxl - Roblox Studio | <other place C>.rbxl - Roblox Studio), so this image may be blank."}
+    image 1608x772, 1 unique colours
+  window state after capture: {"iconic":true,"foreground":false,"visible":true}
+  other Studio windows unchanged (3)
+
+❌ TODO#9 capture_screenshot restores a minimized Studio window FAILED: capture from a minimized window is a single colour (1); message: Screenshot 1608x772px (png). For simulate_mouse_input, x/y are pixel coordinates in this exact image with (0,0) at the top-left; it is not downscaled, so use coordinates as you read them off the image. Warning: Studio's CaptureService returned a blank (single-colour) frame and host window capture also failed (could not pick a Studio window for 'RunnerBaseplate.rbxl' among: C:\Users\<user>\AppData\Local\Temp\rsmcp-runner-rI7Vtt\RunnerBaseplate.rbxl - Roblox Studio | <other place A> - Roblox Studio | <other place B>.rbxl - Roblox Studio | <other place C>.rbxl - Roblox Studio), so this image may be blank.
+
+--- todo-09 stderr tail ---
+responseMode: 'json' drops mid-call notifications. subscriptions/listen streams are always served over SSE regardless; other notifications emitted before a result are dropped.
+Port 51727 in use, trying next...
+Port 51727 in use - entering proxy mode (forwarding to localhost:51727)
+robloxstudio-mcp v3.1.4 running on stdio
+MCP server active in proxy mode - forwarding requests to primary
+Waiting for Studio plugin to connect...
+responseMode: 'json' drops mid-call notifications. subscriptions/listen streams are always served over SSE regardless; other notifications emitted before a result are dropped.
+Port 51727 in use, trying next...
+responseMode: 'json' drops mid-call notifications. subscriptions/listen streams are always served over SSE regardless; other notifications emitted before a result are dropped.
+Port 51727 in use, trying next...
+Closed managed Studio instance instance:x7c-tt2
+
+========== SUMMARY ==========
+  ❌ FAIL  todo-2026-09-15/09-minimized-window-capture.mjs
+
+0/1 passed.
+RED_09=1
