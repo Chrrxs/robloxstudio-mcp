@@ -29,6 +29,7 @@ function parseRequestStatus(value: unknown): RequestStatus {
     stage: value.stage, state: value.state, outcome: value.outcome,
     ...parseObservations(value),
   };
+  if ('queuedAhead' in value && typeof value.queuedAhead === 'number') status.queuedAhead = value.queuedAhead;
   if ('dispatchedAt' in value && typeof value.dispatchedAt === 'number') status.dispatchedAt = value.dispatchedAt;
   if ('settledAt' in value && typeof value.settledAt === 'number') status.settledAt = value.settledAt;
   if ('waiterEndedAt' in value && typeof value.waiterEndedAt === 'number') status.waiterEndedAt = value.waiterEndedAt;

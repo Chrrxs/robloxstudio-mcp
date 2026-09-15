@@ -214,7 +214,7 @@ export const TOOL_HANDLERS: Record<string, ToolHandler> = {
   },
   get_attributes: (tools, body) => tools.getAttributes(body.instancePath, body.instance_id),
   selection: (tools, body) => tools.selection(body.action, body, body.instance_id),
-  execute_luau: (tools, body) => tools.executeLuau(body.code, body.target, body.instance_id, body.operation_id, body.max_output_bytes),
+  execute_luau: (tools, body) => tools.executeLuau(body.code, body.target, body.instance_id, body.operation_id, body.max_output_bytes, body.dedupe),
   eval_server_runtime: (tools, body) => tools.evalServerRuntime(body.code, body.instance_id),
   eval_client_runtime: (tools, body) => tools.evalClientRuntime(body.code, body.target, body.instance_id),
   set_network_profile: (tools, body) => tools.setNetworkProfile(body.profile, body.target, body.overrides, body.instance_id),

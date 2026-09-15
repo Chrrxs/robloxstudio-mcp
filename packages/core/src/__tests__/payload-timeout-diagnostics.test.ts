@@ -63,9 +63,12 @@ describe('issue 75 mutation timeout diagnostics', () => {
     expect(bridge.getRequestStatus('dispatched-mutation')).toMatchObject({
       outcome: 'success', response: { success: true },
     });
-    await expect(invoke('dispatched-mutation')).resolves.toMatchObject({
-      content: [{ type: 'text', text: JSON.stringify({ success: true }) }],
-    });
+    const replayed = await invoke('dispatched-mutation');
+    expect(JSON.parse(replayed.content[0].text)).toMatchObject({ success: true });
+    if (tool === 'execute_luau') {
+      expect(JSON.parse(replayed.content[0].text)).toMatchObject({ operationId: 'dispatched-mutation', queued_ahead: 0 });
+    }
+    expect((await delivered).message).toContain('call get_request_status with operation_id dispatched-mutation; do not resend');
     expect(bridge.claimNextRequestForTransport('edit-peer', 'reconnected-socket')).toBeNull();
   });
 });
