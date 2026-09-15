@@ -33,6 +33,10 @@ const EncodingService = (game as unknown as {
 const { getInstanceByPath, getInstancePath } = Utils;
 const { beginRecording, finishRecording } = Recording;
 
+function subtreeSize(inst: Instance): number {
+	return inst.GetDescendants().size() + 1;
+}
+
 function isServiceClass(inst: Instance): boolean {
 	const [ok, service] = pcall(() => game.GetService(inst.ClassName as keyof Services));
 	return ok && service !== undefined;
@@ -78,9 +82,24 @@ function exportRbxm(requestData: Record<string, unknown>): unknown {
 	// it. Base64 is by definition pure ASCII so this round-trips cleanly.
 	const base64Str = buffer.tostring(encodeResult as buffer);
 
+	let instanceCount = 0;
+	const rootClasses: string[] = [];
+	const rootNames: string[] = [];
+	for (const inst of instances) {
+		instanceCount += subtreeSize(inst);
+		rootClasses.push(inst.ClassName);
+		rootNames.push(inst.Name);
+	}
+
 	return {
 		base64: base64Str,
 		instance_count: instances.size(),
+		bytes: buffer.len(buf),
+		instanceCount,
+		rootClass: rootClasses[0],
+		rootName: rootNames[0],
+		rootClasses,
+		rootNames,
 	};
 }
 
@@ -186,9 +205,13 @@ function importRbxm(requestData: Record<string, unknown>): unknown {
 
 	const names: string[] = [];
 	const paths: string[] = [];
+	const rootClasses: string[] = [];
+	let instanceCount = 0;
 	for (const inst of attached) {
 		names.push(inst.Name);
 		paths.push(getInstancePath(inst));
+		rootClasses.push(inst.ClassName);
+		instanceCount += subtreeSize(inst);
 	}
 
 	// The recording shows "MCP: Import rbxm" in Studio's undo stack -
@@ -202,6 +225,9 @@ function importRbxm(requestData: Record<string, unknown>): unknown {
 		instance_paths: paths,
 		parent_path: parentPath,
 		source: sourceLabel,
+		instanceCount,
+		rootNames: names,
+		rootClasses,
 		...(unwrappedServiceRoots.size() > 0
 			? { unwrappedServiceRoot: unwrappedServiceRoots[0], unwrappedServiceRoots }
 			: {}),

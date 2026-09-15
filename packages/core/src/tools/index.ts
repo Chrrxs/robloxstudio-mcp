@@ -4897,7 +4897,16 @@ export class RobloxStudioTools {
       { instance_paths: instancePaths },
       tgt,
       instance_id,
-    ) as { error?: string; base64?: string; instance_count?: number };
+    ) as {
+      error?: string;
+      base64?: string;
+      instance_count?: number;
+      instanceCount?: number;
+      rootClass?: string;
+      rootName?: string;
+      rootClasses?: string[];
+      rootNames?: string[];
+    };
 
     if (response.error) {
       return { content: [{ type: 'text', text: JSON.stringify({ error: response.error }) }] };
@@ -4922,6 +4931,12 @@ export class RobloxStudioTools {
           bytes_written: bytes.length,
           instance_count: response.instance_count ?? instancePaths.length,
           output_path: resolved,
+          bytes: bytes.length,
+          instanceCount: response.instanceCount,
+          rootClass: response.rootClass,
+          rootName: response.rootName,
+          rootClasses: response.rootClasses,
+          rootNames: response.rootNames,
         }),
       }],
     };

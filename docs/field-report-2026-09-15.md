@@ -87,9 +87,11 @@ is in `tests/field-2026-09-15/EVIDENCE.md`.
 - Not a tool bug, but "move the player to X" tests needed a `Humanoid:MoveTo` loop. Tool-guides note: "for server-side teleports consider the game's speed limits (for example a per-sample distance cap); use `MoveTo` or the game's own teleport API".
 
 ### 13. `export_rbxm` size/count report
+**Status:** fixed in this PR — test `tests/field-2026-09-15/13-export-report.mjs`, evidence `evidence/13-export-report.md`.
 - The export result only returns the path; agents verified file size with `ls` and the instance count with a separate `GetDescendants`. **Request:** `bytes`, `instanceCount`, `rootClass` in the result (also catches item 3 early).
 
 ### 14. Count/verification after `import_rbxm`
+**Status:** fixed in this PR — test `tests/field-2026-09-15/13-export-report.mjs` (shared with item 13), evidence `evidence/13-export-report.md`.
 - A successful import does not say how many instances arrived; every import was followed by an `execute_luau` `GetDescendants` count. **Request:** `instanceCount`, `rootNames` in the result.
 
 ### 15. `get_runtime_logs` `filter` is substring-only; no `level`, no `since`
