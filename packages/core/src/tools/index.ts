@@ -1,6 +1,7 @@
 import { StudioHttpClient } from './studio-client.js';
-import { BridgeService, RoutingFailure } from '../bridge-service.js';
-import type { PublicStudioPeer } from '../bridge-service.js';
+import { autoOperationId, BridgeService, RequestFailure, RoutingFailure } from '../bridge-service.js';
+import type { PublicStudioPeer, RequestStatus } from '../bridge-service.js';
+import { applyExecuteLuauOutputLimit, resolveExecuteLuauOutputLimit } from '../http-body-limits.js';
 import {
   OpenCloudClient,
   type AssetSearchParams,
@@ -32,6 +33,7 @@ import {
 import type { HostCaptureResult, ViewportRect } from '../host-capture.js';
 import * as fs from 'fs';
 import * as path from 'path';
+import { randomUUID } from 'crypto';
 
 type RawImageCaptureResponse = {
   success?: boolean;
@@ -80,6 +82,7 @@ export type HostWindowCaptureFn = (titleHint?: string) => Promise<HostCaptureRes
 // change without the window or viewport size changing (e.g. swapping two
 // panels of equal width), and re-locating the viewport costs one extra capture.
 const HOST_VIEWPORT_RECT_TTL_MS = 60_000;
+const MAX_AUTO_OPERATION_ATTEMPTS = 16;
 
 type ToolContent =
   | { type: 'text'; text: string }
@@ -1954,19 +1957,106 @@ export class RobloxStudioTools {
     };
   }
 
-  async executeLuau(code: string, target?: string, instance_id?: string, operation_id?: string) {
+  async executeLuau(
+    code: string,
+    target?: string,
+    instance_id?: string,
+    operation_id?: string,
+    max_output_bytes?: number,
+    dedupe?: 'auto' | false,
+  ) {
     if (!code) {
       throw new Error('Code is required for execute_luau');
     }
-    const response = await this._callSingle('/api/execute-luau', { code }, target || 'edit', instance_id, undefined, undefined, operation_id);
+    const maxOutputBytes = resolveExecuteLuauOutputLimit(max_output_bytes);
+    if (dedupe !== undefined && dedupe !== 'auto' && dedupe !== false) {
+      throw new Error('execute_luau dedupe must be "auto" or false');
+    }
+    const dispatched = await this._dispatchOperation('/api/execute-luau', { code }, target || 'edit', instance_id, operation_id, dedupe !== false);
+    const response = dispatched.response && typeof dispatched.response === 'object' && !Array.isArray(dispatched.response)
+      ? dispatched.response as Record<string, unknown>
+      : { result: dispatched.response };
+    return this._textResult({ ...applyExecuteLuauOutputLimit(response, maxOutputBytes), ...dispatched.metrics });
+  }
+
+  private async _dispatchOperation(
+    endpoint: string,
+    data: unknown,
+    target: string | undefined,
+    instance_id: string | undefined,
+    operationId: string | undefined,
+    autoDedupe: boolean,
+  ): Promise<{ response: unknown; metrics: Record<string, unknown> }> {
+    const refresh = this.bridge.refreshTopologyForRouting();
+    if (refresh) await refresh;
+    const resolved = this.bridge.resolveTarget({ instance_id, target });
+    if (!resolved.ok) throw new RoutingFailure(resolved.error);
+    if (resolved.mode !== 'single') {
+      throw new RoutingFailure({
+        code: 'target_role_not_present_on_instance',
+        message: 'This tool does not support target=all. Pick a specific role or omit target.',
+        data: this._routingErrorData(),
+      });
+    }
+    const peerId = resolved.targetPeerId;
+    let requestId: string;
+    let deduplicatedFrom: string | undefined;
+    let dedupeMode: 'auto' | undefined;
+    if (operationId !== undefined) {
+      requestId = operationId;
+    } else if (autoDedupe) {
+      const chosen = await this._resolveAutoOperation(peerId, endpoint, data);
+      requestId = chosen.requestId;
+      deduplicatedFrom = chosen.deduplicatedFrom;
+      dedupeMode = 'auto';
+    } else {
+      requestId = randomUUID();
+    }
+    if (dedupeMode && deduplicatedFrom === undefined && this.bridge.getRequestStatus(requestId)) deduplicatedFrom = requestId;
+    const response = await this._requestPeer(endpoint, data, peerId, undefined, undefined, requestId);
+    const status = await this.bridge.getRequestStatusEverywhere(requestId).catch(() => undefined);
     return {
-      content: [
-        {
-          type: 'text',
-          text: JSON.stringify(response)
-        }
-      ]
+      response,
+      metrics: {
+        operationId: requestId,
+        ...this._queueMetrics(status),
+        ...(dedupeMode ? { dedupe: dedupeMode } : {}),
+        ...(deduplicatedFrom ? { deduplicatedFrom } : {}),
+      },
     };
+  }
+
+  private _queueMetrics(status: RequestStatus | undefined): { queued_ahead?: number; waitedMs?: number } {
+    if (!status) return {};
+    const started = status.executionStartedAt ?? status.dispatchedAt ?? status.settledAt ?? Date.now();
+    return {
+      ...(status.queuedAhead !== undefined ? { queued_ahead: status.queuedAhead } : {}),
+      waitedMs: Math.max(0, Math.round(started - status.queuedAt)),
+    };
+  }
+
+  private async _resolveAutoOperation(
+    peerId: string,
+    endpoint: string,
+    data: unknown,
+  ): Promise<{ requestId: string; deduplicatedFrom?: string }> {
+    for (let attempt = 1; attempt <= MAX_AUTO_OPERATION_ATTEMPTS; attempt++) {
+      const requestId = autoOperationId(peerId, endpoint, data, attempt);
+      const status = await this.bridge.getRequestStatusEverywhere(requestId);
+      if (!status) return { requestId };
+      if (status.state === 'pending') return { requestId, deduplicatedFrom: requestId };
+      if (status.state === 'settled') {
+        if (status.waiterEndedAt === undefined) continue;
+        if (!status.resultUnavailable) return { requestId, deduplicatedFrom: requestId };
+      }
+      if (status.executionOutcome === 'not_executed') continue;
+      throw new RequestFailure(
+        `Request ${requestId} already exists: ${status.state}; ${status.stage}; ${status.outcome}; identical code was sent to this peer within the retention window, its waiter ended and its outcome is unknown; call get_request_status with operation_id ${requestId}; do not resend; pass dedupe:false or a new operation_id to run it again`,
+        'operation_not_replayed',
+        { requestId, targetPeerId: peerId, stage: status.stage, outcome: 'unknown' },
+      );
+    }
+    return { requestId: randomUUID() };
   }
 
   async evalServerRuntime(code: string, instance_id?: string) {
@@ -4892,12 +4982,15 @@ export class RobloxStudioTools {
       throw new Error(`export_rbxm target must be "edit" or "server" (got: ${tgt})`);
     }
 
-    const response = await this._callSingle(
+    const dispatched = await this._dispatchOperation(
       '/api/export-rbxm',
       { instance_paths: instancePaths },
       tgt,
       instance_id,
-    ) as { error?: string; base64?: string; instance_count?: number };
+      undefined,
+      false,
+    );
+    const response = dispatched.response as { error?: string; base64?: string; instance_count?: number };
 
     if (response.error) {
       return { content: [{ type: 'text', text: JSON.stringify({ error: response.error }) }] };
@@ -4922,6 +5015,7 @@ export class RobloxStudioTools {
           bytes_written: bytes.length,
           instance_count: response.instance_count ?? instancePaths.length,
           output_path: resolved,
+          ...dispatched.metrics,
         }),
       }],
     };

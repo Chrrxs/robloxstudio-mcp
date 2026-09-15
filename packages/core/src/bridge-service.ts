@@ -183,6 +183,7 @@ export interface RequestStatus extends RequestObservations {
   requestId: string;
   targetPeerId: string;
   queuedAt: number;
+  queuedAhead?: number;
   dispatchedAt?: number;
   settledAt?: number;
   waiterEndedAt?: number;
@@ -405,6 +406,15 @@ function preferredPeer(peers: StudioPeer[]): StudioPeer {
     if (difference !== 0) return difference < 0 ? candidate : preferred;
     return candidate.connectedAt < preferred.connectedAt ? candidate : preferred;
   });
+}
+
+export function operationFingerprint(targetPeerId: string, endpoint: string, data: unknown): string {
+  return createHash('sha256').update(JSON.stringify({ targetPeerId, endpoint, data })).digest('hex');
+}
+
+export function autoOperationId(targetPeerId: string, endpoint: string, data: unknown, attempt = 1): string {
+  const base = `auto-${operationFingerprint(targetPeerId, endpoint, data)}`;
+  return attempt <= 1 ? base : `${base}-${attempt}`;
 }
 
 function copyGroup(group: MultiplayerGroup): MultiplayerGroup {
@@ -1102,7 +1112,7 @@ export class BridgeService implements StudioTransportQueue {
     let fingerprint: string;
     try {
       const target = this.getPeerById(targetPeerId);
-      fingerprint = createHash('sha256').update(JSON.stringify({ targetPeerId, endpoint, data })).digest('hex');
+      fingerprint = operationFingerprint(targetPeerId, endpoint, data);
       requestBytes = Buffer.byteLength(JSON.stringify({
         kind: 'request', requestId, peerId: targetPeerId, target: target?.role,
         endpoint, data: data ?? null, remainingMs: effectiveTimeoutMs,
@@ -1153,6 +1163,7 @@ export class BridgeService implements StudioTransportQueue {
       ));
     }
 
+    const queuedAhead = this.countQueuedAhead(targetPeerId);
     const { promise, resolve, reject } = Promise.withResolvers<unknown>();
     const abortListener = () => {
       const pending = this.pendingRequests.get(requestId);
@@ -1171,7 +1182,7 @@ export class BridgeService implements StudioTransportQueue {
     this.pendingRequests.set(requestId, request);
     this.pendingRequestBytes += requestBytes;
     this.operations.set(requestId, {
-      status: { requestId, targetPeerId, queuedAt: now, stage: 'queued', state: 'pending', outcome: 'pending', executionOutcome: 'unknown' },
+      status: { requestId, targetPeerId, queuedAt: now, queuedAhead, stage: 'queued', state: 'pending', outcome: 'pending', executionOutcome: 'unknown' },
       fingerprint, updatedAt: now, resultBytes: 0,
     });
     this.pruneOperations(now);
@@ -1180,6 +1191,16 @@ export class BridgeService implements StudioTransportQueue {
     const target = this.getPeerById(targetPeerId);
     if (this.pendingRequests.has(requestId) && target) this.notifyRequestAvailable(target.transportPeerId);
     return promise;
+  }
+
+  private countQueuedAhead(targetPeerId: string): number {
+    const transportPeerId = this.getPeerById(targetPeerId)?.transportPeerId;
+    let ahead = 0;
+    for (const request of this.pendingRequests.values()) {
+      const peer = this.getPeerById(request.targetPeerId);
+      if (request.targetPeerId === targetPeerId || (transportPeerId !== undefined && peer?.transportPeerId === transportPeerId)) ahead++;
+    }
+    return ahead;
   }
 
   private endRequestWaiter(
@@ -1205,7 +1226,7 @@ export class BridgeService implements StudioTransportQueue {
     }
     const connectionLost = operation?.status.connectionLostAt !== undefined && operation.status.connectionRestoredAt === undefined;
     request.reject(new RequestFailure(
-      `${message}: ${request.id}; ${stage}; ${outcome}${connectionLost ? '; connection lost' : ''}; waiter ended, execution is not cancelled or rolled back`,
+      `${message}: ${request.id}; ${stage}; ${outcome}${connectionLost ? '; connection lost' : ''}; waiter ended, execution is not cancelled or rolled back; call get_request_status with operation_id ${request.id}; do not resend`,
       state === 'timed_out' ? (connectionLost ? 'request_connection_lost' : 'request_timeout') : `request_${state}`,
       { requestId: request.id, targetPeerId: request.targetPeerId, stage, outcome, ...(operation ? observations(operation.status) : {}) },
     ));

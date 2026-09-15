@@ -44,7 +44,7 @@ describe('mutation recovery tools', () => {
       requestId: operationId, outcome: 'success', response: { success: true, value: 42 },
     });
     const replay = await invoke();
-    expect(JSON.parse(replay.content[0].text)).toEqual({ success: true, value: 42 });
+    expect(JSON.parse(replay.content[0].text)).toMatchObject({ success: true, value: 42, ...(tool === 'execute_luau' ? { operationId } : {}) });
     expect(bridge.claimNextRequestForTransport('edit', 'socket')).toBeNull();
   });
 
