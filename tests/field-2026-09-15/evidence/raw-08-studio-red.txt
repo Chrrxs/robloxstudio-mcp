@@ -1,0 +1,28 @@
+Test process using port 56838 (automatically assigned)
+Full integration suite using port 56838 (from ROBLOX_STUDIO_PORT)
+Installing worktree plugin C:\Users\<user>\Desktop\mcp\wt\E\studio-plugin\MCPPlugin.rbxmx
+Installed MCPPlugin.rbxmx to C:\Users\<user>\AppData\Local\Temp\robloxstudio-mcp-workers\run-all-dZd8Lp\RsmcpIsolatedPlugins\MCPPlugin.rbxmx
+Launched managed Studio instance instance:p7b-le2
+
+=== TODO #8: tags on get_instance_properties and search_tags ===
+  ✓ edit DM staged tagged parts and two scripts
+  [grep_scripts TODO8Dyn] {"scriptsMatched":0,"scriptsSearched":2}
+  ✓ symptom: grep_scripts cannot see the attribute-driven tag use
+  [get_instance_properties] {"properties":["ChildCount","Parent","CFrame","Material","Size","BottomSurface","CanCollide","Position","Anchored","Rotation","Transparency","Name","ClassName","Color","BrickColor","Shape","TopSurface"]}
+
+❌ TODO #8: tags on get_instance_properties and search_tags FAILED: ASSERT FAIL: get_instance_properties lists tags (got undefined)
+
+--- A stderr tail ---
+responseMode: 'json' drops mid-call notifications. subscriptions/listen streams are always served over SSE regardless; other notifications emitted before a result are dropped.
+Port 56838 in use, trying next...
+Port 56838 in use - entering proxy mode (forwarding to localhost:56838)
+robloxstudio-mcp v3.1.4 running on stdio
+MCP server active in proxy mode - forwarding requests to primary
+Waiting for Studio plugin to connect...
+Closed managed Studio instance instance:p7b-le2
+
+========== SUMMARY ==========
+  ❌ FAIL  todo-2026-09-15/08-tags.mjs
+
+0/1 passed.
+EXIT=1

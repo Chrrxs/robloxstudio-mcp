@@ -339,6 +339,35 @@ function createScriptSearch(corpus: ScriptCorpus) {
 	return { search };
 }
 
+const TAG_APIS = [
+	"GetTagged",
+	"HasTag",
+	"AddTag",
+	"RemoveTag",
+	"GetInstanceAddedSignal",
+	"GetInstanceRemovedSignal",
+];
+
+function tagLiteralPattern(tag: string): string {
+	let escaped = "";
+	for (let index = 1; index <= tag.size(); index++) {
+		const character = string.sub(tag, index, index);
+		const [magic] = string.find("^$()%.[]*+-?", character, 1, true);
+		escaped += magic !== undefined ? `%${character}` : character;
+	}
+	return `["']${escaped}["']`;
+}
+
+function classifyTagUsage(line: string): string {
+	for (const api of TAG_APIS) {
+		const [start] = string.find(line, api, 1, true);
+		if (start !== undefined) return api;
+	}
+	return "literal";
+}
+
 export = {
 	createScriptSearch,
+	tagLiteralPattern,
+	classifyTagUsage,
 };

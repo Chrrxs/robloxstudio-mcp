@@ -151,6 +151,7 @@ const MAX_NETWORK_PACKET_LOSS_PERCENT = 0.5;
 const GREP_SCRIPTS_TIMEOUT_MS = 120_000;
 const MAX_GREP_PATTERN_UTF8_BYTES = 4096;
 const RUNTIME_LOG_PEER_TIMEOUT_MS = 5_000;
+const SEARCH_TAGS_MAX_RESULTS = 1000;
 const STUDIO_ASSISTANT_SOURCE_IMAGE_LABEL = 'Studio Assistant Source Image';
 const CREATOR_STORE_SEARCH_TYPES = new Set<string>([
   'Audio',
@@ -1842,6 +1843,30 @@ export class RobloxStudioTools {
       throw new Error('Instance path is required for get_attributes');
     }
     const response = await this._callSingle('/api/get-attributes', { instancePath }, undefined, instance_id);
+    return {
+      content: [
+        {
+          type: 'text',
+          text: JSON.stringify(response)
+        }
+      ]
+    };
+  }
+
+  async searchTags(tag?: string, maxResults?: number, instance_id?: string, signal?: AbortSignal) {
+    if (tag !== undefined && (typeof tag !== 'string' || tag === '')) {
+      throw new Error('search_tags tag must be a non-empty string.');
+    }
+    if (
+      maxResults !== undefined &&
+      (!Number.isInteger(maxResults) || maxResults < 1 || maxResults > SEARCH_TAGS_MAX_RESULTS)
+    ) {
+      throw new Error(`search_tags maxResults must be an integer between 1 and ${SEARCH_TAGS_MAX_RESULTS}.`);
+    }
+    const data: Record<string, unknown> = {};
+    if (tag !== undefined) data.tag = tag;
+    if (maxResults !== undefined) data.maxResults = maxResults;
+    const response = await this._callSingle('/api/search-tags', data, undefined, instance_id, GREP_SCRIPTS_TIMEOUT_MS, signal);
     return {
       content: [
         {

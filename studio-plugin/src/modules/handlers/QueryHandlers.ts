@@ -272,7 +272,8 @@ function getInstanceProperties(requestData: Record<string, unknown>) {
 	});
 
 	if (success) {
-		return { instancePath, className: instance.ClassName, properties };
+		const [tagsOk, tags] = pcall(() => game.GetService("CollectionService").GetTags(instance));
+		return { instancePath, className: instance.ClassName, properties, tags: tagsOk ? tags : [] };
 	} else {
 		return { error: `Failed to get properties: ${result}` };
 	}

@@ -64,6 +64,7 @@ is in `tests/field-2026-09-15/EVIDENCE.md`.
 - **Symptom:** to find the code that sets a third-party UI button `Visible=true` at runtime, `grep_scripts pattern="<ButtonName>"` → 0 results (303 scripts). The reference UI handler finds objects via `CollectionService:GetTagged("…")`; the tag name never appears in the script (it comes from a Config table). The fix was to delete the object.
 - **Request:** a `search_objects`/new `get_tags` tool: an object's tags plus the scripts that look that tag up with `GetTagged` (static: literal `GetTagged("<tag>")` match; when dynamic, a "tag list comes from Config" hint). At minimum a `tags: [...]` field in `get_instance_properties`.
 - **Candidate:** `studio-plugin/src/modules/ScriptSearch.ts`, `handlers/*` (instance properties).
+- **Status:** fixed in this PR — test `tests/field-2026-09-15/08-tags.mjs` and `packages/core/src/__tests__/field-08-tags.test.ts`, evidence `tests/field-2026-09-15/evidence/08-tags.md`.
 
 ### 9. Minimized Studio window → everything is black; the window handle changes per session
 - **Symptom:** when the user has minimized Studio, `capture_screenshot` is black. Every session needs `Get-Process RobloxStudioBeta | select MainWindowHandle` + `ShowWindow` (three Studios open — which one is which instance is matched by the title).

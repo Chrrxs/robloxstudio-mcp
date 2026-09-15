@@ -1,0 +1,119 @@
+
+> @chrrxs/robloxstudio-mcp-core@3.1.4 test
+> jest todo-08 studio-script-search
+
+FAIL src/__tests__/studio-script-search.test.ts
+  ● TODO #8 tag literal search helpers › tagLiteralPattern quotes the tag and escapes Lua magic characters
+
+    TypeError: module.tagLiteralPattern is not a function
+
+      525 |   test('tagLiteralPattern quotes the tag and escapes Lua magic characters', async () => {
+      526 |     const module = await loadScriptSearch();
+    > 527 |     expect(module.tagLiteralPattern('TODO8')).toBe(`["']TODO8["']`);
+          |                   ^
+      528 |     expect(module.tagLiteralPattern('a-b.c%d')).toBe(`["']a%-b%.c%%d["']`);
+      529 |   });
+      530 |
+
+      at Object.<anonymous> (src/__tests__/studio-script-search.test.ts:527:19)
+
+  ● TODO #8 tag literal search helpers › classifyTagUsage names the CollectionService call on the line
+
+    TypeError: module.classifyTagUsage is not a function
+
+      531 |   test('classifyTagUsage names the CollectionService call on the line', async () => {
+      532 |     const module = await loadScriptSearch();
+    > 533 |     expect(module.classifyTagUsage('for _, x in CollectionService:GetTagged("TODO8") do')).toBe('GetTagged');
+          |                   ^
+      534 |     expect(module.classifyTagUsage("if CS:HasTag(part, 'TODO8') then")).toBe('HasTag');
+      535 |     expect(module.classifyTagUsage('CS:AddTag(part, "TODO8")')).toBe('AddTag');
+      536 |     expect(module.classifyTagUsage('CS:RemoveTag(part, "TODO8")')).toBe('RemoveTag');
+
+      at Object.<anonymous> (src/__tests__/studio-script-search.test.ts:533:19)
+
+  ● TODO #8 tag literal search helpers › the tag pattern finds quoted literal uses only, not prefixes or attribute-driven tags
+
+    TypeError: module.tagLiteralPattern is not a function
+
+      570 |
+      571 |     const result = JSON.parse(JSON.stringify(search.search({
+    > 572 |       pattern: module.tagLiteralPattern('TODO8'),
+          |                       ^
+      573 |       usePattern: true,
+      574 |     }, { checkpoint: () => undefined })));
+      575 |     expect(result.scriptsMatched).toBe(1);
+
+      at Object.<anonymous> (src/__tests__/studio-script-search.test.ts:572:23)
+
+FAIL src/__tests__/todo-08-tags.test.ts
+  ● TODO #8 search_tags › is a read-only catalog tool with tag, maxResults, and instance_id
+
+    expect(received).toBeDefined()
+
+    Received: undefined
+
+      41 |   test('is a read-only catalog tool with tag, maxResults, and instance_id', () => {
+      42 |     const tool = TOOL_DEFINITIONS.find((candidate) => candidate.name === 'search_tags');
+    > 43 |     expect(tool).toBeDefined();
+         |                  ^
+      44 |     expect(tool!.category).toBe('read');
+      45 |     expect(getReadOnlyTools().some((candidate) => candidate.name === 'search_tags')).toBe(true);
+      46 |     const properties = (tool!.inputSchema as { properties?: Record<string, unknown>; required?: string[] }).properties ?? {};
+
+      at Object.<anonymous> (src/__tests__/todo-08-tags.test.ts:43:18)
+
+  ● TODO #8 search_tags › forwards tag and maxResults to /api/search-tags and returns the plugin body
+
+    TypeError: http_server_js_1.TOOL_HANDLERS.search_tags is not a function
+
+      52 |   test('forwards tag and maxResults to /api/search-tags and returns the plugin body', async () => {
+      53 |     const { bridge, tools } = connectedTools();
+    > 54 |     const resultPromise = TOOL_HANDLERS.search_tags(tools, { tag: 'TODO8', maxResults: 5, instance_id: 'instance:test' });
+         |                                         ^
+      55 |     resultPromise.catch(() => {});
+      56 |
+      57 |     const request = await nextPendingRequest(bridge);
+
+      at Object.<anonymous> (src/__tests__/todo-08-tags.test.ts:54:41)
+
+  ● TODO #8 search_tags › omits tag from the request when listing every tag
+
+    TypeError: http_server_js_1.TOOL_HANDLERS.search_tags is not a function
+
+      79 |   test('omits tag from the request when listing every tag', async () => {
+      80 |     const { bridge, tools } = connectedTools();
+    > 81 |     const resultPromise = TOOL_HANDLERS.search_tags(tools, { instance_id: 'instance:test' });
+         |                                         ^
+      82 |     resultPromise.catch(() => {});
+      83 |     const request = await nextPendingRequest(bridge);
+      84 |     expect(request.data).toEqual({});
+
+      at Object.<anonymous> (src/__tests__/todo-08-tags.test.ts:81:41)
+
+  ● TODO #8 search_tags › rejects a non-string tag and an out-of-range maxResults before contacting Studio
+
+    TypeError: http_server_js_1.TOOL_HANDLERS.search_tags is not a function
+
+      92 |   test('rejects a non-string tag and an out-of-range maxResults before contacting Studio', async () => {
+      93 |     const { bridge, tools } = connectedTools();
+    > 94 |     await expect(TOOL_HANDLERS.search_tags(tools, { tag: 5, instance_id: 'instance:test' }))
+         |                                ^
+      95 |       .rejects.toThrow('search_tags tag must be a non-empty string.');
+      96 |     await expect(TOOL_HANDLERS.search_tags(tools, { tag: 'x', maxResults: 0, instance_id: 'instance:test' }))
+      97 |       .rejects.toThrow('search_tags maxResults must be an integer between 1 and 1000.');
+
+      at Object.<anonymous> (src/__tests__/todo-08-tags.test.ts:94:32)
+
+A worker process has failed to exit gracefully and has been force exited. This is likely caused by tests leaking due to improper teardown. Try running with --detectOpenHandles to find leaks. Active timers can also cause this, ensure that .unref() was called on them.
+Test Suites: 2 failed, 2 total
+Tests:       7 failed, 13 passed, 20 total
+Snapshots:   0 total
+Time:        3.297 s
+Ran all test suites matching /todo-08|studio-script-search/i.
+npm error Lifecycle script `test` failed with error:
+npm error code 1
+npm error path C:\Users\<user>\Desktop\mcp\wt\E\packages\core
+npm error workspace @chrrxs/robloxstudio-mcp-core@3.1.4
+npm error location C:\Users\<user>\Desktop\mcp\wt\E\packages\core
+npm error command failed
+npm error command C:\WINDOWS\system32\cmd.exe /d /s /c jest todo-08 studio-script-search

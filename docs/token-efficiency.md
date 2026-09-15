@@ -4,8 +4,11 @@ Version 3.0 treats the MCP wire surface as a budgeted public API.
 
 ## Catalog budget
 
-The regression test caps the serialized public catalog at 43,000 characters,
-tool descriptions at 120 characters, and argument descriptions at 64 characters.
+The regression test caps the serialized public catalog at 45,000 characters
+(21,000 for the inspector edition), tool descriptions at 120 characters, and
+argument descriptions at 64 characters. The caps were raised from 44,000 and
+20,000 when `search_tags` and the `get_runtime_logs` filters were added; the
+catalog measured 44,328 and 20,910 characters at that point.
 It also requires structured output schemas for every tool except the
 Markdown-returning `get_roblox_docs` tool. Change the budget only as an explicit
 API decision.

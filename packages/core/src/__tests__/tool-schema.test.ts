@@ -280,6 +280,7 @@ describe('Tool schema compatibility', () => {
       insert_script_lines: 'insertScriptLines',
       delete_script_lines: 'deleteScriptLines',
       get_attributes: 'getAttributes',
+      search_tags: 'searchTags',
       selection: 'selection',
       execute_luau: 'executeLuau',
       eval_server_runtime: 'evalServerRuntime',
