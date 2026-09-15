@@ -177,6 +177,13 @@ export class ManagedInstanceRegistry {
     );
   }
 
+  // Lock-free read for callers that only need a hint (e.g. the process id that
+  // owns a Studio window). Records are replaced atomically, so a read without
+  // the lock sees a consistent record and never waits on a contended registry.
+  async peekAnyByInstanceId(instanceId: string): Promise<ManagedInstanceRegistryRecord | undefined> {
+    return (await this.readRecordsUnlocked()).find((record) => record.instanceId === instanceId);
+  }
+
   async findAnyByRecordId(recordId: string, options?: RegistrySweepOptions): Promise<ManagedInstanceRegistryRecord | undefined> {
     return this.withLock(async () => {
       if (options) await this.sweepUnlocked(options);

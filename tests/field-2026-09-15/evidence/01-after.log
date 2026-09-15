@@ -1,0 +1,32 @@
+Test process using port 55346 (automatically assigned)
+Full integration suite using port 55346 (from ROBLOX_STUDIO_PORT)
+Installing worktree plugin C:\Users\<user>\Desktop\mcp\wt-e\studio-plugin\MCPPlugin.rbxmx
+Installed MCPPlugin.rbxmx to C:\Users\<user>\AppData\Local\Temp\robloxstudio-mcp-workers\run-all-rL8YAM\RsmcpIsolatedPlugins\MCPPlugin.rbxmx
+Launched managed Studio instance instance:hwz-o5z
+
+=== field #1 capture_screenshot play-mode blank frame ===
+  instance instance:hwz-o5z placeName=RunnerBaseplate.rbxl dataModelName=undefined peers={"edit":"peer:kuv-if5"}
+  capture_screenshot {} -> 531ms {"width":1324,"height":772,"format":"png","mimeType":"image/png","peer":"edit","target":"auto","source":"CaptureService","cropped":true,"message":"Screenshot 1324x772px (png). For simulate_mouse_input, x/y are pixel coordinates in this exact image with (0,0) at the top-left; it is not downscaled, so use coordinates as you read them off the image."}
+    image 1324x772, 1613 unique colours
+  manage_instance status -> pid=71588 managed=true state=connected
+  Studio window {"title":"C:\\Users\\<user>\\AppData\\Local\\Temp\\rsmcp-runner-UPBMBt\\RunnerBaseplate.rbxl - Roblox Studio","handle":12390504,"iconic":false,"pid":71588}
+  window probe (play, no markers): {"width":1920,"height":1009,"screenMagenta":0,"screenX":0,"dir":"C:\\\\Users\\\\<user>\\\\AppData\\\\Local\\\\Temp\\\\field-probe-1aIn5V","printed":true,"screenY":23,"printwindowColours":9296,"printwindowMagenta":0,"screenColours":9325}
+  client-1 ViewportSize 1608x772 (emulation off)
+  capture_screenshot {} -> 2292ms {"width":1608,"height":772,"format":"png","mimeType":"image/png","peer":"client-1","target":"auto","source":"host-window","cropped":true,"viewportRect":{"x":3,"y":188,"width":1608,"height":772},"window":{"title":"C:\\Users\\<user>\\AppData\\Local\\Temp\\rsmcp-runner-UPBMBt\\RunnerBaseplate.rbxl - Roblox Studio","handle":12390504,"width":1920,"height":1009,"method":"printwindow","restored":false,"foreground":false},"message":"Screenshot 1608x772px (png). For simulate_mouse_input, x/y are pixel coordinates in this exact image with (0,0) at the top-left; it is not downscaled, so use coordinates as you read them off the image. Captured from the Studio window through the host OS (printwindow) because Studio's CaptureService returned a blank (single-colour) frame."}
+    image 1608x772, 8488 unique colours
+  set_device_simulator {"target":"client-1","deviceId":"hd_720"} (device {"PortraitKeyboardHeight":0,"DeviceForm":"Desktop","DeviceId":"hd_720","LandscapeKeyboardHeight":0,"Name":"HD 720","Width":1280,"Height":720,"ResolutionScale":1,"PixelDensity":96,"IsCustom":false})
+  client-1 ViewportSize 1279x720 (emulation on: {"target":"client-1","role":"client-1","isSimulating":true,"activeDeviceId":"hd_720","orientation":"LandscapeRight","scalingMode":"ScaleToPhysicalSize","pixelDensity":96,"resolution":{"y":720,"x":1280,"height":720,"width":1280}})
+  window probe (play, emulation on): {"width":1920,"height":1009,"screenMagenta":0,"screenX":0,"dir":"C:\\\\Users\\\\<user>\\\\AppData\\\\Local\\\\Temp\\\\field-probe-NKA42B","printed":true,"screenY":23,"printwindowColours":13247,"printwindowMagenta":0,"screenColours":13249}
+  capture_screenshot {} -> 2545ms {"width":1279,"height":720,"format":"png","mimeType":"image/png","peer":"client-1","target":"auto","source":"host-window","cropped":true,"viewportRect":{"x":137,"y":203,"width":1326,"height":746},"window":{"title":"C:\\Users\\<user>\\AppData\\Local\\Temp\\rsmcp-runner-UPBMBt\\RunnerBaseplate.rbxl - Roblox Studio","handle":12390504,"width":1920,"height":1009,"method":"printwindow","restored":false,"foreground":false},"message":"Screenshot 1279x720px (png). For simulate_mouse_input, x/y are pixel coordinates in this exact image with (0,0) at the top-left; it is not downscaled, so use coordinates as you read them off the image. Captured from the Studio window through the host OS (printwindow) because Studio's CaptureService returned a blank (single-colour) frame."}
+    image 1279x720, 14862 unique colours
+  capture_screenshot {"fallback":"window"} -> 1975ms {"width":1920,"height":1009,"format":"png","mimeType":"image/png","peer":"client-1","target":"auto","source":"host-window","cropped":false,"viewportRect":{"x":137,"y":203,"width":1326,"height":746},"window":{"title":"C:\\Users\\<user>\\AppData\\Local\\Temp\\rsmcp-runner-UPBMBt\\RunnerBaseplate.rbxl - Roblox Studio","handle":12390504,"width":1920,"height":1009,"method":"printwindow","restored":false,"foreground":false},"message":"Screenshot 1920x1009px (png). For simulate_mouse_input, x/y are pixel coordinates in this exact image with (0,0) at the top-left; it is not downscaled, so use coordinates as you read them off the image. Captured the whole Studio window through the host OS (fallback: \"window\"); the viewport sits at viewportRect (screen coordinates)."}
+    image 1920x1009, 14432 unique colours
+  RESULT edit=1324x772/1613c play-off=1608x772/8488c play-on=1279x720/14862c window=1920x1009/14432c
+
+✅ field #1 capture_screenshot play-mode blank frame PASSED
+Closed managed Studio instance instance:hwz-o5z
+
+========== SUMMARY ==========
+  ✅ PASS  field-2026-09-15/01-capture-play-blank.mjs
+
+1/1 passed.

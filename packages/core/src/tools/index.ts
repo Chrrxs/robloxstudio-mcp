@@ -29,7 +29,7 @@ import {
   findViewportRect,
   isUniformFrame,
 } from '../host-capture.js';
-import type { HostCaptureResult, ViewportRect } from '../host-capture.js';
+import type { HostCaptureMethod, HostCaptureOptions, HostCaptureResult, ViewportClip, ViewportRect } from '../host-capture.js';
 import * as fs from 'fs';
 import * as path from 'path';
 
@@ -55,7 +55,16 @@ type HostViewportRectCacheEntry = {
   windowHeight: number;
   viewportWidth: number;
   viewportHeight: number;
+  method: HostCaptureMethod;
+  clipped?: ViewportClip;
   cachedAt: number;
+};
+
+type ViewportMarkerEmulation = {
+  active?: boolean;
+  deviceId?: string;
+  resolution?: { width?: number; height?: number };
+  error?: string;
 };
 
 type ViewportMarkerResponse = {
@@ -67,14 +76,34 @@ type ViewportMarkerResponse = {
   viewportWidth?: number;
   viewportHeight?: number;
   markerSize?: number;
+  framesRendered?: number;
+  emulation?: ViewportMarkerEmulation;
 };
 
-type HostViewportCaptureResult =
-  | { success: true; response: RawImageCaptureResponse }
-  | { success: false; error: string };
+type CaptureWindowInfo = {
+  title: string;
+  handle: number;
+  width: number;
+  height: number;
+  method: HostCaptureMethod;
+  restored: boolean;
+  foreground: boolean;
+};
+
+type HostCaptureSuccess = {
+  success: true;
+  response: RawImageCaptureResponse;
+  viewportRect?: ViewportRect;
+  clipped?: ViewportClip;
+  cropped: boolean;
+  window: CaptureWindowInfo;
+  warning?: string;
+};
+
+type HostCaptureOutcome = HostCaptureSuccess | { success: false; error: string };
 
 // Injection seam so tests can stand in for the PowerShell helper.
-export type HostWindowCaptureFn = (titleHint?: string) => Promise<HostCaptureResult>;
+export type HostWindowCaptureFn = (titleHint?: string, options?: HostCaptureOptions) => Promise<HostCaptureResult>;
 
 // A cached viewport position is trusted only briefly: Studio's dock layout can
 // change without the window or viewport size changing (e.g. swapping two
@@ -96,10 +125,19 @@ type EncodedViewportCapture = {
   data: string;
   mimeType: string;
   message: string;
+  peer: string;
+  source: string;
+  cropped: boolean;
+  viewportRect?: ViewportRect;
+  clipped?: ViewportClip;
+  window?: CaptureWindowInfo;
 } | {
   success: false;
   error: string;
+  peer: string;
 };
+
+type CaptureFallbackMode = 'viewport' | 'window';
 
 type DeviceSimulatorSettings = {
   deviceId?: string;
@@ -5029,9 +5067,10 @@ export class RobloxStudioTools {
     format?: string,
     quality?: number,
     maxBytes: number = MAX_INLINE_IMAGE_BYTES,
+    fallback: CaptureFallbackMode = 'viewport',
   ): Promise<EncodedViewportCapture> {
     const previous = this.viewportCaptureQueues.get(instanceId) ?? Promise.resolve();
-    const capture = previous.then(() => this._captureViewportImageNow(instanceId, targetRole, format, quality, maxBytes));
+    const capture = previous.then(() => this._captureViewportImageNow(instanceId, targetRole, format, quality, maxBytes, fallback));
     const settled = capture.then(() => undefined, () => undefined);
     this.viewportCaptureQueues.set(instanceId, settled);
     try {
@@ -5047,9 +5086,29 @@ export class RobloxStudioTools {
     format?: string,
     quality?: number,
     maxBytes: number = MAX_INLINE_IMAGE_BYTES,
+    fallback: CaptureFallbackMode = 'viewport',
   ): Promise<EncodedViewportCapture> {
     const fmt: 'jpeg' | 'png' = format === 'png' ? 'png' : 'jpeg';
     const q = quality === undefined ? 92 : Math.max(1, Math.min(100, Math.floor(quality)));
+    const peer = targetRole;
+    let viewportRect: ViewportRect | undefined;
+    let clipped: ViewportClip | undefined;
+    let cropped = true;
+    let window: CaptureWindowInfo | undefined;
+
+    if (fallback === 'window') {
+      const host = await this._captureViewportFromHostWindow(instanceId, targetRole, true);
+      if (!host.success) return { success: false, error: host.error, peer };
+      return this._encodeViewportCapture(host.response, fmt, q, maxBytes, {
+        peer,
+        source: 'host-window',
+        cropped: host.cropped,
+        viewportRect: host.viewportRect,
+        clipped: host.clipped,
+        window: host.window,
+        hostNote: ` Captured the whole Studio window through the host OS (fallback: "window"); the viewport sits at viewportRect (screen coordinates).${host.warning ? ` ${host.warning}` : ''}`,
+      });
+    }
 
     // Fast path: StudioCaptureService (Studio-only, FFlag-gated) reads the
     // framebuffer directly — no CaptureService callback, no EditableImage
@@ -5085,14 +5144,16 @@ export class RobloxStudioTools {
         // the client to get the rbxtemp:// id, then read it back in the edit DM —
         // the rbxtemp handle is process-scoped and the edit/plugin identity is
         // allowed to promote it into a readable EditableImage.
+        // A begin failure (typically "CaptureScreenshot callback never fired"
+        // while another window covers Studio) is a capture failure like any
+        // other: it goes through the host window fallback below, which reads
+        // the composited window even when it is occluded.
         const begin = await this._callSingle('/api/capture-begin', {}, targetRole, instanceId) as { contentId?: string; error?: string };
-        if (begin.error) {
-          return { success: false, error: begin.error };
+        if (begin.error || !begin.contentId) {
+          response = { success: false, error: begin.error ?? 'Screenshot capture failed: no content id returned from client.' };
+        } else {
+          response = await this._callSingle('/api/capture-read', { contentId: begin.contentId }, 'edit', instanceId) as RawImageCaptureResponse;
         }
-        if (!begin.contentId) {
-          return { success: false, error: 'Screenshot capture failed: no content id returned from client.' };
-        }
-        response = await this._callSingle('/api/capture-read', { contentId: begin.contentId }, 'edit', instanceId) as RawImageCaptureResponse;
       } else {
         // Edit mode: capture and read back in the same (edit) context.
         response = await this._callSingle('/api/capture-screenshot', {}, 'edit', instanceId) as RawImageCaptureResponse;
@@ -5106,6 +5167,7 @@ export class RobloxStudioTools {
     // crop it to the viewport. That path reads the composited window, so it
     // also works while Studio sits behind other windows.
     let hostNote = '';
+    let source = response.source ?? 'CaptureService';
     let hostReason: string | undefined;
     try {
       hostReason = response.error
@@ -5118,10 +5180,20 @@ export class RobloxStudioTools {
       hostReason = `Studio's capture failed (${response.error})`;
     }
     if (hostReason !== undefined) {
-      const host = await this._captureViewportFromHostWindow(instanceId, targetRole);
+      const host = await this._captureViewportFromHostWindow(instanceId, targetRole, false);
       if (host.success) {
         response = host.response;
-        hostNote = ` Captured from the Studio window through the host OS because ${hostReason}.`;
+        source = 'host-window';
+        viewportRect = host.viewportRect;
+        clipped = host.clipped;
+        cropped = host.cropped;
+        window = host.window;
+        hostNote = ` Captured from the Studio window through the host OS (${host.window.method}) because ${hostReason}.`;
+        if (clipped) {
+          hostNote +=
+            ` Only the ${clipped.edge === 'bottom' ? 'top' : 'bottom'} viewport markers were visible, so the viewport extends past the Studio pane` +
+            ` (device emulation larger than the pane${clipped.pixels > 0 ? `; ${clipped.pixels}px beyond the window edge` : ''}); the ${clipped.edge} strip of this image may show pane chrome or black instead of the viewport.`;
+        }
       } else if (response.error) {
         response = { ...response, error: `${response.error} Host window capture also failed: ${host.error}.` };
       } else {
@@ -5142,13 +5214,24 @@ export class RobloxStudioTools {
           'works because the temporary rbxtemp:// handle is readable from the edit process; multiplayer client handles ' +
           `appear to be scoped to the client process. Raw error: ${response.error}`;
       }
-      return { success: false, error: text };
+      return { success: false, error: text, peer };
     }
 
+    return this._encodeViewportCapture(response, fmt, q, maxBytes, { peer, source, cropped, viewportRect, clipped, window, hostNote });
+  }
+
+  private _encodeViewportCapture(
+    response: RawImageCaptureResponse,
+    fmt: 'jpeg' | 'png',
+    q: number,
+    maxBytes: number,
+    meta: { peer: string; source: string; cropped: boolean; viewportRect?: ViewportRect; clipped?: ViewportClip; window?: CaptureWindowInfo; hostNote: string },
+  ): EncodedViewportCapture {
+    const { peer, hostNote } = meta;
     const w = response.width;
     const h = response.height;
     if (w === undefined || h === undefined) {
-      return { success: false, error: 'Screenshot response missing dimensions.' };
+      return { success: false, error: 'Screenshot response missing dimensions.', peer };
     }
 
     // Cap the inline image size. Measured empirically: an ~8MB image (11MB
@@ -5163,7 +5246,7 @@ export class RobloxStudioTools {
     if (response.encoding === 'png') {
       // StudioCaptureService already encoded the PNG in Studio.
       if (!response.data) {
-        return { success: false, error: 'Screenshot response missing PNG data.' };
+        return { success: false, error: 'Screenshot response missing PNG data.', peer };
       }
       buffer = Buffer.from(response.data, 'base64');
       mimeType = 'image/png';
@@ -5183,6 +5266,7 @@ export class RobloxStudioTools {
           error:
             `PNG screenshot is ${mb}MB, over the ~${(maxBytes / 1048576).toFixed(1)}MB inline image limit. ` +
             `Use the default jpeg format (optionally with a "quality" value) or make the Studio window smaller for a lossless capture.`,
+          peer,
         };
       }
       while (buffer.length > maxBytes && usedQ > 25) {
@@ -5195,6 +5279,7 @@ export class RobloxStudioTools {
           error:
             `JPEG screenshot is still ${(buffer.length / 1048576).toFixed(1)}MB at q${usedQ}, over the ` +
             `${(maxBytes / 1048576).toFixed(1)}MB inline budget. Make the Studio window smaller or capture fewer images per call.`,
+          peer,
         };
       }
       note = ` — auto-reduced to q${usedQ} to fit the inline size limit; enlarge the Studio window or capture a smaller region for finer detail`;
@@ -5227,6 +5312,12 @@ export class RobloxStudioTools {
       data: buffer.toString('base64'),
       mimeType,
       message,
+      peer,
+      source: meta.source,
+      cropped: meta.cropped,
+      viewportRect: meta.viewportRect,
+      clipped: meta.clipped,
+      window: meta.window,
     };
   }
 
@@ -5257,16 +5348,17 @@ export class RobloxStudioTools {
   private async _captureViewportFromHostWindow(
     instanceId: string,
     targetRole: string,
-  ): Promise<HostViewportCaptureResult> {
+    uncropped: boolean,
+  ): Promise<HostCaptureOutcome> {
     let prepared: ViewportMarkerResponse | undefined;
-    let result: HostViewportCaptureResult;
+    let result: HostCaptureOutcome;
     try {
       prepared = await this._callViewportMarkers('prepare', targetRole, instanceId);
       if (prepared.error || !prepared.captureId || !prepared.viewportWidth || !prepared.viewportHeight) {
         result = { success: false, error: prepared.error ?? 'the Studio plugin could not prepare host capture (update the plugin)' };
       } else {
         if (prepared.viewportChanged) this.hostViewportRects.delete(`${instanceId}|${targetRole}`);
-        result = await this._capturePreparedViewportFromHostWindow(instanceId, targetRole, prepared);
+        result = await this._capturePreparedViewportFromHostWindow(instanceId, targetRole, prepared, uncropped);
       }
     } catch (error) {
       result = { success: false, error: `host capture failed: ${error instanceof Error ? error.message : String(error)}` };
@@ -5285,6 +5377,32 @@ export class RobloxStudioTools {
     return result;
   }
 
+  private _emulationSummary(emulation: ViewportMarkerEmulation | undefined): string {
+    if (!emulation) return 'unknown (plugin did not report it)';
+    if (emulation.error) return `unknown (${emulation.error})`;
+    if (!emulation.active) return 'off';
+    const resolution = emulation.resolution && emulation.resolution.width && emulation.resolution.height
+      ? ` ${emulation.resolution.width}x${emulation.resolution.height}`
+      : '';
+    return `on (${emulation.deviceId ?? 'device'}${resolution})`;
+  }
+
+  private _windowInfo(capture: { title: string; handle: number; width: number; height: number; method: HostCaptureMethod; restored: boolean; foreground: boolean }): CaptureWindowInfo {
+    return {
+      title: capture.title,
+      handle: capture.handle,
+      width: capture.width,
+      height: capture.height,
+      method: capture.method,
+      restored: capture.restored,
+      foreground: capture.foreground,
+    };
+  }
+
+  private _screenRect(rect: ViewportRect, origin: { x: number; y: number }): ViewportRect {
+    return { x: origin.x + rect.x, y: origin.y + rect.y, width: rect.width, height: rect.height };
+  }
+
   // Grabs the Studio window through the host OS and crops it to the viewport
   // of `targetRole`. The plugin pins magenta markers to the viewport corners
   // so the crop is exact regardless of Studio's dock layout or DPI scale; the
@@ -5293,8 +5411,10 @@ export class RobloxStudioTools {
     instanceId: string,
     targetRole: string,
     prepared: ViewportMarkerResponse,
-  ): Promise<HostViewportCaptureResult> {
+    uncropped: boolean,
+  ): Promise<HostCaptureOutcome> {
     const titleHint = this._hostCaptureTitleHint(instanceId);
+    const pid = await this.instanceManager.lookupProcessIdByInstanceId(instanceId);
     const cacheKey = `${instanceId}|${targetRole}`;
     const cached = this.hostViewportRects.get(cacheKey);
 
@@ -5302,7 +5422,7 @@ export class RobloxStudioTools {
     try {
       sizeInfo = await this._callViewportMarkers('query', targetRole, instanceId, prepared.captureId);
     } catch (error) {
-      return { success: false, error: `viewport markers unavailable: ${error instanceof Error ? error.message : String(error)}` };
+      return { success: false, error: `viewport markers unavailable on peer ${targetRole}: ${error instanceof Error ? error.message : String(error)}` };
     }
     if (sizeInfo.error || !sizeInfo.viewportWidth || !sizeInfo.viewportHeight) {
       return {
@@ -5314,40 +5434,35 @@ export class RobloxStudioTools {
     // Return the original logical size, which is restored before input resumes.
     const viewportWidth = prepared.viewportWidth ?? sizeInfo.viewportWidth;
     const viewportHeight = prepared.viewportHeight ?? sizeInfo.viewportHeight;
+    const emulation = this._emulationSummary(sizeInfo.emulation);
 
-    // Fast path: the viewport was located recently and neither the window nor
-    // the viewport changed size, so one grab is enough.
     if (
       cached &&
       Date.now() - cached.cachedAt < HOST_VIEWPORT_RECT_TTL_MS &&
       cached.viewportWidth === viewportWidth &&
       cached.viewportHeight === viewportHeight
     ) {
-      const grab = await this.hostWindowCapture(titleHint);
+      const grab = await this.hostWindowCapture(titleHint, { method: cached.method, pid });
       if (!grab.ok) return { success: false, error: grab.error };
       if (grab.capture.width === cached.windowWidth && grab.capture.height === cached.windowHeight) {
-        return {
-          success: true,
-          response: this._hostResponseFromCrop(grab.capture.rgba, grab.capture.width, grab.capture.height, cached.rect, viewportWidth, viewportHeight),
-        };
+        return this._hostOutcome(grab.capture, cached.rect, viewportWidth, viewportHeight, uncropped, cached.clipped);
       }
       this.hostViewportRects.delete(cacheKey);
     }
 
-    // Locate the viewport: markers on, grab, markers off, grab again clean.
     let shown: ViewportMarkerResponse;
     try {
       shown = await this._callViewportMarkers('show', targetRole, instanceId, prepared.captureId);
     } catch (error) {
-      return { success: false, error: `could not draw viewport markers: ${error instanceof Error ? error.message : String(error)}` };
+      return { success: false, error: `could not draw viewport markers on peer ${targetRole}: ${error instanceof Error ? error.message : String(error)}` };
     }
-    if (shown.error) return { success: false, error: `could not draw viewport markers: ${shown.error}` };
+    if (shown.error) return { success: false, error: `could not draw viewport markers on peer ${targetRole}: ${shown.error}` };
     const markerSize = shown.markerSize ?? 12;
 
     let markerGrab: HostCaptureResult;
     let hidden: ViewportMarkerResponse;
     try {
-      markerGrab = await this.hostWindowCapture(titleHint);
+      markerGrab = await this.hostWindowCapture(titleHint, { method: 'auto', pid });
     } finally {
       hidden = await this._callViewportMarkers('hide', targetRole, instanceId, prepared.captureId);
     }
@@ -5359,7 +5474,23 @@ export class RobloxStudioTools {
       viewportHeight: shown.viewportHeight ?? viewportHeight,
       markerSize,
     });
-    if ('error' in located) return { success: false, error: located.error };
+    if ('error' in located) {
+      const magenta = Object.entries(markerGrab.capture.magentaPixels).map(([method, count]) => `${method}=${count}`).join(', ') || 'none counted';
+      const detail =
+        ` (branch: ${located.branch}; marker pixels in the analysed grab: ${located.markerPixels}; magenta pixels per method: ${magenta};` +
+        ` window '${markerGrab.capture.title}' ${markerGrab.capture.width}x${markerGrab.capture.height} via ${markerGrab.capture.method}, foreground=${markerGrab.capture.foreground}, restored=${markerGrab.capture.restored};` +
+        ` frames rendered with markers: ${shown.framesRendered ?? 'unknown'}; reported viewport ${viewportWidth}x${viewportHeight}; device emulation: ${emulation}; peer: ${targetRole})`;
+      if (uncropped) {
+        return {
+          success: true,
+          response: this._hostResponseFromWindow(markerGrab.capture),
+          cropped: false,
+          window: this._windowInfo(markerGrab.capture),
+          warning: `The viewport could not be located: ${located.error}${detail}.`,
+        };
+      }
+      return { success: false, error: `${located.error}${detail}` };
+    }
 
     this.hostViewportRects.set(cacheKey, {
       rect: located.rect,
@@ -5367,18 +5498,57 @@ export class RobloxStudioTools {
       windowHeight: markerGrab.capture.height,
       viewportWidth,
       viewportHeight,
+      method: markerGrab.capture.method,
+      clipped: located.clipped,
       cachedAt: Date.now(),
     });
 
-    const cleanGrab = await this.hostWindowCapture(titleHint);
+    const cleanGrab = await this.hostWindowCapture(titleHint, { method: markerGrab.capture.method, pid });
     if (!cleanGrab.ok) return { success: false, error: cleanGrab.error };
     if (cleanGrab.capture.width !== markerGrab.capture.width || cleanGrab.capture.height !== markerGrab.capture.height) {
       this.hostViewportRects.delete(cacheKey);
       return { success: false, error: 'the Studio window was resized while locating the viewport; retry the capture' };
     }
+    return this._hostOutcome(
+      { ...cleanGrab.capture, restored: markerGrab.capture.restored || cleanGrab.capture.restored, foreground: markerGrab.capture.foreground || cleanGrab.capture.foreground },
+      located.rect,
+      viewportWidth,
+      viewportHeight,
+      uncropped,
+      located.clipped,
+    );
+  }
+
+  private _hostOutcome(
+    capture: { rgba: Buffer; width: number; height: number; title: string; handle: number; method: HostCaptureMethod; clientOrigin: { x: number; y: number }; restored: boolean; foreground: boolean },
+    rect: ViewportRect,
+    viewportWidth: number,
+    viewportHeight: number,
+    uncropped: boolean,
+    clipped?: ViewportClip,
+  ): HostCaptureSuccess {
     return {
       success: true,
-      response: this._hostResponseFromCrop(cleanGrab.capture.rgba, cleanGrab.capture.width, cleanGrab.capture.height, located.rect, viewportWidth, viewportHeight),
+      response: uncropped
+        ? this._hostResponseFromWindow(capture)
+        : this._hostResponseFromCrop(capture.rgba, capture.width, capture.height, rect, viewportWidth, viewportHeight),
+      viewportRect: this._screenRect(rect, capture.clientOrigin),
+      clipped,
+      cropped: !uncropped,
+      window: this._windowInfo(capture),
+    };
+  }
+
+  private _hostResponseFromWindow(capture: { rgba: Buffer; width: number; height: number }): RawImageCaptureResponse {
+    return {
+      success: true,
+      encoding: 'rgba8',
+      source: 'host-window',
+      width: capture.width,
+      height: capture.height,
+      nativeWidth: capture.width,
+      nativeHeight: capture.height,
+      data: capture.rgba.toString('base64'),
     };
   }
 
@@ -5403,13 +5573,38 @@ export class RobloxStudioTools {
     };
   }
 
-  async captureScreenshot(instance_id?: string, format?: string, quality?: number) {
+  private _resolveCapturePeer(instance_id: string | undefined, target: string | undefined): { instanceId: string; role: string; selectedTarget: string } {
+    const auto = this._resolveRuntime(instance_id);
+    if (target === undefined || target === '' || target === 'auto') {
+      return { instanceId: auto.instanceId, role: auto.clientRole ?? 'edit', selectedTarget: 'auto' };
+    }
+    if (typeof target !== 'string' || !(target === 'edit' || target === 'server' || /^client-\d+$/.test(target))) {
+      throw new Error(`capture_screenshot target must be "edit", "server" or "client-N" (got ${JSON.stringify(target)})`);
+    }
+    const peers = this.bridge.getPeersInScope(auto.instanceId);
+    const roles = peers.map((peer) => peer.role).sort();
+    if (target === 'server') {
+      throw new Error(
+        `capture_screenshot target "server" was requested, but the play server does not render a viewport; ` +
+        `use target "client-1" (the play client) or "edit". Connected peers: ${roles.join(', ') || 'none'}.`,
+      );
+    }
+    if (!roles.includes(target)) {
+      throw new Error(`capture_screenshot target "${target}" is not connected on ${auto.instanceId}. Connected peers: ${roles.join(', ') || 'none'}.`);
+    }
+    return { instanceId: auto.instanceId, role: target, selectedTarget: target };
+  }
+
+  async captureScreenshot(instance_id?: string, format?: string, quality?: number, target?: string, fallback?: string) {
+    if (fallback !== undefined && fallback !== 'viewport' && fallback !== 'window') {
+      throw new Error(`capture_screenshot fallback must be "viewport" or "window" (got ${JSON.stringify(fallback)})`);
+    }
     const refresh = this.bridge.refreshTopologyForRouting();
     if (refresh) await refresh;
-    const { instanceId, clientRole } = this._resolveRuntime(instance_id);
-    const capture = await this._captureViewportImage(instanceId, clientRole ?? 'edit', format, quality);
+    const resolved = this._resolveCapturePeer(instance_id, target);
+    const capture = await this._captureViewportImage(resolved.instanceId, resolved.role, format, quality, MAX_INLINE_IMAGE_BYTES, fallback === 'window' ? 'window' : 'viewport');
     if (!capture.success) {
-      return this._textResult({ error: capture.error });
+      return this._textResult({ error: `${capture.error} (peer tried: ${capture.peer}; target: ${resolved.selectedTarget})`, peer: capture.peer, target: resolved.selectedTarget });
     }
 
     return {
@@ -5422,6 +5617,13 @@ export class RobloxStudioTools {
             format: capture.format,
             mimeType: capture.mimeType,
             ...(capture.quality === undefined ? {} : { quality: capture.quality }),
+            peer: capture.peer,
+            target: resolved.selectedTarget,
+            source: capture.source,
+            cropped: capture.cropped,
+            ...(capture.viewportRect === undefined ? {} : { viewportRect: capture.viewportRect }),
+            ...(capture.clipped === undefined ? {} : { clipped: capture.clipped }),
+            ...(capture.window === undefined ? {} : { window: capture.window }),
             message: capture.message,
           }),
         },

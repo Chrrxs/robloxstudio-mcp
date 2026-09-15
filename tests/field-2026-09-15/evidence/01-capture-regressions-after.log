@@ -1,0 +1,38 @@
+Test process using port 56841 (automatically assigned)
+Full integration suite using port 56841 (from ROBLOX_STUDIO_PORT)
+Installing worktree plugin C:\Users\<user>\Desktop\mcp\wt-e\studio-plugin\MCPPlugin.rbxmx
+Installed MCPPlugin.rbxmx to C:\Users\<user>\AppData\Local\Temp\robloxstudio-mcp-workers\run-all-zL2h1Q\RsmcpIsolatedPlugins\MCPPlugin.rbxmx
+Launched managed Studio instance instance:ysk-2jf
+  simulator before reset: {"target":"edit","role":"edit","isSimulating":true,"activeDeviceId":"hd_1080","scalingMode":"ScaleToPhysicalSize","orientation":"LandscapeRight","resolution":{"y":1080,"x":1920,"height":1080,"width":19 ...(device list trimmed)
+  simulator after reset: {"target":"edit","role":"edit","isSimulating":false,"activeDeviceId":"default","devices":[{"PortraitKeyboardHeight":0,"DeviceForm":"Console","DeviceId":"xbox","LandscapeKeyboardHeight":0,"Name":"Xbox O ...(device list trimmed)
+
+=== Screenshot beta and legacy regressions ===
+Edit PNG/JPEG and quality passed (beta disabled, proxy=true)
+Host crop 1000x600: button 201,150,349,221; edge 700,420,798,479
+Host crop 1000x600: button 201,150,349,221; edge 700,420,798,479
+Host crop 1000x600: button 201,150,349,221; edge 700,420,798,479
+Host capture PNG/JPEG, clicks, concurrency and restoration passed at 1000x600
+Host crop 1200x700: button 241,176,419,258; edge 840,490,958,559
+Host crop 1200x700: button 241,176,419,258; edge 840,490,958,559
+Host crop 1200x700: button 241,176,419,258; edge 840,490,958,559
+Host capture PNG/JPEG, clicks, concurrency and restoration passed at 1200x700
+Host crop 1920x1080: button 384,270,670,398; edge 1344,756,1535,863
+Host crop 1920x1080: button 384,270,670,398; edge 1344,756,1535,863
+Host crop 1920x1080: button 384,270,670,398; edge 1344,756,1535,863
+Host capture PNG/JPEG, clicks, concurrency and restoration passed at 1920x1080
+Host crop 1000x600: button 201,150,349,221; edge 700,420,798,479
+Host crop 1000x600: button 201,150,349,221; edge 700,420,798,479
+Host crop 1000x600: button 201,150,349,221; edge 700,420,798,479
+Host capture PNG/JPEG, clicks, concurrency and restoration passed at 1000x600
+Stale marker tokens cannot mutate or finish a newer capture
+Scaled play PNG/JPEG passed: 1600x900; markers 601,350,719,428, 1301,700,1420,779
+4K play JPEGs passed; client remains connected
+Post-play edit capture passed
+
+✅ Screenshot beta and legacy regressions PASSED
+Closed managed Studio instance instance:ysk-2jf
+
+========== SUMMARY ==========
+  ✅ PASS  field-2026-09-15/capture-regressions.mjs (run through a local wrapper that first stops the edit-peer device simulator)
+
+1/1 passed.
