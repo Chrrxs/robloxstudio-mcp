@@ -576,19 +576,23 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
   {
     name: 'solo_playtest',
     category: 'write',
-    description: 'Use to start, stop, or inspect a single-player Studio playtest.',
+    description: 'Use to start, stop, restart, or inspect a single-player Studio playtest.',
     inputSchema: {
       type: 'object',
       properties: {
         action: {
           type: 'string',
-          enum: ['start', 'stop', 'status'],
-          description: 'Lifecycle action to run.'
+          enum: ['start', 'stop', 'status', 'restart'],
+          description: 'Lifecycle action to run; restart stops, waits, runs before_start, then starts again.'
         },
         mode: {
           type: 'string',
           enum: ['play', 'run'],
-          description: 'Required for action="start".'
+          description: 'Required for action="start"; restart keeps the running session mode when omitted.'
+        },
+        before_start: {
+          type: 'string',
+          description: 'Only for action="restart": Luau run on the edit DataModel after stop and before start (same sandbox as execute_luau); its result is returned as beforeStart.'
         },
         timeout: {
           type: 'number',
