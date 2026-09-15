@@ -1,6 +1,7 @@
 import { StudioHttpClient } from './studio-client.js';
 import { BridgeService, RoutingFailure } from '../bridge-service.js';
 import type { PublicStudioPeer } from '../bridge-service.js';
+import { applyExecuteLuauOutputLimit, resolveExecuteLuauOutputLimit } from '../http-body-limits.js';
 import {
   OpenCloudClient,
   type AssetSearchParams,
@@ -1954,19 +1955,16 @@ export class RobloxStudioTools {
     };
   }
 
-  async executeLuau(code: string, target?: string, instance_id?: string, operation_id?: string) {
+  async executeLuau(code: string, target?: string, instance_id?: string, operation_id?: string, max_output_bytes?: number) {
     if (!code) {
       throw new Error('Code is required for execute_luau');
     }
+    const maxOutputBytes = resolveExecuteLuauOutputLimit(max_output_bytes);
     const response = await this._callSingle('/api/execute-luau', { code }, target || 'edit', instance_id, undefined, undefined, operation_id);
-    return {
-      content: [
-        {
-          type: 'text',
-          text: JSON.stringify(response)
-        }
-      ]
-    };
+    const body = response && typeof response === 'object' && !Array.isArray(response)
+      ? response as Record<string, unknown>
+      : { result: response };
+    return this._textResult(applyExecuteLuauOutputLimit(body, maxOutputBytes));
   }
 
   async evalServerRuntime(code: string, instance_id?: string) {

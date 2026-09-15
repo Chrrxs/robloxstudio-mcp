@@ -367,6 +367,12 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
         instance_id: {
           type: 'string',
           description: 'Studio process ID when ambiguous.'
+        },
+        max_output_bytes: {
+          type: 'integer',
+          minimum: 1,
+          maximum: 52428800,
+          description: 'Return value byte budget; default 65536. Result reports truncated, totalBytes, returnedBytes.'
         }
       },
       required: ['code']

@@ -48,6 +48,7 @@ is in `tests/field-2026-09-15/EVIDENCE.md`.
 - **Symptom:** `return table.concat(...)` results above ~30k characters arrive with the tail cut off and no indication (`"truncated": true` or similar). Agents dumping inventories had to split into 3–4 chunks.
 - **Request:** `truncated: true` + `totalBytes` in the result; a `max_output_bytes` parameter for `execute_luau`, or an `output_path` that writes large output to a file and returns the path.
 - **Candidate:** `packages/core/src/http-body-limits.ts`, `studio-plugin/src/modules/LuauExec.ts`.
+- **Status:** fixed in this PR — server-side output budget `max_output_bytes` (default 64 KiB, max 50 MiB) with `truncated`/`totalBytes`/`returnedBytes` (and `outputTruncated`/`outputTotalBytes` for print output); test `tests/field-2026-09-15/05-execute-luau-truncation.mjs`, unit test `packages/core/src/__tests__/field-05-execute-luau-output-budget.test.ts`, evidence `tests/field-2026-09-15/evidence/05-execute-luau-truncation.md`. Measurement showed no layer in this repository truncated; the cut came from the MCP client's own output budget.
 
 ### 6. `get_runtime_logs`: the error text and its `Script '…', Line N` source line are separate entries
 - **Symptom:** one error is 2–3 separate `entries`: `ERR` message, `INFO "Script 'Players.x.PlayerGui…', Line 5"`, `INFO "Stack Begin/End"`. `filter="Script '"` drops the error text; `filter=":"` returns everything, with asset-permission spam (below) interleaved.
