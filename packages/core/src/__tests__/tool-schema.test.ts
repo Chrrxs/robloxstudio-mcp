@@ -48,7 +48,7 @@ describe('Tool schema compatibility', () => {
     expect(activeNames.has('multiplayer_playtest')).toBe(true);
 
     const soloProps = (TOOL_DEFINITIONS.find(tool => tool.name === 'solo_playtest')!.inputSchema as { properties?: Record<string, any>; required?: string[] }).properties ?? {};
-    expect((soloProps.action as { enum?: string[] }).enum).toEqual(['start', 'stop', 'status']);
+    expect((soloProps.action as { enum?: string[] }).enum).toEqual(['start', 'stop', 'status', 'restart']);
     expect((TOOL_DEFINITIONS.find(tool => tool.name === 'solo_playtest')!.inputSchema as { required?: string[] }).required).toEqual(['action']);
 
     const multiplayerProps = (TOOL_DEFINITIONS.find(tool => tool.name === 'multiplayer_playtest')!.inputSchema as { properties?: Record<string, any>; required?: string[] }).properties ?? {};

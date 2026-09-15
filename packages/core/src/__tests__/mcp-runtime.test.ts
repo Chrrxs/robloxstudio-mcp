@@ -204,6 +204,7 @@ describe('MCP v2 tool runtime', () => {
           peers: {
             edit: 'peer:def-234',
           },
+          playtest: { active: false },
         }],
         multiplayerGroups: [{
           id: 'test:group',

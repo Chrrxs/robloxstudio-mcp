@@ -8,11 +8,13 @@ import {
 } from '../opencloud-client.js';
 import { RobloxCookieClient } from '../roblox-cookie-client.js';
 import {
+  observeStudioProcesses,
   parseStudioProcessEnvironmentPatch,
   parseStudioWorkingDirectory,
   StudioInstanceManager,
   type ManagedStudioInstance,
   type StudioLaunchSource,
+  type StudioProcessSnapshot,
 } from '../studio-instance-manager.js';
 import {
   decodeImagePathToRgba,
@@ -75,6 +77,14 @@ type HostViewportCaptureResult =
 
 // Injection seam so tests can stand in for the PowerShell helper.
 export type HostWindowCaptureFn = (titleHint?: string) => Promise<HostCaptureResult>;
+
+const STUDIO_WINDOW_SNAPSHOT_TTL_MS = 2_000;
+
+function studioWindowPlaceLabel(title: string): string {
+  const withoutSuffix = title.replace(/\s+-\s+Roblox Studio$/u, '').trim();
+  const separator = Math.max(withoutSuffix.lastIndexOf('\\'), withoutSuffix.lastIndexOf('/'));
+  return withoutSuffix.slice(separator + 1);
+}
 
 // A cached viewport position is trusted only briefly: Studio's dock layout can
 // change without the window or viewport size changing (e.g. swapping two
@@ -1016,6 +1026,10 @@ export class RobloxStudioTools {
   private hostWindowCapture: HostWindowCaptureFn = captureStudioWindow;
   private hostViewportRects = new Map<string, HostViewportRectCacheEntry>();
   private viewportCaptureQueues = new Map<string, Promise<void>>();
+  private studioWindowLookup: () => Promise<StudioProcessSnapshot> = observeStudioProcesses;
+  private studioWindowSnapshot: Promise<StudioProcessSnapshot> | undefined;
+  private studioWindowSnapshotAt = 0;
+  private lastPlaytestMode = new Map<string, 'play' | 'run'>();
 
   constructor(bridge: BridgeService) {
     this.client = new StudioHttpClient(bridge);
@@ -3373,9 +3387,16 @@ export class RobloxStudioTools {
     });
   }
 
-  async soloPlaytest(action: string, mode?: string, timeout?: number, instance_id?: string) {
-    if (action !== 'start' && action !== 'stop' && action !== 'status') {
-      throw new Error('solo_playtest requires action=start|stop|status');
+  async soloPlaytest(action: string, mode?: string, timeout?: number, instance_id?: string, before_start?: string) {
+    if (action !== 'start' && action !== 'stop' && action !== 'status' && action !== 'restart') {
+      throw new Error('solo_playtest requires action=start|stop|status|restart');
+    }
+    if (before_start !== undefined && action !== 'restart') {
+      throw new Error('solo_playtest before_start is only accepted with action=restart');
+    }
+
+    if (action === 'restart') {
+      return this._restartPlaytest(mode, timeout, instance_id, before_start);
     }
 
     if (action === 'status') {
@@ -3437,6 +3458,99 @@ export class RobloxStudioTools {
     });
   }
 
+  private async _restartPlaytest(mode?: string, timeout?: number, instance_id?: string, before_start?: string) {
+    if (mode !== undefined && mode !== 'play' && mode !== 'run') {
+      throw new Error('solo_playtest action=restart accepts mode=play|run');
+    }
+    if (before_start !== undefined && (typeof before_start !== 'string' || before_start.length === 0)) {
+      throw new Error('solo_playtest before_start must be a non-empty Luau string');
+    }
+    const refresh = this.bridge.refreshTopologyForRouting();
+    if (refresh) await refresh;
+    const instanceId = this._resolveInstanceIdOnly(instance_id);
+    const runtimeRoles = this._runtimeTargetsForScope(instanceId).map((target) => target.role);
+    const wasRunning = runtimeRoles.length > 0;
+    const resolvedMode = mode
+      ?? (wasRunning
+        ? (runtimeRoles.some((role) => /^client-\d+$/.test(role)) ? 'play' : 'run')
+        : this.lastPlaytestMode.get(instanceId));
+    if (resolvedMode === undefined) {
+      throw new Error(
+        'solo_playtest action=restart needs mode=play|run: no playtest is running and no earlier start is known for this instance.',
+      );
+    }
+    const restartStartedAt = Date.now();
+    const timings = (extra: Record<string, unknown>) => ({
+      action: 'restart',
+      mode: resolvedMode,
+      wasRunning,
+      ...extra,
+      totalMs: Date.now() - restartStartedAt,
+    });
+
+    let stoppedInMs = 0;
+    if (wasRunning) {
+      const stopBody = this._parseTextResult(await this.stopPlaytest(instanceId, timeout));
+      stoppedInMs = Date.now() - restartStartedAt;
+      if (stopBody.success !== true || stopBody.runtimeStopped === false) {
+        return this._textResult({
+          ...stopBody,
+          success: false,
+          error: stopBody.error ?? 'stop_failed',
+          message: stopBody.message ?? 'Playtest did not stop; restart aborted before before_start and start.',
+          ...timings({ phase: 'stop', stoppedInMs }),
+          roles: Array.isArray(stopBody.roles) ? stopBody.roles : undefined,
+        });
+      }
+    }
+
+    let beforeStart: Record<string, unknown> | undefined;
+    let beforeStartMs: number | undefined;
+    if (before_start !== undefined) {
+      const beforeStartAt = Date.now();
+      try {
+        beforeStart = this._parseTextResult(await this.executeLuau(before_start, 'edit', instanceId));
+      } catch (error) {
+        beforeStart = { success: false, error: errorMessage(error) };
+      }
+      beforeStartMs = Date.now() - beforeStartAt;
+      if (beforeStart.success !== true) {
+        return this._textResult({
+          success: false,
+          error: 'before_start_failed',
+          message: 'before_start Luau failed on the edit DataModel; the playtest was not started again.',
+          beforeStart,
+          ...timings({ phase: 'before_start', stoppedInMs, beforeStartMs }),
+        });
+      }
+    }
+
+    const startAt = Date.now();
+    const startBody = this._parseTextResult(await this.startPlaytest(resolvedMode, undefined, instanceId, timeout));
+    const startedInMs = Date.now() - startAt;
+    const roles = Array.isArray(startBody.roles) ? startBody.roles : undefined;
+    if (startBody.success === true && startBody.runtimeReady !== false) {
+      return this._textResult({
+        success: true,
+        message: wasRunning ? 'Playtest restarted.' : 'No playtest was running; playtest started.',
+        ...timings({ stoppedInMs, beforeStartMs, startedInMs }),
+        beforeStart,
+        roles,
+      });
+    }
+    return this._textResult({
+      ...startBody,
+      success: false,
+      error: startBody.error ?? 'start_failed',
+      message: startBody.success === true
+        ? 'Playtest did not become ready before timeout.'
+        : startBody.message ?? 'Playtest did not start.',
+      ...timings({ phase: 'start', stoppedInMs, beforeStartMs, startedInMs }),
+      beforeStart,
+      roles,
+    });
+  }
+
   async startPlaytest(mode: string, numPlayers?: number, instance_id?: string, timeout = 60) {
     if (mode !== 'play' && mode !== 'run') {
       throw new Error('mode must be "play" or "run"');
@@ -3478,6 +3592,7 @@ export class RobloxStudioTools {
     const response = await this._requestPeer('/api/start-playtest', data, resolved.targetPeerId);
     let wait: { ok: boolean; roles: string[]; timedOut: boolean } | undefined;
     if (response?.success === true) {
+      this.lastPlaytestMode.set(resolved.targetInstanceId, mode);
       const requiredRoles = mode === 'play' ? ['server', 'client-1'] : ['server'];
       wait = await this._waitForRuntimeRolesFresh(resolved.targetInstanceId, startedAt, requiredRoles, timeout);
     }
@@ -4059,10 +4174,75 @@ export class RobloxStudioTools {
   async getConnectedInstances() {
     const refresh = this.bridge.refreshTopologyForRouting();
     if (refresh) await refresh;
+    const instances = this.bridge.getConnectedInstances();
+    const windows = await this._studioWindowsByInstance(instances.map((instance) => instance.id));
     return this._textResult({
-      instances: this.bridge.getConnectedInstances(),
+      instances: instances.map((instance) => ({ ...instance, ...windows.get(instance.id) })),
       multiplayerGroups: this.bridge.getConnectedMultiplayerGroups(),
     });
+  }
+
+  private async _studioWindowsByInstance(
+    instanceIds: string[],
+  ): Promise<Map<string, { windowTitle: string; processId: number }>> {
+    const found = new Map<string, { windowTitle: string; processId: number }>();
+    if (instanceIds.length === 0) return found;
+    let snapshot: StudioProcessSnapshot;
+    try {
+      snapshot = await this._studioWindowSnapshot();
+    } catch {
+      return found;
+    }
+    if (snapshot.status !== 'ok') return found;
+    const windows = snapshot.processes.filter((studioProcess) =>
+      typeof studioProcess.MainWindowTitle === 'string' && studioProcess.MainWindowTitle.length > 0);
+    if (windows.length === 0) return found;
+    for (const instanceId of instanceIds) {
+      const names = new Set<string>();
+      for (const peer of this.bridge.getPeersInScope(instanceId)) {
+        for (const raw of [peer.dataModelName, peer.placeName]) {
+          const name = raw.trim();
+          if (name.length === 0) continue;
+          names.add(name);
+          names.add(name.replace(/\.rbxlx?$/i, ''));
+        }
+      }
+      if (names.size === 0) continue;
+      const matches = windows.filter((studioProcess) => {
+        const label = studioWindowPlaceLabel(studioProcess.MainWindowTitle ?? '');
+        return names.has(label) || names.has(label.replace(/\.rbxlx?$/i, ''));
+      });
+      let match = matches.length === 1 ? matches[0] : undefined;
+      if (match === undefined) {
+        const managedPid = await this._managedProcessId(instanceId);
+        match = managedPid === undefined ? undefined : windows.find((studioProcess) => studioProcess.Id === managedPid);
+      }
+      if (match === undefined) continue;
+      found.set(instanceId, { windowTitle: match.MainWindowTitle ?? '', processId: match.Id });
+    }
+    return found;
+  }
+
+  private _studioWindowSnapshot(): Promise<StudioProcessSnapshot> {
+    const now = Date.now();
+    if (this.studioWindowSnapshot && now - this.studioWindowSnapshotAt <= STUDIO_WINDOW_SNAPSHOT_TTL_MS) {
+      return this.studioWindowSnapshot;
+    }
+    this.studioWindowSnapshotAt = now;
+    this.studioWindowSnapshot = this.studioWindowLookup().catch((error) => {
+      this.studioWindowSnapshot = undefined;
+      throw error;
+    });
+    return this.studioWindowSnapshot;
+  }
+
+  private async _managedProcessId(instanceId: string): Promise<number | undefined> {
+    try {
+      const record = await this.instanceManager.get(instanceId);
+      return record?.nativeProcessId ?? record?.spawnPid;
+    } catch {
+      return undefined;
+    }
   }
 
   async getRequestStatus(request_id: string) {

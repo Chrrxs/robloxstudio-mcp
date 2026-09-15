@@ -57,12 +57,18 @@ export interface PublicStudioInstance {
   placeName: string;
   peers: PublicStudioPeer[];
 }
+export interface ConnectedPlaytestState {
+  active: boolean;
+  mode?: 'play' | 'run' | 'multiplayer';
+  startedAt?: string;
+}
 export interface ConnectedStudioInstance {
   id: string;
   multiplayerGroupId?: string;
   placeId: number;
   placeName: string;
   peers: Record<string, string>;
+  playtest: ConnectedPlaytestState;
 }
 export interface ConnectedMultiplayerGroup {
   id: string;
@@ -387,6 +393,16 @@ function isRuntimeRole(role: string): boolean {
 
 function connectedRuntimeInstanceId(peer: StudioPeer): string {
   return `${peer.instanceId}-${peer.role}`;
+}
+
+function playtestStateOf(instance: StudioInstance): ConnectedPlaytestState {
+  const runtime = instance.peers.filter((peer) => isRuntimeRole(peer.role));
+  if (runtime.length === 0) return { active: false };
+  const mode = instance.multiplayerGroupId !== undefined
+    ? 'multiplayer'
+    : runtime.some((peer) => peer.role !== 'server') ? 'play' : 'run';
+  const startedAt = Math.min(...runtime.map((peer) => peer.connectedAt));
+  return { active: true, mode, startedAt: new Date(startedAt).toISOString() };
 }
 
 function peerIdsByRole(peers: StudioPeer[]): Record<string, string> {
@@ -867,6 +883,7 @@ export class BridgeService implements StudioTransportQueue {
         placeId: instance.placeId,
         placeName: instance.placeName,
         peers: peerIdsByRole(peers),
+        playtest: playtestStateOf(instance),
       }];
     });
   }
