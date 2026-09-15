@@ -184,6 +184,8 @@ describe('Smoke', () => {
   test('get_connected_instances nests role-suffixed multiplayer runtime processes', async () => {
     const bridge = new BridgeService();
     const tools = new RobloxStudioTools(bridge);
+    (tools as unknown as { studioWindowLookup: unknown }).studioWindowLookup =
+      async () => ({ status: 'ok', observedAt: Date.now(), processes: [] });
     bridge.createMultiplayerGroup('test-1', 'instance:aaa-111');
 
     bridge.registerPeer({

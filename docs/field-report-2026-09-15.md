@@ -69,6 +69,7 @@ is in `tests/field-2026-09-15/EVIDENCE.md`.
 ### 9. Minimized Studio window → everything is black; the window handle changes per session
 - **Symptom:** when the user has minimized Studio, `capture_screenshot` is black. Every session needs `Get-Process RobloxStudioBeta | select MainWindowHandle` + `ShowWindow` (three Studios open — which one is which instance is matched by the title).
 - **Request:** `capture_screenshot` (or a new `focus_window`) restores and foregrounds a minimized window (`host-capture.ts` already finds it); add `windowHandle`/`windowTitle` to `get_connected_instances`.
+- **Status:** partially addressed in this PR — `get_connected_instances` now reports `windowTitle` and `processId` per instance (test `tests/field-2026-09-15/11-connected-instances-playtest.mjs`, evidence `evidence/11-connected-instances-playtest.md`); the capture-side restore of a minimized window is in the capture PR.
 
 ### 10. In play mode, `capture_screenshot` never worked on the reference instance because of the "client peer"
 - **Symptom:** for the reference instance (play mode: edit + server + client-1) `capture_screenshot` failed every time (peer ambiguity). No visuals were available for the read-only reference review; code reading had to do.
@@ -81,6 +82,7 @@ is in `tests/field-2026-09-15/EVIDENCE.md`.
 ### 11. `get_connected_instances` does not show play state
 - `server`/`client-1` in `peers` implies play, but there is no `mode` (play/run) or duration. Agents had to be told "the reference is in play mode, use the edit target". `solo_playtest status` is a separate call per instance.
 - **Request:** a `playtest: { active, mode, startedAt }` field.
+- **Status:** fixed in this PR — every instance carries `playtest: { active, mode: play|run|multiplayer, startedAt }` derived from the runtime peers. Test `tests/field-2026-09-15/11-connected-instances-playtest.mjs` + jest `field-11-connected-instances-playtest.test.ts`, evidence `evidence/11-connected-instances-playtest.md`.
 
 ### 12. Fast `HumanoidRootPart.CFrame` writes through `eval_server_runtime` trip the game's anti-cheat
 - Not a tool bug, but "move the player to X" tests needed a `Humanoid:MoveTo` loop. Tool-guides note: "for server-side teleports consider the game's speed limits (for example a per-sample distance cap); use `MoveTo` or the game's own teleport API".

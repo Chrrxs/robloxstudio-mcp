@@ -8,11 +8,13 @@ import {
 } from '../opencloud-client.js';
 import { RobloxCookieClient } from '../roblox-cookie-client.js';
 import {
+  observeStudioProcesses,
   parseStudioProcessEnvironmentPatch,
   parseStudioWorkingDirectory,
   StudioInstanceManager,
   type ManagedStudioInstance,
   type StudioLaunchSource,
+  type StudioProcessSnapshot,
 } from '../studio-instance-manager.js';
 import {
   decodeImagePathToRgba,
@@ -75,6 +77,14 @@ type HostViewportCaptureResult =
 
 // Injection seam so tests can stand in for the PowerShell helper.
 export type HostWindowCaptureFn = (titleHint?: string) => Promise<HostCaptureResult>;
+
+const STUDIO_WINDOW_SNAPSHOT_TTL_MS = 2_000;
+
+function studioWindowPlaceLabel(title: string): string {
+  const withoutSuffix = title.replace(/\s+-\s+Roblox Studio$/u, '').trim();
+  const separator = Math.max(withoutSuffix.lastIndexOf('\\'), withoutSuffix.lastIndexOf('/'));
+  return withoutSuffix.slice(separator + 1);
+}
 
 // A cached viewport position is trusted only briefly: Studio's dock layout can
 // change without the window or viewport size changing (e.g. swapping two
@@ -1016,6 +1026,9 @@ export class RobloxStudioTools {
   private hostWindowCapture: HostWindowCaptureFn = captureStudioWindow;
   private hostViewportRects = new Map<string, HostViewportRectCacheEntry>();
   private viewportCaptureQueues = new Map<string, Promise<void>>();
+  private studioWindowLookup: () => Promise<StudioProcessSnapshot> = observeStudioProcesses;
+  private studioWindowSnapshot: Promise<StudioProcessSnapshot> | undefined;
+  private studioWindowSnapshotAt = 0;
   private lastPlaytestMode = new Map<string, 'play' | 'run'>();
 
   constructor(bridge: BridgeService) {
@@ -4161,10 +4174,75 @@ export class RobloxStudioTools {
   async getConnectedInstances() {
     const refresh = this.bridge.refreshTopologyForRouting();
     if (refresh) await refresh;
+    const instances = this.bridge.getConnectedInstances();
+    const windows = await this._studioWindowsByInstance(instances.map((instance) => instance.id));
     return this._textResult({
-      instances: this.bridge.getConnectedInstances(),
+      instances: instances.map((instance) => ({ ...instance, ...windows.get(instance.id) })),
       multiplayerGroups: this.bridge.getConnectedMultiplayerGroups(),
     });
+  }
+
+  private async _studioWindowsByInstance(
+    instanceIds: string[],
+  ): Promise<Map<string, { windowTitle: string; processId: number }>> {
+    const found = new Map<string, { windowTitle: string; processId: number }>();
+    if (instanceIds.length === 0) return found;
+    let snapshot: StudioProcessSnapshot;
+    try {
+      snapshot = await this._studioWindowSnapshot();
+    } catch {
+      return found;
+    }
+    if (snapshot.status !== 'ok') return found;
+    const windows = snapshot.processes.filter((studioProcess) =>
+      typeof studioProcess.MainWindowTitle === 'string' && studioProcess.MainWindowTitle.length > 0);
+    if (windows.length === 0) return found;
+    for (const instanceId of instanceIds) {
+      const names = new Set<string>();
+      for (const peer of this.bridge.getPeersInScope(instanceId)) {
+        for (const raw of [peer.dataModelName, peer.placeName]) {
+          const name = raw.trim();
+          if (name.length === 0) continue;
+          names.add(name);
+          names.add(name.replace(/\.rbxlx?$/i, ''));
+        }
+      }
+      if (names.size === 0) continue;
+      const matches = windows.filter((studioProcess) => {
+        const label = studioWindowPlaceLabel(studioProcess.MainWindowTitle ?? '');
+        return names.has(label) || names.has(label.replace(/\.rbxlx?$/i, ''));
+      });
+      let match = matches.length === 1 ? matches[0] : undefined;
+      if (match === undefined) {
+        const managedPid = await this._managedProcessId(instanceId);
+        match = managedPid === undefined ? undefined : windows.find((studioProcess) => studioProcess.Id === managedPid);
+      }
+      if (match === undefined) continue;
+      found.set(instanceId, { windowTitle: match.MainWindowTitle ?? '', processId: match.Id });
+    }
+    return found;
+  }
+
+  private _studioWindowSnapshot(): Promise<StudioProcessSnapshot> {
+    const now = Date.now();
+    if (this.studioWindowSnapshot && now - this.studioWindowSnapshotAt <= STUDIO_WINDOW_SNAPSHOT_TTL_MS) {
+      return this.studioWindowSnapshot;
+    }
+    this.studioWindowSnapshotAt = now;
+    this.studioWindowSnapshot = this.studioWindowLookup().catch((error) => {
+      this.studioWindowSnapshot = undefined;
+      throw error;
+    });
+    return this.studioWindowSnapshot;
+  }
+
+  private async _managedProcessId(instanceId: string): Promise<number | undefined> {
+    try {
+      const record = await this.instanceManager.get(instanceId);
+      return record?.nativeProcessId ?? record?.spawnPid;
+    } catch {
+      return undefined;
+    }
   }
 
   async getRequestStatus(request_id: string) {

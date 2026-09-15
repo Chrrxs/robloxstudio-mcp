@@ -2,6 +2,13 @@ import { BridgeService, MultiplayerGroupInUseError, RequestFailure } from '../br
 import { ProxyBridgeService } from '../proxy-bridge-service.js';
 import { RobloxStudioTools } from '../tools/index.js';
 
+function toolsWithoutStudioWindows(bridge: BridgeService): RobloxStudioTools {
+  const tools = new RobloxStudioTools(bridge);
+  (tools as unknown as { studioWindowLookup: unknown }).studioWindowLookup =
+    async () => ({ status: 'ok', observedAt: Date.now(), processes: [] });
+  return tools;
+}
+
 interface RuntimeLogResult {
   instanceId: string;
   entries: Array<{ ts: number; level: string; message: string }>;
@@ -97,7 +104,7 @@ async function fixture(authToken?: string) {
   await proxy.waitForInitialRefresh();
   return {
     primary, proxy, forwarded, requests, stalled, register, fetchMock, endpointResponses,
-    tools: new RobloxStudioTools(proxy),
+    tools: toolsWithoutStudioWindows(proxy),
     close() {
       proxy.stop();
       primary.clearAllPendingRequests();
@@ -356,7 +363,7 @@ describe('proxy discovery and tool routing before the next topology poll', () =>
     const harness = await fixture();
     try {
       harness.register('edit', 'instance:new');
-      const primaryTools = new RobloxStudioTools(harness.primary);
+      const primaryTools = toolsWithoutStudioWindows(harness.primary);
       expect(await harness.tools.getConnectedInstances()).toEqual(await primaryTools.getConnectedInstances());
       expect(harness.forwarded).toEqual([]);
     } finally {
@@ -454,7 +461,7 @@ describe('proxy discovery and tool routing before the next topology poll', () =>
       harness.register('server', 'instance:runtime', 'runtime-peer', 'test:live');
       observer = new ProxyBridgeService('http://primary');
       await observer.waitForInitialRefresh();
-      const observerTools = new RobloxStudioTools(observer);
+      const observerTools = toolsWithoutStudioWindows(observer);
       const before = await observerTools.getConnectedInstances();
       expect(JSON.parse(before.content[0].text)).toMatchObject({
         multiplayerGroups: [{ instances: { 'instance:runtime-server': 'runtime-peer' } }],
@@ -499,7 +506,7 @@ describe('proxy discovery and tool routing before the next topology poll', () =>
       harness.register('server', 'instance:runtime', 'runtime-peer', 'test:race');
       observer = new ProxyBridgeService('http://primary');
       await observer.waitForInitialRefresh();
-      const observerTools = new RobloxStudioTools(observer);
+      const observerTools = toolsWithoutStudioWindows(observer);
       const discovered = await observerTools.getConnectedInstances();
       await observerTools.getMemoryBreakdown('server', undefined, 'instance:runtime-server');
       heldTopology.resolve(beforeRuntime);
