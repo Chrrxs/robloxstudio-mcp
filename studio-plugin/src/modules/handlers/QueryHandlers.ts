@@ -1,6 +1,7 @@
 import Utils from "../Utils";
 import CooperativeJobRunner from "../CooperativeJobRunner";
 import ScriptSearch from "../ScriptSearch";
+import PropertyAccess from "../PropertyAccess";
 import type { StudioRequestContext } from "../../types";
 
 const { getInstancePath, getInstanceByPath, readScriptSource } = Utils;
@@ -272,7 +273,13 @@ function getInstanceProperties(requestData: Record<string, unknown>) {
 	});
 
 	if (success) {
-		return { instancePath, className: instance.ClassName, properties };
+		const inaccessible = PropertyAccess.listInaccessibleProperties(instance);
+		return {
+			instancePath,
+			className: instance.ClassName,
+			properties,
+			...(inaccessible.size() > 0 ? { inaccessible } : {}),
+		};
 	} else {
 		return { error: `Failed to get properties: ${result}` };
 	}

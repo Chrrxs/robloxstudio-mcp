@@ -112,7 +112,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
   {
     name: 'set_properties',
     category: 'write',
-    description: 'Use to update several properties on one instance in a single call.',
+    description: 'Use to update several properties on one instance in a single call; plugin-inaccessible ones fail with a reason.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -1668,7 +1668,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
   {
     name: 'import_rbxm',
     category: 'write',
-    description: 'Use to load a local, remote, or inline .rbxm under a chosen parent.',
+    description: 'Use to load a local, remote, or inline .rbxm under a chosen parent, unwrapping a service root into its children.',
     inputSchema: {
       type: 'object',
       properties: {

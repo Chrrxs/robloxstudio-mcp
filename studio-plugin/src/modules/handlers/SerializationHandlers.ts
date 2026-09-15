@@ -33,6 +33,23 @@ const EncodingService = (game as unknown as {
 const { getInstanceByPath, getInstancePath } = Utils;
 const { beginRecording, finishRecording } = Recording;
 
+function subtreeSize(inst: Instance): number {
+	return inst.GetDescendants().size() + 1;
+}
+
+function isServiceClass(inst: Instance): boolean {
+	const [ok, service] = pcall(() => game.GetService(inst.ClassName as keyof Services));
+	return ok && service !== undefined;
+}
+
+function isLockedParentError(message: string): boolean {
+	const lower = string.lower(message);
+	return (
+		string.find(lower, "cannot change parent", 1, true)[0] !== undefined ||
+		string.find(lower, "locked", 1, true)[0] !== undefined
+	);
+}
+
 function exportRbxm(requestData: Record<string, unknown>): unknown {
 	const instancePaths = requestData.instance_paths as string[] | undefined;
 	if (!instancePaths || !typeIs(instancePaths, "table") || instancePaths.size() === 0) {
@@ -65,9 +82,24 @@ function exportRbxm(requestData: Record<string, unknown>): unknown {
 	// it. Base64 is by definition pure ASCII so this round-trips cleanly.
 	const base64Str = buffer.tostring(encodeResult as buffer);
 
+	let instanceCount = 0;
+	const rootClasses: string[] = [];
+	const rootNames: string[] = [];
+	for (const inst of instances) {
+		instanceCount += subtreeSize(inst);
+		rootClasses.push(inst.ClassName);
+		rootNames.push(inst.Name);
+	}
+
 	return {
 		base64: base64Str,
 		instance_count: instances.size(),
+		bytes: buffer.len(buf),
+		instanceCount,
+		rootClass: rootClasses[0],
+		rootName: rootNames[0],
+		rootClasses,
+		rootNames,
 	};
 }
 
@@ -107,7 +139,7 @@ function importRbxm(requestData: Record<string, unknown>): unknown {
 	if (!deserOk) {
 		return { error: `DeserializeInstancesAsync failed: ${tostring(deserResult)}` };
 	}
-	const deserialized = deserResult as Instance[];
+	const deserializedRoots = deserResult as Instance[];
 
 	// All-or-nothing parenting. Track every instance we've attached and roll back
 	// (unparent + Destroy) if any later one fails - partial imports leave the DM
@@ -116,16 +148,38 @@ function importRbxm(requestData: Record<string, unknown>): unknown {
 	const recordingId = isEdit ? beginRecording(`Import rbxm`) : undefined;
 
 	const attached: Instance[] = [];
+	const unwrappedServiceRoots: string[] = [];
 	let failureMessage: string | undefined;
-	for (const inst of deserialized) {
+	const attach = (inst: Instance): string | undefined => {
 		const [parentOk, parentErr] = pcall(() => {
 			inst.Parent = parentInstance;
 		});
-		if (!parentOk) {
-			failureMessage = `failed to parent ${inst.Name} (${inst.ClassName}) under ${parentPath}: ${tostring(parentErr)}`;
-			break;
+		if (parentOk) {
+			attached.push(inst);
+			return undefined;
 		}
-		attached.push(inst);
+		return tostring(parentErr);
+	};
+	const describeFailure = (inst: Instance, message: string) =>
+		`failed to parent ${inst.Name} (${inst.ClassName}) under ${parentPath}: ${message}`;
+	for (const root of deserializedRoots) {
+		if (!isServiceClass(root)) {
+			const rootError = attach(root);
+			if (rootError === undefined) continue;
+			if (!isLockedParentError(rootError)) {
+				failureMessage = describeFailure(root, rootError);
+				break;
+			}
+		}
+		unwrappedServiceRoots.push(root.ClassName);
+		for (const child of root.GetChildren()) {
+			const childError = attach(child);
+			if (childError !== undefined) {
+				failureMessage = describeFailure(child, childError);
+				break;
+			}
+		}
+		if (failureMessage !== undefined) break;
 	}
 
 	if (failureMessage !== undefined) {
@@ -136,20 +190,28 @@ function importRbxm(requestData: Record<string, unknown>): unknown {
 			});
 		}
 		// Also destroy any unparented deserialized instances so they don't leak.
-		for (const inst of deserialized) {
-			if (inst.Parent === undefined) {
-				pcall(() => inst.Destroy());
-			}
+		for (const inst of deserializedRoots) {
+			pcall(() => inst.Destroy());
 		}
 		finishRecording(recordingId, false);
 		return { error: failureMessage };
 	}
 
+	for (const root of deserializedRoots) {
+		if (root.Parent === undefined) {
+			pcall(() => root.Destroy());
+		}
+	}
+
 	const names: string[] = [];
 	const paths: string[] = [];
+	const rootClasses: string[] = [];
+	let instanceCount = 0;
 	for (const inst of attached) {
 		names.push(inst.Name);
 		paths.push(getInstancePath(inst));
+		rootClasses.push(inst.ClassName);
+		instanceCount += subtreeSize(inst);
 	}
 
 	// The recording shows "MCP: Import rbxm" in Studio's undo stack -
@@ -163,6 +225,12 @@ function importRbxm(requestData: Record<string, unknown>): unknown {
 		instance_paths: paths,
 		parent_path: parentPath,
 		source: sourceLabel,
+		instanceCount,
+		rootNames: names,
+		rootClasses,
+		...(unwrappedServiceRoots.size() > 0
+			? { unwrappedServiceRoot: unwrappedServiceRoots[0], unwrappedServiceRoots }
+			: {}),
 	};
 }
 
