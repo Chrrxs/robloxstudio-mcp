@@ -2,6 +2,7 @@
 
 import { execFileSync, spawn } from 'node:child_process';
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -18,11 +19,108 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
 import lockfile from 'proper-lockfile';
+import { SaxesParser } from 'saxes';
 
 const STUDIO_PROCESS = 'RobloxStudioBeta';
 const DEFAULT_MCP_PORT = Number.parseInt(process.env.ROBLOX_STUDIO_PORT ?? '58741', 10);
 export const ISOLATED_STUDIO_PLUGINS_DIR_NAME = 'RsmcpIsolatedPlugins';
 const STUDIO_WORKER_ROOT_NAME = 'robloxstudio-mcp-workers';
+const TEST_PROFILE_MARKER_NAME = 'studio-test-profile.json';
+const TEST_PROFILE_SETUP = 'node scripts/studio-test-profile.mjs setup --user MACHINE\\StudioTests';
+
+function normalizedWindowsPath(value) {
+  return typeof value === 'string' && /^[A-Za-z]:[\\/]/u.test(value)
+    ? path.win32.normalize(value).replace(/[\\/]$/u, '').toLowerCase()
+    : undefined;
+}
+
+export function probeWindowsStudioIdentity() {
+  if (process.platform !== 'win32' && !isWsl()) {
+    throw new Error('Studio test profiles require Windows, or WSL with Windows PowerShell available.');
+  }
+  const result = powershell([
+    "$ErrorActionPreference = 'Stop'",
+    '$identity = [Security.Principal.WindowsIdentity]::GetCurrent()',
+    '$sid = $identity.User.Value',
+    '$profile = (Get-ItemProperty -LiteralPath ("Registry::HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\ProfileList\\" + $sid) -Name ProfileImagePath).ProfileImagePath',
+    '$machineEnvironment = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey("SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Environment")',
+    '$userEnvironment = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey("Environment")',
+    '$machinePath = $machineEnvironment.GetValue("Path", "", [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)',
+    '$userPath = if ($null -ne $userEnvironment) { $userEnvironment.GetValue("Path", "", [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames) } else { "" }',
+    '[pscustomobject]@{ sid = $sid; accountName = $identity.Name; profileDirectory = [Environment]::ExpandEnvironmentVariables($profile); localAppData = [Environment]::GetFolderPath("LocalApplicationData"); roamingAppData = [Environment]::GetFolderPath("ApplicationData"); machinePath = $machinePath; userPath = $userPath; environmentProfileDirectory = $env:USERPROFILE; environmentLocalAppData = $env:LOCALAPPDATA; profileLoaded = (Test-Path -LiteralPath ("Registry::HKEY_USERS\\" + $sid)); interactiveSession = ([Environment]::UserInteractive -and [Diagnostics.Process]::GetCurrentProcess().SessionId -gt 0) } | ConvertTo-Json -Compress',
+  ].join('; '));
+  return JSON.parse(result);
+}
+
+function assertWindowsStudioIdentity(identity) {
+  if (!identity || !/^S-1-5-21-(?:\d+-){3}\d+$/u.test(identity.sid ?? '')) {
+    throw new Error('Studio tests require an ordinary dedicated Windows local/domain user, not a service identity.');
+  }
+  const profile = normalizedWindowsPath(identity.profileDirectory);
+  const localAppData = normalizedWindowsPath(identity.localAppData);
+  if (!identity.profileLoaded || !identity.interactiveSession) {
+    throw new Error('Studio tests need a loaded Windows user profile in an interactive desktop session. Sign in as the dedicated test user once; do not run Studio as a service.');
+  }
+  if (!profile || !localAppData || !localAppData.startsWith(`${profile}\\`) ||
+      normalizedWindowsPath(identity.environmentProfileDirectory) !== profile ||
+      normalizedWindowsPath(identity.environmentLocalAppData) !== localAppData) {
+    throw new Error('Windows identity/profile paths disagree or are redirected outside the actual profile. Run the entire harness through scripts/studio-test-profile.mjs; environment-only profile redirection is not supported.');
+  }
+}
+
+function testProfileMarkerPath(identity) {
+  return path.join(toWslPath(identity.localAppData), 'robloxstudio-mcp', TEST_PROFILE_MARKER_NAME);
+}
+
+function readTestProfileEnrollment(identity) {
+  const markerPath = testProfileMarkerPath(identity);
+  try {
+    return JSON.parse(readFileSync(markerPath, 'utf8'));
+  } catch (error) {
+    throw new Error(`No readable Studio test-profile enrollment at ${markerPath}. Authorize automated setup for the dedicated Windows account: ${TEST_PROFILE_SETUP}`, { cause: error });
+  }
+}
+
+export function assertStudioTestProfile({
+  identityProbe = probeWindowsStudioIdentity,
+  readEnrollment = readTestProfileEnrollment,
+} = {}) {
+  const identity = identityProbe();
+  assertWindowsStudioIdentity(identity);
+  const enrollment = readEnrollment(identity);
+  if (!enrollment || enrollment.version !== 1 || enrollment.dedicatedTestProfile !== true ||
+      enrollment.sid !== identity.sid ||
+      !/^S-1-5-21-(?:\d+-){3}\d+$/u.test(enrollment.sourceSid ?? '') ||
+      enrollment.sourceSid === identity.sid ||
+      normalizedWindowsPath(enrollment.profileDirectory) !== normalizedWindowsPath(identity.profileDirectory) ||
+      normalizedWindowsPath(enrollment.localAppData) !== normalizedWindowsPath(identity.localAppData)) {
+    throw new Error(`Studio test-profile enrollment does not match this Windows SID/profile, or reuses the personal/source identity. Run from a separate personal account: ${TEST_PROFILE_SETUP}`);
+  }
+  return identity;
+}
+
+async function enrollStudioTestProfile({ sourceSid, confirmDedicatedProfile }) {
+  if (!confirmDedicatedProfile) {
+    throw new Error(`Enrollment requires explicit --confirm-dedicated-profile. Use: ${TEST_PROFILE_SETUP}`);
+  }
+  const identity = probeWindowsStudioIdentity();
+  assertWindowsStudioIdentity(identity);
+  if (!/^S-1-5-21-(?:\d+-){3}\d+$/u.test(sourceSid ?? '') || sourceSid === identity.sid) {
+    throw new Error('Enrollment must execute under a different Windows SID from the personal/source account. Use scripts/studio-test-profile.mjs enroll --user MACHINE\\StudioTests --confirm-dedicated-profile.');
+  }
+  const settings = await configureStudioDirectoryIsolation({ initializeIfMissing: true, freezeSettings: true });
+  const markerPath = testProfileMarkerPath(identity);
+  mkdirSync(path.dirname(markerPath), { recursive: true });
+  writeFileSync(markerPath, `${JSON.stringify({
+    version: 1,
+    dedicatedTestProfile: true,
+    sid: identity.sid,
+    sourceSid,
+    profileDirectory: identity.profileDirectory,
+    localAppData: identity.localAppData,
+  }, null, 2)}\n`, { mode: 0o600 });
+  return { identity: assertStudioTestProfile(), settings, markerPath };
+}
 
 export function isWsl() {
   if (process.platform !== 'linux') return false;
@@ -42,10 +140,19 @@ function run(command, args, options = {}) {
   }).trim();
 }
 
+export function windowsPowerShellEnvironment(inherited = process.env) {
+  // PowerShell 7's module paths break Windows PowerShell autoloading when Node
+  // sits between the two shells. Let the new engine build its own module path.
+  return Object.fromEntries(Object.entries(inherited).filter(
+    ([key]) => !/^(?:PSModulePath|WinPSModulePath)$/iu.test(key),
+  ));
+}
+
 function powershell(script) {
   const exe = process.platform === 'win32' ? 'powershell.exe' : 'powershell.exe';
   return run(exe, ['-NoProfile', '-Command', script], {
     cwd: isWsl() && existsSync('/mnt/c/Windows') ? '/mnt/c/Windows' : process.cwd(),
+    env: windowsPowerShellEnvironment(),
   });
 }
 
@@ -88,42 +195,130 @@ export function resolveStudioLogsDir() {
   return path.join(toWslPath(localAppData), 'Roblox', 'logs');
 }
 
-function pluginDirectorySettingPattern() {
-  return /(<QDir\b[^>]*\bname="PluginsDir"[^>]*>)([\s\S]*?)(<\/QDir>)/gu;
+function missingStudioSettingsError(settingsPath) {
+  return new Error(`Roblox Studio settings were not found at ${settingsPath}. Routine startup never creates settings. Enroll the dedicated test account to initialize isolated settings: ${TEST_PROFILE_SETUP}`);
+}
+
+function parseStudioSettings(contents, settingsPath) {
+  const parser = new SaxesParser();
+  const stack = [];
+  const studioItems = [];
+  let root;
+  let openingStart;
+  parser.on('doctype', () => {
+    throw new Error('DOCTYPE is not supported in Studio settings.');
+  });
+  parser.on('opentagstart', () => {
+    openingStart = contents.lastIndexOf('<', parser.position - 1);
+  });
+  parser.on('opentag', (tag) => {
+    const parent = stack.at(-1);
+    const node = {
+      name: tag.name,
+      attributes: tag.attributes,
+      start: openingStart,
+      contentStart: parser.position,
+      selfClosing: tag.isSelfClosing,
+      children: [],
+      text: '',
+    };
+    if (parent) parent.children.push(node);
+    else root = node;
+    if (tag.name === 'Item' && tag.attributes.class === 'Studio') {
+      if (parent !== root) throw new Error('Studio Item must be a direct child of roblox.');
+      studioItems.push(node);
+    }
+    stack.push(node);
+  });
+  const appendText = (text) => {
+    const node = stack.at(-1);
+    if (node) node.text += text;
+  };
+  parser.on('text', appendText);
+  parser.on('cdata', appendText);
+  parser.on('closetag', () => {
+    const node = stack.pop();
+    node.end = parser.position;
+    node.contentEnd = node.selfClosing ? node.contentStart : contents.lastIndexOf('</', node.end - 1);
+  });
+  try {
+    parser.write(contents).close();
+    if (root?.name !== 'roblox' || root.attributes.version !== '4') {
+      throw new Error('Expected a roblox version="4" settings document.');
+    }
+    if (studioItems.length !== 1) {
+      throw new Error(`Expected exactly one Studio Item; found ${studioItems.length}.`);
+    }
+    const propertiesNodes = studioItems[0].children.filter((node) => node.name === 'Properties');
+    if (propertiesNodes.length !== 1) {
+      throw new Error(`Expected exactly one Studio Properties element; found ${propertiesNodes.length}.`);
+    }
+    const properties = propertiesNodes[0];
+    const plugins = properties.children.filter((node) => node.attributes.name === 'PluginsDir');
+    if (plugins.length > 1) {
+      throw new Error(`Expected at most one Studio.PluginsDir property; found ${plugins.length}.`);
+    }
+    const plugin = plugins[0];
+    if (plugin && (plugin.name !== 'QDir' || plugin.children.length > 0)) {
+      throw new Error('Studio.PluginsDir must be a text-only QDir element.');
+    }
+    return { properties, plugin };
+  } catch (error) {
+    throw new Error(`Invalid Roblox Studio settings at ${settingsPath}: ${error.message}`, { cause: error });
+  }
 }
 
 export function readStudioPluginDirectorySetting(
   settingsPath = resolveStudioGlobalSettingsPath(),
 ) {
-  if (!existsSync(settingsPath)) {
-    throw new Error(
-      `Roblox Studio settings were not found at ${settingsPath}. Launch and close Studio once, then retry.`,
-    );
-  }
-  const contents = readFileSync(settingsPath, 'utf8');
-  const matches = [...contents.matchAll(pluginDirectorySettingPattern())];
-  if (matches.length !== 1) {
-    throw new Error(
-      `Expected exactly one Studio.PluginsDir QDir in ${settingsPath}; found ${matches.length}.`,
-    );
-  }
+  if (!existsSync(settingsPath)) throw missingStudioSettingsError(settingsPath);
+  const { plugin } = parseStudioSettings(readFileSync(settingsPath, 'utf8'), settingsPath);
   return {
     settingsPath,
-    value: matches[0][2],
-    configured: matches[0][2] === ISOLATED_STUDIO_PLUGINS_DIR_NAME,
+    value: plugin?.text ?? null,
+    configured: plugin?.text === ISOLATED_STUDIO_PLUGINS_DIR_NAME,
+    readOnly: (statSync(settingsPath).mode & 0o222) === 0,
   };
+}
+
+export function assertStudioDirectoryIsolation({
+  settingsPath = resolveStudioGlobalSettingsPath(),
+  requireReadOnly = true,
+} = {}) {
+  const current = readStudioPluginDirectorySetting(settingsPath);
+  if (!current.configured) {
+    throw new Error(`Studio.PluginsDir in ${settingsPath} must be ${JSON.stringify(ISOLATED_STUDIO_PLUGINS_DIR_NAME)}, not ${JSON.stringify(current.value)}. Routine startup never edits settings. Close Studio and explicitly enroll the dedicated test account: ${TEST_PROFILE_SETUP}`);
+  }
+  if (requireReadOnly && !current.readOnly) {
+    throw new Error(`Studio settings at ${settingsPath} must be read-only so Studio cannot rewrite the isolated PluginsDir. Routine startup never edits settings or permissions. Close Studio and explicitly enroll the dedicated test account: ${TEST_PROFILE_SETUP}`);
+  }
+  return current;
 }
 
 export async function configureStudioDirectoryIsolation({
   settingsPath = resolveStudioGlobalSettingsPath(),
   relativePluginsDirectory = ISOLATED_STUDIO_PLUGINS_DIR_NAME,
   requireStudioClosed = true,
+  initializeIfMissing = false,
+  freezeSettings = false,
+  processProbe = listStudioProcesses,
 } = {}) {
   if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/u.test(relativePluginsDirectory)) {
     throw new Error('relativePluginsDirectory must be one relative directory name.');
   }
+  const assertStudioClosed = () => {
+    const running = requireStudioClosed ? processProbe({ strict: true, currentUserOnly: true }) : [];
+    if (running.length > 0) {
+      throw new Error(`Close Roblox Studio in the current test profile before configuring directory isolation; running processes: ${JSON.stringify(running)}`);
+    }
+  };
+  if (!existsSync(settingsPath)) {
+    if (!initializeIfMissing) throw missingStudioSettingsError(settingsPath);
+    assertStudioClosed();
+    mkdirSync(path.dirname(settingsPath), { recursive: true });
+  }
   const releaseSettingsLock = await lockfile.lock(settingsPath, {
-    realpath: true,
+    realpath: false,
     stale: 30000,
     retries: {
       retries: 600,
@@ -133,30 +328,81 @@ export async function configureStudioDirectoryIsolation({
     },
   });
   try {
-    const current = readStudioPluginDirectorySetting(settingsPath);
-    if (current.value === relativePluginsDirectory) {
-      return { ...current, configured: true, changed: false };
+    const created = !existsSync(settingsPath);
+    if (created && !initializeIfMissing) throw missingStudioSettingsError(settingsPath);
+    const contents = created ? undefined : readFileSync(settingsPath, 'utf8');
+    const document = created ? undefined : parseStudioSettings(contents, settingsPath);
+    const originalMode = created ? undefined : statSync(settingsPath).mode & 0o7777;
+    const readOnly = !created && (originalMode & 0o222) === 0;
+    if (document?.plugin?.text === relativePluginsDirectory) {
+      if (freezeSettings && !readOnly) {
+        assertStudioClosed();
+        chmodSync(settingsPath, originalMode & ~0o222);
+        return { ...readStudioPluginDirectorySetting(settingsPath), configured: true, created: false, changed: true };
+      }
+      return { settingsPath, value: relativePluginsDirectory, configured: true, readOnly, created: false, changed: false };
     }
-    const running = requireStudioClosed ? listStudioProcesses({ strict: true }) : [];
-    if (running.length > 0) {
-      throw new Error(
-        `Close Roblox Studio before configuring directory isolation; running processes: ${JSON.stringify(running)}`,
-      );
-    }
+    assertStudioClosed();
 
-    const contents = readFileSync(settingsPath, 'utf8');
-    const updated = contents.replace(
-      pluginDirectorySettingPattern(),
-      (_match, open, _value, close) => `${open}${relativePluginsDirectory}${close}`,
-    );
+    let updated;
+    if (created) {
+      updated = [
+        '<?xml version="1.0" encoding="utf-8"?>',
+        '<roblox xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="http://www.roblox.com/roblox.xsd" version="4">',
+        '  <Item class="Studio" referent="RBX0">',
+        '    <Properties>',
+        `      <QDir name="PluginsDir">${relativePluginsDirectory}</QDir>`,
+        '    </Properties>',
+        '  </Item>',
+        '</roblox>',
+        '',
+      ].join('\n');
+    } else {
+      const { plugin, properties } = document;
+      const node = plugin ?? properties;
+      if (node.selfClosing) {
+        const opening = contents.slice(node.start, node.contentStart - 2);
+        const value = plugin ? relativePluginsDirectory : `<QDir name="PluginsDir">${relativePluginsDirectory}</QDir>`;
+        updated = `${contents.slice(0, node.start)}${opening}>${value}</${node.name}>${contents.slice(node.end)}`;
+      } else if (plugin) {
+        updated = `${contents.slice(0, plugin.contentStart)}${relativePluginsDirectory}${contents.slice(plugin.contentEnd)}`;
+      } else {
+        const property = `<QDir name="PluginsDir">${relativePluginsDirectory}</QDir>`;
+        updated = `${contents.slice(0, properties.contentEnd)}${property}${contents.slice(properties.contentEnd)}`;
+      }
+    }
     const temporaryPath = `${settingsPath}.rsmcp-${process.pid}-${Date.now()}.tmp`;
     try {
       writeFileSync(temporaryPath, updated, {
         encoding: 'utf8',
-        mode: statSync(settingsPath).mode,
+        mode: created ? 0o600 : originalMode | 0o200,
+        flag: 'wx',
       });
-      renameSync(temporaryPath, settingsPath);
+      const temporaryMode = created ? statSync(temporaryPath).mode & 0o7777 : originalMode;
+      if (freezeSettings || !created) {
+        chmodSync(temporaryPath, freezeSettings ? temporaryMode & ~0o222 : temporaryMode);
+      }
+      try {
+        renameSync(temporaryPath, settingsPath);
+      } catch (error) {
+        if (process.platform !== 'win32' || !readOnly || !['EPERM', 'EACCES'].includes(error.code)) {
+          throw error;
+        }
+        // Windows refuses to replace a ReadOnly destination. Keep the replacement
+        // protected, and restore the original protection if replacement fails.
+        chmodSync(settingsPath, originalMode | 0o200);
+        try {
+          renameSync(temporaryPath, settingsPath);
+        } catch (replacementError) {
+          chmodSync(settingsPath, originalMode);
+          throw replacementError;
+        }
+      }
     } finally {
+      if (process.platform === 'win32' && existsSync(temporaryPath)) {
+        const mode = statSync(temporaryPath).mode;
+        if ((mode & 0o222) === 0) chmodSync(temporaryPath, mode | 0o200);
+      }
       rmSync(temporaryPath, { force: true });
     }
 
@@ -164,7 +410,7 @@ export async function configureStudioDirectoryIsolation({
     if (configured.value !== relativePluginsDirectory) {
       throw new Error(`Studio.PluginsDir remained ${JSON.stringify(configured.value)} after configuration.`);
     }
-    return { ...configured, configured: true, changed: true };
+    return { ...configured, configured: true, created, changed: true };
   } finally {
     await releaseSettingsLock();
   }
@@ -183,10 +429,13 @@ export function createIsolatedStudioDirectory({ prefix = 'worker' } = {}) {
   const workingDirectory = mkdtempSync(path.join(parent, `${prefix}-`));
   const pluginsDirectory = path.join(workingDirectory, ISOLATED_STUDIO_PLUGINS_DIR_NAME);
   mkdirSync(pluginsDirectory);
+  const managedInstanceRegistryDirectory = path.join(workingDirectory, 'managed-instances');
+  mkdirSync(managedInstanceRegistryDirectory);
   let cleaned = false;
   return {
     workingDirectory,
     pluginsDirectory,
+    managedInstanceRegistryDirectory,
     cleanup() {
       if (cleaned) return;
       cleaned = true;
@@ -235,7 +484,7 @@ export function resolveStudioExe() {
   return candidates[0];
 }
 
-export function listStudioProcesses({ strict = false } = {}) {
+export function listStudioProcesses({ strict = false, currentUserOnly = false } = {}) {
   if (process.platform === 'darwin') {
     let out = '';
     try {
@@ -260,6 +509,10 @@ export function listStudioProcesses({ strict = false } = {}) {
     const out = powershell([
       "$ErrorActionPreference = 'Stop'",
       `$studio = @(); try { $studio = @(Get-Process ${STUDIO_PROCESS} -ErrorAction Stop) } catch { if ($_.FullyQualifiedErrorId -notlike "NoProcessFoundForGivenName,*") { throw } }`,
+      ...(currentUserOnly ? [
+        '$currentSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value',
+        '$studio = @($studio | Where-Object { $candidate = Get-CimInstance Win32_Process -Filter ("ProcessId = " + $_.Id); if ($null -eq $candidate) { throw "A Studio process disappeared while checking ownership; retry setup." }; $owner = Invoke-CimMethod -InputObject $candidate -MethodName GetOwnerSid; if ($owner.ReturnValue -ne 0 -or -not $owner.Sid) { throw "Cannot determine Studio process ownership; refusing to configure settings." }; $owner.Sid -eq $currentSid })',
+      ] : []),
       '$studio | Select-Object Id,Path,MainWindowTitle | ConvertTo-Json -Compress',
     ].join('; '));
     if (!out) return [];
@@ -337,6 +590,8 @@ export async function closeAllStudio({ requireEnv = true, timeoutMs = 30000 } = 
 }
 
 export function launchStudio(args = [], { workingDirectory } = {}) {
+  assertStudioTestProfile();
+  assertStudioDirectoryIsolation();
   const exe = resolveStudioExe();
   const studioArgs = args.map(toStudioLaunchArg);
   const cwd = workingDirectory ?? process.env.RSMCP_STUDIO_WORKING_DIRECTORY ??
@@ -428,7 +683,22 @@ async function main() {
     return;
   }
   if (command === 'configure-plugin-isolation') {
+    assertStudioTestProfile();
     console.log(JSON.stringify(await configureStudioDirectoryIsolation(), null, 2));
+    return;
+  }
+  if (command === 'enroll-test-profile') {
+    console.log(JSON.stringify(await enrollStudioTestProfile({
+      sourceSid: argValue('--source-sid', undefined),
+      confirmDedicatedProfile: process.argv.includes('--confirm-dedicated-profile'),
+    }), null, 2));
+    return;
+  }
+  if (command === 'assert-test-profile') {
+    console.log(JSON.stringify({
+      identity: assertStudioTestProfile(),
+      settings: assertStudioDirectoryIsolation(),
+    }, null, 2));
     return;
   }
   if (command === 'launch') {

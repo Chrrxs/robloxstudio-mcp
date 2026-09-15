@@ -18,7 +18,8 @@ import {
 import { acquireSuitePort, windowsPortIsAvailable } from './lib/test-port.mjs';
 import {
   closeStudioProcess,
-  configureStudioDirectoryIsolation,
+  assertStudioDirectoryIsolation,
+  assertStudioTestProfile,
   createIsolatedStudioDirectory,
 } from '../scripts/studio-lifecycle.mjs';
 
@@ -46,6 +47,7 @@ const ARTIFACT_SOURCE = process.env.RSMCP_E2E_ARTIFACT_SOURCE ?? 'local';
 
 let localBuildDone = false;
 let studioIsolation;
+let studioLaunchPending = false;
 const ownedStudioLaunches = new Map();
 const deferredCleanupErrors = [];
 
@@ -337,11 +339,17 @@ async function ensureLocalBuild(tmpRoot) {
   await runChecked('npm', ['run', 'build'], { timeoutMs: 120000 });
   await runChecked('npm', ['run', 'compile:plugin'], { timeoutMs: 120000 });
   await runChecked('node', ['scripts/build-plugin.mjs', '--variant', 'inspector'], {
-    env: { MCP_PLUGINS_DIR: buildInstallDir },
+    env: {
+      MCP_PLUGINS_DIR: buildInstallDir,
+      ROBLOXSTUDIO_MCP_MANAGED_INSTANCE_REGISTRY_DIR: studioIsolation.managedInstanceRegistryDirectory,
+    },
     timeoutMs: 120000,
   });
   await runChecked('node', ['scripts/build-plugin.mjs'], {
-    env: { MCP_PLUGINS_DIR: buildInstallDir },
+    env: {
+      MCP_PLUGINS_DIR: buildInstallDir,
+      ROBLOXSTUDIO_MCP_MANAGED_INSTANCE_REGISTRY_DIR: studioIsolation.managedInstanceRegistryDirectory,
+    },
     timeoutMs: 120000,
   });
   localBuildDone = true;
@@ -425,6 +433,7 @@ async function smokeAutoInstall(artifact, tmpRoot) {
       env: {
         ...SERVER_ENV,
         MCP_PLUGINS_DIR: smokePluginsDir,
+        ROBLOXSTUDIO_MCP_MANAGED_INSTANCE_REGISTRY_DIR: studioIsolation.managedInstanceRegistryDirectory,
         ROBLOX_STUDIO_PORT: String(portLease.port),
         ROBLOX_STUDIO_REQUIRE_PRIMARY: '1',
       },
@@ -509,6 +518,7 @@ async function startClient(label, artifact, { autoInstall }) {
         ? {
             MCP_PLUGINS_DIR: studioIsolation.pluginsDirectory,
             RSMCP_STUDIO_WORKING_DIRECTORY: studioIsolation.workingDirectory,
+            ROBLOXSTUDIO_MCP_MANAGED_INSTANCE_REGISTRY_DIR: studioIsolation.managedInstanceRegistryDirectory,
           }
         : {}),
     },
@@ -524,7 +534,9 @@ async function startManagerForArtifact(label, managerArtifact) {
 }
 
 async function launchManagedPlace(managerClient, { waitForConnection = true } = {}) {
-  await configureStudioDirectoryIsolation({ requireStudioClosed: false });
+  assertStudioTestProfile();
+  assertStudioDirectoryIsolation();
+  studioLaunchPending = true;
   const launched = await managerClient.callTool('manage_instance', {
     action: 'launch',
     source: 'baseplate',
@@ -542,6 +554,7 @@ async function launchManagedPlace(managerClient, { waitForConnection = true } = 
     `manage_instance returned exact Studio process identity (${JSON.stringify(launched)})`,
   );
   ownedStudioLaunches.set(launched.launch_id, launched);
+  studioLaunchPending = false;
 
   const authorized = await managerClient.callTool('manage_instance', {
     action: 'authorize',
@@ -630,21 +643,7 @@ async function closeManagedInstance(managerClient, instanceId) {
   }
   ownedStudioLaunches.delete(instanceId);
 
-  let restoreError;
-  try {
-    await configureStudioDirectoryIsolation({ requireStudioClosed: false });
-  } catch (error) {
-    restoreError = error instanceof Error ? error : new Error(String(error));
-  }
-  if (managedError && restoreError) {
-    throw new AggregateError(
-      [managedError, restoreError],
-      `Managed close and Studio directory restoration both failed for ${instanceId}`,
-      { cause: managedError },
-    );
-  }
   if (managedError) throw managedError;
-  if (restoreError) throw restoreError;
 }
 
 async function assertToolSurface(client, artifact, instanceId) {
@@ -674,6 +673,7 @@ async function writeMismatchedPlugin(artifact, pluginsDir) {
     env: {
       ...SERVER_ENV,
       MCP_PLUGINS_DIR: pluginsDir,
+      ROBLOXSTUDIO_MCP_MANAGED_INSTANCE_REGISTRY_DIR: studioIsolation.managedInstanceRegistryDirectory,
       ROBLOX_STUDIO_PORT: String(BASE_PORT),
     },
     timeoutMs: 30000,
@@ -859,6 +859,8 @@ async function runMismatchCase(artifact, managerArtifact, pluginsDir) {
 }
 
 async function main() {
+  assertStudioTestProfile();
+  assertStudioDirectoryIsolation();
   if (ARTIFACT_SOURCE !== 'local' && ARTIFACT_SOURCE !== 'latest') {
     throw new Error('RSMCP_E2E_ARTIFACT_SOURCE must be "local" or "latest".');
   }
@@ -875,7 +877,6 @@ async function main() {
   }
 
   const tmpRoot = await mkdtemp(path.join(os.tmpdir(), 'robloxstudio-mcp-e2e-'));
-  await configureStudioDirectoryIsolation({ requireStudioClosed: false });
   studioIsolation = createIsolatedStudioDirectory({ prefix: 'auto-install-e2e' });
   const pluginsDir = studioIsolation.pluginsDirectory;
 
@@ -896,27 +897,26 @@ async function main() {
     throw error;
   } finally {
     const cleanupErrors = [...deferredCleanupErrors];
-    for (const launch of ownedStudioLaunches.values()) {
+    for (const [instanceId, launch] of ownedStudioLaunches) {
       try {
         await closeStudioProcess({
           processId: launch.pid,
           startedAtFileTime: launch.process_started_at_file_time,
         });
+        ownedStudioLaunches.delete(instanceId);
       } catch (error) {
         cleanupErrors.push(error);
       }
     }
-    ownedStudioLaunches.clear();
-    try {
-      await configureStudioDirectoryIsolation({ requireStudioClosed: false });
-    } catch (error) {
-      cleanupErrors.push(error);
-    }
     await delay(1000);
-    try {
-      studioIsolation.cleanup();
-    } catch (error) {
-      cleanupErrors.push(error);
+    if (!studioLaunchPending && ownedStudioLaunches.size === 0) {
+      try {
+        studioIsolation.cleanup();
+      } catch (error) {
+        cleanupErrors.push(error);
+      }
+    } else {
+      console.warn(`Retaining Studio worker and managed registry after unconfirmed closure: ${studioIsolation.workingDirectory}`);
     }
     studioIsolation = undefined;
     rmSync(tmpRoot, { recursive: true, force: true });

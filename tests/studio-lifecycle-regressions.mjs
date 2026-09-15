@@ -10,7 +10,8 @@ import { BASE_PORT, McpClient, DIST, assert } from './lib/mcp-client.mjs';
 import { resolveAuthToken } from '../packages/core/dist/auth.js';
 import {
   closeStudioProcess,
-  configureStudioDirectoryIsolation,
+  assertStudioDirectoryIsolation,
+  assertStudioTestProfile,
   createIsolatedStudioDirectory,
 } from '../scripts/studio-lifecycle.mjs';
 
@@ -21,6 +22,7 @@ const SAVED_INSTANCE_ID = 'instance:old-000';
 const SERVER_ENV = {
   ROBLOX_STUDIO_PROXY_PROMOTION_INTERVAL_MS: '600000',
 };
+let studioLaunchPending = false;
 
 function isPortOpen(port) {
   return new Promise((resolve) => {
@@ -102,7 +104,9 @@ function reproPluginXml(marker, invalidUtf8 = false) {
 }
 
 async function launchLocalPlace(client, placeFile, workingDirectory, launchedProcesses) {
-  await configureStudioDirectoryIsolation({ requireStudioClosed: false });
+  assertStudioTestProfile();
+  assertStudioDirectoryIsolation();
+  studioLaunchPending = true;
   const launch = await client.callTool('manage_instance', {
     action: 'launch',
     source: 'local_file',
@@ -122,6 +126,7 @@ async function launchLocalPlace(client, placeFile, workingDirectory, launchedPro
     processId: launch.pid,
     startedAtFileTime: launch.process_started_at_file_time,
   });
+  studioLaunchPending = false;
 
   const authorized = await client.callTool('manage_instance', {
     action: 'authorize',
@@ -191,11 +196,12 @@ async function assertLogMarker(client, instanceId, marker, expectedCount, expect
 }
 
 async function main() {
+  assertStudioTestProfile();
+  assertStudioDirectoryIsolation();
   if (await isPortOpen(BASE_PORT)) {
     throw new Error(`Port ${BASE_PORT} is already occupied. Stop existing MCP servers before running this E2E.`);
   }
 
-  await configureStudioDirectoryIsolation({ requireStudioClosed: false });
   const worker = createIsolatedStudioDirectory({ prefix: 'lifecycle-regressions' });
   const placeFile = path.join(worker.workingDirectory, 'Lifecycle.rbxlx');
   const reproPlugin = path.join(worker.pluginsDirectory, REPRO_PLUGIN_NAME);
@@ -218,6 +224,7 @@ async function main() {
         ...SERVER_ENV,
         MCP_PLUGINS_DIR: worker.pluginsDirectory,
         RSMCP_STUDIO_WORKING_DIRECTORY: worker.workingDirectory,
+        ROBLOXSTUDIO_MCP_MANAGED_INSTANCE_REGISTRY_DIR: worker.managedInstanceRegistryDirectory,
       },
       startupTimeoutMs: 60000,
     });
@@ -263,7 +270,8 @@ async function main() {
     // place to verify process identity, rather than place metadata, controls
     // coexistence and routing.
     await closeStudioProcess(launchedProcesses[0]);
-    await configureStudioDirectoryIsolation({ requireStudioClosed: false });
+    assertStudioTestProfile();
+    assertStudioDirectoryIsolation();
     writeFileSync(reproPlugin, reproPluginXml(markerB));
     const stalePeer = (await serverTopology()).peers.find(
       (peer) => peer.peerId === firstPeerId,
@@ -376,6 +384,7 @@ async function main() {
     throw error;
   } finally {
     const cleanupErrors = [];
+    let closeConfirmed = !studioLaunchPending;
     if (keepOldPeerAlive) {
       keepOldPeerAlive.controller.abort();
       const oldStreamError = await keepOldPeerAlive.completion;
@@ -406,6 +415,7 @@ async function main() {
         await closeStudioProcess(identity);
       } catch (error) {
         cleanupErrors.push(error);
+        closeConfirmed = false;
       }
     }
     if (client) {
@@ -415,15 +425,14 @@ async function main() {
         cleanupErrors.push(error);
       }
     }
-    try {
-      await configureStudioDirectoryIsolation({ requireStudioClosed: false });
-    } catch (error) {
-      cleanupErrors.push(error);
-    }
-    try {
-      worker.cleanup();
-    } catch (error) {
-      cleanupErrors.push(error);
+    if (closeConfirmed) {
+      try {
+        worker.cleanup();
+      } catch (error) {
+        cleanupErrors.push(error);
+      }
+    } else {
+      console.warn(`Retaining Studio worker and managed registry after unconfirmed closure: ${worker.workingDirectory}`);
     }
     if (cleanupErrors.length > 0) {
       if (bodyError) {

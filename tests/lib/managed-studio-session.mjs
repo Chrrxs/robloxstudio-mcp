@@ -7,7 +7,8 @@ import { McpClient, REPO_ROOT } from './mcp-client.mjs';
 import { callMcpHttpTool } from './mcp-http-client.mjs';
 import {
   closeStudioProcess,
-  configureStudioDirectoryIsolation,
+  assertStudioDirectoryIsolation,
+  assertStudioTestProfile,
 } from '../../scripts/studio-lifecycle.mjs';
 
 const DEFAULT_LAUNCH_TIMEOUT_MS = 120000;
@@ -19,7 +20,7 @@ const SUCCESSFUL_CLOSE_STATUSES = new Set(['closed', 'already_closed']);
 
 function stageRunnerBaseplate() {
   const directory = mkdtempSync(path.join(os.tmpdir(), 'rsmcp-runner-'));
-  const placePath = path.join(directory, 'RunnerBaseplate.rbxl');
+  const placePath = path.join(directory, `RunnerBaseplate-${randomBytes(16).toString('hex')}.rbxl`);
   try {
     copyFileSync(path.join(REPO_ROOT, 'packages/core/assets/Baseplate.rbxl'), placePath);
   } catch (error) {
@@ -28,6 +29,16 @@ function stageRunnerBaseplate() {
   }
   return {
     path: placePath,
+    cleanup() {
+      rmSync(directory, { recursive: true, force: true });
+    },
+  };
+}
+
+function createManagedInstanceRegistry() {
+  const directory = mkdtempSync(path.join(os.tmpdir(), 'rsmcp-registry-'));
+  return {
+    directory,
     cleanup() {
       rmSync(directory, { recursive: true, force: true });
     },
@@ -43,41 +54,22 @@ const defaultAdapters = {
   },
   callTool: callMcpHttpTool,
   closeProcessIdentity: closeStudioProcess,
-  configureDirectoryIsolation: () => configureStudioDirectoryIsolation({ requireStudioClosed: false }),
+  assertDirectoryIsolation: assertStudioDirectoryIsolation,
+  assertTestProfile: assertStudioTestProfile,
+  createRegistry: createManagedInstanceRegistry,
   stagePlace: stageRunnerBaseplate,
   delay,
 };
 
-function existingSession(instanceId) {
+function existingSession(instanceId, env) {
   return {
     instanceId,
     managed: false,
+    env,
     async close() {},
   };
 }
 
-function environmentGuard(env, values, removals) {
-  const previous = new Map();
-  for (const key of [...Object.keys(values), ...removals]) {
-    if (previous.has(key)) continue;
-    previous.set(key, {
-      exists: Object.prototype.hasOwnProperty.call(env, key),
-      value: env[key],
-    });
-  }
-  Object.assign(env, values);
-  for (const key of removals) delete env[key];
-
-  let restored = false;
-  return () => {
-    if (restored) return;
-    restored = true;
-    for (const [key, prior] of previous) {
-      if (prior.exists) env[key] = prior.value;
-      else delete env[key];
-    }
-  };
-}
 
 function controlEnvironment(runtimeEnv, port, authToken) {
   const env = {
@@ -87,7 +79,6 @@ function controlEnvironment(runtimeEnv, port, authToken) {
     ROBLOX_STUDIO_REQUIRE_PRIMARY: '1',
     RSMCP_AUTO_ASSIGNED_PORT: '0',
   };
-  delete env.ROBLOX_STUDIO_NO_AUTH;
   return env;
 }
 
@@ -107,11 +98,15 @@ function launchIdOf(value) {
 function cleanupError(primary, cleanupErrors) {
   if (cleanupErrors.length === 0) return primary;
   const primaryError = primary instanceof Error ? primary : new Error(String(primary));
-  return new AggregateError(
+  const combined = new AggregateError(
     [primaryError, ...cleanupErrors],
     `${primaryError.message} Cleanup also failed: ${cleanupErrors.map((error) => error.message).join('; ')}`,
     { cause: primaryError },
   );
+  if ([primaryError, ...cleanupErrors].some((error) => error.retainedStudioResources)) {
+    combined.retainedStudioResources = true;
+  }
+  return combined;
 }
 
 function assertCloseSucceeded(result, launchId) {
@@ -229,7 +224,7 @@ export async function openManagedStudioSession(
   const suppliedInstanceId = typeof existingInstanceId === 'string'
     ? existingInstanceId.trim()
     : '';
-  if (suppliedInstanceId) return existingSession(suppliedInstanceId);
+  if (suppliedInstanceId) return existingSession(suppliedInstanceId, runtimeEnv);
   if (!Number.isInteger(port) || port < 1 || port > 65535) {
     throw new Error(`Invalid MCP HTTP port ${port}`);
   }
@@ -243,41 +238,46 @@ export async function openManagedStudioSession(
 
   const adapters = { ...defaultAdapters, ...injectedAdapters };
   const authToken = randomBytes(32).toString('hex');
-  const restoreEnvironment = environmentGuard(
-    runtimeEnv,
-    {
-      ROBLOX_STUDIO_AUTH_TOKEN: authToken,
-      ROBLOX_STUDIO_PORT: String(port),
-      RSMCP_AUTO_ASSIGNED_PORT: '0',
-    },
-    ['ROBLOX_STUDIO_NO_AUTH', 'ROBLOX_STUDIO_REQUIRE_PRIMARY'],
-  );
-  const ownedEnvironment = controlEnvironment(runtimeEnv, port, authToken);
-  const control = adapters.createControl(ownedEnvironment);
+  const sessionEnv = {
+    ...runtimeEnv,
+    ROBLOX_STUDIO_AUTH_TOKEN: authToken,
+    ROBLOX_STUDIO_PORT: String(port),
+    RSMCP_AUTO_ASSIGNED_PORT: '0',
+    ROBLOX_STUDIO_NO_AUTH: '0',
+    ROBLOX_STUDIO_REQUIRE_PRIMARY: '0',
+    MCP_INSTANCE_ID: '',
+  };
+  let ownedEnvironment;
+  let registry;
+  let control;
   let controlStarted = false;
   let stagedPlace;
   let launchId;
   let launchProcessIdentity;
+  let launchMayBeLive = false;
 
   async function release({ close = true } = {}) {
     const errors = [];
     let managedCloseConfirmed = false;
-    if (close && launchId) {
+    if (close && launchMayBeLive && launchId) {
       try {
         await closeLaunch(adapters, port, ownedEnvironment, launchId);
         managedCloseConfirmed = true;
+        launchMayBeLive = false;
       } catch (error) {
         errors.push(error instanceof Error ? error : new Error(String(error)));
       }
     }
     if (
       close &&
+      launchMayBeLive &&
       !managedCloseConfirmed &&
       launchProcessIdentity &&
       typeof adapters.closeProcessIdentity === 'function'
     ) {
       try {
         await adapters.closeProcessIdentity(launchProcessIdentity);
+        launchMayBeLive = false;
       } catch (error) {
         errors.push(error instanceof Error ? error : new Error(String(error)));
       }
@@ -290,16 +290,15 @@ export async function openManagedStudioSession(
       }
       controlStarted = false;
     }
-    if (
-      close &&
-      studioWorkingDirectory &&
-      typeof adapters.configureDirectoryIsolation === 'function'
-    ) {
-      try {
-        await adapters.configureDirectoryIsolation();
-      } catch (error) {
-        errors.push(error instanceof Error ? error : new Error(String(error)));
-      }
+    if (launchMayBeLive) {
+      const retained = new Error(
+        'Studio close could not be confirmed; retained staged place ' +
+        `${stagedPlace?.path ?? '(none)'} and registry ` +
+        `${sessionEnv.ROBLOXSTUDIO_MCP_MANAGED_INSTANCE_REGISTRY_DIR} for exact-identity recovery.`,
+      );
+      retained.retainedStudioResources = true;
+      errors.push(retained);
+      return errors;
     }
     if (stagedPlace) {
       try {
@@ -309,11 +308,29 @@ export async function openManagedStudioSession(
       }
       stagedPlace = undefined;
     }
-    restoreEnvironment();
+    if (registry) {
+      try {
+        await registry.cleanup();
+      } catch (error) {
+        errors.push(error instanceof Error ? error : new Error(String(error)));
+      }
+      registry = undefined;
+    }
     return errors;
   }
 
   try {
+    await adapters.assertTestProfile();
+    await adapters.assertDirectoryIsolation();
+    if (!sessionEnv.ROBLOXSTUDIO_MCP_MANAGED_INSTANCE_REGISTRY_DIR?.trim()) {
+      registry = await adapters.createRegistry();
+      if (typeof registry?.directory !== 'string' || !registry.directory.trim()) {
+        throw new Error('The managed Studio runner did not allocate a private registry directory');
+      }
+      sessionEnv.ROBLOXSTUDIO_MCP_MANAGED_INSTANCE_REGISTRY_DIR = registry.directory;
+    }
+    ownedEnvironment = controlEnvironment(sessionEnv, port, authToken);
+    control = adapters.createControl(ownedEnvironment);
     controlStarted = true;
     await control.start();
     stagedPlace = await adapters.stagePlace();
@@ -327,15 +344,10 @@ export async function openManagedStudioSession(
       { port, env: ownedEnvironment, timeoutMs: TOOL_TIMEOUT_MS },
     );
     const baselineLaunchIds = new Set(managedEntries(baselineStatus).map(launchIdOf).filter(Boolean));
-    if (
-      studioWorkingDirectory &&
-      typeof adapters.configureDirectoryIsolation === 'function'
-    ) {
-      await adapters.configureDirectoryIsolation();
-    }
 
     let launch;
     try {
+      launchMayBeLive = true;
       launch = await adapters.callTool(
         'manage_instance',
         {
@@ -397,6 +409,7 @@ export async function openManagedStudioSession(
           recoveryErrors.push(closeError instanceof Error ? closeError : new Error(String(closeError)));
         }
       }
+      if (recoveredLaunchIds.length > 0 && recoveryErrors.length === 0) launchMayBeLive = false;
       throw cleanupError(error, recoveryErrors);
     }
 
@@ -429,6 +442,10 @@ export async function openManagedStudioSession(
     return {
       instanceId,
       managed: true,
+      launchId,
+      processIdentity: launchProcessIdentity,
+      env: sessionEnv,
+      managedInstanceRegistryDirectory: sessionEnv.ROBLOXSTUDIO_MCP_MANAGED_INSTANCE_REGISTRY_DIR,
       studioWorkingDirectory,
       close() {
         if (!closePromise) {
@@ -436,7 +453,7 @@ export async function openManagedStudioSession(
             const errors = await release();
             if (errors.length === 1) throw errors[0];
             if (errors.length > 1) {
-              throw new AggregateError(errors, `Managed Studio cleanup failed: ${errors.map((error) => error.message).join('; ')}`);
+              throw cleanupError(errors[0], errors.slice(1));
             }
           })();
         }

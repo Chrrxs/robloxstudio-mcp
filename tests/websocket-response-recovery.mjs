@@ -11,11 +11,14 @@ import { createServer, request } from 'node:http';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { WebSocket, WebSocketServer } from 'ws';
-import { configureStudioDirectoryIsolation, createIsolatedStudioDirectory } from '../scripts/studio-lifecycle.mjs';
+import { assertStudioDirectoryIsolation, assertStudioTestProfile, createIsolatedStudioDirectory } from '../scripts/studio-lifecycle.mjs';
 import { DIST, REPO_ROOT } from './lib/mcp-client.mjs';
 import { callMcpHttpTool } from './lib/mcp-http-client.mjs';
 import { openManagedStudioSession } from './lib/managed-studio-session.mjs';
 import { acquireSuitePort } from './lib/test-port.mjs';
+
+assertStudioTestProfile();
+assertStudioDirectoryIsolation();
 
 const portLease = await acquireSuitePort({ env: {} });
 const pairs = new Set();
@@ -32,6 +35,7 @@ let heldCompletionResponse;
 let heartbeats = 0;
 let sequence = 0;
 let session;
+let managedLaunchAttempted = false;
 let worker;
 let failure;
 const cleanupErrors = [];
@@ -108,12 +112,12 @@ try {
   await once(front, 'listening');
   const address = front.address();
   assert.ok(address && typeof address === 'object');
-  await configureStudioDirectoryIsolation({ requireStudioClosed: false });
   worker = createIsolatedStudioDirectory({ prefix: 'websocket-response-recovery' });
   const runtimeEnv = {
     ...process.env,
     MCP_PLUGINS_DIR: worker.pluginsDirectory,
     RSMCP_STUDIO_WORKING_DIRECTORY: worker.workingDirectory,
+    ROBLOXSTUDIO_MCP_MANAGED_INSTANCE_REGISTRY_DIR: worker.managedInstanceRegistryDirectory,
     ROBLOX_STUDIO_PORT: String(portLease.port),
     RSMCP_AUTO_ASSIGNED_PORT: '0',
   };
@@ -125,8 +129,9 @@ try {
   assert.equal(installCode, 0);
   assert.ok(readFileSync(path.join(worker.pluginsDirectory, 'MCPPlugin.rbxmx'), 'utf8').includes(`http://localhost:${address.port}`));
   await portLease.handoff();
+  managedLaunchAttempted = true;
   session = await openManagedStudioSession({ port: portLease.port, env: runtimeEnv });
-  const call = (name, args) => callMcpHttpTool(name, args, { port: portLease.port, env: runtimeEnv, timeoutMs: 35000 });
+  const call = (name, args) => callMcpHttpTool(name, args, { port: portLease.port, env: session.env, timeoutMs: 35000 });
   const mutate = (operation_id, result) => call('execute_luau', {
     instance_id: session.instanceId, target: 'edit', operation_id,
     code: `local key=${JSON.stringify(marker)}; local n=(workspace:GetAttribute(key) or 0)+1; workspace:SetAttribute(key,n); return ${result}`,
@@ -228,10 +233,18 @@ try {
 } catch (error) {
   failure = error;
 } finally {
+  let closeConfirmed = !managedLaunchAttempted && failure?.retainedStudioResources !== true;
   try {
-    await session?.close();
-    worker?.cleanup();
+    if (session) {
+      await session.close();
+      closeConfirmed = true;
+    }
   } catch (error) { cleanupErrors.push(error); }
+  if (closeConfirmed) {
+    try { worker?.cleanup(); } catch (error) { cleanupErrors.push(error); }
+  } else if (worker) {
+    console.warn(`Retaining Studio worker and managed registry after unconfirmed closure: ${worker.workingDirectory}`);
+  }
   for (const pair of pairs) { pair.upstream.terminate(); pair.downstream.terminate(); }
   const closed = once(websocketServer, 'close');
   websocketServer.close();

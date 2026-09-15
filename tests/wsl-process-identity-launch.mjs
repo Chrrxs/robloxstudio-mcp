@@ -1,24 +1,47 @@
 #!/usr/bin/env node
 
-import { closeStudioProcess } from '../scripts/studio-lifecycle.mjs';
+import { pathToFileURL } from 'node:url';
+import {
+  assertStudioDirectoryIsolation,
+  assertStudioTestProfile,
+  closeStudioProcess,
+  createIsolatedStudioDirectory,
+} from '../scripts/studio-lifecycle.mjs';
 import { McpClient, DIST, assert } from './lib/mcp-client.mjs';
 
-async function main() {
+export async function runProcessIdentityRegression({
+  assertProfile = assertStudioTestProfile,
+  assertIsolation = assertStudioDirectoryIsolation,
+  createWorker = createIsolatedStudioDirectory,
+  createClient = (options) => new McpClient('wsl-process-identity-launch', options),
+  closeProcess = closeStudioProcess,
+} = {}) {
   let client;
   let launchId;
   let processIdentity;
   let bodyError;
+  let worker;
+  let launchAttempted = false;
+  let closeConfirmed = false;
 
   try {
-    client = new McpClient('wsl-process-identity-launch', {
-      command: 'node',
+    assertProfile();
+    assertIsolation();
+    worker = createWorker({ prefix: 'process-identity' });
+    client = createClient({
+      command: process.execPath,
       args: [DIST],
       startupTimeoutMs: 60000,
+      env: {
+        ...process.env,
+        ROBLOXSTUDIO_MCP_MANAGED_INSTANCE_REGISTRY_DIR: worker.managedInstanceRegistryDirectory,
+      },
     });
     await client.start();
     await client.initialize();
 
     console.log('\n=== WSL process identity launch without a working directory ===');
+    launchAttempted = true;
     const launch = await client.callTool('manage_instance', {
       action: 'launch',
       source: 'baseplate',
@@ -52,6 +75,7 @@ async function main() {
       launch_id: launchId,
     });
     assert(closed.close_status === 'closed', 'the suspended Studio launch is aborted by exact identity');
+    closeConfirmed = true;
     console.log('\n✅ WSL process identity launch regression PASSED');
   } catch (error) {
     bodyError = error;
@@ -59,17 +83,20 @@ async function main() {
     const cleanupErrors = [];
     if (client && launchId) {
       try {
-        await client.callTool('manage_instance', {
+        const closed = await client.callTool('manage_instance', {
           action: 'close',
           launch_id: launchId,
         });
+        assert(['closed', 'already_closed'].includes(closed.close_status), 'managed cleanup confirms Studio is closed');
+        closeConfirmed = true;
       } catch (error) {
         cleanupErrors.push(error);
       }
     }
     if (processIdentity) {
       try {
-        await closeStudioProcess(processIdentity);
+        await closeProcess(processIdentity);
+        closeConfirmed = true;
       } catch (error) {
         cleanupErrors.push(error);
       }
@@ -77,6 +104,15 @@ async function main() {
     if (client) {
       try {
         await client.stop();
+      } catch (error) {
+        cleanupErrors.push(error);
+      }
+    }
+    if (worker && launchAttempted && !closeConfirmed) {
+      console.error(`Retaining worker for unconfirmed Studio launch recovery: ${worker.workingDirectory}`);
+    } else if (worker && cleanupErrors.length === 0) {
+      try {
+        worker.cleanup();
       } catch (error) {
         cleanupErrors.push(error);
       }
@@ -95,9 +131,11 @@ async function main() {
   }
 }
 
-try {
-  await main();
-} catch (error) {
-  console.error(`\n❌ WSL process identity launch regression FAILED: ${error instanceof Error ? error.stack ?? error.message : String(error)}`);
-  process.exitCode = 1;
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  try {
+    await runProcessIdentityRegression();
+  } catch (error) {
+    console.error(`WSL process identity launch regression FAILED: ${error instanceof Error ? error.stack ?? error.message : String(error)}`);
+    process.exitCode = 1;
+  }
 }

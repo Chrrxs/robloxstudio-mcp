@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 
 import { createConnection } from 'node:net';
-import { readFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import {
@@ -17,7 +18,8 @@ import {
 import { windowsPortIsAvailable } from './lib/test-port.mjs';
 import {
   closeStudioProcess,
-  configureStudioDirectoryIsolation,
+  assertStudioDirectoryIsolation,
+  assertStudioTestProfile,
   createIsolatedStudioDirectory,
 } from '../scripts/studio-lifecycle.mjs';
 
@@ -94,7 +96,8 @@ async function waitForEditInstance(client, expectedVersion, instanceId, timeoutM
 }
 
 async function launchManagedPlace(client, workingDirectory) {
-  await configureStudioDirectoryIsolation({ requireStudioClosed: false });
+  assertStudioTestProfile();
+  assertStudioDirectoryIsolation();
   const launched = await client.callTool('manage_instance', {
     action: 'launch',
     source: 'baseplate',
@@ -621,16 +624,29 @@ return true`,
 async function main() {
   const existingInstanceId = process.env.MCP_INSTANCE_ID?.trim();
   if (existingInstanceId) {
-    const client = new McpClient('regular-tooling-existing', { env: SERVER_ENV });
+    const managedInstanceRegistryDirectory = mkdtempSync(path.join(os.tmpdir(), 'rsmcp-tooling-registry-'));
+    const client = new McpClient('regular-tooling-existing', {
+      env: {
+        ...SERVER_ENV,
+        ROBLOXSTUDIO_MCP_MANAGED_INSTANCE_REGISTRY_DIR: managedInstanceRegistryDirectory,
+      },
+    });
     try {
       await client.start();
       await client.initialize();
       await runEditModeToolSmoke(client, existingInstanceId);
     } finally {
-      await client.stop();
+      try {
+        await client.stop();
+      } finally {
+        rmSync(managedInstanceRegistryDirectory, { recursive: true, force: true });
+      }
     }
     return;
   }
+
+  assertStudioTestProfile();
+  assertStudioDirectoryIsolation();
 
   if (await isPortOpen(BASE_PORT)) {
     throw new Error(`Port ${BASE_PORT} is already occupied. Stop existing MCP servers before running this smoke test.`);
@@ -642,11 +658,11 @@ async function main() {
     );
   }
 
-  await configureStudioDirectoryIsolation({ requireStudioClosed: false });
   const worker = createIsolatedStudioDirectory({ prefix: 'tooling-smoke' });
   const { version } = JSON.parse(readFileSync(path.join(REPO_ROOT, 'package.json'), 'utf8'));
   let client;
   let launch;
+  let launchAttempted = false;
   let bodyError;
 
   try {
@@ -657,12 +673,14 @@ async function main() {
         ...SERVER_ENV,
         MCP_PLUGINS_DIR: worker.pluginsDirectory,
         RSMCP_STUDIO_WORKING_DIRECTORY: worker.workingDirectory,
+        ROBLOXSTUDIO_MCP_MANAGED_INSTANCE_REGISTRY_DIR: worker.managedInstanceRegistryDirectory,
       },
       startupTimeoutMs: 60000,
     });
     await client.start();
     await client.initialize();
 
+    launchAttempted = true;
     launch = await launchManagedPlace(client, worker.workingDirectory);
     const edit = await waitForEditInstance(client, version, launch.instance_id);
     await runEditModeToolSmoke(client, edit.instanceId);
@@ -671,9 +689,11 @@ async function main() {
     throw error;
   } finally {
     const cleanupErrors = [];
+    let closeConfirmed = !launchAttempted;
     if (client && launch) {
       try {
         await closeManagedInstance(client, launch);
+        closeConfirmed = true;
       } catch (error) {
         cleanupErrors.push(error);
         try {
@@ -681,6 +701,7 @@ async function main() {
             processId: launch.pid,
             startedAtFileTime: launch.process_started_at_file_time,
           });
+          closeConfirmed = true;
         } catch (identityError) {
           cleanupErrors.push(identityError);
         }
@@ -694,16 +715,15 @@ async function main() {
         cleanupErrors.push(error);
       }
     }
-    try {
-      await configureStudioDirectoryIsolation({ requireStudioClosed: false });
-    } catch (error) {
-      cleanupErrors.push(error);
-    }
     await delay(1000);
-    try {
-      worker.cleanup();
-    } catch (error) {
-      cleanupErrors.push(error);
+    if (closeConfirmed) {
+      try {
+        worker.cleanup();
+      } catch (error) {
+        cleanupErrors.push(error);
+      }
+    } else {
+      console.warn(`Retaining Studio worker and managed registry after unconfirmed closure: ${worker.workingDirectory}`);
     }
     if (cleanupErrors.length > 0) {
       if (bodyError) {
