@@ -1,0 +1,13 @@
+
+> @chrrxs/robloxstudio-mcp-core@3.1.4 test
+> jest field-16
+
+PASS src/__tests__/field-16-tool-guides.test.ts
+  field #12/#16 tool guide sections
+    √ lists the tool guide resource and serves both new sections (56 ms)
+
+Test Suites: 1 passed, 1 total
+Tests:       1 passed, 1 total
+Snapshots:   0 total
+Time:        2.124 s
+Ran all test suites matching /field-16/i.

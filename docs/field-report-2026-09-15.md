@@ -85,6 +85,7 @@ is in `tests/field-2026-09-15/EVIDENCE.md`.
 
 ### 12. Fast `HumanoidRootPart.CFrame` writes through `eval_server_runtime` trip the game's anti-cheat
 - Not a tool bug, but "move the player to X" tests needed a `Humanoid:MoveTo` loop. Tool-guides note: "for server-side teleports consider the game's speed limits (for example a per-sample distance cap); use `MoveTo` or the game's own teleport API".
+- **Status:** fixed in this PR — `robloxstudio://tool-guides` section "Server-side teleportation", test `packages/core/src/__tests__/field-16-tool-guides.test.ts`, evidence `tests/field-2026-09-15/evidence/12-16-tool-guides.md`.
 
 ### 13. `export_rbxm` size/count report
 - The export result only returns the path; agents verified file size with `ls` and the instance count with a separate `GetDescendants`. **Request:** `bytes`, `instanceCount`, `rootClass` in the result (also catches item 3 early).
@@ -98,6 +99,7 @@ is in `tests/field-2026-09-15/EVIDENCE.md`.
 
 ### 16. Tool-guides: a short section on the concurrent-agent protocol
 - Rules that worked in the field (candidates for `robloxstudio://tool-guides`): one playtest lock (the orchestrator), a disjoint DataModel subtree per agent, mandatory `operation_id`, restart play after writing to the edit DataModel, split large outputs, treat reference instances as read-only (`target=edit`).
+- **Status:** fixed in this PR — `robloxstudio://tool-guides` section "Concurrent agent protocol", test `packages/core/src/__tests__/field-16-tool-guides.test.ts`, evidence `tests/field-2026-09-15/evidence/12-16-tool-guides.md`.
 
 ---
 
