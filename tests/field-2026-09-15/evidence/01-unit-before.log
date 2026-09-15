@@ -1,0 +1,60 @@
+> @chrrxs/robloxstudio-mcp-core@3.1.4 test
+> jest todo-01-capture-markers
+FAIL src/__tests__/todo-01-capture-markers.test.ts
+  TODO#1 viewport markers under device emulation
+    × a 1326x662 on-screen pane is accepted when the client reports a 1608x661 viewport (19 ms)
+    √ a 1177x662 letterboxed pane (16:9 emulation inside a wider dock) is accepted for a 1280x720 viewport (10 ms)
+    × a marker miss reports the pixel count and the branch that failed (2 ms)
+  TODO#1 single-colour frame detection
+    √ the 1608x772 black frame CaptureService hands back in play mode is flagged as blank (5 ms)
+    √ a frame with a single lit pixel is not blank (2 ms)
+  ● TODO#1 viewport markers under device emulation › a 1326x662 on-screen pane is accepted when the client reports a 1608x661 viewport
+    expect(received).toMatchObject(expected)
+    - Expected  - 6
+    + Received  + 1
+      Object {
+    -   "rect": Object {
+    -     "height": 662,
+    -     "width": 1326,
+    -     "x": 293,
+    -     "y": 195,
+    -   },
+    +   "error": "viewport marker box 1326x662 does not match the reported 1608x661 viewport aspect",
+      }
+      48 |     const rgba = windowWithPane(1920, 1009, { x: 293, y: 195, width: 1326, height: 662 }, 12);
+      49 |     const located = findViewportRect(rgba, 1920, 1009, { viewportWidth: 1608, viewportHeight: 661, markerSize: 12 });
+    > 50 |     expect(located).toMatchObject({ rect: { x: 293, y: 195, width: 1326, height: 662 } });
+         |                     ^
+      51 |   });
+      52 |
+      53 |   test('a 1177x662 letterboxed pane (16:9 emulation inside a wider dock) is accepted for a 1280x720 viewport', () => {
+      at Object.<anonymous> (src/__tests__/todo-01-capture-markers.test.ts:50:21)
+  ● TODO#1 viewport markers under device emulation › a marker miss reports the pixel count and the branch that failed
+    expect(received).toMatchObject(expected)
+    - Expected  - 2
+    + Received  + 0
+      Object {
+    -   "branch": "none",
+        "error": StringContaining "no viewport markers",
+    -   "markerPixels": 0,
+      }
+      59 |   test('a marker miss reports the pixel count and the branch that failed', () => {
+      60 |     const rgba = solid(64, 32, [0, 0, 0]);
+    > 61 |     expect(findViewportRect(rgba, 64, 32, { viewportWidth: 64, viewportHeight: 32, markerSize: 12 })).toMatchObject({
+         |                                                                                                       ^
+      62 |       error: expect.stringContaining('no viewport markers'),
+      63 |       branch: 'none',
+      64 |       markerPixels: 0,
+      at Object.<anonymous> (src/__tests__/todo-01-capture-markers.test.ts:61:103)
+Test Suites: 1 failed, 1 total
+Tests:       2 failed, 3 passed, 5 total
+Snapshots:   0 total
+Time:        2.067 s
+Ran all test suites matching /todo-01-capture-markers/i.
+npm error Lifecycle script `test` failed with error:
+npm error code 1
+npm error path C:\Users\<user>\Desktop\mcp\wt\A\packages\core
+npm error workspace @chrrxs/robloxstudio-mcp-core@3.1.4
+npm error location C:\Users\<user>\Desktop\mcp\wt\A\packages\core
+npm error command failed
+npm error command C:\WINDOWS\system32\cmd.exe /d /s /c jest todo-01-capture-markers

@@ -1,0 +1,24 @@
+Test process using port 51732 (automatically assigned)
+Full integration suite using port 51732 (from ROBLOX_STUDIO_PORT)
+Installing worktree plugin C:\Users\<user>\Desktop\mcp\wt-e\studio-plugin\MCPPlugin.rbxmx
+Installed MCPPlugin.rbxmx to C:\Users\<user>\AppData\Local\Temp\robloxstudio-mcp-workers\run-all-Grgvh4\RsmcpIsolatedPlugins\MCPPlugin.rbxmx
+Launched managed Studio instance instance:mol-g67
+
+=== field #10 capture_screenshot target peer selection ===
+  capture_screenshot {"target":"edit"} -> 620ms isError=false {"width":1324,"height":772,"format":"png","mimeType":"image/png","peer":"edit","target":"edit","source":"CaptureService","cropped":true,"message":"Screenshot 1324x772px (png). For simulate_mouse_input, x/y are pixel coordinates in this exact image with (0,0) at the top-left; it is not downscaled, so use coordinates as you read them off the image."}
+    image 1324x772, 2758 unique colours
+  capture_screenshot {} -> 2268ms isError=false {"width":1608,"height":772,"format":"png","mimeType":"image/png","peer":"client-1","target":"auto","source":"host-window","cropped":true,"viewportRect":{"x":3,"y":188,"width":1608,"height":772},"window":{"title":"C:\\Users\\<user>\\AppData\\Local\\Temp\\rsmcp-runner-33VplL\\RunnerBaseplate.rbxl - Roblox Studio","handle":26873336,"width":1920,"height":1009,"method":"printwindow","restored":false,"foreground":false},"message":"Screenshot 1608x772px (png). For simulate_mouse_input, x/y are pixel coordinates in this exact image with (0,0) at the top-left; it is not downscaled, so use coordinates as you read them off the image. Captured from the Studio window through the host OS (printwindow) because Studio's CaptureService returned a blank (single-colour) frame."}
+    image 1608x772, 6379 unique colours
+  capture_screenshot {"target":"client-1"} -> 1440ms isError=false {"width":1608,"height":772,"format":"png","mimeType":"image/png","peer":"client-1","target":"client-1","source":"host-window","cropped":true,"viewportRect":{"x":3,"y":188,"width":1608,"height":772},"window":{"title":"C:\\Users\\<user>\\AppData\\Local\\Temp\\rsmcp-runner-33VplL\\RunnerBaseplate.rbxl - Roblox Studio","handle":26873336,"width":1920,"height":1009,"method":"printwindow","restored":false,"foreground":false},"message":"Screenshot 1608x772px (png). For simulate_mouse_input, x/y are pixel coordinates in this exact image with (0,0) at the top-left; it is not downscaled, so use coordinates as you read them off the image. Captured from the Studio window through the host OS (printwindow) because Studio's CaptureService returned a blank (single-colour) frame."}
+    image 1608x772, 10291 unique colours
+  capture_screenshot {"target":"server"} -> 4ms isError=true {"error":"tool_failed","message":"capture_screenshot target \"server\" was requested, but the play server does not render a viewport; use target \"client-1\" (the play client) or \"edit\". Connected peers: client-1, edit, server."}
+  capture_screenshot {"target":"client-7"} -> 2ms isError=true {"error":"tool_failed","message":"capture_screenshot target \"client-7\" is not connected on instance:mol-g67. Connected peers: client-1, edit, server."}
+  RESULT auto=client-1/host-window explicit=client-1/host-window server-error="tool_failed" client-7-error="tool_failed"
+
+✅ field #10 capture_screenshot target peer selection PASSED
+Closed managed Studio instance instance:mol-g67
+
+========== SUMMARY ==========
+  ✅ PASS  field-2026-09-15/10-capture-target-peer.mjs
+
+1/1 passed.

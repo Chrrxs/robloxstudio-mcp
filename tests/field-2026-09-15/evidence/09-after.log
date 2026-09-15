@@ -1,0 +1,24 @@
+Test process using port 50677 (automatically assigned)
+Full integration suite using port 50677 (from ROBLOX_STUDIO_PORT)
+Installing worktree plugin C:\Users\<user>\Desktop\mcp\wt-e\studio-plugin\MCPPlugin.rbxmx
+Installed MCPPlugin.rbxmx to C:\Users\<user>\AppData\Local\Temp\robloxstudio-mcp-workers\run-all-l8NhBH\RsmcpIsolatedPlugins\MCPPlugin.rbxmx
+Launched managed Studio instance instance:ide-dvw
+
+=== field #9 capture_screenshot restores a minimized Studio window ===
+  Studio windows before: [{"title":"C:\\Users\\<user>\\AppData\\Local\\Temp\\rsmcp-runner-behYcl\\RunnerBaseplate.rbxl - Roblox Studio","handle":18419638,"iconic":false,"pid":62208},{"title":"<other place A> - Roblox Studio","handle":132328,"iconic":false,"pid":17836},{"title":"<other place B>.rbxl - Roblox Studio","handle":329360,"iconic":true,"pid":22880},{"title":"<other place C>.rbxl - Roblox Studio","handle":67310,"iconic":true,"pid":23144}]
+  manage_instance status -> pid=62208 managed=true state=connected
+  managed window: {"title":"C:\\Users\\<user>\\AppData\\Local\\Temp\\rsmcp-runner-behYcl\\RunnerBaseplate.rbxl - Roblox Studio","handle":18419638,"iconic":false,"pid":62208}; untouched windows: 3
+  ShowWindow(18419638, SW_MINIMIZE) -> {"iconic":true,"ok":true}
+  capture_screenshot (minimized) -> 2748ms {"width":1608,"height":772,"format":"png","mimeType":"image/png","peer":"client-1","target":"auto","source":"host-window","cropped":true,"viewportRect":{"x":3,"y":188,"width":1608,"height":772},"window":{"title":"C:\\Users\\<user>\\AppData\\Local\\Temp\\rsmcp-runner-behYcl\\RunnerBaseplate.rbxl - Roblox Studio","handle":18419638,"width":1920,"height":1009,"method":"printwindow","restored":true,"foreground":true},"message":"Screenshot 1608x772px (png). For simulate_mouse_input, x/y are pixel coordinates in this exact image with (0,0) at the top-left; it is not downscaled, so use coordinates as you read them off the image. Captured from the Studio window through the host OS (printwindow) because Studio's CaptureService returned a blank (single-colour) frame."}
+    image 1608x772, 8248 unique colours
+  window state after capture: {"iconic":false,"foreground":true,"visible":true}
+  other Studio windows unchanged (3)
+  RESULT IsIconic=false, image 1608x772/8248c, restored=true, method=printwindow
+
+✅ field #9 capture_screenshot restores a minimized Studio window PASSED
+Closed managed Studio instance instance:ide-dvw
+
+========== SUMMARY ==========
+  ✅ PASS  field-2026-09-15/09-minimized-window-capture.mjs
+
+1/1 passed.

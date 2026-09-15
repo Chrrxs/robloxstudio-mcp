@@ -298,7 +298,7 @@ describe('MCP v2 tool runtime', () => {
     expect(catalog.filter((tool) => tool.outputSchema)).toHaveLength(47);
     expect(catalog.every((tool) => tool.description.length <= 120)).toBe(true);
     expect(inspectorCatalog).toHaveLength(25);
-    expect(JSON.stringify(inspectorCatalog).length).toBeLessThanOrEqual(20_000);
+    expect(JSON.stringify(inspectorCatalog).length).toBeLessThanOrEqual(20_500);
     expect(byName.get('selection')?.outputSchema).toEqual({
       type: 'object',
       additionalProperties: true,

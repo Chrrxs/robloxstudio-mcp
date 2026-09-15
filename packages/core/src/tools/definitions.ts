@@ -1495,6 +1495,15 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
           type: 'number',
           description: 'JPEG quality 1-100; defaults to 92. Ignored for png.'
         },
+        target: {
+          type: 'string',
+          description: 'Peer: "edit"|"client-N"; default client-1 in play, else edit.'
+        },
+        fallback: {
+          type: 'string',
+          enum: ['viewport', 'window'],
+          description: '"window" = uncropped Studio window + viewportRect (screen).'
+        },
         instance_id: {
           type: 'string',
           description: 'Studio process ID when ambiguous.'

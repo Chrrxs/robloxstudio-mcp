@@ -1,0 +1,4 @@
+npm test -w packages/core -- host-capture field-01 (final branch, 2026-09-15 14:07)
+PASS src/__tests__/field-01-capture-markers.test.ts
+PASS src/__tests__/host-capture.test.ts
+Tests:       52 passed, 52 total

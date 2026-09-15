@@ -1497,6 +1497,25 @@ export class StudioInstanceManager {
     return registryRecord ? this.refresh(this.fromRegistryRecord(registryRecord), snapshot) : undefined;
   }
 
+  peekProcessIdByInstanceId(instanceId: string): number | undefined {
+    const record = this.managedByInstanceId.get(instanceId);
+    return record?.nativeProcessId ?? record?.spawnPid;
+  }
+
+  // A proxied server never launched the instance itself, so its in-memory map
+  // is empty; the shared registry still knows which process owns the window.
+  async lookupProcessIdByInstanceId(instanceId: string): Promise<number | undefined> {
+    const inMemory = this.peekProcessIdByInstanceId(instanceId);
+    if (inMemory !== undefined) return inMemory;
+    try {
+      const record = await this.registry.peekAnyByInstanceId(instanceId);
+      if (!record || record.closedAt !== undefined) return undefined;
+      return record.nativeProcessId ?? record.spawnPid;
+    } catch {
+      return undefined;
+    }
+  }
+
   peekByLaunchId(launchId: string): ManagedStudioInstance | undefined {
     return [...this.managedByInstanceId.values(), ...this.pending].find(
       (record) => record.recordId === launchId,

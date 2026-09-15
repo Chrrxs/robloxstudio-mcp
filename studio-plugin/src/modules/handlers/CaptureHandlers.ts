@@ -52,6 +52,7 @@ interface StudioDeviceSimulatorServiceLike {
 	GetDeviceAsync(this: StudioDeviceSimulatorServiceLike): string;
 	GetScalingModeAsync(this: StudioDeviceSimulatorServiceLike): CaptureEnumItem;
 	SetScalingModeAsync(this: StudioDeviceSimulatorServiceLike, scalingMode: CaptureEnumItem): void;
+	GetResolutionAsync(this: StudioDeviceSimulatorServiceLike): Vector2;
 }
 
 // Unchecked cast, single reason: these enums exist in Studio but are missing
@@ -436,6 +437,23 @@ function viewportSize(): { viewportWidth: number; viewportHeight: number } | und
 	};
 }
 
+function emulationState(): Record<string, unknown> {
+	const dynamicGame = game as unknown as { GetService(name: string): unknown };
+	const [serviceOk, service] = pcall(() => dynamicGame.GetService("StudioDeviceSimulatorService"));
+	if (!serviceOk || service === undefined) return { error: `StudioDeviceSimulatorService unavailable: ${tostring(service)}` };
+	const simulator = service as StudioDeviceSimulatorServiceLike;
+	const [deviceOk, device] = pcall(() => tostring(simulator.GetDeviceAsync()));
+	if (!deviceOk) return { error: `GetDeviceAsync failed: ${tostring(device)}` };
+	const deviceId = device as string;
+	if (deviceId === "default") return { active: false, deviceId };
+	const [resolutionOk, resolution] = pcall(() => simulator.GetResolutionAsync());
+	return {
+		active: true,
+		deviceId,
+		resolution: resolutionOk ? { width: (resolution as Vector2).X, height: (resolution as Vector2).Y } : undefined,
+	};
+}
+
 function hideMarkers(): void {
 	const existing = CoreGui.FindFirstChild(MARKER_GUI_NAME);
 	if (existing !== undefined) existing.Destroy();
@@ -604,7 +622,7 @@ function showMarkers(captureId: unknown): unknown {
 		gui.Destroy();
 		return { error: "No CurrentCamera after rendering viewport markers." };
 	}
-	return { success: true, ...renderedSize, markerSize: MARKER_SIZE, framesRendered };
+	return { success: true, ...renderedSize, markerSize: MARKER_SIZE, framesRendered, emulation: emulationState(), markerParent: gui.Parent?.GetFullName() };
 }
 
 // prepare temporarily fits a simulated viewport; finish restores it after the
@@ -632,7 +650,7 @@ function captureMarkers(requestData: Record<string, unknown>): unknown {
 	if (action === "query") {
 		const size = viewportSize();
 		if (size === undefined) return { error: "No CurrentCamera; cannot read viewport size." };
-		return { success: true, ...size, markerSize: MARKER_SIZE };
+		return { success: true, ...size, markerSize: MARKER_SIZE, emulation: emulationState() };
 	}
 	return { error: `capture-markers action must be "prepare", "finish", "show", "hide" or "query" (got ${tostring(action)})` };
 }

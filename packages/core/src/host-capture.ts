@@ -21,18 +21,50 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 
+export type HostCaptureMethod = 'printwindow' | 'screen';
+
+export type StudioWindowInfo = {
+  handle: number;
+  pid: number;
+  title: string;
+  placeName: string;
+  isIconic: boolean;
+};
+
 export type HostWindowCapture = {
   width: number;
   height: number;
   rgba: Buffer;
   title: string;
+  handle: number;
+  method: HostCaptureMethod;
+  clientOrigin: { x: number; y: number };
+  restored: boolean;
+  foreground: boolean;
+  magentaPixels: Partial<Record<HostCaptureMethod, number>>;
 };
 
 export type HostCaptureResult =
   | { ok: true; capture: HostWindowCapture }
   | { ok: false; error: string };
 
+export type HostCaptureOptions = {
+  method?: HostCaptureMethod | 'auto';
+  foreground?: boolean;
+  pid?: number;
+};
+
+export type StudioWindowListResult =
+  | { ok: true; windows: StudioWindowInfo[] }
+  | { ok: false; error: string };
+
 export type ViewportRect = { x: number; y: number; width: number; height: number };
+
+export type ViewportClip = { edge: 'top' | 'bottom'; pixels: number };
+
+export type ViewportLocateResult =
+  | { rect: ViewportRect; markerPixels: number; scaleX: number; scaleY: number; clipped?: ViewportClip }
+  | { error: string; branch: 'none' | 'rectangle'; markerPixels: number };
 
 export type ViewportMarkerHint = {
   viewportWidth: number;
@@ -44,9 +76,7 @@ const HOST_CAPTURE_TIMEOUT_MS = 20_000;
 // Marker colour is pure magenta; allow for colour management / compositor rounding.
 const MARKER_MIN_RB = 200;
 const MARKER_MAX_G = 60;
-// The marker bounding box must match the viewport within this ratio, or be a
-// consistent DPI scale of it (same factor on both axes within this tolerance).
-const MARKER_SCALE_TOLERANCE = 0.03;
+const STUDIO_TITLE_SUFFIX = ' - Roblox Studio';
 
 export function isHostCaptureDisabled(env: NodeJS.ProcessEnv = process.env): boolean {
   const value = (env.ROBLOX_STUDIO_HOST_CAPTURE ?? '').trim().toLowerCase();
@@ -89,15 +119,17 @@ export function findViewportRect(
   width: number,
   height: number,
   hint: ViewportMarkerHint,
-): { rect: ViewportRect } | { error: string } {
+): ViewportLocateResult {
   let minX = width;
   let minY = height;
   let maxX = -1;
   let maxY = -1;
+  let markerPixels = 0;
   for (let y = 0; y < height; y++) {
     const row = y * width * 4;
     for (let x = 0; x < width; x++) {
       if (!isMarkerPixel(rgba, row + x * 4)) continue;
+      markerPixels++;
       if (x < minX) minX = x;
       if (x > maxX) maxX = x;
       if (y < minY) minY = y;
@@ -105,36 +137,55 @@ export function findViewportRect(
     }
   }
   if (maxX < 0) {
-    return { error: 'no viewport markers were visible in the Studio window capture' };
+    return { error: 'no viewport markers were visible in the Studio window capture', branch: 'none', markerPixels };
   }
 
-  const rect = { x: minX, y: minY, width: maxX - minX + 1, height: maxY - minY + 1 };
-
-  // All four corners of the box must themselves be marker pixels; a stray
-  // magenta pixel elsewhere in Studio's chrome would otherwise stretch the box.
+  const box = { x: minX, y: minY, width: maxX - minX + 1, height: maxY - minY + 1 };
   const inset = Math.max(1, Math.floor(hint.markerSize / 4));
-  const corners: Array<[number, number]> = [
-    [minX + inset, minY + inset],
-    [maxX - inset, minY + inset],
-    [minX + inset, maxY - inset],
-    [maxX - inset, maxY - inset],
-  ];
-  for (const [x, y] of corners) {
-    if (!isMarkerPixel(rgba, (y * width + x) * 4)) {
-      return { error: `viewport markers were found but do not form a rectangle (box ${rect.width}x${rect.height} at ${rect.x},${rect.y})` };
-    }
+  const marker = (x: number, y: number) => isMarkerPixel(rgba, (y * width + x) * 4);
+  const rectangleError = (): ViewportLocateResult => ({
+    error: `viewport markers were found but do not form a rectangle (box ${box.width}x${box.height} at ${box.x},${box.y})`,
+    branch: 'rectangle',
+    markerPixels,
+  });
+
+  if (box.width < hint.markerSize * 3 || !marker(minX + inset, minY + inset) || !marker(maxX - inset, minY + inset)) {
+    return rectangleError();
   }
 
-  const scaleX = rect.width / hint.viewportWidth;
-  const scaleY = rect.height / hint.viewportHeight;
-  if (Math.abs(scaleX - scaleY) > MARKER_SCALE_TOLERANCE * Math.max(scaleX, scaleY)) {
-    return {
-      error:
-        `viewport marker box ${rect.width}x${rect.height} does not match the reported ` +
-        `${hint.viewportWidth}x${hint.viewportHeight} viewport aspect`,
-    };
+  if (box.height >= hint.markerSize * 2) {
+    if (!marker(minX + inset, maxY - inset) || !marker(maxX - inset, maxY - inset)) return rectangleError();
+    return { rect: box, markerPixels, scaleX: box.width / hint.viewportWidth, scaleY: box.height / hint.viewportHeight };
   }
-  return { rect };
+
+  const scale = box.width / hint.viewportWidth;
+  const rectHeight = Math.round(hint.viewportHeight * scale);
+  const overflowIfTopRow = Math.max(0, minY + rectHeight - height);
+  const overflowIfBottomRow = Math.max(0, rectHeight - 1 - maxY);
+  const topRow = overflowIfTopRow <= overflowIfBottomRow;
+  const rect = topRow
+    ? { x: minX, y: minY, width: box.width, height: rectHeight }
+    : { x: minX, y: maxY + 1 - rectHeight, width: box.width, height: rectHeight };
+  return {
+    rect,
+    markerPixels,
+    scaleX: scale,
+    scaleY: scale,
+    clipped: { edge: topRow ? 'bottom' : 'top', pixels: topRow ? overflowIfTopRow : overflowIfBottomRow },
+  };
+}
+
+export function studioWindowPlaceName(title: string): string {
+  return title.endsWith(STUDIO_TITLE_SUFFIX) ? title.slice(0, -STUDIO_TITLE_SUFFIX.length) : title;
+}
+
+export function studioWindowMatchesHint(title: string, hint: string): boolean {
+  if (!hint) return false;
+  const name = studioWindowPlaceName(title);
+  if (name === hint) return true;
+  const file = name.split(/[\\/]/).pop() ?? name;
+  if (file === hint) return true;
+  return file.replace(/\.rbxlx?$/i, '') === hint;
 }
 
 // Crops the window capture to the viewport rect and resamples it to the
@@ -149,45 +200,46 @@ export function cropToViewport(
   targetWidth: number,
   targetHeight: number,
 ): { width: number; height: number; rgba: Buffer } {
-  const x0 = Math.max(0, Math.min(width - 1, rect.x));
-  const y0 = Math.max(0, Math.min(height - 1, rect.y));
-  const srcW = Math.max(1, Math.min(rect.width, width - x0));
-  const srcH = Math.max(1, Math.min(rect.height, height - y0));
-
-  const exact = srcW === targetWidth && srcH === targetHeight;
+  const inside = rect.x >= 0 && rect.y >= 0 && rect.x + rect.width <= width && rect.y + rect.height <= height;
+  const exact = inside && rect.width === targetWidth && rect.height === targetHeight;
   const outW = targetWidth;
   const outH = targetHeight;
   const out = Buffer.alloc(outW * outH * 4);
 
   if (exact) {
     for (let y = 0; y < outH; y++) {
-      rgba.copy(out, y * outW * 4, ((y0 + y) * width + x0) * 4, ((y0 + y) * width + x0 + outW) * 4);
+      rgba.copy(out, y * outW * 4, ((rect.y + y) * width + rect.x) * 4, ((rect.y + y) * width + rect.x + outW) * 4);
     }
     return { width: outW, height: outH, rgba: out };
   }
 
   // Bilinear resample from the source rect into the target size.
-  const sx = srcW / outW;
-  const sy = srcH / outH;
+  const sx = rect.width / outW;
+  const sy = rect.height / outH;
   for (let y = 0; y < outH; y++) {
-    const fy = Math.min(srcH - 1, (y + 0.5) * sy - 0.5);
-    const iy = Math.max(0, Math.floor(fy));
-    const ny = Math.min(srcH - 1, iy + 1);
+    const fy = rect.y + Math.min(rect.height - 1, (y + 0.5) * sy - 0.5);
+    const iy = Math.floor(fy);
+    const ny = Math.min(rect.y + rect.height - 1, iy + 1);
     const wy = Math.max(0, fy - iy);
+    const rowOk = iy >= 0 && ny < height;
     for (let x = 0; x < outW; x++) {
-      const fx = Math.min(srcW - 1, (x + 0.5) * sx - 0.5);
-      const ix = Math.max(0, Math.floor(fx));
-      const nx = Math.min(srcW - 1, ix + 1);
-      const wx = Math.max(0, fx - ix);
-      const o00 = ((y0 + iy) * width + x0 + ix) * 4;
-      const o10 = ((y0 + iy) * width + x0 + nx) * 4;
-      const o01 = ((y0 + ny) * width + x0 + ix) * 4;
-      const o11 = ((y0 + ny) * width + x0 + nx) * 4;
       const dst = (y * outW + x) * 4;
+      const fx = rect.x + Math.min(rect.width - 1, (x + 0.5) * sx - 0.5);
+      const ix = Math.floor(fx);
+      const nx = Math.min(rect.x + rect.width - 1, ix + 1);
+      const wx = Math.max(0, fx - ix);
+      if (!rowOk || ix < 0 || nx >= width) {
+        out[dst + 3] = 255;
+        continue;
+      }
+      const o00 = (iy * width + ix) * 4;
+      const o10 = (iy * width + nx) * 4;
+      const o01 = (ny * width + ix) * 4;
+      const o11 = (ny * width + nx) * 4;
       for (let c = 0; c < 4; c++) {
-        const top = rgba[o00 + c] * (1 - wx) + rgba[o10 + c] * wx;
-        const bottom = rgba[o01 + c] * (1 - wx) + rgba[o11 + c] * wx;
-        out[dst + c] = Math.round(top * (1 - wy) + bottom * wy);
+        const topRow = rgba[o00 + c] * (1 - wx) + rgba[o10 + c] * wx;
+        const bottomRow = rgba[o01 + c] * (1 - wx) + rgba[o11 + c] * wx;
+        out[dst + c] = Math.round(topRow * (1 - wy) + bottomRow * wy);
       }
     }
   }
@@ -210,14 +262,24 @@ public static class McpStudioCapture {
   [DllImport("user32.dll")] static extern bool EnumWindows(EnumWindowsProc cb, IntPtr lParam);
   [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr hWnd);
   [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr hWnd);
+  [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+  [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);
+  [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+  [DllImport("user32.dll")] static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo);
+  [DllImport("user32.dll")] static extern bool SetProcessDpiAwarenessContext(IntPtr value);
   [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint pid);
   [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetWindowTextW(IntPtr hWnd, StringBuilder text, int count);
   [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetWindowTextLengthW(IntPtr hWnd);
   [DllImport("user32.dll")] public static extern bool GetClientRect(IntPtr hWnd, out RECT rect);
+  [DllImport("user32.dll")] public static extern bool ClientToScreen(IntPtr hWnd, ref POINT point);
   [DllImport("user32.dll")] public static extern bool PrintWindow(IntPtr hWnd, IntPtr hdc, uint flags);
   delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
   [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left, Top, Right, Bottom; }
-  public class Candidate { public IntPtr Handle; public uint Pid; public string Title; }
+  [StructLayout(LayoutKind.Sequential)] public struct POINT { public int X, Y; }
+  public class Candidate { public IntPtr Handle; public uint Pid; public string Title; public bool Iconic; }
+  public static bool EnablePerMonitorDpi() {
+    try { return SetProcessDpiAwarenessContext(new IntPtr(-4)); } catch { return false; }
+  }
   public static List<Candidate> Find(string processName) {
     var found = new List<Candidate>();
     EnumWindows((hWnd, lParam) => {
@@ -234,47 +296,141 @@ public static class McpStudioCapture {
         var proc = System.Diagnostics.Process.GetProcessById((int)pid);
         if (!string.Equals(proc.ProcessName, processName, StringComparison.OrdinalIgnoreCase)) return true;
       } catch { return true; }
-      found.Add(new Candidate { Handle = hWnd, Pid = pid, Title = title });
+      found.Add(new Candidate { Handle = hWnd, Pid = pid, Title = title, Iconic = IsIconic(hWnd) });
       return true;
     }, IntPtr.Zero);
     return found;
   }
+  public static bool BringToFront(IntPtr hWnd) {
+    if (GetForegroundWindow() == hWnd) return true;
+    SetForegroundWindow(hWnd);
+    if (GetForegroundWindow() == hWnd) return true;
+    keybd_event(0x12, 0, 0, UIntPtr.Zero);
+    keybd_event(0x12, 0, 2, UIntPtr.Zero);
+    SetForegroundWindow(hWnd);
+    System.Threading.Thread.Sleep(150);
+    return GetForegroundWindow() == hWnd;
+  }
+  public static int CountMarkers(byte[] bgra, int stride, int width, int height) {
+    int count = 0;
+    for (int y = 0; y < height; y++) {
+      int row = y * stride;
+      for (int x = 0; x < width; x++) {
+        int o = row + x * 4;
+        if (bgra[o + 2] >= 200 && bgra[o + 1] <= 60 && bgra[o] >= 200) count++;
+      }
+    }
+    return count;
+  }
 }
 "@
-function Emit($obj) { Write-Output ($obj | ConvertTo-Json -Compress) }
+function Emit($obj) { Write-Output ($obj | ConvertTo-Json -Compress -Depth 4) }
+function PlaceName($title) {
+  $suffix = ' - Roblox Studio'
+  if ($title.EndsWith($suffix)) { return $title.Substring(0, $title.Length - $suffix.Length) }
+  return $title
+}
+function MatchesHint($title, $hint) {
+  if (-not $hint) { return $false }
+  $name = PlaceName $title
+  if ($name -eq $hint) { return $true }
+  $file = $name.Split([char[]]@([char]92, [char]47))[-1]
+  if ($file -eq $hint) { return $true }
+  return (($file -replace '\.rbxlx?$', '') -eq $hint)
+}
+function Grab($handle, $method) {
+  $rect = New-Object McpStudioCapture+RECT
+  [void][McpStudioCapture]::GetClientRect($handle, [ref]$rect)
+  $w = $rect.Right - $rect.Left; $h = $rect.Bottom - $rect.Top
+  if ($w -le 0 -or $h -le 0) { return @{ ok = $false; error = "the Studio window client area is empty ($w x $h)" } }
+  $origin = New-Object McpStudioCapture+POINT
+  [void][McpStudioCapture]::ClientToScreen($handle, [ref]$origin)
+  $bmp = New-Object System.Drawing.Bitmap $w, $h, ([System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
+  $g = [System.Drawing.Graphics]::FromImage($bmp)
+  if ($method -eq 'screen') {
+    $g.CopyFromScreen($origin.X, $origin.Y, 0, 0, $bmp.Size)
+    $g.Dispose()
+  } else {
+    $hdc = $g.GetHdc()
+    $printed = [McpStudioCapture]::PrintWindow($handle, $hdc, 3)
+    $g.ReleaseHdc($hdc); $g.Dispose()
+    if (-not $printed) { $bmp.Dispose(); return @{ ok = $false; error = 'PrintWindow failed for the Studio window' } }
+  }
+  $bounds = New-Object System.Drawing.Rectangle 0, 0, $w, $h
+  $data = $bmp.LockBits($bounds, [System.Drawing.Imaging.ImageLockMode]::ReadOnly, [System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
+  $bytes = New-Object byte[] ($data.Stride * $h)
+  [System.Runtime.InteropServices.Marshal]::Copy($data.Scan0, $bytes, 0, $bytes.Length)
+  $stride = $data.Stride
+  $bmp.UnlockBits($data); $bmp.Dispose()
+  $magenta = [McpStudioCapture]::CountMarkers($bytes, $stride, $w, $h)
+  return @{ ok = $true; width = $w; height = $h; stride = $stride; bytes = $bytes; magenta = $magenta; originX = $origin.X; originY = $origin.Y; method = $method }
+}
+$dpiAware = [McpStudioCapture]::EnablePerMonitorDpi()
+$mode = $env:MCP_CAPTURE_MODE
 $hint = $env:MCP_CAPTURE_TITLE_HINT
+$pidHint = 0
+if ($env:MCP_CAPTURE_PID) { $pidHint = [int]$env:MCP_CAPTURE_PID }
 $outFile = $env:MCP_CAPTURE_OUT
+$requestedMethod = $env:MCP_CAPTURE_METHOD
+$wantForeground = $env:MCP_CAPTURE_FOREGROUND -eq '1'
 $candidates = [McpStudioCapture]::Find('RobloxStudioBeta')
+if ($mode -eq 'list') {
+  $list = @($candidates | ForEach-Object { @{ handle = [int64]$_.Handle; pid = $_.Pid; title = $_.Title; placeName = (PlaceName $_.Title); isIconic = $_.Iconic } })
+  Emit @{ ok = $true; windows = $list; dpiAware = $dpiAware }; exit 0
+}
 if ($candidates.Count -eq 0) { Emit @{ ok = $false; error = 'no visible Roblox Studio window was found' }; exit 0 }
 $pick = $null
-if ($hint) { $pick = $candidates | Where-Object { $_.Title.StartsWith($hint) } | Select-Object -First 1 }
+if ($pidHint -gt 0) { $pick = $candidates | Where-Object { $_.Pid -eq $pidHint } | Select-Object -First 1 }
+if ($pick -eq $null -and $hint) {
+  $matches = @($candidates | Where-Object { MatchesHint $_.Title $hint })
+  if ($matches.Count -eq 1) { $pick = $matches[0] }
+  elseif ($matches.Count -gt 1) {
+    $titles = ($matches | ForEach-Object { "$($_.Title) (pid $($_.Pid))" }) -join ' | '
+    Emit @{ ok = $false; error = "several Studio windows match '$hint' (pid hint $pidHint): $titles" }; exit 0
+  }
+}
 if ($pick -eq $null -and $candidates.Count -eq 1) { $pick = $candidates[0] }
 if ($pick -eq $null) {
-  $titles = ($candidates | ForEach-Object { $_.Title }) -join ' | '
-  Emit @{ ok = $false; error = "could not pick a Studio window for '$hint' among: $titles" }; exit 0
+  $titles = ($candidates | ForEach-Object { "$($_.Title) (pid $($_.Pid))" }) -join ' | '
+  Emit @{ ok = $false; error = "could not pick a Studio window for '$hint' (pid hint $pidHint) among: $titles" }; exit 0
+}
+$restored = $false
+if ([McpStudioCapture]::IsIconic($pick.Handle)) {
+  [void][McpStudioCapture]::ShowWindow($pick.Handle, 9)
+  $restored = $true
+  $wantForeground = $true
+}
+$foreground = $false
+if ($wantForeground -or $requestedMethod -eq 'screen') {
+  $foreground = [McpStudioCapture]::BringToFront($pick.Handle)
+  Start-Sleep -Milliseconds 400
+} elseif ($restored) {
+  Start-Sleep -Milliseconds 400
 }
 if ([McpStudioCapture]::IsIconic($pick.Handle)) {
-  Emit @{ ok = $false; error = "the Studio window '$($pick.Title)' is minimized; restore it (it may stay behind other windows)" }; exit 0
+  Emit @{ ok = $false; error = "the Studio window '$($pick.Title)' is minimized and could not be restored" }; exit 0
 }
-$rect = New-Object McpStudioCapture+RECT
-[void][McpStudioCapture]::GetClientRect($pick.Handle, [ref]$rect)
-$w = $rect.Right - $rect.Left; $h = $rect.Bottom - $rect.Top
-if ($w -le 0 -or $h -le 0) { Emit @{ ok = $false; error = "the Studio window client area is empty ($w x $h)" }; exit 0 }
-$bmp = New-Object System.Drawing.Bitmap $w, $h, ([System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
-$g = [System.Drawing.Graphics]::FromImage($bmp)
-$hdc = $g.GetHdc()
-# PW_CLIENTONLY (1) | PW_RENDERFULLCONTENT (2): DWM-composited client area, occluded windows included.
-$printed = [McpStudioCapture]::PrintWindow($pick.Handle, $hdc, 3)
-$g.ReleaseHdc($hdc); $g.Dispose()
-if (-not $printed) { $bmp.Dispose(); Emit @{ ok = $false; error = 'PrintWindow failed for the Studio window' }; exit 0 }
-$bounds = New-Object System.Drawing.Rectangle 0, 0, $w, $h
-$data = $bmp.LockBits($bounds, [System.Drawing.Imaging.ImageLockMode]::ReadOnly, [System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
-$bytes = New-Object byte[] ($data.Stride * $h)
-[System.Runtime.InteropServices.Marshal]::Copy($data.Scan0, $bytes, 0, $bytes.Length)
-$stride = $data.Stride
-$bmp.UnlockBits($data); $bmp.Dispose()
-[System.IO.File]::WriteAllBytes($outFile, $bytes)
-Emit @{ ok = $true; width = $w; height = $h; stride = $stride; title = $pick.Title }
+$magenta = @{}
+$grab = $null
+if ($requestedMethod -eq 'screen') {
+  $grab = Grab $pick.Handle 'screen'
+  if ($grab.ok) { $magenta['screen'] = $grab.magenta }
+} else {
+  $grab = Grab $pick.Handle 'printwindow'
+  if ($grab.ok) { $magenta['printwindow'] = $grab.magenta }
+  if ($requestedMethod -eq 'auto' -and $grab.ok -and $grab.magenta -eq 0) {
+    $foreground = [McpStudioCapture]::BringToFront($pick.Handle)
+    Start-Sleep -Milliseconds 400
+    $second = Grab $pick.Handle 'screen'
+    if ($second.ok) { $magenta['screen'] = $second.magenta; $grab = $second }
+  }
+}
+if (-not $grab.ok) { Emit $grab; exit 0 }
+[System.IO.File]::WriteAllBytes($outFile, $grab.bytes)
+Emit @{
+  ok = $true; width = $grab.width; height = $grab.height; stride = $grab.stride; title = $pick.Title; handle = [int64]$pick.Handle
+  method = $grab.method; originX = $grab.originX; originY = $grab.originY; restored = $restored; foreground = $foreground; magenta = $magenta; dpiAware = $dpiAware
+}
 `;
 
 type WindowsCaptureReport = {
@@ -284,6 +440,14 @@ type WindowsCaptureReport = {
   height?: number;
   stride?: number;
   title?: string;
+  handle?: number;
+  method?: HostCaptureMethod;
+  originX?: number;
+  originY?: number;
+  restored?: boolean;
+  foreground?: boolean;
+  magenta?: Partial<Record<HostCaptureMethod, number>>;
+  windows?: StudioWindowInfo[];
 };
 
 function powershellPath(): string {
@@ -295,14 +459,14 @@ function powershellPath(): string {
   return 'powershell.exe';
 }
 
-function runWindowsCapture(titleHint: string | undefined, outFile: string): Promise<WindowsCaptureReport> {
+function runWindowsHelper(env: Record<string, string>): Promise<WindowsCaptureReport> {
   return new Promise((resolve, reject) => {
     const encoded = Buffer.from(WINDOWS_CAPTURE_SCRIPT, 'utf16le').toString('base64');
     const child = spawn(
       powershellPath(),
       ['-NoProfile', '-NonInteractive', '-NoLogo', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', encoded],
       {
-        env: { ...process.env, MCP_CAPTURE_TITLE_HINT: titleHint ?? '', MCP_CAPTURE_OUT: outFile },
+        env: { ...process.env, ...env },
         stdio: ['ignore', 'pipe', 'pipe'],
         windowsHide: true,
       },
@@ -346,18 +510,58 @@ function runWindowsCapture(titleHint: string | undefined, outFile: string): Prom
   });
 }
 
+function hostCaptureAvailability(): string | undefined {
+  if (isHostCaptureDisabled()) return 'host window capture is disabled by ROBLOX_STUDIO_HOST_CAPTURE';
+  if (!isHostCaptureSupported()) return hostCaptureUnsupportedReason();
+  return undefined;
+}
+
+export async function listStudioWindows(): Promise<StudioWindowListResult> {
+  const unavailable = hostCaptureAvailability();
+  if (unavailable) return { ok: false, error: unavailable };
+  try {
+    const report = await runWindowsHelper({ MCP_CAPTURE_MODE: 'list', MCP_CAPTURE_TITLE_HINT: '', MCP_CAPTURE_OUT: '' });
+    if (!report.ok) return { ok: false, error: report.error ?? 'window listing failed' };
+    return { ok: true, windows: report.windows ?? [] };
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : String(error) };
+  }
+}
+
+export function pickStudioWindow(windows: StudioWindowInfo[], titleHint?: string, pid?: number): { ok: true; window: StudioWindowInfo } | { ok: false; error: string } {
+  if (windows.length === 0) return { ok: false, error: 'no visible Roblox Studio window was found' };
+  const byPid = pid ? windows.find((window) => window.pid === pid) : undefined;
+  if (byPid) return { ok: true, window: byPid };
+  const matches = titleHint ? windows.filter((window) => studioWindowMatchesHint(window.title, titleHint)) : [];
+  if (matches.length === 1) return { ok: true, window: matches[0] };
+  if (matches.length > 1) {
+    return { ok: false, error: `several Studio windows match '${titleHint}' (pid hint ${pid ?? 0}): ${matches.map((window) => `${window.title} (pid ${window.pid})`).join(' | ')}` };
+  }
+  if (windows.length === 1) return { ok: true, window: windows[0] };
+  return { ok: false, error: `could not pick a Studio window for '${titleHint ?? ''}' (pid hint ${pid ?? 0}) among: ${windows.map((window) => `${window.title} (pid ${window.pid})`).join(' | ')}` };
+}
+
+export async function findStudioWindow(titleHint?: string, pid?: number): Promise<{ ok: true; window: StudioWindowInfo } | { ok: false; error: string }> {
+  const listed = await listStudioWindows();
+  if (!listed.ok) return listed;
+  return pickStudioWindow(listed.windows, titleHint, pid);
+}
+
 // Captures the Studio window's client area as RGBA. `titleHint` is the place
 // name shown in the window title (used to pick among several open places).
-export async function captureStudioWindow(titleHint?: string): Promise<HostCaptureResult> {
-  if (isHostCaptureDisabled()) {
-    return { ok: false, error: 'host window capture is disabled by ROBLOX_STUDIO_HOST_CAPTURE' };
-  }
-  if (!isHostCaptureSupported()) {
-    return { ok: false, error: hostCaptureUnsupportedReason() };
-  }
+export async function captureStudioWindow(titleHint?: string, options: HostCaptureOptions = {}): Promise<HostCaptureResult> {
+  const unavailable = hostCaptureAvailability();
+  if (unavailable) return { ok: false, error: unavailable };
   const outFile = path.join(os.tmpdir(), `robloxstudio-mcp-capture-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}.bgra`);
   try {
-    const report = await runWindowsCapture(titleHint, outFile);
+    const report = await runWindowsHelper({
+      MCP_CAPTURE_MODE: 'capture',
+      MCP_CAPTURE_TITLE_HINT: titleHint ?? '',
+      MCP_CAPTURE_OUT: outFile,
+      MCP_CAPTURE_METHOD: options.method ?? 'printwindow',
+      MCP_CAPTURE_FOREGROUND: options.foreground ? '1' : '0',
+      MCP_CAPTURE_PID: options.pid ? String(options.pid) : '',
+    });
     if (!report.ok || !report.width || !report.height || !report.stride) {
       return { ok: false, error: report.error ?? 'host window capture returned no image' };
     }
@@ -376,7 +580,21 @@ export async function captureStudioWindow(titleHint?: string): Promise<HostCaptu
         rgba[d + 3] = 255;
       }
     }
-    return { ok: true, capture: { width, height, rgba, title: report.title ?? '' } };
+    return {
+      ok: true,
+      capture: {
+        width,
+        height,
+        rgba,
+        title: report.title ?? '',
+        handle: report.handle ?? 0,
+        method: report.method ?? 'printwindow',
+        clientOrigin: { x: report.originX ?? 0, y: report.originY ?? 0 },
+        restored: report.restored === true,
+        foreground: report.foreground === true,
+        magentaPixels: report.magenta ?? {},
+      },
+    };
   } catch (error) {
     return { ok: false, error: error instanceof Error ? error.message : String(error) };
   } finally {
