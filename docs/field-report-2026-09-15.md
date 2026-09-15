@@ -30,6 +30,7 @@ is in `tests/field-2026-09-15/EVIDENCE.md`.
 - **Priority rationale:** in the concurrent-agent protocol the playtest is the single locked resource; every restart costs 20–30 s of queue time.
 
 ### 3. `import_rbxm` could not parent under `StarterPlayer.StarterCharacterScripts`
+**Status:** fixed in this PR — test `tests/field-2026-09-15/03-import-service-root.mjs`, evidence `evidence/03-import-service-root.md`. Roblox's actual text is `Cannot change Parent of type StarterCharacterScripts`; the root is now unwrapped and the result carries `unwrappedServiceRoot`.
 - **Symptom:** an rbxm with two LocalScripts (1,706 B) could not be imported with `parent_path="StarterPlayer.StarterCharacterScripts"` (agent report: "rbxm could not be parented"); the same file imported fine into `StarterGui`/`ReplicatedStorage` in four other imports. The scripts were recreated by hand with `Instance.new("LocalScript")` + `Source`.
 - **Reproduce:** `export_rbxm instance_paths=["StarterPlayer.StarterCharacterScripts"]` → `import_rbxm path=… parent_path="StarterPlayer.StarterCharacterScripts"` (target Studio is a different instance).
 - **Suspicion:** the root object serialized as the `StarterCharacterScripts` container itself; importing a service/container root fails ("Parent locked"). When the root is a service/container, its **children** should be moved to the parent. `studio-plugin/src/modules/handlers/SerializationHandlers.ts`.

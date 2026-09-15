@@ -1668,7 +1668,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
   {
     name: 'import_rbxm',
     category: 'write',
-    description: 'Use to load a local, remote, or inline .rbxm under a chosen parent.',
+    description: 'Use to load a local, remote, or inline .rbxm under a chosen parent, unwrapping a service root into its children.',
     inputSchema: {
       type: 'object',
       properties: {
