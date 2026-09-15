@@ -74,6 +74,7 @@ is in `tests/field-2026-09-15/EVIDENCE.md`.
 ### 10. In play mode, `capture_screenshot` never worked on the reference instance because of the "client peer"
 - **Symptom:** for the reference instance (play mode: edit + server + client-1) `capture_screenshot` failed every time (peer ambiguity). No visuals were available for the read-only reference review; code reading had to do.
 - **Request:** a `target` parameter (`edit|client-1`) or automatic client-1 selection in play mode; the error text names the peer that was tried.
+- **Status:** fixed in this PR — test `tests/field-2026-09-15/10-capture-target-peer.mjs`, evidence `tests/field-2026-09-15/evidence/10-capture-target-peer.md`.
 
 ---
 

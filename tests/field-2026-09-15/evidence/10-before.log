@@ -1,0 +1,43 @@
+Test process using port 59007 (automatically assigned)
+Full integration suite using port 59007 (from ROBLOX_STUDIO_PORT)
+Installing worktree plugin C:\Users\<user>\Desktop\mcp\wt\A\studio-plugin\MCPPlugin.rbxmx
+Installed MCPPlugin.rbxmx to C:\Users\<user>\AppData\Local\Temp\robloxstudio-mcp-workers\run-all-MXQQWf\RsmcpIsolatedPlugins\MCPPlugin.rbxmx
+Launched managed Studio instance instance:f9p-jev
+
+=== TODO#10 capture_screenshot target peer selection ===
+  capture_screenshot {"target":"edit"} -> 723ms isError=false {"width":1324,"height":772,"format":"png","mimeType":"image/png","message":"Screenshot 1324x772px (png). For simulate_mouse_input, x/y are pixel coordinates in this exact image with (0,0) at the top-left; it is not downscaled, so use coordinates as you read them off the image."}
+    image 1324x772, 2758 unique colours
+  capture_screenshot {} -> 1458ms isError=false {"width":1608,"height":772,"format":"png","mimeType":"image/png","message":"Screenshot 1608x772px (png). For simulate_mouse_input, x/y are pixel coordinates in this exact image with (0,0) at the top-left; it is not downscaled, so use coordinates as you read them off the image. Warning: Studio's CaptureService returned a blank (single-colour) frame and host window capture also failed (could not pick a Studio window for 'RunnerBaseplate.rbxl' among: C:\\Users\\<user>\\AppData\\Local\\Temp\\rsmcp-runner-UwUb2z\\RunnerBaseplate.rbxl - Roblox Studio | <other place A> - Roblox Studio | <other place B>.rbxl - Roblox Studio | <other place C>.rbxl - Roblox Studio), so this image may be blank."}
+    image 1608x772, 1 unique colours
+  capture_screenshot {"target":"client-1"} -> 1255ms isError=false {"width":1608,"height":772,"format":"png","mimeType":"image/png","message":"Screenshot 1608x772px (png). For simulate_mouse_input, x/y are pixel coordinates in this exact image with (0,0) at the top-left; it is not downscaled, so use coordinates as you read them off the image. Warning: Studio's CaptureService returned a blank (single-colour) frame and host window capture also failed (could not pick a Studio window for 'RunnerBaseplate.rbxl' among: C:\\Users\\<user>\\AppData\\Local\\Temp\\rsmcp-runner-UwUb2z\\RunnerBaseplate.rbxl - Roblox Studio | <other place A> - Roblox Studio | <other place B>.rbxl - Roblox Studio | <other place C>.rbxl - Roblox Studio), so this image may be blank."}
+    image 1608x772, 1 unique colours
+  capture_screenshot {"target":"server"} -> 1257ms isError=false {"width":1608,"height":772,"format":"png","mimeType":"image/png","message":"Screenshot 1608x772px (png). For simulate_mouse_input, x/y are pixel coordinates in this exact image with (0,0) at the top-left; it is not downscaled, so use coordinates as you read them off the image. Warning: Studio's CaptureService returned a blank (single-colour) frame and host window capture also failed (could not pick a Studio window for 'RunnerBaseplate.rbxl' among: C:\\Users\\<user>\\AppData\\Local\\Temp\\rsmcp-runner-UwUb2z\\RunnerBaseplate.rbxl - Roblox Studio | <other place A> - Roblox Studio | <other place B>.rbxl - Roblox Studio | <other place C>.rbxl - Roblox Studio), so this image may be blank."}
+    image 1608x772, 1 unique colours
+  capture_screenshot {"target":"client-7"} -> 1336ms isError=false {"width":1608,"height":772,"format":"png","mimeType":"image/png","message":"Screenshot 1608x772px (png). For simulate_mouse_input, x/y are pixel coordinates in this exact image with (0,0) at the top-left; it is not downscaled, so use coordinates as you read them off the image. Warning: Studio's CaptureService returned a blank (single-colour) frame and host window capture also failed (could not pick a Studio window for 'RunnerBaseplate.rbxl' among: C:\\Users\\<user>\\AppData\\Local\\Temp\\rsmcp-runner-UwUb2z\\RunnerBaseplate.rbxl - Roblox Studio | <other place A> - Roblox Studio | <other place B>.rbxl - Roblox Studio | <other place C>.rbxl - Roblox Studio), so this image may be blank."}
+    image 1608x772, 1 unique colours
+
+❌ TODO#10 capture_screenshot target peer selection FAILED: play mode without target must use client-1
++ actual - expected
+
++ undefined
+- 'client-1'
+
+
+--- todo-10 stderr tail ---
+responseMode: 'json' drops mid-call notifications. subscriptions/listen streams are always served over SSE regardless; other notifications emitted before a result are dropped.
+Port 59007 in use, trying next...
+Port 59007 in use - entering proxy mode (forwarding to localhost:59007)
+robloxstudio-mcp v3.1.4 running on stdio
+MCP server active in proxy mode - forwarding requests to primary
+Waiting for Studio plugin to connect...
+responseMode: 'json' drops mid-call notifications. subscriptions/listen streams are always served over SSE regardless; other notifications emitted before a result are dropped.
+Port 59007 in use, trying next...
+responseMode: 'json' drops mid-call notifications. subscriptions/listen streams are always served over SSE regardless; other notifications emitted before a result are dropped.
+Port 59007 in use, trying next...
+Closed managed Studio instance instance:f9p-jev
+
+========== SUMMARY ==========
+  ❌ FAIL  todo-2026-09-15/10-capture-target-peer.mjs
+
+0/1 passed.
+RED_10-capture-target-peer=1
