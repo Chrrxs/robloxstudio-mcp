@@ -8,6 +8,7 @@
 // and later close a managed baseplate.
 
 import { spawn } from 'node:child_process';
+import { readdirSync, readFileSync } from 'node:fs';
 import { once } from 'node:events';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
@@ -68,10 +69,20 @@ const requestedTest = requestedTestIndex === -1 ? undefined : process.argv[reque
 if (requestedTestIndex !== -1 && !requestedTest) {
   throw new Error('--test requires a test filename');
 }
-if (requestedTest && !FULL_TESTS.includes(requestedTest) && !DIAGNOSTIC_TESTS.includes(requestedTest) && !CONFIGURED_TESTS.includes(requestedTest)) {
+// Field-report regressions live in their own folder and run in one Studio session via --field.
+const FIELD_TEST_PREFIX = 'field-2026-09-15/';
+if (requestedTest && !FULL_TESTS.includes(requestedTest) && !DIAGNOSTIC_TESTS.includes(requestedTest) && !CONFIGURED_TESTS.includes(requestedTest) && !requestedTest.startsWith(FIELD_TEST_PREFIX)) {
   throw new Error(`Unknown Studio test ${JSON.stringify(requestedTest)}`);
 }
-const TESTS = requestedTest ? [requestedTest] : (featureSmoke ? FEATURE_TESTS : FULL_TESTS);
+const fieldSuite = process.argv.includes('--field');
+const FIELD_STUDIO_TESTS = fieldSuite
+  ? readdirSync(resolve(__dirname, FIELD_TEST_PREFIX))
+    .filter((file) => /^\d\d-.*\.mjs$/.test(file))
+    .filter((file) => /mcp-client\.mjs/.test(readFileSync(resolve(__dirname, FIELD_TEST_PREFIX, file), 'utf8')))
+    .sort()
+    .map((file) => FIELD_TEST_PREFIX + file)
+  : [];
+const TESTS = requestedTest ? [requestedTest] : fieldSuite ? FIELD_STUDIO_TESTS : (featureSmoke ? FEATURE_TESTS : FULL_TESTS);
 
 // Studio takes a few seconds to fully tear down a play DM after StudioTestService:EndTest.
 // Without a gap, the next test's solo_playtest start collides with the previous test's
