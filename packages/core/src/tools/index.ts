@@ -151,6 +151,8 @@ const MAX_NETWORK_PACKET_LOSS_PERCENT = 0.5;
 const GREP_SCRIPTS_TIMEOUT_MS = 120_000;
 const MAX_GREP_PATTERN_UTF8_BYTES = 4096;
 const RUNTIME_LOG_PEER_TIMEOUT_MS = 5_000;
+const RUNTIME_LOG_LEVELS = ['ERR', 'WARN', 'INFO', 'OUT'];
+const SEARCH_TAGS_MAX_RESULTS = 1000;
 const STUDIO_ASSISTANT_SOURCE_IMAGE_LABEL = 'Studio Assistant Source Image';
 const CREATOR_STORE_SEARCH_TYPES = new Set<string>([
   'Audio',
@@ -1852,6 +1854,30 @@ export class RobloxStudioTools {
     };
   }
 
+  async searchTags(tag?: string, maxResults?: number, instance_id?: string, signal?: AbortSignal) {
+    if (tag !== undefined && (typeof tag !== 'string' || tag === '')) {
+      throw new Error('search_tags tag must be a non-empty string.');
+    }
+    if (
+      maxResults !== undefined &&
+      (!Number.isInteger(maxResults) || maxResults < 1 || maxResults > SEARCH_TAGS_MAX_RESULTS)
+    ) {
+      throw new Error(`search_tags maxResults must be an integer between 1 and ${SEARCH_TAGS_MAX_RESULTS}.`);
+    }
+    const data: Record<string, unknown> = {};
+    if (tag !== undefined) data.tag = tag;
+    if (maxResults !== undefined) data.maxResults = maxResults;
+    const response = await this._callSingle('/api/search-tags', data, undefined, instance_id, GREP_SCRIPTS_TIMEOUT_MS, signal);
+    return {
+      content: [
+        {
+          type: 'text',
+          text: JSON.stringify(response)
+        }
+      ]
+    };
+  }
+
   async selection(
     action: string,
     opts: {
@@ -2481,6 +2507,12 @@ export class RobloxStudioTools {
     tail?: number,
     filter?: string,
     signal?: AbortSignal,
+    options: {
+      level?: string;
+      since_ts?: number;
+      exclude?: string;
+      dedupe?: boolean;
+    } = {},
   ) {
     if (instance_id !== undefined && multiplayer_group_id !== undefined) {
       throw new Error('get_runtime_logs accepts only one of instance_id or multiplayer_group_id.');
@@ -2490,6 +2522,19 @@ export class RobloxStudioTools {
     }
     if (tail !== undefined && (!Number.isInteger(tail) || tail < 0)) {
       throw new Error('get_runtime_logs tail must be a non-negative integer.');
+    }
+    const { level, since_ts, exclude, dedupe } = options;
+    if (level !== undefined && !RUNTIME_LOG_LEVELS.includes(level)) {
+      throw new Error(`get_runtime_logs level must be one of ${RUNTIME_LOG_LEVELS.join(', ')}.`);
+    }
+    if (since_ts !== undefined && (typeof since_ts !== 'number' || !Number.isFinite(since_ts) || since_ts < 0)) {
+      throw new Error('get_runtime_logs since_ts must be a non-negative number.');
+    }
+    if (exclude !== undefined && typeof exclude !== 'string') {
+      throw new Error('get_runtime_logs exclude must be a string.');
+    }
+    if (dedupe !== undefined && typeof dedupe !== 'boolean') {
+      throw new Error('get_runtime_logs dedupe must be a boolean.');
     }
 
     // Capture one fresh topology before resolving the log scope and its fanout.
@@ -2679,6 +2724,10 @@ export class RobloxStudioTools {
         if (peerSince !== undefined) data.since = peerSince;
         if (tail !== undefined) data.tail = tail;
         if (filter !== undefined) data.filter = filter;
+        if (level !== undefined) data.level = level;
+        if (since_ts !== undefined) data.sinceTs = since_ts;
+        if (exclude !== undefined) data.exclude = exclude;
+        if (dedupe !== undefined) data.dedupe = dedupe;
         try {
           const responseValue: unknown = await this.client.request(
             '/api/get-runtime-logs',

@@ -4,6 +4,7 @@ import Utils from "./Utils";
 import UI from "./UI";
 import { cleanupEditBridgeArtifacts } from "./EvalBridges";
 import QueryHandlers from "./handlers/QueryHandlers";
+import TagHandlers from "./handlers/TagHandlers";
 import PropertyHandlers from "./handlers/PropertyHandlers";
 import ScriptHandlers from "./handlers/ScriptHandlers";
 import MetadataHandlers from "./handlers/MetadataHandlers";
@@ -51,6 +52,7 @@ const routeMap: Record<string, Handler> = {
     "/api/class-info": QueryHandlers.getClassInfo,
     "/api/project-structure": QueryHandlers.getProjectStructure,
     "/api/grep-scripts": QueryHandlers.grepScripts,
+    "/api/search-tags": TagHandlers.searchTags,
 
     "/api/set-properties": PropertyHandlers.setProperties,
 

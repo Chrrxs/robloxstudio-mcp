@@ -1,0 +1,39 @@
+Test process using port 58230 (automatically assigned)
+Full integration suite using port 58230 (from ROBLOX_STUDIO_PORT)
+Installing worktree plugin C:\Users\<user>\Desktop\mcp\wt\E\studio-plugin\MCPPlugin.rbxmx
+Installed MCPPlugin.rbxmx to C:\Users\<user>\AppData\Local\Temp\robloxstudio-mcp-workers\run-all-p9bYFq\RsmcpIsolatedPlugins\MCPPlugin.rbxmx
+Launched managed Studio instance instance:lm9-qr6
+
+=== TODO #6/#15: runtime error merge, level/since_ts/exclude, dedupe ===
+  ✓ edit DM staged StarterGui.TODO6Gui with two disabled LocalScripts
+  ✓ TODO6Once enabled at Players.<user>.PlayerGui.TODO6Gui.TODO6Once
+  [raw filter=TODO6] [{"message":"Players.<user>.PlayerGui.TODO6Gui.TODO6Once:1: TODO6 boom once","ts":1789461954.51,"script":"Players.<user>.PlayerGui.TODO6Gui.TODO6Once","data":[],"level":"ERR","stack":["Script 'Players.<user>.PlayerGui.TODO6Gui.TODO6Once', Line 1"],"line":1}]
+  ✓ one error yields exactly one entry mentioning TODO6Once (got 1)
+  ✓ the merged entry keeps level ERR (got ERR)
+  ✓ script is the LocalScript path (got Players.<user>.PlayerGui.TODO6Gui.TODO6Once)
+  ✓ line is 1 (got 1)
+  ✓ stack holds the Script frames (got ["Script 'Players.<user>.PlayerGui.TODO6Gui.TODO6Once', Line 1"])
+  [level=ERR filter=TODO6] [{"message":"Players.<user>.PlayerGui.TODO6Gui.TODO6Once:1: TODO6 boom once","ts":1789461954.51,"script":"Players.<user>.PlayerGui.TODO6Gui.TODO6Once","data":[],"level":"ERR","stack":["Script 'Players.<user>.PlayerGui.TODO6Gui.TODO6Once', Line 1"],"line":1}]
+  ✓ level:"ERR" returns exactly the merged error (got 1)
+  [level=INFO filter=TODO6] []
+  ✓ no separate INFO "Script ..., Line N" entry remains (got 0)
+  [level=error] "Input validation error: Invalid arguments for tool get_runtime_logs: data/level must be equal to one of the allowed values"
+
+❌ TODO #6/#15: runtime error merge, level/since_ts/exclude, dedupe FAILED: ASSERT FAIL: an unknown level is rejected with the accepted names
+
+--- A stderr tail ---
+responseMode: 'json' drops mid-call notifications. subscriptions/listen streams are always served over SSE regardless; other notifications emitted before a result are dropped.
+Port 58230 in use, trying next...
+Port 58230 in use - entering proxy mode (forwarding to localhost:58230)
+robloxstudio-mcp v3.1.4 running on stdio
+MCP server active in proxy mode - forwarding requests to primary
+Waiting for Studio plugin to connect...
+responseMode: 'json' drops mid-call notifications. subscriptions/listen streams are always served over SSE regardless; other notifications emitted before a result are dropped.
+Port 58230 in use, trying next...
+Closed managed Studio instance instance:lm9-qr6
+
+========== SUMMARY ==========
+  ❌ FAIL  todo-2026-09-15/06-runtime-log-merge.mjs
+
+0/1 passed.
+EXIT=1

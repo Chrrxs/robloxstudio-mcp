@@ -45,11 +45,27 @@ Start solo_playtest or multiplayer_playtest before targeting a live server or cl
 
 execute_luau runs through the Studio plugin. eval_server_runtime and eval_client_runtime run inside a live game VM and share that VM's require cache with game scripts. Use the eval tools when module state or the runtime Script or LocalScript environment matters.
 
-Read output with get_runtime_logs. Reuse nextCursor as cursor for one Instance, or nextCursorByInstance as cursor_by_instance for a Multiplayer Group, instead of requesting the full process streams again.
+Read output with get_runtime_logs. Reuse nextCursor as cursor for one Instance, or nextCursorByInstance as cursor_by_instance for a Multiplayer Group, instead of requesting the full process streams again. A runtime error arrives as one entry whose script, line, and stack fields come from the Stack Begin and Stack End lines. Use level, since_ts, and exclude to narrow the stream, and dedupe=true to collapse repeated messages into count, firstTs, and lastTs.
 
 - Each Peer VM retains approximately 64 KiB of message text, rather than a fixed message count. Reads do not consume or clear the buffer; incoming messages evict old entries.
 - totalDropped sums lifetime eviction counts from successfully read Peers. It counts messages evicted, not messages missed by this caller, and may decrease when Peers fail, disconnect, or reload.
 - For successfully read Peers, nextCursor advances past all captured entries, including those omitted by filter or tail. It is a continuation watermark, not pagination through omitted results; continuing from it will not return those entries.
+
+## Server-side teleportation
+
+- Rapid HumanoidRootPart.CFrame writes from eval_server_runtime or execute_luau can trip the game's own anti-cheat, which may rubber-band or kick the player. Treat any speed limit the game enforces as the ceiling for scripted movement.
+- Prefer Humanoid:MoveTo in a loop, the game's own teleport or checkpoint API, or a single CFrame write followed by a short wait, and confirm the position afterwards instead of assuming the write stuck.
+
+## Concurrent agent protocol
+
+Several agents sharing one Studio process need these rules to avoid wasted queue time and double mutations.
+
+- Keep one playtest lock per Instance, held by an orchestrator. Only the holder calls solo_playtest or multiplayer_playtest; other agents read logs and run edit-mode work.
+- Give each agent a disjoint DataModel subtree to write to. Two agents editing the same Folder or ScreenGui produce conflicting Source writes and duplicate instances.
+- Pass a unique operation_id on every execute_luau and set_properties call. After a timeout, query get_request_status with that ID instead of resending the same code.
+- A running playtest does not see edit DataModel changes. After writing scripts or instances in edit mode, restart the session so the change is observed: solo_playtest action=restart where the server offers it, otherwise stop and start.
+- Split large outputs. Return chunks from execute_luau, bound them with max_output_bytes where the server offers it, and use cursors on get_runtime_logs instead of rereading full streams.
+- Treat a reference Instance as read-only: use target=edit for reads and never start, stop, or mutate a playtest owned by another agent.
 
 ## Simulation and input
 

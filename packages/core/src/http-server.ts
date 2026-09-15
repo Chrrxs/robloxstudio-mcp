@@ -61,6 +61,7 @@ const TOOL_PROXY_ENDPOINTS: Record<string, readonly string[]> = {
   insert_script_lines: ['/api/insert-script-lines'],
   delete_script_lines: ['/api/delete-script-lines'],
   get_attributes: ['/api/get-attributes'],
+  search_tags: ['/api/search-tags'],
   selection: ['/api/get-selection', '/api/set-selection', '/api/focus-viewport'],
   execute_luau: ['/api/execute-luau'],
   eval_server_runtime: ['/api/eval-runtime'],
@@ -213,6 +214,7 @@ export const TOOL_HANDLERS: Record<string, ToolHandler> = {
     return tools.deleteScriptLines(body.instancePath, startLine, endLine, body.instance_id);
   },
   get_attributes: (tools, body) => tools.getAttributes(body.instancePath, body.instance_id),
+  search_tags: (tools, body, context) => tools.searchTags(body.tag, body.maxResults, body.instance_id, context?.signal),
   selection: (tools, body) => tools.selection(body.action, body, body.instance_id),
   execute_luau: (tools, body) => tools.executeLuau(body.code, body.target, body.instance_id, body.operation_id),
   eval_server_runtime: (tools, body) => tools.evalServerRuntime(body.code, body.instance_id),
@@ -226,7 +228,12 @@ export const TOOL_HANDLERS: Record<string, ToolHandler> = {
   manage_instance: (tools, body) => tools.manageInstance(body),
   solo_playtest: (tools, body) => tools.soloPlaytest(body.action, body.mode, body.timeout, body.instance_id),
   multiplayer_playtest: (tools, body) => tools.multiplayerPlaytest(body.action, body.numPlayers, body.target, body.testArgs, body.value, body.timeout, body.instance_id),
-  get_runtime_logs: (tools, body, context) => tools.getRuntimeLogs(body.instance_id, body.multiplayer_group_id, body.cursor, body.cursor_by_instance, body.tail, body.filter, context?.signal),
+  get_runtime_logs: (tools, body, context) => tools.getRuntimeLogs(body.instance_id, body.multiplayer_group_id, body.cursor, body.cursor_by_instance, body.tail, body.filter, context?.signal, {
+    level: body.level,
+    since_ts: body.since_ts,
+    exclude: body.exclude,
+    dedupe: body.dedupe,
+  }),
   capture_script_profiler: (tools, body) => tools.captureScriptProfiler(body.target, {
     duration_ms: body.duration_ms,
     frequency: body.frequency,

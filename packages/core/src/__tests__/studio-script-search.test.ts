@@ -30,6 +30,28 @@ interface ScriptSearch {
 
 interface ScriptSearchModule {
   createScriptSearch(corpus: ScriptCorpus): ScriptSearch;
+  tagLiteralPattern(tag: string): string;
+  classifyTagUsage(line: string): string;
+}
+
+type FindImpl = (value: string, pattern: string, start?: number, plain?: boolean) => [number | undefined, number | undefined];
+
+function luaPatternFind(value: string, pattern: string, start = 1, plain = false): [number | undefined, number | undefined] {
+  if (plain) return robloxFind(value, pattern, start);
+  let out = '';
+  for (let index = 0; index < pattern.length; index += 1) {
+    const char = pattern[index];
+    if (char === '%') {
+      index += 1;
+      out += `\\${pattern[index]}`;
+    } else {
+      out += char;
+    }
+  }
+  const match = new RegExp(out).exec(value.slice(Math.max(0, start - 1)));
+  if (!match) return [undefined, undefined];
+  const from = Math.max(0, start - 1) + match.index + 1;
+  return [from, from + match[0].length - 1];
 }
 
 function installRobloxCollections(context: vm.Context): void {
@@ -63,7 +85,10 @@ function robloxFind(
   return index < 0 ? [undefined, undefined] : [index + 1, index + 1];
 }
 
-async function loadScriptSearch(onFind: (pattern: string) => void = () => undefined): Promise<ScriptSearchModule> {
+async function loadScriptSearch(
+  onFind: (pattern: string) => void = () => undefined,
+  findImpl: FindImpl = (value, pattern, start) => robloxFind(value, pattern, start),
+): Promise<ScriptSearchModule> {
   const result = await esbuildBuild({
     entryPoints: [path.resolve(process.cwd(), '../../studio-plugin/src/modules/ScriptSearch.ts')],
     bundle: true,
@@ -80,9 +105,9 @@ async function loadScriptSearch(onFind: (pattern: string) => void = () => undefi
     typeIs: (value: unknown, expected: string) => typeof value === expected,
     math: { floor: Math.floor, max: Math.max, min: Math.min },
     string: {
-      find: (value: string, pattern: string, start?: number) => {
+      find: (value: string, pattern: string, start?: number, plain?: boolean) => {
         onFind(pattern);
-        return robloxFind(value, pattern, start);
+        return findImpl(value, pattern, start, plain);
       },
       sub: (value: string, start: number, finish?: number) => {
         const from = start > 0 ? start - 1 : value.length + start;
@@ -494,4 +519,67 @@ describe('Studio script search', () => {
     });
   });
 
+});
+
+describe('field #8 tag literal search helpers', () => {
+  test('tagLiteralPattern quotes the tag and escapes Lua magic characters', async () => {
+    const module = await loadScriptSearch();
+    expect(module.tagLiteralPattern('Field8')).toBe(`["']Field8["']`);
+    expect(module.tagLiteralPattern('a-b.c%d')).toBe(`["']a%-b%.c%%d["']`);
+  });
+
+  test('classifyTagUsage names the CollectionService call on the line', async () => {
+    const module = await loadScriptSearch();
+    expect(module.classifyTagUsage('for _, x in CollectionService:GetTagged("Field8") do')).toBe('GetTagged');
+    expect(module.classifyTagUsage("if CS:HasTag(part, 'Field8') then")).toBe('HasTag');
+    expect(module.classifyTagUsage('CS:AddTag(part, "Field8")')).toBe('AddTag');
+    expect(module.classifyTagUsage('CS:RemoveTag(part, "Field8")')).toBe('RemoveTag');
+    expect(module.classifyTagUsage('CS:GetInstanceAddedSignal("Field8"):Connect(f)')).toBe('GetInstanceAddedSignal');
+    expect(module.classifyTagUsage('local TAGS = { "Field8" }')).toBe('literal');
+  });
+
+  test('the tag pattern finds quoted literal uses only, not prefixes or attribute-driven tags', async () => {
+    const root = { id: 'root' };
+    const staticScript = { id: 'static' };
+    const dynamicScript = { id: 'dynamic' };
+    const corpus: ScriptCorpus = {
+      resolveRoot: () => root,
+      getChildren: (node) => node === root ? [staticScript, dynamicScript] : [],
+      readScript: (node) => {
+        if (node === staticScript) {
+          return {
+            instancePath: 'game.ServerScriptService.Field8Static',
+            name: 'Field8Static',
+            className: 'Script',
+            source: 'local CS = game:GetService("CollectionService")\nfor _, inst in ipairs(CS:GetTagged("Field8")) do\n\tprint(CS:HasTag(inst, \'Field8Dyn\'))\nend',
+          };
+        }
+        if (node === dynamicScript) {
+          return {
+            instancePath: 'game.ServerScriptService.Field8Dynamic',
+            name: 'Field8Dynamic',
+            className: 'Script',
+            source: 'local tag = script:GetAttribute("Tag")\nfor _, inst in ipairs(game:GetService("CollectionService"):GetTagged(tag)) do print(inst) end',
+          };
+        }
+        return undefined;
+      },
+    };
+    const module = await loadScriptSearch(() => undefined, luaPatternFind);
+    const search = module.createScriptSearch(corpus);
+
+    const result = JSON.parse(JSON.stringify(search.search({
+      pattern: module.tagLiteralPattern('Field8'),
+      usePattern: true,
+    }, { checkpoint: () => undefined })));
+    expect(result.scriptsMatched).toBe(1);
+    expect(result.results[0].instancePath).toBe('game.ServerScriptService.Field8Static');
+    expect(result.results[0].matches.map((match: { line: number }) => match.line)).toEqual([2]);
+
+    const dynamicOnly = JSON.parse(JSON.stringify(search.search({
+      pattern: module.tagLiteralPattern('Field8Dyn'),
+      usePattern: true,
+    }, { checkpoint: () => undefined })));
+    expect(dynamicOnly.results[0].matches.map((match: { line: number }) => match.line)).toEqual([3]);
+  });
 });

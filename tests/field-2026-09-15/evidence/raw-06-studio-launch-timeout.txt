@@ -1,0 +1,29 @@
+Test process using port 57451 (automatically assigned)
+Full integration suite using port 57451 (from ROBLOX_STUDIO_PORT)
+Installing worktree plugin C:\Users\<user>\Desktop\mcp\wt\E\studio-plugin\MCPPlugin.rbxmx
+Installed MCPPlugin.rbxmx to C:\Users\<user>\AppData\Local\Temp\robloxstudio-mcp-workers\run-all-eOx4dt\RsmcpIsolatedPlugins\MCPPlugin.rbxmx
+file:///C:/Users/<user>/Desktop/mcp/wt/E/tests/lib/mcp-http-client.mjs:76
+    throw new McpHttpToolError(
+          ^
+
+McpHttpToolError: MCP HTTP tool manage_instance request failed: The operation was aborted due to timeout
+    at Object.callMcpHttpTool [as callTool] (file:///C:/Users/<user>/Desktop/mcp/wt/E/tests/lib/mcp-http-client.mjs:76:11)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+    at async waitForEditConnection (file:///C:/Users/<user>/Desktop/mcp/wt/E/tests/lib/managed-studio-session.mjs:187:18)
+    ... 2 lines matching cause stack trace ...
+    at async file:///C:/Users/<user>/Desktop/mcp/wt/E/tests/run-all.mjs:171:1 {
+  responseReceived: false,
+  status: undefined,
+  body: undefined,
+  [cause]: DOMException [TimeoutError]: The operation was aborted due to timeout
+      at node:internal/deps/undici/undici:16416:13
+      at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+      at async Object.callMcpHttpTool [as callTool] (file:///C:/Users/<user>/Desktop/mcp/wt/E/tests/lib/mcp-http-client.mjs:66:16)
+      at async waitForEditConnection (file:///C:/Users/<user>/Desktop/mcp/wt/E/tests/lib/managed-studio-session.mjs:187:18)
+      at async openManagedStudioSession (file:///C:/Users/<user>/Desktop/mcp/wt/E/tests/lib/managed-studio-session.mjs:420:24)
+      at async main (file:///C:/Users/<user>/Desktop/mcp/wt/E/tests/run-all.mjs:126:21)
+      at async file:///C:/Users/<user>/Desktop/mcp/wt/E/tests/run-all.mjs:171:1
+}
+
+Node.js v24.13.0
+EXIT=1

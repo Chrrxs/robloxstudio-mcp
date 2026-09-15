@@ -12,7 +12,7 @@ screenshots, memory reports, and profiler captures from each peer.
 
 - Run Luau with `eval_server_runtime` or `eval_client_runtime`. Both tools execute in a live server or client context and use the same `require` cache as your game scripts.
 - Instrument live code with `breakpoints`. It records each hit without pausing the playtest.
-- Read output from edit mode, the server, or a specific client with `get_runtime_logs`, including messages logged during startup.
+- Read output from edit mode, the server, or a specific client with `get_runtime_logs`, including messages logged during startup. A runtime error is one entry with `script`, `line`, and `stack`; narrow the stream with `level`, `since_ts`, and `exclude`, or collapse repeats with `dedupe`.
 
 ### Automate playtests
 
@@ -29,6 +29,7 @@ screenshots, memory reports, and profiler captures from each peer.
 - Run Luau in Studio's edit context with `execute_luau`.
 - Use `set_properties` for instance properties and `find_and_replace_in_scripts` for script text. For project-specific bulk edits, use `execute_luau`.
 - For large generated Luau, use the [verified chunk-staging workflow](docs/large-inputs.md): explicit instance routing, UTF-8 byte/hash readback, ownership-checked cleanup, and bounded recovery without blindly replaying mutations.
+- Find which instances carry a CollectionService tag and which scripts use it with `search_tags`; `get_instance_properties` lists an instance's tags.
 - Use `selection` to inspect or update Studio selection and frame a part or model before capturing the viewport.
 - Capture the viewport with `capture_screenshot`, then send mouse or keyboard input. When Studio's own capture APIs cannot see the play viewport (a blank frame or an EditableImage error during a playtest), the server grabs the Studio window through the host OS instead and crops it to the viewport — this works with Studio behind other windows, though not minimized. See [Configuration](docs/configuration.md#host-window-capture).
 
@@ -97,7 +98,7 @@ On Windows, wrap with `cmd /c` if `npx` doesn't resolve:
 
 [![NPM Version](https://img.shields.io/npm/v/@chrrxs/robloxstudio-mcp-inspector)](https://www.npmjs.com/package/@chrrxs/robloxstudio-mcp-inspector)
 
-24 Studio-safe inspection tools: no DataModel or script edits. The selection
+25 Studio-safe inspection tools: no DataModel or script edits. The selection
 tool can change editor selection and camera framing; export and profiler tools
 can write files only to explicit local paths. Install only one variant at a time
 (the installers remove the other automatically):

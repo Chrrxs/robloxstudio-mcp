@@ -261,3 +261,111 @@ describe('runtime log structured context', () => {
     });
   });
 });
+
+describe('field #15 runtime log filters', () => {
+  test('forwards level, since_ts, exclude, and dedupe to every Peer read', async () => {
+    const bridge = new BridgeService();
+    bridge.registerPeer({
+      peerId: 'edit-session',
+      transportPeerId: 'edit-session',
+      instanceId: 'instance:test',
+      role: 'edit',
+      placeId: 0,
+      placeName: 'TestPlace',
+      dataModelName: 'TestPlace',
+      isRunning: false,
+    });
+    const tools = new RobloxStudioTools(bridge);
+
+    const resultPromise = tools.getRuntimeLogs(
+      'instance:test',
+      undefined,
+      undefined,
+      undefined,
+      10,
+      'needle',
+      undefined,
+      { level: 'ERR', since_ts: 1_721_000_000, exclude: 'User is not authorized to access Asset', dedupe: true },
+    );
+    resultPromise.catch(() => {});
+
+    const logsRequest = await nextPendingRequest(bridge);
+    expect(logsRequest.request).toEqual({
+      endpoint: '/api/get-runtime-logs',
+      data: {
+        tail: 10,
+        filter: 'needle',
+        level: 'ERR',
+        sinceTs: 1_721_000_000,
+        exclude: 'User is not authorized to access Asset',
+        dedupe: true,
+      },
+    });
+    bridge.resolveRequest(logsRequest.requestId, {
+      entries: [{
+        seq: 4,
+        ts: 1_721_000_001,
+        level: 'ERR',
+        message: 'Players.P.PlayerGui.G.S:5: needle',
+        script: 'Players.P.PlayerGui.G.S',
+        line: 5,
+        stack: ["Script 'Players.P.PlayerGui.G.S', Line 5"],
+        count: 5,
+        firstTs: 1_721_000_001,
+        lastTs: 1_721_000_003,
+      }],
+      totalDropped: 0,
+      nextSince: 8,
+    });
+
+    const result = await resultPromise;
+    const first = result.content[0];
+    if (first.type !== 'text') throw new Error('expected a text response');
+    const response = JSON.parse(first.text);
+    expect(response.entries).toEqual([{
+      ts: 1_721_000_001,
+      level: 'ERR',
+      message: 'Players.P.PlayerGui.G.S:5: needle',
+      script: 'Players.P.PlayerGui.G.S',
+      line: 5,
+      stack: ["Script 'Players.P.PlayerGui.G.S', Line 5"],
+      count: 5,
+      firstTs: 1_721_000_001,
+      lastTs: 1_721_000_003,
+    }]);
+  });
+
+  test('rejects an unknown level, a negative since_ts, and a non-boolean dedupe before contacting Studio', async () => {
+    const bridge = new BridgeService();
+    bridge.registerPeer({
+      peerId: 'edit-session',
+      transportPeerId: 'edit-session',
+      instanceId: 'instance:test',
+      role: 'edit',
+      placeId: 0,
+      placeName: 'TestPlace',
+      dataModelName: 'TestPlace',
+      isRunning: false,
+    });
+    const tools = new RobloxStudioTools(bridge);
+
+    await expect(tools.getRuntimeLogs('instance:test', undefined, undefined, undefined, undefined, undefined, undefined, { level: 'error' }))
+      .rejects.toThrow('get_runtime_logs level must be one of ERR, WARN, INFO, OUT.');
+    await expect(tools.getRuntimeLogs('instance:test', undefined, undefined, undefined, undefined, undefined, undefined, { since_ts: -1 }))
+      .rejects.toThrow('get_runtime_logs since_ts must be a non-negative number.');
+    await expect(tools.getRuntimeLogs('instance:test', undefined, undefined, undefined, undefined, undefined, undefined, { dedupe: 'yes' as unknown as boolean }))
+      .rejects.toThrow('get_runtime_logs dedupe must be a boolean.');
+    expect(bridge.claimNextRequestForTransport('edit-session', RUNTIME_LOG_TEST_CLAIM_OWNER)).toBeNull();
+  });
+});
+
+describe('field #15 client Peer broker', () => {
+  test('the client broker routes get-runtime-logs through LogHandlers so level, sinceTs, exclude, and dedupe reach client buffers', () => {
+    const source = fs.readFileSync(
+      path.join(repositoryRoot(), 'studio-plugin/src/modules/ClientBroker.ts'),
+      'utf8',
+    );
+    expect(source).toContain('LogHandlers.getRuntimeLogs(data ?? {})');
+    expect(source).not.toContain('RuntimeLogBuffer.query({ since, tail, filter })');
+  });
+});

@@ -79,9 +79,13 @@ describe('Tool schema compatibility', () => {
     expect(Object.keys(properties).sort()).toEqual([
       'cursor',
       'cursor_by_instance',
+      'dedupe',
+      'exclude',
       'filter',
       'instance_id',
+      'level',
       'multiplayer_group_id',
+      'since_ts',
       'tail',
     ]);
     expect(properties).not.toHaveProperty('target');
@@ -280,6 +284,7 @@ describe('Tool schema compatibility', () => {
       insert_script_lines: 'insertScriptLines',
       delete_script_lines: 'deleteScriptLines',
       get_attributes: 'getAttributes',
+      search_tags: 'searchTags',
       selection: 'selection',
       execute_luau: 'executeLuau',
       eval_server_runtime: 'evalServerRuntime',

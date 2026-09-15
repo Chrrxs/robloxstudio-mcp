@@ -18,6 +18,12 @@ interface RuntimeLogEntry {
 	level: LogLevel;
 	message: string;
 	data?: Record<string, unknown>;
+	script?: string;
+	line?: number;
+	stack?: string[];
+	count?: number;
+	firstTs?: number;
+	lastTs?: number;
 }
 
 const MAX_BYTES = 64 * 1024;
@@ -145,6 +151,85 @@ interface QueryOptions {
 	since?: number;
 	tail?: number;
 	filter?: string; // Plain substring match, applied to message
+	level?: LogLevel;
+	sinceTs?: number;
+	exclude?: string;
+	dedupe?: boolean;
+}
+
+const STACK_BEGIN = "Stack Begin";
+const STACK_END = "Stack End";
+const MILLISECOND_TIMESTAMP_THRESHOLD = 1e11;
+
+function parseStackFrame(frame: string): [string | undefined, number | undefined] {
+	const [scriptPath, lineText] = string.match(frame, "^Script '(.-)', Line (%d+)");
+	if (!typeIs(scriptPath, "string")) return [undefined, undefined];
+	return [scriptPath, tonumber(lineText)];
+}
+
+function mergeStackFrames(list: RuntimeLogEntry[]): RuntimeLogEntry[] {
+	const merged: RuntimeLogEntry[] = [];
+	let index = 0;
+	while (index < list.size()) {
+		const entry = list[index];
+		const following = list[index + 1];
+		if (entry.level === "ERR" && following !== undefined && following.level === "INFO" && following.message === STACK_BEGIN) {
+			const stack: string[] = [];
+			let cursor = index + 2;
+			let closed = false;
+			while (cursor < list.size()) {
+				const frame = list[cursor];
+				if (frame.level !== "INFO") break;
+				cursor++;
+				if (frame.message === STACK_END) {
+					closed = true;
+					break;
+				}
+				stack.push(frame.message);
+			}
+			if (closed) {
+				const combined: RuntimeLogEntry = { ...entry, stack };
+				for (const frame of stack) {
+					const [scriptPath, lineNumber] = parseStackFrame(frame);
+					if (scriptPath !== undefined) {
+						combined.script = scriptPath;
+						combined.line = lineNumber;
+						break;
+					}
+				}
+				merged.push(combined);
+				index = cursor;
+				continue;
+			}
+		}
+		merged.push(entry);
+		index++;
+	}
+	return merged;
+}
+
+function dedupeEntries(list: RuntimeLogEntry[]): RuntimeLogEntry[] {
+	const deduped: RuntimeLogEntry[] = [];
+	const byKey = new Map<string, RuntimeLogEntry>();
+	for (const entry of list) {
+		const key = `${entry.level}|${entry.script ?? ""}|${entry.line ?? ""}|${entry.message}`;
+		const existing = byKey.get(key);
+		if (existing === undefined) {
+			const first: RuntimeLogEntry = { ...entry, count: 1 };
+			byKey.set(key, first);
+			deduped.push(first);
+		} else {
+			existing.count = (existing.count ?? 1) + 1;
+			existing.firstTs = existing.firstTs ?? existing.ts;
+			existing.lastTs = entry.ts;
+		}
+	}
+	return deduped;
+}
+
+function containsSubstring(message: string, needle: string): boolean {
+	const [start] = string.find(message, needle, 1, true);
+	return start !== undefined;
 }
 
 interface QueryResult {
@@ -158,6 +243,18 @@ function query(opts: QueryOptions): QueryResult {
 		? entries.filter((e) => e.seq > (opts.since as number))
 		: [...entries];
 
+	result = mergeStackFrames(result);
+
+	if (opts.level !== undefined) {
+		const level = opts.level;
+		result = result.filter((e) => e.level === level);
+	}
+
+	if (opts.sinceTs !== undefined) {
+		const threshold = opts.sinceTs > MILLISECOND_TIMESTAMP_THRESHOLD ? opts.sinceTs / 1000 : opts.sinceTs;
+		result = result.filter((e) => e.ts >= threshold);
+	}
+
 	if (opts.filter !== undefined) {
 		// Plain substring search (4th arg = true). Pattern matching here was
 		// surprising in practice - Lua magic chars in messages would silently
@@ -165,10 +262,16 @@ function query(opts: QueryOptions): QueryResult {
 		// because '-' means "0+" in Lua patterns). Substring search matches
 		// most users' mental model of "filter messages containing this text".
 		const needle = opts.filter;
-		result = result.filter((e) => {
-			const [start] = string.find(e.message, needle, 1, true);
-			return start !== undefined;
-		});
+		result = result.filter((e) => containsSubstring(e.message, needle));
+	}
+
+	if (opts.exclude !== undefined) {
+		const needle = opts.exclude;
+		result = result.filter((e) => !containsSubstring(e.message, needle));
+	}
+
+	if (opts.dedupe === true) {
+		result = dedupeEntries(result);
 	}
 
 	if (opts.tail !== undefined && result.size() > opts.tail) {

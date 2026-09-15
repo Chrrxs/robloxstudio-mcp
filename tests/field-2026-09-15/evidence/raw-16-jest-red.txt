@@ -1,0 +1,86 @@
+
+> @chrrxs/robloxstudio-mcp-core@3.1.4 test
+> jest todo-16
+
+FAIL src/__tests__/todo-16-tool-guides.test.ts (12.724 s)
+  TODO #12/#16 tool guide sections
+    × lists the tool guide resource and serves both new sections (80 ms)
+
+  ● TODO #12/#16 tool guide sections › lists the tool guide resource and serves both new sections
+
+    expect(received).toContain(expected) // indexOf
+
+    Expected substring: "## Server-side teleportation"
+    Received string:    "# Roblox Studio MCP tool guide·
+    Tool descriptions explain selection. Input schemas explain arguments. This guide holds shared workflows and safety notes.·
+    ## Connection and paths·
+    - Use canonical DataModel paths returned by the tools. Paths usually start with game.
+    - Call get_connected_instances when more than one Studio process may be connected. Pass either a top-level Instance ID or a multiplayer group's role-suffixed Instance ID as instance_id on later calls.
+    - Use get_place_info for the active place identity and settings.·
+    ## Discovery and edit work·
+    - Use get_project_structure for a bounded hierarchy, search_objects for an instance query, and grep_scripts for source text.
+    - Use get_instance_properties and get_attributes after locating an instance.
+    - Use execute_luau for custom traversal, bulk edits, and work that would otherwise need many tool calls. It runs through the Studio plugin context.
+    - Use set_properties when several known properties on one instance can be updated in one request.·
+    ## Selection and viewport·
+    - Use selection with action=get when the user's Studio selection should define the scope.
+    - Use action=set with instance paths to replace, add to, or remove from the selection. An empty paths array in set mode clears it.
+    - Use action=view with a BasePart or Model path to frame it, or omit path to frame exactly one selected BasePart or Model. Empty, multiple, or unsupported selections require an explicit target or a changed selection. The original camera type is restored after framing, including on failure. The current viewing direction is preserved unless from or angleY overrides it. padding below 1 crops closer and above 1 pulls back.
+    - For visual proof, change the instance, frame it with selection, then call capture_screenshot.·
+    ## Script changes·
+    - Read the relevant source with get_script_source before changing it.
+    - Use edit_script_lines, insert_script_lines, or delete_script_lines for focused changes with known line numbers.
+    - Use set_script_source only when replacing the whole script.
+    - Use find_and_replace_in_scripts with dryRun first when a replacement may affect several scripts.·
+    ## Playtests and runtime Luau·
+    Start solo_playtest or multiplayer_playtest before targeting a live server or client. Stop the playtest when the scenario is complete.·
+    execute_luau runs through the Studio plugin. eval_server_runtime and eval_client_runtime run inside a live game VM and share that VM's require cache with game scripts. Use the eval tools when module state or the runtime Script or LocalScript environment matters.·
+    Read output with get_runtime_logs. Reuse nextCursor as cursor for one Instance, or nextCursorByInstance as cursor_by_instance for a Multiplayer Group, instead of requesting the full process streams again.·
+    ## Simulation and input·
+    - Inspect current settings with get_simulation_state before changing them.
+    - Apply network conditions with set_network_profile. Roblox caps packet loss at 0.5 percent.
+    - Inspect built-in device IDs with get_device_simulator_state, then apply one with set_device_simulator or compare several with capture_device_matrix.
+    - Clear temporary network and device settings with reset_simulation_state after a scenario.
+    - Capture the viewport with capture_screenshot before simulate_mouse_input so the pixel coordinates match. Keyboard input should target a live client when game input is under test.·
+    ## Debugging and profiling·
+    - breakpoints requires Studio's Script Editor API beta feature. Logpoints normally use continue_execution=true. A pausing breakpoint with continue_execution=false needs an OnStopped resume handler.
+    - breakpoints clear removes only MCP-created breakpoints unless clear_all is true. clear_all also removes user-created breakpoints.
+    - capture_script_profiler ranks Luau functions by CPU time. Use output_path when the raw capture is needed.
+    - capture_micro_profiler attributes frame time across engine and game work. Its rows are inclusive or cumulative views, so do not sum them as disjoint totals.
+    - Use baseline_path or baseline for before-and-after MicroProfiler comparisons.
+    - Use get_memory_breakdown for memory categories and get_scene_analysis for instance, script, triangle, animation, or audio cost.·
+    ## Creator Store and generated assets·
+    Search with search_assets, inspect a shortlist with get_asset_details or get_asset_thumbnail, and preview untrusted content with preview_asset before insert_asset.·
+    Studio must allow third-party asset loading for public third-party previews and insertion. preview_asset scans the complete hierarchy without returning script source. insert_asset removes every LuaSourceContainer and PackageLink before parenting the remaining content, then scans again before insertion.·
+    generate_model stages generated content under ServerStorage for review. upload_asset sends an explicit local file to the chosen Roblox user or group.·
+    ## RBXM files·
+    - export_rbxm writes selected instances to an explicit local path. It can read the edit DataModel or a live server DataModel.
+    - import_rbxm accepts exactly one local path, HTTP or HTTPS URL, or base64 source. It parents imported instances under the supplied canonical path.·
+    ## Studio processes·
+    manage_instance can launch, inspect, and close Studio or list published place revisions. A process-identity launch returns a suspended launch that must be authorized and completed explicitly. Keep its launch_id until the connection has an instance_id.·
+    ## Roblox reference material·
+    Use get_roblox_docs for official engine and Luau reference pages. Use get_roblox_skills to list or read Roblox-authored Studio Assistant skills when their longer guidance is useful.
+    "
+
+      25 |       const result = await client.readResource({ uri: TOOL_GUIDE_URI });
+      26 |       const text = result.contents.map((content) => ('text' in content ? content.text : '')).join('\n');
+    > 27 |       expect(text).toContain('## Server-side teleportation');
+         |                    ^
+      28 |       expect(text).toContain('HumanoidRootPart.CFrame');
+      29 |       expect(text).toContain('Humanoid:MoveTo');
+      30 |       expect(text).toContain('## Concurrent agent protocol');
+
+      at Object.<anonymous> (src/__tests__/todo-16-tool-guides.test.ts:27:20)
+
+Test Suites: 1 failed, 1 total
+Tests:       1 failed, 1 total
+Snapshots:   0 total
+Time:        13.263 s
+Ran all test suites matching /todo-16/i.
+npm error Lifecycle script `test` failed with error:
+npm error code 1
+npm error path C:\Users\<user>\Desktop\mcp\wt\E\packages\core
+npm error workspace @chrrxs/robloxstudio-mcp-core@3.1.4
+npm error location C:\Users\<user>\Desktop\mcp\wt\E\packages\core
+npm error command failed
+npm error command C:\WINDOWS\system32\cmd.exe /d /s /c jest todo-16

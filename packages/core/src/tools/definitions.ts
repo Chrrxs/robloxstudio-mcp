@@ -287,6 +287,28 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
       required: ['instancePath']
     }
   },
+  {
+    name: 'search_tags',
+    category: 'read',
+    description: 'Use to find the instances and scripts that use a CollectionService tag.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        tag: {
+          type: 'string',
+          description: 'Omit to list every tag with counts.'
+        },
+        maxResults: {
+          type: 'number',
+          description: 'Instance path limit; default 100, max 1000.'
+        },
+        instance_id: {
+          type: 'string',
+          description: 'Studio process ID when ambiguous.'
+        }
+      }
+    }
+  },
 
   // === Selection ===
   {
@@ -948,6 +970,23 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
         filter: {
           type: 'string',
           description: 'Literal message substring applied before tail.'
+        },
+        level: {
+          type: 'string',
+          enum: ['ERR', 'WARN', 'INFO', 'OUT'],
+          description: 'Keep only this level.'
+        },
+        since_ts: {
+          type: 'number',
+          description: 'Drop entries before this Unix ts (s or ms).'
+        },
+        exclude: {
+          type: 'string',
+          description: 'Literal message substring to drop.'
+        },
+        dedupe: {
+          type: 'boolean',
+          description: 'Collapse repeats into count/firstTs/lastTs.'
         }
       }
     }

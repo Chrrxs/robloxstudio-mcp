@@ -1,0 +1,46 @@
+5:PASS src/__tests__/studio-transport.test.ts (7.388 s)
+6:PASS src/__tests__/bridge-service.test.ts (9.282 s)
+7:PASS src/__tests__/studio-response-delivery.test.ts (9.895 s)
+8:PASS src/__tests__/creator-store-assets.test.ts (10.016 s)
+9:PASS src/__tests__/studio-script-search.test.ts
+10:PASS src/__tests__/proxy-runtime-logs.test.ts (11.608 s)
+11:PASS src/__tests__/proxy-bridge-service.test.ts
+12:PASS src/__tests__/studio-process-identity.test.ts
+13:PASS src/__tests__/plugin-installation.test.ts
+21:PASS src/__tests__/host-capture.test.ts (14.111 s)
+22:PASS src/__tests__/tool-schema.test.ts (14.553 s)
+23:PASS src/__tests__/stdio-transport.test.ts
+24:PASS src/__tests__/image-decode.test.ts
+25:PASS src/__tests__/mcp-runtime.test.ts (15.545 s)
+60:PASS src/__tests__/runtime-log-context.test.ts
+61:PASS src/__tests__/runtime-log-responsiveness.test.ts
+62:PASS src/__tests__/studio-playtest-control.test.ts
+63:PASS src/__tests__/http-server.test.ts (18.396 s)
+693:PASS src/__tests__/http-security.test.ts (19.326 s)
+856:PASS src/__tests__/selection.test.ts
+857:PASS src/__tests__/studio-skills.test.ts
+858:PASS src/__tests__/roblox-cookie-client.test.ts
+859:PASS src/__tests__/field-06-runtime-log-merge.test.ts (6.592 s)
+860:PASS src/__tests__/integration.test.ts
+959:PASS src/__tests__/payload-timeout-diagnostics.test.ts
+960:PASS src/__tests__/roblox-docs.test.ts
+961:PASS src/__tests__/studio-grep-responsiveness.test.ts (8.01 s)
+962:PASS src/__tests__/studio-platform.test.ts
+963:PASS src/__tests__/field-08-tags.test.ts
+964:PASS src/__tests__/request-recovery-tools.test.ts
+965:PASS src/__tests__/http-body-limits.test.ts (6.5 s)
+966:PASS src/__tests__/mcp-compat.test.ts
+982:PASS src/__tests__/field-16-tool-guides.test.ts
+983:PASS src/__tests__/studio-cooperative-job-runner.test.ts
+984:PASS src/__tests__/studio-handler-failures.test.ts
+985:PASS src/__tests__/server-primary-mode.test.ts
+1005:PASS src/__tests__/managed-instance-registry.test.ts
+1006:PASS src/__tests__/script-source-safety.test.ts (9.826 s)
+1884:PASS src/__tests__/studio-process-enumeration.test.ts (40.236 s)
+1960:PASS src/__tests__/studio-close-verification.test.ts (46.713 s)
+1961:PASS src/__tests__/smoke.test.ts (77.811 s)
+2076:Test Suites: 41 passed, 41 total
+2077:Tests:       714 passed, 714 total
+2079:Time:        79.395 s
+
+[full per-test listing trimmed; 41 suites / 714 tests]
