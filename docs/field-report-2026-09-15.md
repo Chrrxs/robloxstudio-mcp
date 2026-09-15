@@ -36,6 +36,7 @@ is in `tests/field-2026-09-15/EVIDENCE.md`.
 - **Request:** unwrap service-rooted rbxm into its children; include Roblox's own text ("The Parent property of X is locked…") in the error message.
 
 ### 4. `set_properties` cannot write `Workspace.StreamingMinRadius` / `StreamingTargetRadius`
+**Status:** fixed in this PR — test `tests/field-2026-09-15/04-streaming-props.mjs`, evidence `evidence/04-streaming-props.md`. The properties are `NotScriptable` (API dump), so no plugin can write them; `set_properties` now explains that with `reason: "not_scriptable"` and `get_instance_properties` lists them under `inaccessible`.
 - **Symptom:** `"StreamingMinRadius is not a valid member of Workspace"`. These properties cannot be read from the plugin context either (`get_instance_properties` omits them). The user has to set them in the Properties panel.
 - **Suspicion:** these properties sit under `RobloxScriptSecurity`/`PluginSecurity` (or are `NotScriptable`); they should be attempted with `pcall` and reported with a clear message ("this property cannot be written from a plugin; set it in the Properties panel").
 - **Candidate:** `studio-plugin/src/modules/handlers/PropertyHandlers.ts` — a table of known plugin-inaccessible properties plus an explanatory error.

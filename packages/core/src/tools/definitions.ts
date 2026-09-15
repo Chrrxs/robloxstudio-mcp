@@ -112,7 +112,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
   {
     name: 'set_properties',
     category: 'write',
-    description: 'Use to update several properties on one instance in a single call.',
+    description: 'Use to update several properties on one instance in a single call; plugin-inaccessible ones fail with a reason.',
     inputSchema: {
       type: 'object',
       properties: {

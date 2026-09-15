@@ -1,8 +1,10 @@
 import Utils from "../Utils";
 import Recording from "../Recording";
+import PropertyAccess from "../PropertyAccess";
 
 const { getInstanceByPath, convertPropertyValue } = Utils;
 const { beginRecording, finishRecording } = Recording;
+const { classifyPropertyFailure } = PropertyAccess;
 
 // Native StringValue rejects UTF-8 strings of 200000 bytes or more.
 const STRING_VALUE_MAX_BYTES = 199999;
@@ -47,7 +49,9 @@ function setProperties(requestData: Record<string, unknown>) {
 			results.push({ property: propName, success: true });
 		} else {
 			failureCount++;
-			const failure = { property: propName, success: false, error: tostring(err) };
+			const classified = classifyPropertyFailure(instance, propName as string, tostring(err));
+			const failure: Record<string, unknown> = { property: propName, success: false, error: classified.error };
+			if (classified.reason !== undefined) failure.reason = classified.reason;
 			if (instance.IsA("StringValue") && propName === "Value" && typeIs(propValue, "string")) {
 				results.push({
 					...failure,

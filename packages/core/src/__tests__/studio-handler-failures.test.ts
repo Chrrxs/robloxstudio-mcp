@@ -19,15 +19,32 @@ function propertyHandlerResult(properties: Record<string, unknown>) {
     set Invalid(_value: unknown) { throw new Error('Invalid property'); },
   };
   const finishRecording = jest.fn();
-  const source = readFileSync(resolve(__dirname, '../../../../studio-plugin/src/modules/handlers/PropertyHandlers.ts'), 'utf8');
-  const compiled = ts.transpileModule(source, {
-    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
+  const pluginModule = (relativePath: string) => {
+    const source = readFileSync(resolve(__dirname, '../../../../studio-plugin/src/modules', relativePath), 'utf8');
+    return ts.transpileModule(source, {
+      compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
+    }).outputText;
+  };
+  const luauString = {
+    lower: (value: string) => value.toLowerCase(),
+    find: (value: string, needle: string, init = 1) => {
+      const index = value.indexOf(needle, init - 1);
+      return index === -1 ? [undefined] : [index + 1, index + needle.length];
+    },
+  };
+  const propertyAccess = { exports: {} };
+  runInNewContext(pluginModule('PropertyAccess.ts'), {
+    module: propertyAccess,
+    exports: propertyAccess.exports,
+    pairs: Object.entries,
+    string: luauString,
   });
   const module = { exports: {} };
-  runInNewContext(compiled.outputText, {
+  runInNewContext(pluginModule('handlers/PropertyHandlers.ts'), {
     module,
     exports: module.exports,
     require: (name: string) => {
+      if (name === '../PropertyAccess') return { default: propertyAccess.exports };
       if (name === '../Utils') return { default: {
         getInstanceByPath: () => instance,
         convertPropertyValue: (_instance: unknown, _property: string, value: unknown) => value,
