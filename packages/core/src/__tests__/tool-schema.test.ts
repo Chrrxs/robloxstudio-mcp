@@ -79,9 +79,13 @@ describe('Tool schema compatibility', () => {
     expect(Object.keys(properties).sort()).toEqual([
       'cursor',
       'cursor_by_instance',
+      'dedupe',
+      'exclude',
       'filter',
       'instance_id',
+      'level',
       'multiplayer_group_id',
+      'since_ts',
       'tail',
     ]);
     expect(properties).not.toHaveProperty('target');

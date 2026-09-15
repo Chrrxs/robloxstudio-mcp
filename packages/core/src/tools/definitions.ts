@@ -970,6 +970,23 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
         filter: {
           type: 'string',
           description: 'Literal message substring applied before tail.'
+        },
+        level: {
+          type: 'string',
+          enum: ['ERR', 'WARN', 'INFO', 'OUT'],
+          description: 'Keep only this level.'
+        },
+        since_ts: {
+          type: 'number',
+          description: 'Drop entries before this Unix ts (s or ms).'
+        },
+        exclude: {
+          type: 'string',
+          description: 'Literal message substring to drop.'
+        },
+        dedupe: {
+          type: 'boolean',
+          description: 'Collapse repeats into count/firstTs/lastTs.'
         }
       }
     }

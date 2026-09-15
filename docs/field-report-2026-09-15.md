@@ -54,6 +54,7 @@ is in `tests/field-2026-09-15/EVIDENCE.md`.
 - **Request:** merge `MessageOutput` + `MessageError` + stack lines into one entry (`stack: [...]`), or at least a `level="ERR"` filter (there is no `level` parameter).
 - **Extra:** the same asset's "User is not authorized to access Asset" error repeated 60+ times; `dedupe: true` (same message → `count`) would free a lot of space.
 - **Candidate:** `studio-plugin/src/modules/RuntimeLogBuffer.ts`, `packages/core/src/tools/definitions.ts` (get_runtime_logs schema).
+- **Status:** fixed in this PR — test `tests/field-2026-09-15/06-runtime-log-merge.mjs` and `packages/core/src/__tests__/field-06-runtime-log-merge.test.ts`, evidence `tests/field-2026-09-15/evidence/06-runtime-log-merge.md`.
 
 ### 7. Many concurrent agents → queue, timeouts, resends
 - **Symptom:** five agents sending `execute_luau`/`export_rbxm` to one instance produced 60 s timeouts; agents resent the same code instead of calling `get_request_status` (no `operation_id`, so no deduplication). Mutations (e.g. decor placement) risked running twice.
@@ -93,6 +94,7 @@ is in `tests/field-2026-09-15/EVIDENCE.md`.
 
 ### 15. `get_runtime_logs` `filter` is substring-only; no `level`, no `since`
 - `level: "ERR"|"WARN"`, `since_ts`, `exclude` (to drop the asset-permission spam) parameters.
+- **Status:** fixed in this PR together with item 6 — `level`, `since_ts`, `exclude`, `dedupe` on `get_runtime_logs`; test `tests/field-2026-09-15/06-runtime-log-merge.mjs`, evidence `tests/field-2026-09-15/evidence/06-runtime-log-merge.md`.
 
 ### 16. Tool-guides: a short section on the concurrent-agent protocol
 - Rules that worked in the field (candidates for `robloxstudio://tool-guides`): one playtest lock (the orchestrator), a disjoint DataModel subtree per agent, mandatory `operation_id`, restart play after writing to the edit DataModel, split large outputs, treat reference instances as read-only (`target=edit`).

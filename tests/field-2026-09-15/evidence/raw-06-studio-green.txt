@@ -1,0 +1,43 @@
+Test process using port 61013 (automatically assigned)
+Full integration suite using port 61013 (from ROBLOX_STUDIO_PORT)
+Installing worktree plugin C:\Users\<user>\Desktop\mcp\wt-d\studio-plugin\MCPPlugin.rbxmx
+Installed MCPPlugin.rbxmx to C:\Users\<user>\AppData\Local\Temp\robloxstudio-mcp-workers\run-all-PexCoS\RsmcpIsolatedPlugins\MCPPlugin.rbxmx
+Launched managed Studio instance instance:ogc-gp6
+
+=== field #6/#15: runtime error merge, level/since_ts/exclude, dedupe ===
+  ✓ edit DM staged StarterGui.Field6Gui with two disabled LocalScripts
+  ✓ Field6Once enabled at Players.<user>.PlayerGui.Field6Gui.Field6Once
+  [raw filter=Field6] [{"message":"Players.<user>.PlayerGui.Field6Gui.Field6Once:1: Field6 boom once","ts":1789467322.698,"script":"Players.<user>.PlayerGui.Field6Gui.Field6Once","data":[],"level":"ERR","stack":["Script 'Players.<user>.PlayerGui.Field6Gui.Field6Once', Line 1"],"line":1}]
+  ✓ one error yields exactly one entry mentioning Field6Once (got 1)
+  ✓ the merged entry keeps level ERR (got ERR)
+  ✓ script is the LocalScript path (got Players.<user>.PlayerGui.Field6Gui.Field6Once)
+  ✓ line is 1 (got 1)
+  ✓ stack holds the Script frames (got ["Script 'Players.<user>.PlayerGui.Field6Gui.Field6Once', Line 1"])
+  [level=ERR filter=Field6] [{"message":"Players.<user>.PlayerGui.Field6Gui.Field6Once:1: Field6 boom once","ts":1789467322.698,"script":"Players.<user>.PlayerGui.Field6Gui.Field6Once","data":[],"level":"ERR","stack":["Script 'Players.<user>.PlayerGui.Field6Gui.Field6Once', Line 1"],"line":1}]
+  ✓ level:"ERR" returns exactly the merged error (got 1)
+  [level=INFO filter=Field6] []
+  ✓ no separate INFO "Script ..., Line N" entry remains (got 0)
+  [level=error] "Input validation error: Invalid arguments for tool get_runtime_logs: data/level must be equal to one of the allowed values"
+  ✓ an unknown level is rejected (schema enum or server check)
+  ✓ Field6Five enabled at Players.<user>.PlayerGui.Field6Gui.Field6Five
+  [level=ERR filter=five] [{"message":"Players.<user>.PlayerGui.Field6Gui.Field6Five:3: Field6 boom five","ts":1789467323.732,"script":"Players.<user>.PlayerGui.Field6Gui.Field6Five","data":[],"level":"ERR","stack":["Script 'Players.<user>.PlayerGui.Field6Gui.Field6Five', Line 3"],"line":3},{"message":"Players.<user>.PlayerGui.Field6Gui.Field6Five:3: Field6 boom five","ts":1789467323.732,"script":"Players.<user>.PlayerGui.Field6Gui.Field6Five","data":[],"level":"ERR","stack":["Script 'Players.<user>.PlayerGui.Field6Gui.Field6Five', Line 3"],"line":3},{"message":"Players.<user>.PlayerGui.Field6Gui.Field6Five:3: Field6 boom five","ts":1789467323.732,"script":"Players.<user>.PlayerGui.Field6Gui.Field6Five","data":[],"level":"ERR","stack":["Script 'Players.<user>.PlayerGui.Field6Gui.Field6Five', Line 3"],"line":3},{"message":"Players.<user>.PlayerGui.Field6Gui.Field6Five:3: Field6 boom five","ts":1789467323.732,"script":"Players.<user>.PlayerGui.Field6Gui.Field6Five","data":[],"level":"ERR","stack":["Script 'Players.<user>.PlayerGui.Field6Gui.Field6Five', Line 3"],"line":3},{"message":"Players.<user>.PlayerGui.Field6Gui.Field6Five:3: Field6 boom five","ts":1789467323.732,"script":"Players.<user>.PlayerGui.Field6Gui.Field6Five","data":[],"level":"ERR","stack":["Script 'Players.<user>.PlayerGui.Field6Gui.Field6Five', Line 3"],"line":3}]
+  ✓ five identical errors are five merged entries without dedupe (got 5)
+  ✓ each of the five carries line 3 and a stack
+  [dedupe=true] [{"lastTs":1789467323.732,"ts":1789467323.732,"script":"Players.<user>.PlayerGui.Field6Gui.Field6Five","data":[],"message":"Players.<user>.PlayerGui.Field6Gui.Field6Five:3: Field6 boom five","firstTs":1789467323.732,"count":5,"stack":["Script 'Players.<user>.PlayerGui.Field6Gui.Field6Five', Line 3"],"level":"ERR","line":3}]
+  ✓ dedupe:true collapses them into one entry (got 1)
+  ✓ count is 5 (got 5)
+  ✓ firstTs/lastTs bracket the repeats
+  ✓ the five errors are timestamped after the first error
+  [since_ts seconds] ["Players.<user>.PlayerGui.Field6Gui.Field6Five:3: Field6 boom five","Players.<user>.PlayerGui.Field6Gui.Field6Five:3: Field6 boom five","Players.<user>.PlayerGui.Field6Gui.Field6Five:3: Field6 boom five","Players.<user>.PlayerGui.Field6Gui.Field6Five:3: Field6 boom five","Players.<user>.PlayerGui.Field6Gui.Field6Five:3: Field6 boom five"]
+  ✓ since_ts (seconds) drops the earlier error (got 5)
+  ✓ since_ts (milliseconds) is accepted too (got 5)
+  [exclude=five] ["Players.<user>.PlayerGui.Field6Gui.Field6Once:1: Field6 boom once"]
+  ✓ exclude:"five" leaves only the first error (got 1)
+
+✅ field #6/#15: runtime error merge, level/since_ts/exclude, dedupe PASSED
+Closed managed Studio instance instance:ogc-gp6
+
+========== SUMMARY ==========
+  ✅ PASS  field-2026-09-15/06-runtime-log-merge.mjs
+
+1/1 passed.

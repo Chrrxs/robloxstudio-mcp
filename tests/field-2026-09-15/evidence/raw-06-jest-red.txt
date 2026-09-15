@@ -1,0 +1,201 @@
+
+> @chrrxs/robloxstudio-mcp-core@3.1.4 test
+> jest todo-06 runtime-log-context
+
+FAIL src/__tests__/runtime-log-context.test.ts
+  ● Test suite failed to run
+
+    src/__tests__/runtime-log-context.test.ts:288:7 - error TS2554: Expected 0-7 arguments, but got 8.
+
+    288       { level: 'ERR', since_ts: 1_721_000_000, exclude: 'User is not authorized to access Asset', dedupe: true },
+              ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    src/__tests__/runtime-log-context.test.ts:352:122 - error TS2554: Expected 0-7 arguments, but got 8.
+
+    352     await expect(tools.getRuntimeLogs('instance:test', undefined, undefined, undefined, undefined, undefined, undefined, { level: 'error' }))
+                                                                                                                                 ~~~~~~~~~~~~~~~~~~
+    src/__tests__/runtime-log-context.test.ts:354:122 - error TS2554: Expected 0-7 arguments, but got 8.
+
+    354     await expect(tools.getRuntimeLogs('instance:test', undefined, undefined, undefined, undefined, undefined, undefined, { since_ts: -1 }))
+                                                                                                                                 ~~~~~~~~~~~~~~~~
+    src/__tests__/runtime-log-context.test.ts:356:122 - error TS2554: Expected 0-7 arguments, but got 8.
+
+    356     await expect(tools.getRuntimeLogs('instance:test', undefined, undefined, undefined, undefined, undefined, undefined, { dedupe: 'yes' as unknown as boolean }))
+                                                                                                                                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+FAIL src/__tests__/todo-06-runtime-log-merge.test.ts (11.09 s)
+  ● TODO #6 runtime log merge › one runtime error becomes one entry with script, line, and stack
+
+    expect(received).toEqual(expected) // deep equality
+
+    - Expected  - 0
+    + Received  + 3
+
+      Array [
+        "before",
+        "Players.Player1.PlayerGui.TODO6Gui.TODO6Once:5: TODO6 boom",
+    +   "Stack Begin",
+    +   "Script 'Players.Player1.PlayerGui.TODO6Gui.TODO6Once', Line 5",
+    +   "Stack End",
+        "after",
+      ]
+
+      203 |
+      204 |     const { entries } = loaded.buffer.query({});
+    > 205 |     expect(entries.map((entry) => entry.message)).toEqual([
+          |                                                   ^
+      206 |       'before',
+      207 |       `${SCRIPT_PATH}:5: TODO6 boom`,
+      208 |       'after',
+
+      at Object.<anonymous> (src/__tests__/todo-06-runtime-log-merge.test.ts:205:51)
+
+  ● TODO #6 runtime log merge › multi-frame stacks keep every frame and take script/line from the first frame
+
+    expect(received).toHaveLength(expected)
+
+    Expected length: 1
+    Received length: 5
+    Received array:  [{"data": undefined, "level": "ERR", "message": "Players.Player1.PlayerGui.TODO6Gui.TODO6Once:9: TODO6 nested", "seq": 1, "ts": 1700000000}, {"data": undefined, "level": "INFO", "message": "Stack Begin", "seq": 2, "ts": 1700000000}, {"data": undefined, "level": "INFO", "message": "Script 'Players.Player1.PlayerGui.TODO6Gui.TODO6Once', Line 9 - function inner", "seq": 3, "ts": 1700000000}, {"data": undefined, "level": "INFO", "message": "Script 'Players.Player1.PlayerGui.TODO6Gui.TODO6Once', Line 14", "seq": 4, "ts": 1700000000}, {"data": undefined, "level": "INFO", "message": "Stack End", "seq": 5, "ts": 1700000000}]
+
+      226 |
+      227 |     const { entries } = loaded.buffer.query({ level: 'ERR' });
+    > 228 |     expect(entries).toHaveLength(1);
+          |                     ^
+      229 |     expect(entries[0].script).toBe(SCRIPT_PATH);
+      230 |     expect(entries[0].line).toBe(9);
+      231 |     expect(entries[0].stack).toHaveLength(2);
+
+      at Object.<anonymous> (src/__tests__/todo-06-runtime-log-merge.test.ts:228:21)
+
+  ● TODO #6 runtime log merge › level filters merged entries and the stack INFO lines are not returned separately
+
+    expect(received).toEqual(expected) // deep equality
+
+    - Expected  -  1
+    + Received  + 37
+
+    - Array []
+    + Array [
+    +   Object {
+    +     "data": undefined,
+    +     "level": "ERR",
+    +     "message": "Players.Player1.PlayerGui.TODO6Gui.TODO6Once:5: TODO6 boom",
+    +     "seq": 1,
+    +     "ts": 1700000000,
+    +   },
+    +   Object {
+    +     "data": undefined,
+    +     "level": "INFO",
+    +     "message": "Stack Begin",
+    +     "seq": 2,
+    +     "ts": 1700000000,
+    +   },
+    +   Object {
+    +     "data": undefined,
+    +     "level": "INFO",
+    +     "message": "Script 'Players.Player1.PlayerGui.TODO6Gui.TODO6Once', Line 5",
+    +     "seq": 3,
+    +     "ts": 1700000000,
+    +   },
+    +   Object {
+    +     "data": undefined,
+    +     "level": "INFO",
+    +     "message": "Stack End",
+    +     "seq": 4,
+    +     "ts": 1700000000,
+    +   },
+    +   Object {
+    +     "data": undefined,
+    +     "level": "WARN",
+    +     "message": "warned",
+    +     "seq": 5,
+    +     "ts": 1700000000,
+    +   },
+    + ]
+
+      251 |     loaded.emit('warned', loaded.types.MessageWarning);
+      252 |
+    > 253 |     expect(loaded.buffer.query({ level: 'INFO' }).entries).toEqual([]);
+          |                                                            ^
+      254 |     expect(loaded.buffer.query({ level: 'WARN' }).entries.map((entry) => entry.message)).toEqual(['warned']);
+      255 |     expect(loaded.buffer.query({ level: 'ERR' }).entries).toHaveLength(1);
+      256 |   });
+
+      at Object.<anonymous> (src/__tests__/todo-06-runtime-log-merge.test.ts:253:60)
+
+  ● TODO #6 runtime log merge › dedupe collapses identical level+message+script+line into count with firstTs/lastTs
+
+    expect(received).toHaveLength(expected)
+
+    Expected length: 8
+    Received length: 26
+    Received array:  [{"data": undefined, "level": "ERR", "message": "Players.Player1.PlayerGui.TODO6Gui.TODO6Once:5: TODO6 boom", "seq": 1, "ts": 1700000000.1}, {"data": undefined, "level": "INFO", "message": "Stack Begin", "seq": 2, "ts": 1700000000.1}, {"data": undefined, "level": "INFO", "message": "Script 'Players.Player1.PlayerGui.TODO6Gui.TODO6Once', Line 5", "seq": 3, "ts": 1700000000.1}, {"data": undefined, "level": "INFO", "message": "Stack End", "seq": 4, "ts": 1700000000.1}, {"data": undefined, "level": "ERR", "message": "Players.Player1.PlayerGui.TODO6Gui.TODO6Once:5: TODO6 boom", "seq": 5, "ts": 1700000000.2}, {"data": undefined, "level": "INFO", "message": "Stack Begin", "seq": 6, "ts": 1700000000.2}, {"data": undefined, "level": "INFO", "message": "Script 'Players.Player1.PlayerGui.TODO6Gui.TODO6Once', Line 5", "seq": 7, "ts": 1700000000.2}, {"data": undefined, "level": "INFO", "message": "Stack End", "seq": 8, "ts": 1700000000.2}, {"data": undefined, "level": "ERR", "message": "Players.Player1.PlayerGui.TODO6Gui.TODO6Once:5: TODO6 boom", "seq": 9, "ts": 1700000000.3}, {"data": undefined, "level": "INFO", "message": "Stack Begin", "seq": 10, "ts": 1700000000.3}, …]
+
+      268 |
+      269 |     const plain = loaded.buffer.query({ level: 'ERR' });
+    > 270 |     expect(plain.entries).toHaveLength(8);
+          |                           ^
+      271 |
+      272 |     const { entries } = loaded.buffer.query({ level: 'ERR', dedupe: true });
+      273 |     expect(entries).toHaveLength(3);
+
+      at Object.<anonymous> (src/__tests__/todo-06-runtime-log-merge.test.ts:270:27)
+
+  ● TODO #6 runtime log merge › sinceTs accepts Unix seconds or milliseconds and exclude drops substrings
+
+    expect(received).toEqual(expected) // deep equality
+
+    - Expected  - 0
+    + Received  + 1
+
+      Array [
+    +   "old",
+        "new spam",
+        "new keep",
+      ]
+
+      288 |
+      289 |     const sinceSeconds = loaded.buffer.query({ sinceTs: 1_700_000_002 });
+    > 290 |     expect(sinceSeconds.entries.map((entry) => entry.message)).toEqual(['new spam', 'new keep']);
+          |                                                                ^
+      291 |     const sinceMillis = loaded.buffer.query({ sinceTs: 1_700_000_002_000 });
+      292 |     expect(sinceMillis.entries.map((entry) => entry.message)).toEqual(['new spam', 'new keep']);
+      293 |     const excluded = loaded.buffer.query({ exclude: 'spam' });
+
+      at Object.<anonymous> (src/__tests__/todo-06-runtime-log-merge.test.ts:290:64)
+
+  ● TODO #6 runtime log merge › tail applies after merge and filters
+
+    expect(received).toEqual(expected) // deep equality
+
+    - Expected  - 1
+    + Received  + 1
+
+      Array [
+    -   "Players.Player1.PlayerGui.TODO6Gui.TODO6Once:5: TODO6 boom",
+    +   "Stack End",
+        "last",
+      ]
+
+      304 |
+      305 |     const { entries, nextSince } = loaded.buffer.query({ tail: 2 });
+    > 306 |     expect(entries.map((entry) => entry.message)).toEqual([`${SCRIPT_PATH}:5: TODO6 boom`, 'last']);
+          |                                                   ^
+      307 |     expect(nextSince).toBe(6);
+      308 |   });
+      309 | });
+
+      at Object.<anonymous> (src/__tests__/todo-06-runtime-log-merge.test.ts:306:51)
+
+Test Suites: 2 failed, 2 total
+Tests:       6 failed, 1 passed, 7 total
+Snapshots:   0 total
+Time:        12.309 s
+Ran all test suites matching /todo-06|runtime-log-context/i.
+npm error Lifecycle script `test` failed with error:
+npm error code 1
+npm error path C:\Users\<user>\Desktop\mcp\wt\E\packages\core
+npm error workspace @chrrxs/robloxstudio-mcp-core@3.1.4
+npm error location C:\Users\<user>\Desktop\mcp\wt\E\packages\core
+npm error command failed
+npm error command C:\WINDOWS\system32\cmd.exe /d /s /c jest todo-06 runtime-log-context

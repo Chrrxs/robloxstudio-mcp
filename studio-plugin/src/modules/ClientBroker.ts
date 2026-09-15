@@ -1,5 +1,5 @@
 import { HttpService, Players, ReplicatedStorage, RunService } from "@rbxts/services";
-import RuntimeLogBuffer from "./RuntimeLogBuffer";
+import LogHandlers from "./handlers/LogHandlers";
 import MemoryHandlers from "./handlers/MemoryHandlers";
 import SceneAnalysisHandlers from "./handlers/SceneAnalysisHandlers";
 import CaptureHandlers from "./handlers/CaptureHandlers";
@@ -130,11 +130,7 @@ function handleExecuteLuau(data: Record<string, unknown> | undefined) {
 }
 
 function handleGetRuntimeLogs(data: Record<string, unknown> | undefined): unknown {
-	const d = data ?? {};
-	const since = d.since as number | undefined;
-	const tail = d.tail as number | undefined;
-	const filter = d.filter as string | undefined;
-	return RuntimeLogBuffer.query({ since, tail, filter });
+	return LogHandlers.getRuntimeLogs(data ?? {});
 }
 
 function handleMultiplayerTestState(): unknown {
