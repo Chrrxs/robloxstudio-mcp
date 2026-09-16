@@ -2,7 +2,7 @@
 
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -107,6 +107,27 @@ if (process.platform === 'win32') {
     '-NoProfile', '-Command',
     '[pscustomobject]@{ sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value; interactive = ([Environment]::UserInteractive -and [Diagnostics.Process]::GetCurrentProcess().SessionId -gt 0); profileDirectory = $env:USERPROFILE; localAppData = [Environment]::GetFolderPath("LocalApplicationData"); roamingAppData = [Environment]::GetFolderPath("ApplicationData") } | ConvertTo-Json -Compress',
   ], { encoding: 'utf8' }));
+  const bootstrapArguments = [
+    '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
+    '-File', fileURLToPath(new URL('../scripts/studio-test-profile.ps1', import.meta.url)),
+  ];
+  for (const invalidInput of ['not-base64!', Buffer.from('{invalid json', 'utf8').toString('base64')]) {
+    const invalidResult = spawnSync('powershell.exe', [
+      ...bootstrapArguments, '-Child', '-PayloadFromStdin',
+    ], { encoding: 'utf8', input: invalidInput, env: windowsPowerShellEnvironment(process.env) });
+    assert.ifError(invalidResult.error);
+    assert.equal(invalidResult.status, 1, 'malformed stdin payload must fail before launching Node');
+    assert.match(invalidResult.stderr, /Studio launcher child failure/, 'malformed input must reach the production child receiver');
+    assert.doesNotMatch(invalidResult.stdout, /bootstrap-clean/);
+  }
+  // Invalid input also makes this safe if source-side validation regresses:
+  // decoding must stop before any account lookup or credential flow.
+  const sourceStdinResult = spawnSync('powershell.exe', [
+    ...bootstrapArguments, '-PayloadFromStdin',
+  ], { encoding: 'utf8', input: 'not-base64!', env: windowsPowerShellEnvironment(process.env) });
+  assert.ifError(sourceStdinResult.error);
+  assert.equal(sourceStdinResult.status, 1, 'the source launcher must reject stdin transport');
+  assert.match(sourceStdinResult.stderr, /PayloadFromStdin.*child/i, 'stdin transport must be rejected before decoding or credential flow');
   if (current.interactive) {
     const fixture = mkdtempSync(path.join(os.tmpdir(), 'rsmcp-profile-bootstrap-'));
     let fixtureError;
@@ -115,6 +136,8 @@ if (process.platform === 'win32') {
       writeFileSync(path.join(fixture, 'scripts', 'studio-test-profile.ps1'), '');
       writeFileSync(path.join(fixture, 'scripts', 'studio-test-profile.mjs'), [
         'import assert from "node:assert/strict";',
+        'import { readFileSync } from "node:fs";',
+        'import { isDeepStrictEqual } from "node:util";',
         `import { probeWindowsStudioIdentity } from ${JSON.stringify(new URL('../scripts/studio-lifecycle.mjs', import.meta.url).href)};`,
         `import { createTestProfileEnvironment } from ${JSON.stringify(new URL('../scripts/studio-test-profile.mjs', import.meta.url).href)};`,
         'if (Object.keys(process.env).some((key) => /^NODE_/i.test(key))) throw new Error("Inherited Node startup environment reached bootstrap");',
@@ -129,6 +152,11 @@ if (process.platform === 'win32') {
         'const env = createTestProfileEnvironment(actualIdentity, { ...payload, nodeExecutable: process.execPath }, process.env);',
         'assert.equal(env.USERPROFILE, actualIdentity.profileDirectory);',
         'assert.equal(env.LOCALAPPDATA, actualIdentity.localAppData);',
+        'if (payload.command) {',
+        `  const expected = JSON.parse(readFileSync(${JSON.stringify(path.join(fixture, 'expected-stdin-payload.json'))}, "utf8"));`,
+        '  assert.equal(isDeepStrictEqual(payload, expected), true, "stdin transport must preserve the entire payload exactly");',
+        '  console.log("bootstrap-stdin-roundtrip");',
+        '}',
         'console.log("bootstrap-clean");',
       ].join('\n'));
       const preload = path.join(fixture, 'personal-preload.cjs');
@@ -162,6 +190,40 @@ if (process.platform === 'win32') {
         },
       });
       assert.match(result, /bootstrap-clean/);
+
+      const stdinPayload = {
+        ...JSON.parse(Buffer.from(bootstrapPayload, 'base64').toString('utf8')),
+        command: [
+          ...command,
+          'argument with spaces '.repeat(80),
+          'embedded "quotes" and a trailing slash\\',
+          'C:\\two trailing backslashes\\\\',
+          '$(throw "must stay literal"); & whoami | Out-File ignored',
+          '%USERPROFILE% && echo must-stay-literal',
+          'café 東京 Ελληνικά',
+        ],
+      };
+      const encodedStdinPayload = encodeTestProfilePayload(stdinPayload);
+      assert.ok(Buffer.byteLength(JSON.stringify(stdinPayload), 'utf8') > 1024, 'fixture must exceed the credentialed command-line limit before base64 encoding');
+      writeFileSync(path.join(fixture, 'expected-stdin-payload.json'), JSON.stringify(stdinPayload));
+      const stdinResult = spawnSync('powershell.exe', [
+        ...bootstrapArguments, '-Child', '-PayloadFromStdin',
+      ], {
+        encoding: 'utf8',
+        input: encodedStdinPayload,
+        env: windowsPowerShellEnvironment(process.env),
+      });
+      assert.ifError(stdinResult.error);
+      assert.equal(stdinResult.status, 0, 'large stdin payload must complete the production child bootstrap');
+      assert.match(stdinResult.stdout, /bootstrap-stdin-roundtrip/, 'the fake Node entrypoint must verify the exact decoded payload');
+      assert.match(stdinResult.stdout, /bootstrap-clean/);
+
+      const conflictingPayloadResult = spawnSync('powershell.exe', [
+        ...bootstrapArguments, '-Child', '-PayloadFromStdin', '-Payload', bootstrapPayload,
+      ], { encoding: 'utf8', input: encodedStdinPayload, env: windowsPowerShellEnvironment(process.env) });
+      assert.ifError(conflictingPayloadResult.error);
+      assert.equal(conflictingPayloadResult.status, 1, 'inline and stdin payload transports must be mutually exclusive');
+      assert.doesNotMatch(conflictingPayloadResult.stdout, /bootstrap-clean|bootstrap-stdin-roundtrip/);
 
       // Private ancestors break both PowerShell cwd resolution and Node's
       // entrypoint canonicalization. The wrapper proves rejection, restores
@@ -247,6 +309,7 @@ if (process.platform === 'win32') {
     } finally {
       try {
         rmSync(fixture, { recursive: true, force: true });
+        assert.equal(existsSync(fixture), false, 'bootstrap fixture files must be removed after child exit');
       } catch (cleanupError) {
         if (fixtureError) throw new AggregateError([fixtureError, cleanupError], 'Bootstrap fixture failed and cleanup also failed');
         throw cleanupError;

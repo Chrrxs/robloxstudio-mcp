@@ -1,5 +1,7 @@
+[CmdletBinding(DefaultParameterSetName = 'Inline')]
 param(
-    [Parameter(Mandatory = $true)][string]$Payload,
+    [Parameter(Mandatory = $true, ParameterSetName = 'Inline')][string]$Payload,
+    [Parameter(Mandatory = $true, ParameterSetName = 'Stdin')][switch]$PayloadFromStdin,
     [switch]$Child
 )
 
@@ -101,6 +103,11 @@ public static class StudioUserEnvironment {
 
 try {
     $selection = $null
+    if ($PayloadFromStdin) {
+        if (-not $Child) { throw 'PayloadFromStdin is only valid for a credentialed child.' }
+        $Payload = [Console]::In.ReadToEnd()
+        if ([string]::IsNullOrWhiteSpace($Payload)) { throw 'The child launch payload is empty.' }
+    }
     $config = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($Payload)) | ConvertFrom-Json
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
     $currentSid = $identity.User.Value
@@ -279,9 +286,15 @@ public sealed class StudioHarnessJob : IDisposable {
         $job = New-Object StudioHarnessJob
         $startInfo = New-Object Diagnostics.ProcessStartInfo
         $startInfo.FileName = Join-Path $PSHOME 'powershell.exe'
-        # -File receives one quoted Windows filename and a base64 JSON payload;
-        # neither command text nor credentials are shell-evaluated arguments.
-        $startInfo.Arguments = '-NoProfile -ExecutionPolicy Bypass -File "' + $childScript + '" -Child -Payload ' + $childPayload
+        # CreateProcessWithLogonW limits the entire command line to 1024
+        # characters. Send configuration through stdin, never inline argv.
+        # Credentials remain exclusively in ProcessStartInfo.Password.
+        $startInfo.Arguments = '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' + $childScript + '" -Child -PayloadFromStdin'
+        # .NET includes the quoted executable and separating space in argv.
+        $commandLineLength = $startInfo.FileName.Length + $startInfo.Arguments.Length + 3
+        if ($commandLineLength -ge 1024) {
+            throw ('Credentialed launch command line is too long ({0} characters; Windows limit 1024). Use a shorter Windows checkout path.' -f $commandLineLength)
+        }
         $startInfo.WorkingDirectory = $config.repo
         $startInfo.UseShellExecute = $false
         $startInfo.CreateNoWindow = $true
@@ -290,6 +303,7 @@ public sealed class StudioHarnessJob : IDisposable {
         # source account's or a different PowerShell edition's module paths.
         $startInfo.EnvironmentVariables.Remove('PSModulePath')
         $startInfo.EnvironmentVariables.Remove('WinPSModulePath')
+        $startInfo.RedirectStandardInput = $true
         $startInfo.RedirectStandardOutput = $true
         $startInfo.RedirectStandardError = $true
         $startInfo.StandardOutputEncoding = [Text.Encoding]::UTF8
@@ -304,7 +318,9 @@ public sealed class StudioHarnessJob : IDisposable {
         $process.StartInfo = $startInfo
         try { $null = $process.Start() }
         catch {
-            throw ('Credentialed Windows logon/process launch failed. No password retry prompt was opened. If credentials changed, use studio:test-profile forget --user <account>, then studio:test-profile setup --user <account> --confirm-dedicated-profile to reauthorize. ' + $_.Exception.Message)
+            $nativeFailure = $_.Exception.GetBaseException()
+            $nativeCode = if ($nativeFailure -is [ComponentModel.Win32Exception]) { $nativeFailure.NativeErrorCode } else { 'unknown' }
+            throw ('Credentialed Windows process creation failed (Win32 error {0}; command-line characters {1}). No password retry prompt was opened. {2}' -f $nativeCode, $commandLineLength, $nativeFailure.Message)
         }
         $started = $true
         $startInfo.Password = $null
@@ -315,6 +331,11 @@ public sealed class StudioHarnessJob : IDisposable {
         $credential = $null
         $selection = $null
         $job.Assign($process.Handle)
+        # The child reads to EOF before checking the gate. Contain it first,
+        # then deliver configuration and close the pipe; no descendants start
+        # until the gate is opened below. A failed write follows job cleanup.
+        try { $process.StandardInput.Write($childPayload) }
+        finally { $process.StandardInput.Close() }
         [IO.File]::WriteAllText($config.launchGate, 'contained')
         $stdoutBuffer = New-Object char[] 4096
         $stderrBuffer = New-Object char[] 4096
@@ -370,7 +391,7 @@ public sealed class StudioHarnessJob : IDisposable {
 } catch {
     $launchSide = if ($Child) { 'child' } else { 'source' }
     [Console]::Error.WriteLine(('Studio launcher {0} failure at line {1}: {2}' -f $launchSide, $_.InvocationInfo.ScriptLineNumber, $_.Exception.Message))
-    [Console]::Error.WriteLine('Setup automatically prepares the workspace and settings. The dedicated Windows account, its Studio installation, native Node, Secondary Logon, and an interactive desktop must be available. Runs never prompt. Use forget then setup to reauthorize; forget only removes the named source-vault entry. No elevation fallback is attempted.')
+    [Console]::Error.WriteLine('Setup automatically prepares the workspace and settings. The dedicated Windows account, its Studio installation, native Node, Secondary Logon, and an interactive desktop must be available. Runs never prompt. For authentication failures, use forget then setup to reauthorize; forget only removes the named source-vault entry. No elevation fallback is attempted.')
     exit 1
 } finally {
     if ($null -ne $selection) { $selection.Credential.Password.Dispose() }
