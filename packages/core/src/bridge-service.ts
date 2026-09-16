@@ -1307,7 +1307,7 @@ export class BridgeService implements StudioTransportQueue {
     if (phase === 'executing') operation.status.executionStartedAt = now;
     else {
       operation.status.executionOutcome = outcome ?? 'unknown';
-      if (outcome !== 'not_executed') operation.status.executionCompletedAt = now;
+      if (outcome === 'success' || outcome === 'error') operation.status.executionCompletedAt = now;
     }
     operation.updatedAt = now;
     this.operations.delete(requestId);
@@ -1329,7 +1329,8 @@ export class BridgeService implements StudioTransportQueue {
         'studio_response_error',
         {
           requestId, targetPeerId: operation.status.targetPeerId, ...observations(operation.status),
-          executionCompletedAt: executionOutcome === 'not_executed' ? undefined : operation.status.executionCompletedAt ?? Date.now(),
+          executionCompletedAt: executionOutcome === 'success' || executionOutcome === 'error'
+            ? operation.status.executionCompletedAt ?? Date.now() : undefined,
           stage: 'response_delivery', outcome: executionOutcome === 'not_executed' ? 'not_executed' : 'unknown', executionOutcome,
         },
       );
@@ -1358,14 +1359,19 @@ export class BridgeService implements StudioTransportQueue {
     operation.status.state = 'settled';
     const localRejection = error instanceof RequestFailure && error.details.transportStage === 'server_send';
     const responseOutcome = handlerOutcome(response);
-    const completedOutcome = !hasError && responseOutcome === 'error' ? 'error'
-      : executionOutcome ?? (localRejection ? 'not_executed' : hasError
-        ? operation.status.executionOutcome === 'success' ? 'success' : 'error' : responseOutcome);
+    // A client broker can return an error-shaped diagnostic without observing
+    // remote completion. Only the owning transport's explicit observation may
+    // override inferred execution failure, never a field in the response body.
+    const completedOutcome = executionOutcome === 'unknown' || executionOutcome === 'not_executed' ? executionOutcome
+      : !hasError && responseOutcome === 'error' ? 'error'
+        : executionOutcome ?? (localRejection ? 'not_executed' : hasError
+          ? operation.status.executionOutcome === 'success' ? 'success' : 'error' : responseOutcome);
     operation.status.executionOutcome = completedOutcome;
-    operation.status.outcome = hasError || completedOutcome === 'error' || completedOutcome === 'not_executed' ? 'error' : 'success';
+    operation.status.outcome = hasError || responseOutcome === 'error' || completedOutcome === 'error' || completedOutcome === 'not_executed' ? 'error' : 'success';
     if (!localRejection) {
       operation.status.stage = 'response_delivery';
-      if (completedOutcome !== 'not_executed') operation.status.executionCompletedAt ??= now;
+      if (completedOutcome === 'success' || completedOutcome === 'error') operation.status.executionCompletedAt ??= now;
+      else delete operation.status.executionCompletedAt;
     }
     operation.status.settledAt = now;
     operation.updatedAt = now;

@@ -233,6 +233,34 @@ describe('WebSocketStudioTransport', () => {
     expect(bridge.getRequestStatus('not-executed')).not.toHaveProperty('executionCompletedAt');
   });
 
+  test.each(['unknown', 'not_executed'] as const)('retains a broker diagnostic without converting %s remote execution to failure', async (executionOutcome) => {
+    register(bridge, 'server', 'instance:play', 'server');
+    register(bridge, 'client', 'instance:play', 'client', 'server');
+    const socket = new FakeStudioSocket();
+    transport.open('server', socket, () => STATUS);
+    const requestId = `broker-${executionOutcome}`;
+    const invoke = () => bridge.sendRequest('/api/capture-script-profiler', {}, 'client', 30000, undefined, requestId);
+    const pending = invoke();
+    socket.progress(requestId, 'executing');
+    socket.progress(requestId, 'response_delivery', executionOutcome);
+    expect(bridge.getRequestStatus(requestId)).not.toHaveProperty('executionCompletedAt');
+    const response = {
+      success: false,
+      error: executionOutcome === 'unknown' ? 'client_broker_timeout' : 'client_broker_cancelled',
+      stage: executionOutcome === 'unknown' ? 'client_broker_wait' : 'client_broker_admission',
+    };
+    socket.emit('message', Buffer.from(JSON.stringify({ kind: 'response', requestId, response, executionOutcome })), false);
+    await expect(pending).resolves.toEqual(response);
+    expect(bridge.getRequestStatus(requestId)).toMatchObject({
+      state: 'settled', outcome: 'error', executionOutcome, response,
+    });
+    expect(bridge.getRequestStatus(requestId)).not.toHaveProperty('executionCompletedAt');
+    await expect(invoke()).resolves.toEqual(response);
+    socket.respond(requestId, { success: true, capture: 'late' });
+    expect(bridge.getRequestStatus(requestId)).toMatchObject({ outcome: 'error', executionOutcome, response });
+    expect(socket.events().filter((event) => event.kind === 'request')).toHaveLength(1);
+  });
+
   test('a final handler failure overrides success progress and reuses its response without replay', async () => {
     register(bridge, 'peer', 'instance:edit', 'edit');
     const socket = new FakeStudioSocket();
@@ -242,7 +270,9 @@ describe('WebSocketStudioTransport', () => {
     void pending.catch(() => {});
     socket.progress('partial-failure', 'response_delivery', 'success');
     const response = { summary: { total: 2, succeeded: 1, failed: 1 }, results: [{ property: 'Locked', success: false }] };
-    socket.respond('partial-failure', response);
+    socket.emit('message', Buffer.from(JSON.stringify({
+      kind: 'response', requestId: 'partial-failure', response, executionOutcome: 'success',
+    })), false);
     await expect(pending).resolves.toEqual(response);
     expect(bridge.getRequestStatus('partial-failure')).toMatchObject({ outcome: 'error', executionOutcome: 'error', response });
     await expect(invoke()).resolves.toEqual(response);
