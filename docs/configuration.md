@@ -32,6 +32,30 @@ Setting `ROBLOX_STUDIO_HOST` to a non-loopback address exposes the bridge to
 other machines. Only do this on a trusted network, retain token authentication,
 and treat the token as a secret.
 
+### Automatic Studio reconnection
+
+While the plugin is enabled, connection failures retry automatically with
+backoff of 0.5, 1, 2, 4, then 5 seconds (capped at 5 seconds, with no retry
+limit). Duplicate-instance registration responses use a 1-second retry.
+Registration (`/ready`, including metadata preparation) and WebSocket
+creation/upgrade each have a 20-second deadline. A stalled phase is abandoned
+and retried; late completions cannot replace the current connection. An open
+socket with no valid incoming events for 20 seconds is also reconnected.
+
+A previously healthy registration may be revalidated once by reconnecting its
+socket without HTTP, so transient drops can recover even when Studio's HTTP
+quota is exhausted. If that socket cannot open, including a timeout or an
+upgrade rejection without a numeric HTTP status, its cached credentials are
+discarded and the next attempt registers again. Replacing the bridge does not
+require toggling Disconnect/Connect.
+
+The plugin panel shows the connection stage, attempt number, retry countdown,
+and last failure. A live connection with no MCP client is shown separately from
+a failed registration or socket. Metadata refreshes also have a 20-second
+deadline, but their failure does not close a healthy socket or start an HTTP
+retry loop. Explicit metadata changes received during reconnection or another
+refresh are coalesced and sent when the transport is ready.
+
 ## Multiple connected places
 
 Connect every open Studio place to the same MCP server URL. The server tracks

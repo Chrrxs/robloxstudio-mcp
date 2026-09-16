@@ -55,6 +55,7 @@ independent auto-install, lifecycle, and parallel-isolation suites.
 | Large Luau source staging, hash verification, ownership cleanup, or replay safety | `npm run test:studio:large-input-workflow` |
 | Payload admission, property-size rejection, or native response boundaries | `npm run test:studio:payload-boundaries` |
 | WebSocket progress, response loss/recovery, or multi-Studio capacity | `npm run test:studio:websocket-recovery` and `npm run test:studio:websocket-capacity` |
+| Plugin reconnect, registration deadlines, or listener replacement | `npm run test:studio:websocket-reconnect` |
 | Release | `npm run test:e2e:full`, plus affected standalone payload/WebSocket probes above |
 
 When `MCP_INSTANCE_ID` is unset, the runner starts the built MCP server as the
@@ -183,6 +184,7 @@ node scripts/studio-lifecycle.mjs wait-connected --variant main --version <expec
 
 | File | What it checks |
 |---|---|
+| `studio-websocket-reconnect.mjs` | Replaces the owned bridge process on its isolated port and injects stale registration, held `/ready`, silent upgrade, and between-registration-and-upgrade loss. Repeats faults through a full solo Play cycle and verifies edit/server/client tool round-trips. Run with `npm run test:studio:websocket-reconnect`. |
 | `codex-wsl-environment.mjs` | The supported Codex wrapper validates Windows interop and advertises the retained process-identity launcher from a sanitized WSL environment without launching Studio |
 | `eval-bridge-error-preservation.mjs` | `eval_server_runtime` / `eval_client_runtime` surface actual user errors instead of Roblox's generic `"Requested module experienced an error while loading"` wrapper for explicit errors, nil derefs, parser errors, and nested `require()` module-load failures |
 | `eval-context-routing.mjs` | `execute_luau target=server/client-N` runs in plugin context on the selected peer, while `eval_server_runtime` / `eval_client_runtime` run through the server Script and client LocalScript eval bridges |

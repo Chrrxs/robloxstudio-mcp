@@ -21,6 +21,11 @@ interface ScheduledTask {
   callback: () => void;
 }
 
+interface MockThread {
+  callback: () => void;
+  cancelled: boolean;
+}
+
 interface MockSignal<T extends unknown[]> {
   Connect(callback: (...args: T) => void): { Disconnect(): void };
   fire(...args: T): void;
@@ -78,6 +83,11 @@ interface HarnessOptions {
   onSend?(body: string, stream: MockWebStreamClient): void;
   onProgress?(event: ProgressEnvelope, stream: MockWebStreamClient): void;
   onEncode?(value: unknown): void;
+  onReadyPayload?(): void;
+  onReadyRequest?(request: HttpRequest): void;
+  onCreate?(): void;
+  autoStart?: boolean;
+  autoOpen?: boolean;
 }
 
 function repositoryRoot(): string {
@@ -125,7 +135,7 @@ const dependencies: Plugin = {
         contents: `export default {
           peerId: 'peer', getInstanceId: () => 'studio-instance',
           getMultiplayerGroupId: () => undefined, getRole: () => 'edit',
-          createReadyPayload: () => ({})
+          createReadyPayload: () => { globalThis.__READY_PAYLOAD__(); return {}; }
         };`,
         loader: 'js',
       };
@@ -168,7 +178,15 @@ async function createHarness(harnessOptions: HarnessOptions = {}) {
   const socketRequests: Array<{ kind: string; request: HttpRequest }> = [];
   const streams: MockWebStreamClient[] = [];
   const lifecycle: string[] = [];
-  const spawned: Array<() => void> = [];
+  const spawned: MockThread[] = [];
+  const cancelledWorkers: MockThread[] = [];
+  let runningThread: MockThread | ScheduledTask | undefined;
+  function runThread(thread: MockThread): void {
+    if (thread.cancelled) return;
+    const previous = runningThread;
+    runningThread = thread;
+    try { thread.callback(); } finally { runningThread = previous; }
+  }
   let spawnsDeferred = false;
   let httpQuotaExhausted = false;
   let now = 10;
@@ -184,6 +202,7 @@ async function createHarness(harnessOptions: HarnessOptions = {}) {
       lifecycle.push(request.Url.endsWith('/disconnect') ? 'disconnect' : 'ready');
       if (httpQuotaExhausted) throw new Error('Number of requests exceeded limit');
       if (request.Url.endsWith('/ready')) {
+        harnessOptions.onReadyRequest?.(request);
         return {
           Success: true, StatusCode: 200,
           Body: JSON.stringify({
@@ -197,6 +216,7 @@ async function createHarness(harnessOptions: HarnessOptions = {}) {
     },
     CreateWebStreamClient: (kind: string, request: HttpRequest) => {
       socketRequests.push({ kind, request });
+      harnessOptions.onCreate?.();
       const stream: MockWebStreamClient = {
         Opened: createSignal(), MessageReceived: createSignal(), Error: createSignal(), Closed: createSignal(),
         Close: jest.fn(() => lifecycle.push('close')),
@@ -228,21 +248,32 @@ async function createHarness(harnessOptions: HarnessOptions = {}) {
   const context = vm.createContext({
     module: commonJsModule, exports: commonJsModule.exports, console,
     __HTTP_SERVICE__: httpService, __BYTE_LENGTH__: (value: string) => Buffer.byteLength(value, 'utf8'),
+    __READY_PAYLOAD__: () => harnessOptions.onReadyPayload?.(),
+    coroutine: { running: () => runningThread },
     Enum: { WebStreamClientType: { WebSocket: 'WebSocket' } },
     math: { min: Math.min, max: Math.max, pow: Math.pow, floor: Math.floor, huge: Infinity },
     task: {
       spawn: (callback: () => void) => {
-        if (spawnsDeferred) spawned.push(callback);
-        else callback();
+        const thread = { callback, cancelled: false };
+        if (spawnsDeferred) spawned.push(thread);
+        else runThread(thread);
+        return thread;
       },
       delay: (delay: number, callback: () => void) => {
         const timer = { due: now + delay, callback };
         scheduled.push(timer);
         return timer;
       },
-      cancel: (timer: ScheduledTask) => {
-        const index = scheduled.indexOf(timer);
-        if (index !== -1) scheduled.splice(index, 1);
+      cancel: (thread: ScheduledTask | MockThread | undefined) => {
+        if (thread === undefined) return;
+        if (thread === runningThread) throw new Error('Cannot cancel the running thread');
+        if ('cancelled' in thread) {
+          thread.cancelled = true;
+          cancelledWorkers.push(thread);
+        } else {
+          const index = scheduled.indexOf(thread);
+          if (index !== -1) scheduled.splice(index, 1);
+        }
       },
     },
     tick: () => now, os: { clock: () => now }, pcall: robloxPcall,
@@ -286,8 +317,10 @@ async function createHarness(harnessOptions: HarnessOptions = {}) {
   const options: StudioWebSocketOptions = {
     serverUrl: 'http://127.0.0.1:19191', dispatchRequest, onStatus, onHeartbeat, onReady, onTransportUpdate,
   };
-  websocket.start(options);
-  streams[0].Opened.fire(101, '');
+  if (harnessOptions.autoStart !== false) {
+    websocket.start(options);
+    if (harnessOptions.autoOpen !== false) streams[0]?.Opened.fire(101, '');
+  }
 
   function advance(seconds: number): void {
     const target = now + seconds;
@@ -297,21 +330,29 @@ async function createHarness(harnessOptions: HarnessOptions = {}) {
       if (next === undefined || next.due > target) break;
       scheduled.shift();
       now = next.due;
-      next.callback();
+      // Reentrant advancement models a yielding Roblox call: its stack cannot
+      // continue until timers/other workers have run, then returns a late result.
+      const previous = runningThread;
+      runningThread = next;
+      try { next.callback(); } finally { runningThread = previous; }
     }
-    now = target;
+    now = Math.max(now, target);
   }
 
   return {
-    module: websocket, streams, responseBodies, progressEvents, httpRequests, socketRequests, lifecycle, warnings,
+    module: websocket, options, streams, responseBodies, progressEvents, httpRequests, socketRequests, lifecycle, warnings, cancelledWorkers,
     dispatchRequest, onStatus, onHeartbeat, onReady, onTransportUpdate, advance,
     get stream() { return streams[streams.length - 1]; },
     get scheduledTaskCount() { return scheduled.length; },
+    get deferredWorkerCount() { return spawned.filter((thread) => !thread.cancelled).length; },
     exhaustHttpQuota() { httpQuotaExhausted = true; },
     deferSpawns() { spawnsDeferred = true; },
     flushSpawns() {
       spawnsDeferred = false;
-      while (spawned.length > 0) spawned.shift()?.();
+      while (spawned.length > 0) {
+        const thread = spawned.shift();
+        if (thread !== undefined) runThread(thread);
+      }
     },
     emitRequest(requestId: string, target = 'edit') {
       streams[streams.length - 1].MessageReceived.fire(JSON.stringify(requestEvent(requestId, target)));
@@ -748,6 +789,259 @@ describe('Studio WebSocket request lifecycle', () => {
     expect(harness.lifecycle).toEqual(['ready', 'close', 'disconnect', 'ready']);
     expect(harness.responseBodies[1]).toBe(harness.responseBodies[0]);
     expect(harness.dispatchRequest).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('Studio WebSocket attempt ownership', () => {
+  test('retries an initial ready payload exception instead of stranding registration', async () => {
+    let failPayload = true;
+    const harness = await createHarness({
+      autoStart: false,
+      onReadyPayload() { if (failPayload) throw new Error('metadata unavailable'); },
+    });
+    harness.module.start(harness.options);
+    expect(harness.onTransportUpdate).toHaveBeenLastCalledWith(expect.objectContaining({
+      state: 'retrying', retryDelay: 0.5, detail: expect.stringContaining('metadata unavailable'),
+    }));
+    failPayload = false;
+    harness.advance(0.5);
+    harness.stream.Opened.fire(101, '');
+    harness.emitRequest('after-payload-failure');
+    expect(harness.dispatchRequest).toHaveBeenCalledTimes(1);
+  });
+
+  test('releases a failed refresh without disconnecting the healthy socket', async () => {
+    let failPayload = false;
+    const harness = await createHarness({
+      onReadyPayload() { if (failPayload) throw new Error('metadata unavailable'); },
+    });
+    failPayload = true;
+    harness.module.refresh();
+    failPayload = false;
+    harness.module.refresh();
+    expect(harness.onReady).toHaveBeenCalledTimes(2);
+    harness.emitRequest('after-refresh-failure');
+    expect(harness.dispatchRequest).toHaveBeenCalledTimes(1);
+    expect(harness.stream.Close).not.toHaveBeenCalled();
+  });
+
+  test.each(['registration', 'creation'])('bounds a suspended %s call and fences its late completion', async (stage) => {
+    let suspend = () => {};
+    let beforeDeadline: unknown;
+    let afterDeadline: unknown;
+    const harness = await createHarness({
+      autoStart: false,
+      onReadyRequest() { if (stage === 'registration') suspend(); },
+      onCreate() { if (stage === 'creation') suspend(); },
+    });
+    suspend = () => {
+      harness.advance(19);
+      beforeDeadline = harness.onTransportUpdate.mock.calls.at(-1)?.[0];
+      harness.advance(1);
+      afterDeadline = harness.onTransportUpdate.mock.calls.at(-1)?.[0];
+    };
+    harness.module.start(harness.options);
+    expect(beforeDeadline).toEqual(expect.objectContaining({
+      state: 'connecting', detail: expect.stringContaining('20'),
+    }));
+    expect(afterDeadline).toEqual(expect.objectContaining({
+      state: 'retrying', retryDelay: 0.5, detail: expect.stringContaining('20'),
+    }));
+    expect(harness.cancelledWorkers).toHaveLength(1);
+    if (stage === 'registration') expect(harness.onReady).not.toHaveBeenCalled();
+    else expect(harness.stream.Close).toHaveBeenCalledTimes(1);
+    suspend = () => {};
+    harness.advance(0.5);
+    expect(harness.httpRequests.filter((request) => request.Url.endsWith('/ready'))).toHaveLength(2);
+    harness.stream.Opened.fire(101, '');
+    harness.emitRequest('after-pending-operation');
+    expect(harness.dispatchRequest).toHaveBeenCalledTimes(1);
+  });
+
+  test.each(['create-throw', 'silent-upgrade', 'bad-open'])('discards cached credentials after %s before opening', async (failure) => {
+    let failCreate = false;
+    const harness = await createHarness({
+      onCreate() { if (failCreate) throw new Error('socket creation failed'); },
+    });
+    harness.stream.Closed.fire();
+    failCreate = failure === 'create-throw';
+    harness.advance(0.5);
+    expect(harness.httpRequests).toHaveLength(1);
+    if (failure === 'silent-upgrade') harness.advance(20);
+    if (failure === 'bad-open') harness.stream.Opened.fire(503, '');
+    failCreate = false;
+    harness.advance(1);
+    expect(harness.httpRequests.filter((request) => request.Url.endsWith('/ready'))).toHaveLength(2);
+    harness.stream.Opened.fire(101, '');
+    harness.emitRequest('fresh-registration');
+    expect(harness.dispatchRequest).toHaveBeenCalledTimes(1);
+  });
+
+  test('times out refresh independently while heartbeats keep its socket healthy', async () => {
+    let suspend = () => {};
+    const harness = await createHarness({ onReadyRequest() { suspend(); } });
+    suspend = () => {
+      harness.advance(19);
+      harness.stream.MessageReceived.fire(JSON.stringify({ kind: 'heartbeat', timestamp: 1 }));
+      harness.advance(1);
+    };
+    harness.module.refresh();
+    expect(harness.onReady).toHaveBeenCalledTimes(1);
+    expect(harness.cancelledWorkers).toHaveLength(1);
+    suspend = () => {};
+    harness.module.refresh();
+    expect(harness.onReady).toHaveBeenCalledTimes(2);
+    expect(harness.stream.Close).not.toHaveBeenCalled();
+    harness.emitRequest('after-refresh-timeout');
+    expect(harness.dispatchRequest).toHaveBeenCalledTimes(1);
+  });
+
+  test('a late refresh cannot notify or release a newer session refresh', async () => {
+    let onReadyRequest = () => {};
+    const harness = await createHarness({ onReadyRequest() { onReadyRequest(); } });
+    onReadyRequest = () => {
+      onReadyRequest = () => {};
+      harness.restart();
+      harness.deferSpawns();
+      harness.module.refresh();
+    };
+    harness.module.refresh();
+    expect(harness.onReady).toHaveBeenCalledTimes(2);
+    expect(harness.deferredWorkerCount).toBe(1);
+    harness.module.refresh();
+    expect(harness.deferredWorkerCount).toBe(1);
+    harness.flushSpawns();
+    expect(harness.onReady).toHaveBeenCalledTimes(3);
+    expect(harness.httpRequests.filter((request) => request.Url.endsWith('/ready'))).toHaveLength(4);
+  });
+
+  test.each(['stop', 'suspendForShutdown'] as const)('%s cancels deferred connection work and timers', async (operation) => {
+    const harness = await createHarness({ autoStart: false });
+    harness.deferSpawns();
+    harness.module.start(harness.options);
+    harness.module[operation]();
+    harness.flushSpawns();
+    harness.advance(100);
+    expect(harness.httpRequests.filter((request) => request.Url.endsWith('/ready'))).toHaveLength(0);
+    expect(harness.socketRequests).toHaveLength(0);
+    expect(harness.scheduledTaskCount).toBe(0);
+  });
+
+  test('onReady restarting the session prevents the obsolete socket creation', async () => {
+    const harness = await createHarness({ autoStart: false });
+    harness.onReady.mockImplementationOnce(() => harness.restart());
+    harness.module.start(harness.options);
+    expect(harness.socketRequests).toHaveLength(1);
+    harness.emitRequest('reentrant-ready');
+    expect(harness.dispatchRequest).toHaveBeenCalledTimes(1);
+    harness.module.stop();
+    expect(harness.scheduledTaskCount).toBe(0);
+  });
+});
+
+describe('Studio WebSocket explicit metadata refresh', () => {
+  test('coalesces metadata changes during cached socket recovery until Opened', async () => {
+    const harness = await createHarness();
+    harness.stream.Closed.fire();
+    harness.module.refresh();
+    harness.module.refresh();
+    harness.advance(0.5);
+    expect(harness.httpRequests).toHaveLength(1);
+    harness.stream.Opened.fire(101, '');
+    expect(harness.httpRequests.filter((request) => request.Url.endsWith('/ready'))).toHaveLength(2);
+    expect(harness.onReady).toHaveBeenCalledTimes(2);
+    harness.emitRequest('after-queued-metadata');
+    expect(harness.dispatchRequest).toHaveBeenCalledTimes(1);
+  });
+
+  test('coalesces changes arriving during a pending refresh into one subsequent refresh', async () => {
+    let onReadyRequest = () => {};
+    const harness = await createHarness({ onReadyRequest() { onReadyRequest(); } });
+    onReadyRequest = () => {
+      onReadyRequest = () => {};
+      harness.module.refresh();
+      harness.module.refresh();
+    };
+    harness.module.refresh();
+    expect(harness.httpRequests.filter((request) => request.Url.endsWith('/ready'))).toHaveLength(3);
+    expect(harness.onReady).toHaveBeenCalledTimes(3);
+    expect(harness.stream.Close).not.toHaveBeenCalled();
+  });
+
+  test('drains a newer explicit change after the active refresh times out', async () => {
+    let onReadyRequest = () => {};
+    const harness = await createHarness({ onReadyRequest() { onReadyRequest(); } });
+    onReadyRequest = () => {
+      onReadyRequest = () => {};
+      harness.module.refresh();
+      harness.module.refresh();
+      harness.advance(19);
+      harness.stream.MessageReceived.fire(JSON.stringify({ kind: 'heartbeat', timestamp: 1 }));
+      harness.advance(1);
+    };
+    harness.module.refresh();
+    expect(harness.httpRequests.filter((request) => request.Url.endsWith('/ready'))).toHaveLength(3);
+    expect(harness.onReady).toHaveBeenCalledTimes(2);
+    expect(harness.stream.Close).not.toHaveBeenCalled();
+  });
+
+  test('preserves a metadata change arriving during initial registration', async () => {
+    let onReadyRequest = () => {};
+    const harness = await createHarness({ autoStart: false, onReadyRequest() { onReadyRequest(); } });
+    onReadyRequest = () => {
+      onReadyRequest = () => {};
+      harness.module.refresh();
+    };
+    harness.module.start(harness.options);
+    harness.stream.Opened.fire(101, '');
+    expect(harness.httpRequests.filter((request) => request.Url.endsWith('/ready'))).toHaveLength(2);
+    expect(harness.onReady).toHaveBeenCalledTimes(2);
+  });
+
+  test.each(['stop', 'suspendForShutdown'] as const)('%s discards queued metadata from the retired session', async (operation) => {
+    const harness = await createHarness();
+    harness.stream.Closed.fire();
+    harness.module.refresh();
+    harness.module[operation]();
+    if (operation === 'stop') harness.restart();
+    else {
+      harness.module.resumeAfterShutdownFailure();
+      harness.stream.Opened.fire(101, '');
+    }
+    expect(harness.httpRequests.filter((request) => request.Url.endsWith('/ready'))).toHaveLength(2);
+  });
+});
+
+describe('Studio WebSocket retry boundaries', () => {
+  test('repeated registration exceptions keep the capped retry cadence until stopped', async () => {
+    const payload = jest.fn(() => { throw new Error('metadata unavailable'); });
+    const harness = await createHarness({ onReadyPayload: payload });
+    let attempts = 1;
+    for (const delay of [0.5, 1, 2, 4, 5, 5]) {
+      expect(harness.onTransportUpdate).toHaveBeenLastCalledWith(expect.objectContaining({
+        state: 'retrying', retryDelay: delay,
+      }));
+      harness.advance(delay - 0.125);
+      expect(payload).toHaveBeenCalledTimes(attempts);
+      harness.advance(0.125);
+      expect(payload).toHaveBeenCalledTimes(++attempts);
+    }
+    harness.module.stop();
+    harness.advance(100);
+    expect(payload).toHaveBeenCalledTimes(attempts);
+    expect(harness.scheduledTaskCount).toBe(0);
+  });
+
+  test('a throwing onReady callback does not strand or restart its connection', async () => {
+    const harness = await createHarness({ autoStart: false });
+    harness.onReady.mockImplementation(() => { throw new Error('UI callback failed'); });
+    harness.module.start(harness.options);
+    harness.stream.Opened.fire(101, '');
+    harness.emitRequest('after-callback-failure');
+    expect(harness.dispatchRequest).toHaveBeenCalledTimes(1);
+    expect(harness.onTransportUpdate).toHaveBeenLastCalledWith(expect.objectContaining({ state: 'open' }));
+    expect(harness.warnings).toHaveBeenCalledWith(expect.stringContaining('UI callback failed'));
+    expect(harness.socketRequests).toHaveLength(1);
   });
 });
 

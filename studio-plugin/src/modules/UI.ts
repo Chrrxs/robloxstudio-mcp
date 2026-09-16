@@ -320,13 +320,14 @@ function init(pluginRef: Plugin) {
 	});
 
 	const statusRow = new Instance("Frame");
-	statusRow.Size = new UDim2(1, 0, 0, 14);
+	statusRow.Size = new UDim2(1, 0, 0, 0);
+	statusRow.AutomaticSize = Enum.AutomaticSize.Y;
 	statusRow.BackgroundTransparency = 1;
 	statusRow.LayoutOrder = 2;
 	statusRow.Parent = card;
 
 	const statusLabel = new Instance("TextLabel");
-	statusLabel.Size = new UDim2(1, 0, 1, 0);
+	statusLabel.Size = new UDim2(1, 0, 0, 18);
 	statusLabel.BackgroundTransparency = 1;
 	statusLabel.Text = "Disconnected";
 	statusLabel.TextColor3 = C.red;
@@ -334,18 +335,21 @@ function init(pluginRef: Plugin) {
 	statusLabel.Font = Enum.Font.GothamBold;
 	statusLabel.TextXAlignment = Enum.TextXAlignment.Left;
 	statusLabel.TextWrapped = true;
+	statusLabel.RichText = false;
 	statusLabel.Parent = statusRow;
 
 	const detailStatusLabel = new Instance("TextLabel");
-	detailStatusLabel.Size = new UDim2(0.5, 0, 1, 0);
-	detailStatusLabel.Position = new UDim2(0.5, 0, 0, 0);
+	detailStatusLabel.Size = new UDim2(1, 0, 0, 0);
+	detailStatusLabel.Position = new UDim2(0, 0, 0, 18);
+	detailStatusLabel.AutomaticSize = Enum.AutomaticSize.Y;
 	detailStatusLabel.BackgroundTransparency = 1;
 	detailStatusLabel.Text = "HTTP: X  MCP: X";
 	detailStatusLabel.TextColor3 = C.muted;
 	detailStatusLabel.TextSize = 9;
 	detailStatusLabel.Font = Enum.Font.GothamMedium;
-	detailStatusLabel.TextXAlignment = Enum.TextXAlignment.Right;
+	detailStatusLabel.TextXAlignment = Enum.TextXAlignment.Left;
 	detailStatusLabel.TextWrapped = true;
+	detailStatusLabel.RichText = false;
 	detailStatusLabel.Parent = statusRow;
 
 	const stepsFrame = new Instance("Frame");
@@ -467,14 +471,15 @@ function updateUIState() {
 	const conn = State.getActiveConnection();
 	if (!conn) return;
 	const el = elements;
+	const diagnostics = State.getTransportDiagnostics(tick());
 
 	if (!conn.isActive) {
-		el.statusLabel.Text = "Disconnected";
+		el.statusLabel.Text = diagnostics.status;
 		el.statusLabel.TextColor3 = C.muted;
 		el.statusIndicator.BackgroundColor3 = C.red;
 		el.statusPulse.BackgroundColor3 = C.red;
 		el.statusText.Text = "OFFLINE";
-		el.detailStatusLabel.Text = "";
+		el.detailStatusLabel.Text = diagnostics.detail;
 		el.detailStatusLabel.TextColor3 = C.muted;
 		stopPulseAnimation();
 
@@ -497,12 +502,12 @@ function updateUIState() {
 	el.urlInput.BackgroundColor3 = C.card;
 
 	if (conn.lastHttpOk && conn.lastMcpOk) {
-		el.statusLabel.Text = "Connected";
+		el.statusLabel.Text = diagnostics.status;
 		el.statusLabel.TextColor3 = Color3.fromRGB(34, 197, 94);
 		el.statusIndicator.BackgroundColor3 = Color3.fromRGB(34, 197, 94);
 		el.statusPulse.BackgroundColor3 = Color3.fromRGB(34, 197, 94);
 		el.statusText.Text = "ONLINE";
-		el.detailStatusLabel.Text = "HTTP: OK  MCP: OK";
+		el.detailStatusLabel.Text = diagnostics.detail;
 		el.detailStatusLabel.TextColor3 = Color3.fromRGB(34, 197, 94);
 		el.step1Dot.BackgroundColor3 = Color3.fromRGB(34, 197, 94);
 		el.step1Label.Text = "HTTP server (OK)";
@@ -513,12 +518,12 @@ function updateUIState() {
 		el.troubleshootLabel.Visible = false;
 		stopPulseAnimation();
 	} else if (conn.lastHttpOk && !conn.lastMcpOk) {
-		el.statusLabel.Text = "Waiting for MCP server";
+		el.statusLabel.Text = diagnostics.status;
 		el.statusLabel.TextColor3 = Color3.fromRGB(245, 158, 11);
 		el.statusIndicator.BackgroundColor3 = Color3.fromRGB(245, 158, 11);
 		el.statusPulse.BackgroundColor3 = Color3.fromRGB(245, 158, 11);
 		el.statusText.Text = "WAITING";
-		el.detailStatusLabel.Text = "HTTP: OK  MCP: ...";
+		el.detailStatusLabel.Text = diagnostics.detail;
 		el.detailStatusLabel.TextColor3 = Color3.fromRGB(245, 158, 11);
 		el.step1Dot.BackgroundColor3 = Color3.fromRGB(34, 197, 94);
 		el.step1Label.Text = "HTTP server (OK)";
@@ -529,55 +534,21 @@ function updateUIState() {
 		const elapsed = conn.mcpWaitStartTime !== undefined ? tick() - conn.mcpWaitStartTime : 0;
 		el.troubleshootLabel.Visible = elapsed > 8;
 		startPulseAnimation();
-	} else if (conn.consecutiveFailures >= conn.maxFailuresBeforeError) {
-		el.statusLabel.Text = "Server unavailable";
-		el.statusLabel.TextColor3 = Color3.fromRGB(239, 68, 68);
-		el.statusIndicator.BackgroundColor3 = Color3.fromRGB(239, 68, 68);
-		el.statusPulse.BackgroundColor3 = Color3.fromRGB(239, 68, 68);
-		el.statusText.Text = "ERROR";
-		el.detailStatusLabel.Text = "HTTP: X  MCP: X";
-		el.detailStatusLabel.TextColor3 = Color3.fromRGB(239, 68, 68);
-		el.step1Dot.BackgroundColor3 = Color3.fromRGB(239, 68, 68);
-		el.step1Label.Text = "HTTP server (error)";
-		el.step2Dot.BackgroundColor3 = Color3.fromRGB(239, 68, 68);
-		el.step2Label.Text = "MCP bridge (error)";
-		el.step3Dot.BackgroundColor3 = Color3.fromRGB(239, 68, 68);
-		el.step3Label.Text = "Commands (error)";
-		el.troubleshootLabel.Visible = false;
-		stopPulseAnimation();
-	} else if (conn.consecutiveFailures > 5) {
-		const waitTime = math.ceil(conn.currentRetryDelay);
-		el.statusLabel.Text = `Retrying (${waitTime}s)`;
-		el.statusLabel.TextColor3 = Color3.fromRGB(245, 158, 11);
-		el.statusIndicator.BackgroundColor3 = Color3.fromRGB(245, 158, 11);
-		el.statusPulse.BackgroundColor3 = Color3.fromRGB(245, 158, 11);
-		el.statusText.Text = "RETRY";
-		el.detailStatusLabel.Text = "HTTP: ...  MCP: ...";
-		el.detailStatusLabel.TextColor3 = Color3.fromRGB(245, 158, 11);
-		el.step1Dot.BackgroundColor3 = Color3.fromRGB(245, 158, 11);
-		el.step1Label.Text = "HTTP server (retrying...)";
-		el.step2Dot.BackgroundColor3 = Color3.fromRGB(245, 158, 11);
-		el.step2Label.Text = "MCP bridge (retrying...)";
-		el.step3Dot.BackgroundColor3 = Color3.fromRGB(245, 158, 11);
-		el.step3Label.Text = "Commands (retrying...)";
-		el.troubleshootLabel.Visible = false;
-		startPulseAnimation();
 	} else {
-		el.statusLabel.Text = conn.consecutiveFailures > 1
-			? `Connecting (attempt ${conn.consecutiveFailures})`
-			: "Connecting...";
+		const retrying = conn.nextRetryAt !== undefined;
+		el.statusLabel.Text = diagnostics.status;
 		el.statusLabel.TextColor3 = C.yellow;
 		el.statusIndicator.BackgroundColor3 = C.yellow;
 		el.statusPulse.BackgroundColor3 = C.yellow;
-		el.statusText.Text = "CONNECTING";
-		el.detailStatusLabel.Text = conn.consecutiveFailures === 0 ? "..." : "HTTP: ...  MCP: ...";
-		el.detailStatusLabel.TextColor3 = C.muted;
+		el.statusText.Text = retrying ? "RETRY" : "CONNECTING";
+		el.detailStatusLabel.Text = diagnostics.detail;
+		el.detailStatusLabel.TextColor3 = C.yellow;
 		el.step1Dot.BackgroundColor3 = C.yellow;
-		el.step1Label.Text = "HTTP server (connecting...)";
-		el.step2Dot.BackgroundColor3 = C.yellow;
-		el.step2Label.Text = "MCP bridge (connecting...)";
-		el.step3Dot.BackgroundColor3 = C.yellow;
-		el.step3Label.Text = "Commands (connecting...)";
+		el.step1Label.Text = retrying ? "Listener (disconnected)" : "Listener (connecting...)";
+		el.step2Dot.BackgroundColor3 = C.gray;
+		el.step2Label.Text = "MCP client (waiting for listener)";
+		el.step3Dot.BackgroundColor3 = C.gray;
+		el.step3Label.Text = "Commands (waiting for listener)";
 		el.troubleshootLabel.Visible = false;
 		startPulseAnimation();
 	}

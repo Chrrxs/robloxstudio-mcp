@@ -40,6 +40,7 @@
     "test:studio:parallel": "node scripts/studio-test-profile.mjs run -- tests/parallel-studio-isolation-smoke.mjs",
     "test:studio:websocket-capacity": "node scripts/studio-test-profile.mjs run -- tests/websocket-multi-studio-capacity.mjs",
     "test:studio:websocket-recovery": "node scripts/studio-test-profile.mjs run -- tests/websocket-response-recovery.mjs",
+    "test:studio:websocket-reconnect": "node scripts/studio-test-profile.mjs run -- tests/studio-websocket-reconnect.mjs",
     "test:studio:payload-boundaries": "node scripts/studio-test-profile.mjs run -- tests/studio-payload-boundaries.mjs",
     "test:studio:large-input-workflow": "node scripts/studio-test-profile.mjs run -- tests/run-all.mjs --managed --test large-input-workflow.mjs",
     "test:studio:event-stream-cycles": "node scripts/studio-test-profile.mjs run -- tests/run-all.mjs --managed --test play-cycle-event-stream-regression.mjs",

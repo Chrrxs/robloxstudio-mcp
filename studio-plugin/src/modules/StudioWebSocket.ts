@@ -17,6 +17,7 @@ const PROTOCOL_VERSION = 1;
 const INITIAL_RETRY_DELAY_SECONDS = 0.5;
 const MAX_RETRY_DELAY_SECONDS = 5;
 const SOCKET_SILENCE_TIMEOUT_SECONDS = 20;
+const CONNECTION_STAGE_TIMEOUT_SECONDS = 20;
 const RESPONSE_RETENTION_SECONDS = 5 * 60;
 const RESPONSE_ACK_TIMEOUT_SECONDS = 120;
 const MAX_TERMINAL_RESPONSES = 32768;
@@ -70,6 +71,14 @@ interface TerminalResponse {
 	expiresAt: number;
 }
 
+interface TransportWork {
+	generation: number;
+	options: StudioWebSocketOptions;
+	stage: string;
+	worker?: thread;
+	deadline?: thread;
+}
+
 let options: StudioWebSocketOptions | undefined;
 let active = false;
 let shutdownSuspended = false;
@@ -80,7 +89,11 @@ let socketOpen = false;
 let socketConnections: RBXScriptConnection[] = [];
 let lastValidEventAt = 0;
 let cachedReady: ReadyResponse | undefined;
-let readyRefreshPending = false;
+let connectionWork: TransportWork | undefined;
+let refreshWork: TransportWork | undefined;
+let refreshRequested = false;
+let reconnectTimer: thread | undefined;
+let silenceTimer: thread | undefined;
 let pendingResponseBytes = 0;
 let inFlightRequestBytes = 0;
 let pendingRejectionCount = 0;
@@ -389,23 +402,99 @@ function reportTransport(update: TransportUpdate): void {
 	if (active && currentOptions !== undefined) invokeCallback("WebSocket transport", () => currentOptions.onTransportUpdate(update));
 }
 
+function ownsWork(work: TransportWork): boolean {
+	return active && generation === work.generation && options === work.options
+		&& (connectionWork === work || refreshWork === work);
+}
+
+function cancelThread(worker: thread | undefined): void {
+	// Cancellation is best-effort for native yielding calls. Identity checks
+	// remain necessary when an operation returns after its owner was retired.
+	if (worker !== undefined && worker !== coroutine.running()) pcall(() => task.cancel(worker));
+}
+
+function finishWork(work: TransportWork): void {
+	if (connectionWork === work) connectionWork = undefined;
+	if (refreshWork === work) refreshWork = undefined;
+	cancelThread(work.deadline);
+	cancelThread(work.worker);
+	work.deadline = undefined;
+	work.worker = undefined;
+}
+
+function cancelTransportWork(): void {
+	if (connectionWork !== undefined) finishWork(connectionWork);
+	if (refreshWork !== undefined) {
+		refreshRequested = true;
+		finishWork(refreshWork);
+	}
+	cancelThread(reconnectTimer);
+	cancelThread(silenceTimer);
+	reconnectTimer = undefined;
+	silenceTimer = undefined;
+}
+
+function runWork(work: TransportWork, callback: () => void, failed: (detail: string) => void): void {
+	let finished = false;
+	const worker = task.spawn(() => {
+		if (!ownsWork(work)) return;
+		work.worker = coroutine.running();
+		const [ok, workError] = pcall(callback);
+		work.worker = undefined;
+		finished = true;
+		if (!ok && ownsWork(work)) {
+			// Native upgrade errors can echo credential-bearing request data.
+			const detail = work.stage === "WebSocket upgrade" ? "WebSocket upgrade failed" : `${work.stage} failed: ${tostring(workError)}`;
+			failed(detail);
+		}
+	});
+	if (!finished && ownsWork(work)) work.worker = worker;
+}
+
+function beginStage(work: TransportWork, stage: string): void {
+	cancelThread(work.deadline);
+	work.stage = stage;
+	work.deadline = task.delay(CONNECTION_STAGE_TIMEOUT_SECONDS, () => {
+		if (!ownsWork(work)) return;
+		work.deadline = undefined;
+		const detail = `${stage} timed out after ${CONNECTION_STAGE_TIMEOUT_SECONDS} seconds`;
+		if (connectionWork === work) scheduleReconnect(work.generation, detail);
+		else {
+			finishWork(work);
+			warn(`[robloxstudio-mcp] ${detail}`);
+			flushRefresh();
+		}
+	});
+	if (connectionWork === work) reportTransport({
+		state: "connecting", attempt: reconnectAttempt, retryDelay: 0,
+		detail: `${stage} (timeout ${CONNECTION_STAGE_TIMEOUT_SECONDS} seconds)`,
+	});
+}
+
 function scheduleReconnect(expectedGeneration: number, detail: string, duplicate = false): void {
 	if (!active || generation !== expectedGeneration) return;
+	// A healthy registration gets one socket-only revalidation, preserving
+	// recovery under HTTP quota. Any failure before Opened exhausts that path.
+	if (!socketOpen) cachedReady = undefined;
 	generation++;
+	const nextGeneration = generation;
+	cancelTransportWork();
 	closeCurrentSocket();
 	reconnectAttempt++;
 	const delay = duplicate ? 1 : retryDelay(reconnectAttempt);
 	reportTransport({ state: duplicate ? "waiting-duplicate" : "retrying", attempt: reconnectAttempt, retryDelay: delay, detail });
-	const nextGeneration = generation;
-	task.delay(delay, () => {
+	if (!active || generation !== nextGeneration) return;
+	reconnectTimer = task.delay(delay, () => {
+		reconnectTimer = undefined;
 		if (active && generation === nextGeneration) connect(nextGeneration);
 	});
 }
 
 function watchForSilence(expectedGeneration: number, expectedClient: WebStreamClient): void {
 	const elapsed = tick() - lastValidEventAt;
-	task.delay(math.max(SOCKET_SILENCE_TIMEOUT_SECONDS - elapsed, 0.1), () => {
+	silenceTimer = task.delay(math.max(SOCKET_SILENCE_TIMEOUT_SECONDS - elapsed, 0.1), () => {
 		if (!active || generation !== expectedGeneration || socketClient !== expectedClient) return;
+		silenceTimer = undefined;
 		const silentFor = tick() - lastValidEventAt;
 		if (silentFor >= SOCKET_SILENCE_TIMEOUT_SECONDS) {
 			scheduleReconnect(expectedGeneration, `WebSocket silent for ${math.floor(silentFor)} seconds`);
@@ -431,17 +520,20 @@ function parseReadyResponse(body: string): ReadyResponse | undefined {
 	};
 }
 
-function registerReady(currentOptions: StudioWebSocketOptions, expectedGeneration: number, reconnectOnFailure: boolean): ReadyResponse | undefined {
+function registerReady(work: TransportWork, reconnectOnFailure: boolean): ReadyResponse | undefined {
+	if (!ownsWork(work)) return undefined;
+	const currentOptions = work.options;
+	const expectedGeneration = work.generation;
 	const instanceId = PluginSession.getInstanceId();
 	const multiplayerGroupId = PluginSession.getMultiplayerGroupId();
 	const transportRole = PluginSession.getRole();
 	const readyUrl = `${currentOptions.serverUrl}/ready`;
 	const readyPayload = PluginSession.createReadyPayload(PluginSession.peerId, transportRole, instanceId, multiplayerGroupId);
-	if (!active || generation !== expectedGeneration || options !== currentOptions) return undefined;
+	if (!ownsWork(work)) return undefined;
 	const [readyOk, readyResult] = pcall(() => HttpService.RequestAsync({
 		Url: readyUrl, Method: "POST", Headers: { "Content-Type": "application/json" }, Body: HttpService.JSONEncode(readyPayload),
 	}));
-	if (!active || generation !== expectedGeneration || options !== currentOptions) return undefined;
+	if (!ownsWork(work)) return undefined;
 	const readyLogKey = `${currentOptions.serverUrl}|${PluginSession.peerId}`;
 	if (!readyOk || !readyResult.Success) {
 		const detail = readyOk ? HttpDiagnostics.formatRequestFailure(readyUrl, true, readyResult)
@@ -464,7 +556,7 @@ function registerReady(currentOptions: StudioWebSocketOptions, expectedGeneratio
 	}
 	cachedReady = readyData;
 	invokeCallback("WebSocket ready", () => currentOptions.onReady(readyData));
-	return readyData;
+	return ownsWork(work) ? readyData : undefined;
 }
 
 function credentialsRejected(statusCode: number): boolean {
@@ -474,38 +566,52 @@ function credentialsRejected(statusCode: number): boolean {
 function connect(expectedGeneration: number): void {
 	const currentOptions = options;
 	if (!active || generation !== expectedGeneration || currentOptions === undefined) return;
-	reportTransport({ state: "connecting", attempt: reconnectAttempt, retryDelay: 0 });
-	task.spawn(() => {
-		const readyData = cachedReady ?? registerReady(currentOptions, expectedGeneration, true);
-		if (readyData === undefined || !active || generation !== expectedGeneration || options !== currentOptions) return;
+	if (refreshWork !== undefined) finishWork(refreshWork);
+	const work: TransportWork = { generation: expectedGeneration, options: currentOptions, stage: "" };
+	connectionWork = work;
+	beginStage(work, cachedReady === undefined ? "/ready registration" : "WebSocket upgrade");
+	if (!ownsWork(work)) return;
+	runWork(work, () => {
+		const readyData = cachedReady ?? registerReady(work, true);
+		if (readyData === undefined || !ownsWork(work)) return;
+		if (work.stage !== "WebSocket upgrade") beginStage(work, "WebSocket upgrade");
+		if (!ownsWork(work)) return;
 		const [socketBaseUrl] = currentOptions.serverUrl.gsub("^http", "ws");
 		const [createOk, createdClient] = pcall(() => HttpService.CreateWebStreamClient(Enum.WebStreamClientType.WebSocket, {
 			Url: `${socketBaseUrl}/studio?peerId=${HttpService.UrlEncode(PluginSession.peerId)}&protocolVersion=${PROTOCOL_VERSION}`,
 			Headers: { "X-Studio-Token": readyData.transportToken },
 		}));
 		if (!createOk) {
-			scheduleReconnect(expectedGeneration, `Failed to create WebSocket: ${tostring(createdClient)}`);
+			scheduleReconnect(expectedGeneration, "Failed to create WebSocket");
 			return;
 		}
-		if (!active || generation !== expectedGeneration || options !== currentOptions) {
+		if (!ownsWork(work)) {
 			pcall(() => createdClient.Close());
 			return;
 		}
 		socketClient = createdClient;
-		socketConnections = [
+		// Attach incrementally so a failed subscription cannot leak earlier ones.
+		socketConnections.push(
 			createdClient.Opened.Connect((statusCode, _headers) => {
 				if (!active || generation !== expectedGeneration || socketClient !== createdClient) return;
+				if (socketOpen) return;
 				if (statusCode !== 101 && (statusCode < 200 || statusCode >= 300)) {
-					if (credentialsRejected(statusCode)) cachedReady = undefined;
+					cachedReady = undefined;
 					scheduleReconnect(expectedGeneration, `WebSocket opened with HTTP ${statusCode}`);
 					return;
 				}
 				socketOpen = true;
+				finishWork(work);
 				lastValidEventAt = tick();
 				reconnectAttempt = 0;
 				reportTransport({ state: "open", attempt: 0, retryDelay: 0 });
+				if (!active || generation !== expectedGeneration || socketClient !== createdClient) return;
+				watchForSilence(expectedGeneration, createdClient);
 				resumePendingResponses();
+				if (active && generation === expectedGeneration && socketClient === createdClient) flushRefresh();
 			}),
+		);
+		socketConnections.push(
 			createdClient.MessageReceived.Connect((message) => {
 				if (!active || generation !== expectedGeneration || socketClient !== createdClient) return;
 				if (!typeIs(message, "string")) {
@@ -532,32 +638,30 @@ function connect(expectedGeneration: number): void {
 					dispatchRequest(event, message.size());
 				} else {
 					invokeCallback("WebSocket status", () => currentOptions.onStatus(event));
+					if (!active || generation !== expectedGeneration || socketClient !== createdClient) return;
 					if (!event.knownPeer) {
 						cachedReady = undefined;
 						scheduleReconnect(expectedGeneration, "WebSocket session is no longer registered");
 					}
 				}
 			}),
-			createdClient.Error.Connect((statusCode, message) => {
+		);
+		socketConnections.push(
+			createdClient.Error.Connect((statusCode, _message) => {
 				if (!active || generation !== expectedGeneration || socketClient !== createdClient) return;
-				// A socket that never opened with the cached registration means
-				// that registration is stale (the server restarted and forgot
-				// this peer, so the upgrade fails with 404 unknown_peer). Studio
-				// reports that rejection here with the HTTP status only in the
-				// message text, so keying on statusCode alone left the plugin
-				// retrying the dead credentials forever. Re-register instead.
 				if (!socketOpen || credentialsRejected(statusCode)) cachedReady = undefined;
-				scheduleReconnect(expectedGeneration, `WebSocket error ${statusCode}: ${message}`);
+				// Native error messages may echo request credentials.
+				scheduleReconnect(expectedGeneration, `WebSocket error ${statusCode}`);
 			}),
+		);
+		socketConnections.push(
 			createdClient.Closed.Connect(() => {
 				if (!active || generation !== expectedGeneration || socketClient !== createdClient) return;
 				if (!socketOpen) cachedReady = undefined;
 				scheduleReconnect(expectedGeneration, "WebSocket closed");
 			}),
-		];
-		lastValidEventAt = tick();
-		watchForSilence(expectedGeneration, createdClient);
-	});
+		);
+	}, (detail) => scheduleReconnect(expectedGeneration, detail));
 }
 
 function start(newOptions: StudioWebSocketOptions): void {
@@ -570,17 +674,34 @@ function start(newOptions: StudioWebSocketOptions): void {
 	connect(generation);
 }
 
-function refresh(): void {
+function flushRefresh(): void {
 	const currentOptions = options;
-	if (!active || currentOptions === undefined || readyRefreshPending) return;
-	// Metadata changes must not close a healthy socket or make its reconnect
-	// depend on RequestAsync quota. Proxy registration remains independent.
-	readyRefreshPending = true;
-	const expectedGeneration = generation;
-	task.spawn(() => {
-		registerReady(currentOptions, expectedGeneration, false);
-		readyRefreshPending = false;
+	if (!refreshRequested || !active || currentOptions === undefined || refreshWork !== undefined || connectionWork !== undefined || !socketOpen) return;
+	refreshRequested = false;
+	// Only explicit metadata changes are queued. Failure alone never schedules
+	// more HTTP requests or replaces a healthy transport.
+	const work: TransportWork = { generation, options: currentOptions, stage: "" };
+	refreshWork = work;
+	beginStage(work, "/ready metadata refresh");
+	runWork(work, () => {
+		// Consume at worker entry so changes coalesce even before task.spawn runs.
+		refreshRequested = false;
+		registerReady(work, false);
+		if (ownsWork(work)) {
+			finishWork(work);
+			flushRefresh();
+		}
+	}, (detail) => {
+		finishWork(work);
+		warn(`[robloxstudio-mcp] ${detail}`);
+		flushRefresh();
 	});
+}
+
+function refresh(): void {
+	if (!active || options === undefined) return;
+	refreshRequested = true;
+	flushRefresh();
 }
 
 // EndTest may tear down this VM without an Unloading callback. Release the
@@ -591,6 +712,8 @@ function suspendForShutdown(): void {
 	active = false;
 	shutdownSuspended = true;
 	generation++;
+	cancelTransportWork();
+	refreshRequested = false;
 	reconnectAttempt = 0;
 	closeCurrentSocket();
 	cachedReady = undefined;
@@ -612,6 +735,8 @@ function stop(): void {
 	active = false;
 	shutdownSuspended = false;
 	generation++;
+	cancelTransportWork();
+	refreshRequested = false;
 	for (const [, inFlight] of inFlightRequests) inFlight.cancelled = true;
 	closeCurrentSocket();
 	cachedReady = undefined;

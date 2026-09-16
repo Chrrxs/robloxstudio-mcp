@@ -10,6 +10,11 @@ export interface Connection {
 	lastHttpOk: boolean;
 	lastMcpOk: boolean;
 	mcpWaitStartTime?: number;
+	transportState?: TransportUpdate["state"];
+	transportAttempt?: number;
+	transportDetail?: string;
+	lastTransportFailure?: string;
+	nextRetryAt?: number;
 	heartbeatConnection?: RBXScriptConnection;
 }
 

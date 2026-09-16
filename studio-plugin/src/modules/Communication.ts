@@ -175,29 +175,10 @@ function handleTransportUpdate(update: TransportUpdate): void {
 	const conn = State.getActiveConnection();
 	if (!conn.isActive) return;
 
-	if (update.state === "open") {
-		conn.lastHttpOk = true;
-		conn.lastMcpOk = false;
-		conn.consecutiveFailures = 0;
-		conn.currentRetryDelay = 0.5;
-		conn.mcpWaitStartTime = tick();
-	} else {
-		conn.lastHttpOk = false;
-		conn.lastMcpOk = false;
-		conn.consecutiveFailures = update.attempt;
-		if (update.retryDelay > 0) conn.currentRetryDelay = update.retryDelay;
-		conn.mcpWaitStartTime = undefined;
-	}
+	State.applyTransportUpdate(update, tick());
 
 	UI.updateUIState();
 	UI.updateToolbarIcon();
-	if (update.state === "waiting-duplicate") {
-		const ui = UI.getElements();
-		ui.statusLabel.Text = "Waiting for previous instance";
-		ui.statusLabel.TextColor3 = Color3.fromRGB(245, 158, 11);
-		ui.detailStatusLabel.Text = update.detail ?? "The previous plugin instance is still active.";
-		ui.detailStatusLabel.TextColor3 = Color3.fromRGB(245, 158, 11);
-	}
 }
 
 let nameChangeConn: RBXScriptConnection | undefined;
@@ -245,6 +226,7 @@ function activatePlugin() {
 	conn.lastHttpOk = false;
 	conn.lastMcpOk = false;
 	conn.mcpWaitStartTime = undefined;
+	State.clearTransportDiagnostics();
 
 	const normalizedUrl = ServerUrlSettings.normalizeServerUrl(ui.urlInput.Text);
 	conn.serverUrl = normalizedUrl !== "" ? normalizedUrl : conn.serverUrl;
@@ -266,6 +248,7 @@ function activatePlugin() {
 	});
 
 	if (!conn.heartbeatConnection) {
+		let lastDiagnosticUpdate = tick();
 		conn.heartbeatConnection = RunService.Heartbeat.Connect(() => {
 			if (initialRole === "server" && !RunService.IsRunning()) {
 				ClientBroker.disconnectAllProxies();
@@ -277,6 +260,11 @@ function activatePlugin() {
 				lastReadyPlaceKey = currentPlaceKey;
 				PluginSession.invalidatePlaceName();
 				StudioWebSocket.refresh();
+			}
+			const now = tick();
+			if (conn.nextRetryAt !== undefined && now - lastDiagnosticUpdate >= 0.25) {
+				lastDiagnosticUpdate = now;
+				UI.updateUIState();
 			}
 		});
 	}
@@ -294,6 +282,7 @@ function deactivatePlugin() {
 	conn.lastHttpOk = false;
 	conn.lastMcpOk = false;
 	conn.mcpWaitStartTime = undefined;
+	State.clearTransportDiagnostics();
 
 	StudioWebSocket.stop();
 	disconnectIdentityWatchers();
