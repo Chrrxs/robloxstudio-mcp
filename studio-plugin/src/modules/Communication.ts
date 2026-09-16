@@ -128,6 +128,7 @@ function dispatchSocketRequest(request: StudioRequestEvent, context: StudioReque
 			request.target,
 			request.endpoint,
 			request.data,
+			context,
 		);
 	}
 	const localRole = assignedRole ?? PluginSession.getRole();

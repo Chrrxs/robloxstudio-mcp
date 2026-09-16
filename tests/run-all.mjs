@@ -31,6 +31,7 @@ const FULL_TESTS = [
   'property-value-conversion.mjs',
   'luau-payload-transfers.mjs',
   'capture-broker-transfers.mjs',
+  'client-profiler-broker-deadline.mjs',
   'large-input-workflow.mjs',
   'studio-tooling-smoke.mjs',
   'eval-bridge-error-preservation.mjs',

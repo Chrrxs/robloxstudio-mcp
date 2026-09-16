@@ -381,7 +381,7 @@ function dispatchRequest(request: StudioRequestEvent, requestBytes: number): voi
 		inFlight.progress.phase = "executing";
 		sendProgress(request.requestId, inFlight.progress);
 		const [dispatchOk, response] = pcall(() => dispatchOptions.dispatchRequest(request, context));
-		const executionOutcome = dispatchOk ? handlerOutcome(response) : "error";
+		const executionOutcome = context.executionOutcome ?? (dispatchOk ? handlerOutcome(response) : "error");
 		// Report handler return before JSON encoding or result retention can fail.
 		completeProgress(request.requestId, inFlight.progress, executionOutcome);
 		const body = dispatchOk ? encodeResponse(request.requestId, response, executionOutcome)

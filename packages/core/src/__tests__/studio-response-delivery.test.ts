@@ -45,6 +45,7 @@ interface StudioRequestContext {
   requestId: string;
   deadlineAt: number;
   isCancelled(): boolean;
+  executionOutcome?: 'unknown' | 'not_executed';
 }
 
 interface StudioWebSocketOptions {
@@ -409,6 +410,35 @@ describe('Studio WebSocket response delivery', () => {
     harness.emitRequest('failed-handler');
     expect(responseEnvelope(harness.responseBodies[0]).executionOutcome).toBe('error');
     expect(harness.progressEvents.at(-1)).toMatchObject({ phase: 'response_delivery', outcome: 'error' });
+  });
+
+  test('preserves unknown remote execution after a bounded broker wait returns a diagnostic', async () => {
+    const harness = await createHarness();
+    harness.dispatchRequest.mockImplementation((_request, context) => {
+      context.executionOutcome = 'unknown';
+      return { success: false, error: 'client_broker_timeout', stage: 'client_broker_wait' };
+    });
+    harness.emitRequest('broker-timeout', 'client-1');
+    expect(responseEnvelope(harness.responseBodies[0])).toMatchObject({
+      executionOutcome: 'unknown', response: { error: 'client_broker_timeout' },
+    });
+    expect(harness.progressEvents.at(-1)).toMatchObject({ phase: 'response_delivery', outcome: 'unknown' });
+    acknowledge(harness.stream, 'broker-timeout');
+    harness.emitRequest('broker-timeout', 'client-1');
+    expect(harness.dispatchRequest).toHaveBeenCalledTimes(1);
+  });
+
+  test('accepts a trusted broker admission outcome but not outcome claims in arbitrary handler results', async () => {
+    const harness = await createHarness();
+    harness.dispatchRequest.mockImplementationOnce((_request, context) => {
+      context.executionOutcome = 'not_executed';
+      return { success: false, error: 'client_broker_cancelled' };
+    });
+    harness.emitRequest('broker-cancelled', 'client-1');
+    expect(responseEnvelope(harness.responseBodies[0]).executionOutcome).toBe('not_executed');
+    harness.dispatchRequest.mockReturnValue({ success: false, error: 'handler failure', executionOutcome: 'not_executed' });
+    harness.emitRequest('untrusted-outcome');
+    expect(responseEnvelope(harness.responseBodies[1]).executionOutcome).toBe('error');
   });
 
   test('replays only current progress once per new connection before the retained result', async () => {

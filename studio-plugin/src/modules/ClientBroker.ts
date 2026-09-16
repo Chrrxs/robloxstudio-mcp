@@ -1,4 +1,4 @@
-import { HttpService, Players, ReplicatedStorage, RunService } from "@rbxts/services";
+import { HttpService, Players, ReplicatedStorage, RunService, Workspace } from "@rbxts/services";
 import RuntimeLogBuffer from "./RuntimeLogBuffer";
 import MemoryHandlers from "./handlers/MemoryHandlers";
 import SceneAnalysisHandlers from "./handlers/SceneAnalysisHandlers";
@@ -15,6 +15,7 @@ import HttpDiagnostics from "./HttpDiagnostics";
 import PluginSession from "./PluginSession";
 import TopologyId from "./TopologyId";
 import PeerRole from "./PeerRole";
+import type { StudioRequestContext } from "../types";
 
 interface StudioTestServiceMultiplayer extends StudioTestService {
 	CanLeaveTest(): boolean;
@@ -34,6 +35,11 @@ let mcpUrl = DEFAULT_MCP_URL;
 const BROKER_NAME = "__MCPClientBroker";
 const BROKER_OWNER_ATTRIBUTE = "__MCPBrokerOwner";
 const CLIENT_IDENTITY_KIND = "identity";
+// A normal capture needs at most 15s sampling + 5s waiting for profiler data.
+// Leave room for processing, then return a diagnostic before the outer 30s wait.
+const CLIENT_PROFILER_MAX_WAIT_SECONDS = 25;
+const CLIENT_PROFILER_RESPONSE_RESERVE_SECONDS = 5;
+const CLIENT_PROFILER_POLL_SECONDS = 0.05;
 
 interface ProxyEntry {
 	player: Player;
@@ -51,6 +57,9 @@ interface ProxyEntry {
 interface BrokerEnvelope {
 	endpoint: string;
 	data?: Record<string, unknown>;
+	requestId?: string;
+	remainingMs?: number;
+	expiresAtServerTime?: number;
 }
 
 interface ClientIdentityHandshake {
@@ -227,6 +236,21 @@ function setupClientBroker(attempt = 0) {
 			return BreakpointHandlers.breakpoints(payload.data ?? {});
 		}
 		if (payload && payload.endpoint === "/api/capture-script-profiler") {
+			// os.clock is VM-local. Only the engine-synchronized server clock can
+			// reject an envelope that expired while travelling to this client.
+			if (
+				(typeIs(payload.remainingMs, "number") && payload.remainingMs <= 0) ||
+				(typeIs(payload.expiresAtServerTime, "number") && Workspace.GetServerTimeNow() >= payload.expiresAtServerTime)
+			) {
+				return {
+					success: false,
+					error: "client_broker_expired",
+					stage: "client_broker_pre_start",
+					requestId: payload.requestId,
+					executionOutcome: "not_executed",
+					message: "Client profiler request expired before capture started.",
+				};
+			}
 			return ScriptProfilerHandlers.captureScriptProfiler(payload.data ?? {});
 		}
 		if (payload && payload.endpoint === "/api/capture-micro-profiler") {
@@ -502,12 +526,115 @@ function refreshAllProxyRegistrations(): void {
 	}
 }
 
+function invokeClientProfiler(
+	entry: ProxyEntry,
+	target: string,
+	data: Record<string, unknown> | undefined,
+	context: StudioRequestContext,
+): unknown {
+	const startedAt = os.clock();
+	const deadlineAt = math.min(
+		context.deadlineAt - CLIENT_PROFILER_RESPONSE_RESERVE_SECONDS,
+		startedAt + CLIENT_PROFILER_MAX_WAIT_SECONDS,
+	);
+	const failure = (code: string, stage: string, outcome: "unknown" | "not_executed", detail: string) => {
+		context.executionOutcome = outcome;
+		return {
+			success: false,
+			error: code,
+			stage,
+			requestId: context.requestId,
+			peerId: entry.peerId,
+			target,
+			elapsedMs: math.floor(math.max(0, os.clock() - startedAt) * 1000),
+			executionOutcome: outcome,
+			message: outcome === "unknown"
+				? `${detail} Only the broker's local wait ended; remote execution may still be running. No retry was started.`
+				: `${detail} Client profiler execution was not started.`,
+		};
+	};
+	if (context.isCancelled()) {
+		return failure("client_broker_cancelled", "client_broker_admission", "not_executed", "Request cancelled before client invocation.");
+	}
+	if (startedAt >= deadlineAt) {
+		return failure("client_broker_timeout", "client_broker_admission", "not_executed", "Insufficient request budget for client invocation and response delivery.");
+	}
+	const interrupted = () => {
+		if (context.isCancelled()) {
+			return failure("client_broker_cancelled", "client_broker_wait", "unknown", "Request cancelled while awaiting the client profiler response.");
+		}
+		if (
+			proxyByPeerId.get(entry.peerId) !== entry || proxyByPlayer.get(entry.player) !== entry ||
+			entry.player.Parent === undefined || entry.remote.Parent === undefined || !RunService.IsRunning()
+		) {
+			return failure("client_broker_disconnected", "client_broker_wait", "unknown", "Client proxy disconnected while awaiting the profiler response.");
+		}
+		if (os.clock() >= deadlineAt) {
+			return failure("client_broker_timeout", "client_broker_wait", "unknown", "Client profiler round-trip exceeded its response deadline.");
+		}
+		return undefined;
+	};
+	const remainingMs = math.max(0, math.floor((deadlineAt - os.clock()) * 1000));
+	const envelope: BrokerEnvelope = {
+		endpoint: "/api/capture-script-profiler",
+		data,
+		requestId: context.requestId,
+		remainingMs,
+		expiresAtServerTime: Workspace.GetServerTimeNow() + remainingMs / 1000,
+	};
+	let settled = false;
+	let response: unknown;
+	context.executionOutcome = "unknown";
+	const invocation = task.spawn(() => {
+		const [ok, result] = pcall(() => entry.remote.InvokeClient(entry.player, envelope));
+		// Cancelling a suspended engine wait is best effort. A late return must
+		// never replace the chosen outcome, even if task.cancel was unavailable.
+		if (settled) return;
+		const interruption = interrupted();
+		if (interruption !== undefined) {
+			response = interruption;
+		} else if (!ok) {
+			response = failure("client_broker_invoke_failed", "client_broker_wait", "unknown", `InvokeClient failed: ${tostring(result)}`);
+		} else if (result === undefined) {
+			response = failure("client_broker_nil_response", "client_broker_wait", "unknown", "Client profiler returned no response.");
+		} else {
+			response = result;
+			// Only this endpoint's broker pre-start refusal establishes that no
+			// remote capture ran. Other responses retain normal handler outcome
+			// classification; arbitrary payload fields cannot override transport.
+			context.executionOutcome = undefined;
+			if (typeIs(result, "table")) {
+				const reply = result as Record<string, unknown>;
+				if (reply.error === "client_broker_expired" && reply.stage === "client_broker_pre_start") {
+					context.executionOutcome = "not_executed";
+				}
+			}
+		}
+		settled = true;
+	});
+	while (!settled) {
+		const interruption = interrupted();
+		if (interruption !== undefined) {
+			response = interruption;
+			settled = true;
+			// This only releases the local coroutine; it cannot stop the remote
+			// OnClientInvoke callback or roll back an already-started capture.
+			pcall(() => task.cancel(invocation));
+			break;
+		}
+		task.wait(math.min(CLIENT_PROFILER_POLL_SECONDS, deadlineAt - os.clock()));
+	}
+	return response;
+}
+
 function dispatchClientRequest(
 	peerId: string,
 	target: string,
 	endpoint: string,
-	data?: Record<string, unknown>,
+	data: Record<string, unknown> | undefined,
+	context: StudioRequestContext,
 ): unknown {
+	if (endpoint === "/api/capture-script-profiler") context.executionOutcome = "not_executed";
 	const entry = proxyByPeerId.get(peerId);
 	if (!entry || proxyByPlayer.get(entry.player) !== entry) {
 		return { error: `Client proxy ${target} (${peerId}) is not registered.` };
@@ -531,6 +658,9 @@ function dispatchClientRequest(
 		return {
 			error: `Client-proxy does not forward ${endpoint}. Allowed: ${allowed.join(", ")}.`,
 		};
+	}
+	if (endpoint === "/api/capture-script-profiler") {
+		return invokeClientProfiler(entry, target, data, context);
 	}
 	if (endpoint === "/api/capture-studio") {
 		return CaptureTransfer.receive(
