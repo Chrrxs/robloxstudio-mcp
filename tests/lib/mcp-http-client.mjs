@@ -1,3 +1,4 @@
+import { withStudioTestToolLaunch } from '../../scripts/studio-test-safety.mjs';
 
 export class McpHttpToolError extends Error {
   constructor(message, {
@@ -58,8 +59,11 @@ export async function callMcpHttpTool(
   if (!Number.isInteger(timeoutMs) || timeoutMs < 1) {
     throw new Error(`Invalid MCP HTTP timeout ${timeoutMs}`);
   }
+  return withStudioTestToolLaunch(toolName, args, env, () =>
+    requestMcpHttpTool(toolName, args, { port, env, timeoutMs }));
+}
 
-
+async function requestMcpHttpTool(toolName, args, { port, env, timeoutMs }) {
   const token = authToken(env);
   let response;
   try {

@@ -3,6 +3,7 @@ import { RunService } from "@rbxts/services";
 interface LibMPControl {
 	EnableProfiler(this: LibMPControl, enable: boolean): boolean;
 	EnableCapture(this: LibMPControl, enable: boolean): boolean;
+	SetFrameLimit(this: LibMPControl, frames: number): boolean;
 	CaptureToBufferSync(this: LibMPControl): buffer;
 	IsBackendAccessible(this: LibMPControl): boolean;
 	IsBackendReady(this: LibMPControl): boolean;
@@ -559,6 +560,15 @@ function captureMicroProfiler(requestData: Record<string, unknown>): unknown {
 		};
 	}
 
+	const [frameLimitOk, frameLimitResult] = safeCall(() => LibMP.Control.SetFrameLimit(math.min(frameWindow, 256)));
+	if (!frameLimitOk) {
+		return {
+			error: "micro_profiler_frame_limit_failed",
+			message: tostring(frameLimitResult),
+			backend,
+		};
+	}
+
 	const [profilerOk, profilerResult] = safeCall(() => LibMP.Control.EnableProfiler(true));
 	if (!profilerOk) {
 		return {
@@ -579,6 +589,10 @@ function captureMicroProfiler(requestData: Record<string, unknown>): unknown {
 
 	task.wait(durationMs / 1000);
 
+	// Active reads synchronize the engine's data; paused reads can return an
+	// empty or stale cache. Export first, then pause, including on export failure.
+	const [bufferOk, snapshotOrErr] = safeCall(() => LibMP.Control.CaptureToBufferSync());
+
 	const [captureStopOk, captureStopResult] = safeCall(() => LibMP.Control.EnableCapture(false));
 	if (!captureStopOk) {
 		return {
@@ -588,7 +602,6 @@ function captureMicroProfiler(requestData: Record<string, unknown>): unknown {
 		};
 	}
 
-	const [bufferOk, snapshotOrErr] = safeCall(() => LibMP.Control.CaptureToBufferSync());
 	if (!bufferOk) {
 		return {
 			error: "micro_profiler_snapshot_failed",

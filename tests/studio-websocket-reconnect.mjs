@@ -58,7 +58,6 @@ const controls = [];
 const cleanupErrors = [];
 let fault, session, worker, backend, backendEnv, failure;
 let playing = false;
-let managedLaunchAttempted = false;
 const websocketServer = new WebSocketServer({ noServer: true, maxPayload: 64 * 1024 * 1024 });
 
 function forwardHttp(incoming, outgoing, body, registration) {
@@ -337,12 +336,13 @@ try {
   await once(front, 'listening', { signal: AbortSignal.timeout(10000) });
   const address = front.address();
   assert.ok(address && typeof address === 'object');
-  worker = createIsolatedStudioDirectory({ prefix: 'native-websocket-reconnect' });
+  worker = await createIsolatedStudioDirectory({ prefix: 'native-websocket-reconnect' });
   // The profile wrapper exports/builds once before launch. Never rebuild or
   // overwrite a source/snapshot artifact while Studio is using it.
   const artifact = path.join(REPO_ROOT, 'studio-plugin', 'MCPPlugin.rbxmx');
   const runtimeEnv = {
     ...process.env, MCP_PLUGINS_DIR: worker.pluginsDirectory,
+    ...worker.environment,
     RSMCP_STUDIO_WORKING_DIRECTORY: worker.workingDirectory,
     ROBLOXSTUDIO_MCP_MANAGED_INSTANCE_REGISTRY_DIR: worker.managedInstanceRegistryDirectory,
     ROBLOX_STUDIO_PORT: String(portLease.port), RSMCP_AUTO_ASSIGNED_PORT: '0',
@@ -358,7 +358,6 @@ try {
   }
   assert.ok(readFileSync(path.join(worker.pluginsDirectory, 'MCPPlugin.rbxmx'), 'utf8').includes(`http://localhost:${address.port}`));
   await portLease.handoff();
-  managedLaunchAttempted = true;
   session = await openManagedStudioSession({ port: portLease.port, env: runtimeEnv }, { createControl });
   await verifyTools(['edit']);
   await restartOwnedBridge(['edit']);
@@ -393,15 +392,12 @@ try {
     try { assert.equal((await tool('solo_playtest', { action: 'stop' })).success, true); }
     catch (error) { cleanupErrors.push(error); }
   }
-  let closeConfirmed = !managedLaunchAttempted && failure?.retainedStudioResources !== true;
-  try { if (session) { await session.close(); closeConfirmed = true; } }
+  try { await session?.close(); }
   catch (error) { cleanupErrors.push(error); }
   for (const control of controls) {
     try { await stopOwnedControl(control); } catch (error) { cleanupErrors.push(error); }
   }
-  if (closeConfirmed) {
-    try { worker?.cleanup(); } catch (error) { cleanupErrors.push(error); }
-  } else if (worker) console.warn(`Retaining worker after unconfirmed Studio closure: ${worker.workingDirectory}`);
+  try { await worker?.cleanup(); } catch (error) { cleanupErrors.push(error); }
   for (const forwarded of forwardedRequests) forwarded.destroy();
   for (const upstream of upstreams) upstream.terminate();
   for (const pair of pairs) pair.downstream.terminate();

@@ -35,7 +35,6 @@ let heldCompletionResponse;
 let heartbeats = 0;
 let sequence = 0;
 let session;
-let managedLaunchAttempted = false;
 let worker;
 let failure;
 const cleanupErrors = [];
@@ -112,9 +111,10 @@ try {
   await once(front, 'listening');
   const address = front.address();
   assert.ok(address && typeof address === 'object');
-  worker = createIsolatedStudioDirectory({ prefix: 'websocket-response-recovery' });
+  worker = await createIsolatedStudioDirectory({ prefix: 'websocket-response-recovery' });
   const runtimeEnv = {
     ...process.env,
+    ...worker.environment,
     MCP_PLUGINS_DIR: worker.pluginsDirectory,
     RSMCP_STUDIO_WORKING_DIRECTORY: worker.workingDirectory,
     ROBLOXSTUDIO_MCP_MANAGED_INSTANCE_REGISTRY_DIR: worker.managedInstanceRegistryDirectory,
@@ -129,7 +129,6 @@ try {
   assert.equal(installCode, 0);
   assert.ok(readFileSync(path.join(worker.pluginsDirectory, 'MCPPlugin.rbxmx'), 'utf8').includes(`http://localhost:${address.port}`));
   await portLease.handoff();
-  managedLaunchAttempted = true;
   session = await openManagedStudioSession({ port: portLease.port, env: runtimeEnv });
   const call = (name, args) => callMcpHttpTool(name, args, { port: portLease.port, env: session.env, timeoutMs: 35000 });
   const mutate = (operation_id, result) => call('execute_luau', {
@@ -233,18 +232,12 @@ try {
 } catch (error) {
   failure = error;
 } finally {
-  let closeConfirmed = !managedLaunchAttempted && failure?.retainedStudioResources !== true;
   try {
     if (session) {
       await session.close();
-      closeConfirmed = true;
     }
   } catch (error) { cleanupErrors.push(error); }
-  if (closeConfirmed) {
-    try { worker?.cleanup(); } catch (error) { cleanupErrors.push(error); }
-  } else if (worker) {
-    console.warn(`Retaining Studio worker and managed registry after unconfirmed closure: ${worker.workingDirectory}`);
-  }
+  try { await worker?.cleanup(); } catch (error) { cleanupErrors.push(error); }
   for (const pair of pairs) { pair.upstream.terminate(); pair.downstream.terminate(); }
   const closed = once(websocketServer, 'close');
   websocketServer.close();

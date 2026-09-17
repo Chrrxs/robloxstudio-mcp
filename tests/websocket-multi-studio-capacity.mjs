@@ -52,6 +52,7 @@ function uniquePeers(peers) {
 function workerEnvironment(worker, port, workerIndex, { requirePrimary }) {
   const env = {
     ...process.env,
+    ...worker.environment,
     MCP_PLUGINS_DIR: worker.pluginsDirectory,
     ROBLOX_STUDIO_PORT: String(port),
     RSMCP_AUTO_ASSIGNED_PORT: '0',
@@ -317,7 +318,6 @@ async function closeWorker(control, launch, workerIndex) {
       if (closed?.close_status !== 'closed' && closed?.close_status !== 'already_closed') {
         throw new Error(`manage_instance did not close ${launch.launch_id}: ${JSON.stringify(closed)}`);
       }
-      confirmedStudioCloses.add(workerIndex);
       return;
     } catch (error) {
       managedError = asError(error);
@@ -329,7 +329,6 @@ async function closeWorker(control, launch, workerIndex) {
       processId: launch.pid,
       startedAtFileTime: launch.process_started_at_file_time,
     });
-    confirmedStudioCloses.add(workerIndex);
   } catch (identityError) {
     if (managedError) {
       throw new AggregateError(
@@ -400,7 +399,6 @@ const workers = [];
 const controls = [];
 const launches = [];
 const launchAttempts = new Set();
-const confirmedStudioCloses = new Set();
 const playtestInstanceIds = new Set();
 let portLease;
 let primaryError;
@@ -408,7 +406,7 @@ let primaryError;
 try {
   portLease = await acquireSuitePort({ env: {} });
   for (let index = 0; index < STUDIO_COUNT; index += 1) {
-    workers.push(createIsolatedStudioDirectory({ prefix: `sse-capacity-${index + 1}` }));
+    workers.push(await createIsolatedStudioDirectory({ prefix: `sse-capacity-${index + 1}` }));
   }
 
   await settleOrThrow(
@@ -517,14 +515,9 @@ try {
     }
   }
 
-  await delay(1_000);
-  for (const [index, worker] of workers.entries()) {
-    if (launchAttempts.has(index) && !confirmedStudioCloses.has(index)) {
-      console.warn(`Retaining Studio worker and managed registry after unconfirmed closure: ${worker.workingDirectory}`);
-      continue;
-    }
+  for (const worker of workers) {
     try {
-      worker.cleanup();
+      await worker.cleanup();
     } catch (error) {
       cleanupFailures.push(asError(error));
     }

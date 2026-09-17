@@ -134,6 +134,7 @@ function stopPlaytest(_requestData: Record<string, unknown>) {
 	// Signal the play-server DM's StopPlayMonitor via plugin:SetSetting.
 	// The monitor acknowledges with the matching request id only after its
 	// StudioTestService:EndTest call returns from pcall.
+	const hadActivePlaytest = testRunning || !StudioTestService.EditModeActive;
 	const stopRequest = StopPlayMonitor.requestStop();
 	if (!stopRequest.ok || stopRequest.requestId === undefined) {
 		return { error: "Plugin not ready. Try again in a moment." };
@@ -154,6 +155,12 @@ function stopPlaytest(_requestData: Record<string, unknown>) {
 		// Either way clean up the pending request so a future playtest's monitor
 		// doesn't fire EndTest on startup against a stale signal.
 		StopPlayMonitor.clearPending(stopRequest.requestId);
+		// Settings acknowledgement can be lost as the server VM exits. Reconcile
+		// only a playtest observed at entry, and only after both native teardown
+		// and the tracked execution have finished. Never mask an EndTest error.
+		if (!consumption.consumed && hadActivePlaytest && !testRunning && StudioTestService.EditModeActive) {
+			return { success: true, message: "Playtest stopped." };
+		}
 		if (testRunning) {
 			return {
 				error:

@@ -72,7 +72,7 @@ async function createHarness(editModeActive = false) {
   };
   const stopMonitor = {
     requestStop: () => ({ ok: true, requestId: 'stop-request' }),
-    waitForConsumption: () => ({ ok: true, consumed: true }),
+    waitForConsumption: (): { ok: boolean; consumed: boolean; error?: string } => ({ ok: true, consumed: true }),
     clearPending: () => undefined,
   };
   const commonJsModule = { exports: {} as unknown };
@@ -103,6 +103,7 @@ async function createHarness(editModeActive = false) {
     handlers: loaded.default ?? loaded,
     studioTestService,
     pluginSession,
+    stopMonitor,
     get now() { return now; },
     get scheduledCount() { return spawned.length; },
     onWait(callback: () => void) { onWait = callback; },
@@ -115,6 +116,39 @@ async function createHarness(editModeActive = false) {
 }
 
 describe('Studio playtest lifecycle control', () => {
+  test.each(['tracked', 'manual'])('reconciles a lost acknowledgement after %s playtest teardown completes', async (mode) => {
+    const harness = await createHarness(mode === 'tracked');
+    if (mode === 'tracked') {
+      expect(harness.handlers.startPlaytest({ mode: 'play' }).success).toBe(true);
+      harness.studioTestService.EditModeActive = false;
+    }
+    harness.stopMonitor.waitForConsumption = () => {
+      if (mode === 'tracked') harness.finishExecution();
+      harness.studioTestService.EditModeActive = true;
+      return { ok: false, consumed: false, error: 'acknowledgement lost' };
+    };
+
+    expect(harness.handlers.stopPlaytest({})).toMatchObject({ success: true });
+  });
+
+  test.each(['no active playtest', 'runtime still active', 'execution still pending', 'EndTest failed'])(
+    'does not hide a stop failure when %s',
+    async (state) => {
+      const harness = await createHarness(state !== 'runtime still active');
+      if (state === 'execution still pending') harness.handlers.startPlaytest({ mode: 'play' });
+      if (state === 'EndTest failed') harness.studioTestService.EditModeActive = false;
+      harness.stopMonitor.waitForConsumption = () => {
+        if (state === 'EndTest failed') harness.studioTestService.EditModeActive = true;
+        return { ok: false, consumed: state === 'EndTest failed', error: 'stop failed' };
+      };
+
+      const result = harness.handlers.stopPlaytest({});
+      expect(result.success).not.toBe(true);
+      expect(result.error).toEqual(expect.any(String));
+      expect(result.detail).toBe('stop failed');
+    },
+  );
+
   test('waits for native edit mode after an accepted stop with no tracked execution', async () => {
     // A manually started test (or an already-unwound execution) leaves testRunning false.
     const harness = await createHarness();

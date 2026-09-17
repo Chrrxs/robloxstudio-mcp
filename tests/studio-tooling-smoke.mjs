@@ -658,11 +658,10 @@ async function main() {
     );
   }
 
-  const worker = createIsolatedStudioDirectory({ prefix: 'tooling-smoke' });
+  const worker = await createIsolatedStudioDirectory({ prefix: 'tooling-smoke' });
   const { version } = JSON.parse(readFileSync(path.join(REPO_ROOT, 'package.json'), 'utf8'));
   let client;
   let launch;
-  let launchAttempted = false;
   let bodyError;
 
   try {
@@ -671,6 +670,7 @@ async function main() {
       args: [DIST, '--auto-install-plugin'],
       env: {
         ...SERVER_ENV,
+        ...worker.environment,
         MCP_PLUGINS_DIR: worker.pluginsDirectory,
         RSMCP_STUDIO_WORKING_DIRECTORY: worker.workingDirectory,
         ROBLOXSTUDIO_MCP_MANAGED_INSTANCE_REGISTRY_DIR: worker.managedInstanceRegistryDirectory,
@@ -680,7 +680,6 @@ async function main() {
     await client.start();
     await client.initialize();
 
-    launchAttempted = true;
     launch = await launchManagedPlace(client, worker.workingDirectory);
     const edit = await waitForEditInstance(client, version, launch.instance_id);
     await runEditModeToolSmoke(client, edit.instanceId);
@@ -689,11 +688,9 @@ async function main() {
     throw error;
   } finally {
     const cleanupErrors = [];
-    let closeConfirmed = !launchAttempted;
     if (client && launch) {
       try {
         await closeManagedInstance(client, launch);
-        closeConfirmed = true;
       } catch (error) {
         cleanupErrors.push(error);
         try {
@@ -701,7 +698,6 @@ async function main() {
             processId: launch.pid,
             startedAtFileTime: launch.process_started_at_file_time,
           });
-          closeConfirmed = true;
         } catch (identityError) {
           cleanupErrors.push(identityError);
         }
@@ -715,15 +711,11 @@ async function main() {
         cleanupErrors.push(error);
       }
     }
-    await delay(1000);
-    if (closeConfirmed) {
-      try {
-        worker.cleanup();
-      } catch (error) {
-        cleanupErrors.push(error);
-      }
-    } else {
-      console.warn(`Retaining Studio worker and managed registry after unconfirmed closure: ${worker.workingDirectory}`);
+    try {
+      await worker.cleanup();
+    } catch (error) {
+      cleanupErrors.push(error);
+      console.warn(`Retaining Studio worker after unconfirmed job drain: ${worker.workingDirectory}`);
     }
     if (cleanupErrors.length > 0) {
       if (bodyError) {

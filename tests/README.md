@@ -34,16 +34,16 @@ npm run test:e2e:full
 # Full managed functional suite, without installer/lifecycle/isolation E2Es
 npm run test:studio:runner
 
-# Reuse a specific already-connected instance for the full functional suite
-MCP_INSTANCE_ID=instance:... ROBLOX_STUDIO_PORT=43123 node tests/run-all.mjs
-
-# Run an individual regression while iterating
-node tests/execute-luau-error-preservation.mjs
+# Run an individual regression through the same guarded profile
+node scripts/studio-test-profile.mjs run -- tests/run-all.mjs --managed --test execute-luau-error-preservation.mjs
 ```
 
-The full gate does not launch the feature smoke separately: its complete
-functional runner covers those checks in the same Studio session before the
-independent auto-install, lifecycle, and parallel-isolation suites.
+The full gate uses one prepared WTI snapshot. It runs functional coverage inside
+the main matching auto-install session, then completes variant/mismatch checks,
+process identity, lifecycle, and parallel isolation. It does not launch feature
+smoke or another functional editor separately. On the current successful path
+this schedules 23 Studio processes, including multiplayer servers and clients.
+The runner stops at the first failure and reports remaining checks as not run.
 
 | Change area | Required live command |
 |---|---|
@@ -76,15 +76,106 @@ all edit, playtest, runtime, proxy, simulation, and multiplayer tests, use:
 npm run test:studio:runner
 ```
 
-Independent worktree workers receive distinct leased ports instead of
-accidentally proxying through each other's servers. Roblox Studio processes and
-the installed plugin folder are global to the OS user, so destructive live
-suites also take a cross-platform, heartbeating worktree lease. Multiple
-worktrees may start the commands together; one waits while the other owns that
-global mutation boundary, preventing plugin backup/restore and close-all races.
-The lease keeps durable copies of the installed plugins and lifecycle fixture,
-so a successor restores them before proceeding even if the prior test process
-was killed.
+WTI workers keep separate plugins, ports, working directories, and registries,
+but the dedicated account's authentication and Studio installation are shared.
+Public profile commands therefore use an account-global safety guard:
+
+- Only one harness invocation may run per dedicated account. Concurrent commands
+  are rejected, not queued for a later surprise launch. The explicit parallel
+  isolation test still keeps two worker Studios open within its one invocation.
+- Launch requests have a rolling budget of 10 native-process launch-cost units
+  per 2 minutes. Multiplayer starts count
+  the server and requested clients; adding players counts the additional
+  clients. Solo play reuses its editor process. Engine-created children can
+  still start together.
+- Requests with available capacity dispatch without a fixed delay once the
+  active launch lease is free. Otherwise, they wait before dispatch until enough
+  cost reservations expire. The harness reports the requested cost, available
+  units, and capacity wait duration on stderr. Waiting for admission does not
+  retry a launch or consume its RPC timeout; each admitted operation dispatches
+  only once. Capacity alone does not create a failure stop condition.
+- Failed or interrupted runs leave a persistent stop condition across worktrees.
+  Cleanup/status calls remain available; new launches do not. No automatic
+  replacement launch or whole-suite retry is performed.
+
+These are conservative harness limits, **not a documented Roblox threshold or
+guarantee against rate limits**.
+Use offline fixtures first and only the smallest affected live gate. Do not
+repeat a full gate to turn a flaky result green. If Studio reports login,
+rate-limit, or missing/corrupt-file errors, stop and address the environment
+before attempting another launch. After checking the failure and confirming
+owned Studio processes are closed, explicitly acknowledge recovery:
+
+```bash
+npm run studio:test-safety:reset -- --reason "Describe the checked failure and recovery"
+```
+
+Reset does not launch Studio, change credentials, or replenish the launch budget.
+Existing `launch_budget` stop conditions from older harness versions also
+require a reviewed explicit reset; waiting out the window does not clear them.
+Use the public profile commands rather than direct internal test entrypoints so
+these safeguards apply.
+
+For installation failures, these fixed maintenance commands remain available
+while the safety block is set:
+
+```bash
+npm run studio:test-diagnose
+npm run studio:test-repair
+```
+
+When the account's updater explicitly requests a different channel, use that
+observed channel for the one supervised repair attempt, for example:
+
+```bash
+npm run studio:test-repair -- --channel zbuck2release-739-control
+```
+
+Channel names are limited to 1–64 alphanumeric characters separated by hyphens.
+Only the verified installer's `-channel <name>` switch is forwarded; arbitrary
+installer flags, paths, and mixed repair/suite commands are rejected before
+dispatch. Omitting `--channel` retains the official installer's zero-argument
+default behavior.
+
+Diagnosis reads a bounded installation inventory and redacted startup-log
+indicators from the dedicated account; it launches no Studio process. Explicit
+repair downloads the official Roblox Studio installer, checks its Windows
+signature, and supervises one installation attempt under that same account.
+It does not reset the safety block, delete authentication data, or launch a test.
+Do not interrupt an active update merely because its original Studio process
+exited: the installer may still be writing its version folder. Automatic
+executable discovery rejects the newest folder if it contains a `.crdownload`
+or lacks a nonempty `AppSettings.xml`, rather than silently launching an older
+version and triggering another update.
+
+Repair completion requires fresh installer success and a complete newest
+installation. The newest executable is selected by modification time, not by
+channel or semantic version. A default-channel downgrade can coexist with a
+different channel's complete folder, so these checks alone do not prove that
+the selected executable matches the account's requested version. Review the
+fresh installer log's channel/version evidence against the diagnosed folder
+before resetting safety or running the live gate; repair never resets that
+state or automatically launches Studio to check it.
+
+If a completed official repair leaves an old zero-byte download marker, first
+let its supervisor finish and close dedicated-account Studio/installer processes.
+After reviewing the diagnostic metadata and successful installer log, finalize
+that exact completed attempt without downloading or launching anything:
+
+```bash
+npm run studio:test-repair -- --finalize-log RobloxStudioInstaller_A600A.log
+```
+
+Use the actual `RobloxStudioInstaller_HEX.log` basename, never a path.
+Finalization and `--channel` are mutually exclusive. Under the maintenance
+lease, finalization requires an idle account, a log less than one hour old with
+both installer success and terminal thread completion, one version GUID, and no
+terminal failure. It checks regular, nonempty executable/settings files and
+quarantines only regular zero-byte `.crdownload` files older than the log's start.
+Reparse points, new or nonempty markers, and changing evidence are rejected.
+Markers are preserved in a unique profile-global maintenance quarantine, never
+deleted; if normal unchanged executable discovery does not select the completed
+target, moves are rolled back. Neither safety state nor launch quota is reset.
 
 The Codex/WSL environment regression is non-destructive and does not launch
 Studio. It starts the real source wrapper with `WSL_INTEROP` and
@@ -129,23 +220,22 @@ Studio session, avoiding a second install and launch. The focused command
 remains available for iteration:
 
 ```bash
-RSMCP_E2E_CLOSE_ALL_STUDIO=1 npm run test:studio:tools
+npm run test:studio:tools
 ```
 
 ## Release E2E: auto-install + Studio restart
 
-`tests/auto-install-plugin-e2e.mjs` is a destructive release verification that
-requires Studio to be closed first, installs the main and inspector plugins,
-launches Studio through `manage_instance`, checks version/variant metadata,
-verifies mismatch warnings, closes the explicit launched `instance_id`, and
-restores the original plugin files.
+`tests/auto-install-plugin-e2e.mjs` installs the main and inspector plugins into
+its isolated worker directory, launches Studio through `manage_instance`, checks
+version/variant metadata and mismatch rejection, and closes only its explicitly
+owned launches before removing the worker directory.
 Its subprocess runner bypasses the Windows `npm.cmd`/`npx.cmd` shims and invokes
 their Node CLI entry points directly. It drains output through process close,
 terminates the whole process tree on timeout, and turns pre-exit spawn failures
 into immediate, causal errors instead of waiting indefinitely.
 
 ```bash
-RSMCP_E2E_CLOSE_ALL_STUDIO=1 npm run test:e2e:auto-install
+npm run test:e2e:auto-install
 ```
 
 ## Lifecycle regressions: same-place process coexistence and edit startup logs
@@ -159,24 +249,26 @@ errors before the MCP plugin installs its log listener so the test can verify
 current-launch history seeding and prior-launch exclusion.
 
 ```bash
-RSMCP_E2E_CLOSE_ALL_STUDIO=1 npm run test:e2e:lifecycle
+npm run test:e2e:lifecycle
 ```
 
 The E2E defaults to freshly built local packed tarballs and prints
 `artifactSource: local-pack`, so unpublished changes are what reach Studio.
 Set `RSMCP_E2E_ARTIFACT_SOURCE=latest` to test the published release instead.
+The launch manager must advertise the current worker-job containment capability
+before any Studio process is created. Older published artifacts without it are
+rejected; use local worktree artifacts rather than running without containment.
 The self-contained auto-install, lifecycle, and tooling commands each lease an
 open port and install a plugin configured for that port, so an unrelated MCP
 server on the default port does not block targeted or full verification.
-All destructive E2Es still require no Studio windows to be open and the
-close-all environment variable remains an explicit opt-in.
+These public commands use the dedicated test account and close only their owned
+Studio launches. They do not require a close-all opt-in or closing personal Studio.
 
-Studio lifecycle helpers are available directly:
+Diagnostic helpers remain available directly; launches require the guarded profile:
 
 ```bash
 node scripts/studio-lifecycle.mjs status
-RSMCP_E2E_CLOSE_ALL_STUDIO=1 node scripts/studio-lifecycle.mjs close-all
-node scripts/studio-lifecycle.mjs launch
+node scripts/studio-test-profile.mjs run -- scripts/studio-lifecycle.mjs launch
 node scripts/studio-lifecycle.mjs wait-connected --variant main --version <expected-version>
 ```
 
@@ -204,6 +296,18 @@ node scripts/studio-lifecycle.mjs wait-connected --variant main --version <expec
   and read from the runtime log buffer.
 - `run-all.mjs` closes only the exact managed `launch_id` it created; a
   supplied `MCP_INSTANCE_ID` remains caller-owned and is not closed.
+- Each owned worker retains a separate Windows job across Studio launch,
+  authorization, and release. Helpers remain owned even after Studio exits.
+  Cleanup allows an owned installer up to ten minutes to finish, then terminates
+  remaining worker-job members and confirms they have exited before removing
+  the directory. An unconfirmed drain leaves the directory intact and fails.
+  This never performs account-wide process-name kills.
+- The outer harness also allows owned installers to finish after an ordinary
+  harness exit. Explicit cancellation still closes containment immediately.
+- To exercise worker cleanup without Studio, run
+  `npm run test:studio-worker-native` from native Windows Node/npm. It builds
+  the core and runs controlled Node fixtures for orphaned helpers, installer
+  completion, and isolation from unrelated processes.
 
 ## Layout
 

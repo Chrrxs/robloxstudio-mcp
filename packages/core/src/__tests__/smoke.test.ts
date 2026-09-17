@@ -1,7 +1,7 @@
 import { BridgeService } from '../bridge-service.js';
 import { createHttpServer } from '../http-server.js';
 import { RobloxStudioTools } from '../tools/index.js';
-import { buildStudioLaunchArgs, buildWindowsStudioStartScript, buildWindowsStudioStopScript, cleanupManagedBaseplateFiles, isWsl, quoteWindowsCommandLineArg, StudioInstanceManager, sweepStaleBaseplateFiles } from '../studio-instance-manager.js';
+import { buildStudioLaunchArgs, buildWindowsStudioStartScript, cleanupManagedBaseplateFiles, isWsl, quoteWindowsCommandLineArg, StudioInstanceManager, sweepStaleBaseplateFiles } from '../studio-instance-manager.js';
 import { detectStudioPlatform } from '../studio-platform.js';
 import { ManagedInstanceRegistry } from '../managed-instance-registry.js';
 import request from 'supertest';
@@ -259,91 +259,7 @@ describe('Smoke', () => {
     expect(payload.instances.every((instance: { roles?: unknown }) => instance.roles === undefined)).toBe(true);
   });
 
-  test('WSL Studio launch does not inherit the synchronous PowerShell pipes', () => {
-    const script = buildWindowsStudioStartScript(
-      'C:\\Roblox\\RobloxStudioBeta.exe',
-      ['--task', 'EditFile', '--localPlaceFile', 'C:\\Places\\Baseplate.rbxl'],
-    );
-
-    expect(script.startsWith("$ErrorActionPreference = 'Stop'\n")).toBe(true);
-    expect(script).toContain(
-      'if (String.IsNullOrEmpty(currentDirectory))\n            currentDirectory = null;',
-    );
-    expect(script.indexOf('String.IsNullOrEmpty(currentDirectory)')).toBeLessThan(
-      script.indexOf('bool started = CreateProcessW'),
-    );
-    expect(script).toContain('CREATE_SUSPENDED');
-    expect(script).toContain('JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE');
-    expect(script).toContain('AssignProcessToJobObject');
-    expect(script).toContain('Marshal.GetLastWin32Error() == 5');
-    expect(script).toContain(
-      'public uint dwXCountChars;\n        public uint dwYCountChars;\n        public uint dwFillAttribute;\n        public uint dwFlags;',
-    );
-    expect(script).toContain('$launch = [McpSuspendedStudio]::Start(');
-    expect(script).toContain('$launch.Resume()');
-    expect(script).toContain('$launch.Abort()');
-    expect(script).toContain(
-      'elseif ($command -eq "MCP_STUDIO_LAUNCH_ABORT") { $launch.Abort(); $accepted = $true }',
-    );
-    expect(script).toContain(
-      'if ($command -eq "MCP_STUDIO_LAUNCH_COMPLETE") { $launch.Release(); $accepted = $true }\n' +
-      'elseif ($command -eq "MCP_STUDIO_LAUNCH_ABORT") { $launch.Abort(); $accepted = $true }',
-    );
-    expect(script).toContain('TerminateAndWait(created.hProcess)');
-    expect(script).toContain('TerminateAndWait(process)');
-    expect(script).toContain('WaitForSingleObject(processHandle, 15000)');
-    expect(script).toContain('$launch.StartedAtFileTime');
-    expect(script).not.toContain('$psi.UseShellExecute');
-    expect(script).toContain("'C:\\Roblox\\RobloxStudioBeta.exe', 'C:\\Roblox\\RobloxStudioBeta.exe --task EditFile --localPlaceFile C:\\Places\\Baseplate.rbxl', $null)");
-  });
-
-  test('Windows Studio shutdown uses a creation-checked process handle', () => {
-    const script = buildWindowsStudioStopScript(47312, '133700123456');
-
-    expect(script).toContain(
-      '[System.Diagnostics.Process]::GetProcessById($processId)',
-    );
-    expect(script).toContain(
-      '$studio.StartTime.ToUniversalTime().ToFileTimeUtc()',
-    );
-    expect(script).toContain(
-      'if ($actualStartedAt -ne $expectedStartedAt) { return }',
-    );
-    expect(script).toContain('$studio.Kill()');
-    expect(script).toContain('$studio.WaitForExit()');
-    expect(script).not.toContain('Stop-Process');
-  });
-
-  test('WSL Studio launch applies environment and working-directory values as PowerShell data', () => {
-    const script = buildWindowsStudioStartScript(
-      'C:\\Roblox\\RobloxStudioBeta.exe',
-      ['--task', 'EditFile'],
-      {
-        set: {
-          STUDIO_LAUNCH_LOADER: "C:\\LaunchTools\\loader's; $env:SHOULD_NOT_RUN.dll",
-          STUDIO_LAUNCH_BUILD_VERSION: '0.0.0+build.123',
-        },
-        remove: ['STUDIO_LAUNCH_LOADED_BUILD_VERSION'],
-      },
-      "C:\\Studio Workers\\worker's-directory",
-    );
-
-    expect(script).toContain(
-      "[Environment]::SetEnvironmentVariable('STUDIO_LAUNCH_LOADER', 'C:\\LaunchTools\\loader''s; $env:SHOULD_NOT_RUN.dll', [EnvironmentVariableTarget]::Process)",
-    );
-    expect(script).toContain(
-      "[Environment]::SetEnvironmentVariable('STUDIO_LAUNCH_LOADED_BUILD_VERSION', $null, [EnvironmentVariableTarget]::Process)",
-    );
-    expect(script.indexOf("'STUDIO_LAUNCH_LOADER'")).toBeLessThan(
-      script.indexOf('[McpSuspendedStudio]::Start('),
-    );
-    expect(script).toContain(
-      "[McpSuspendedStudio]::Start('C:\\Roblox\\RobloxStudioBeta.exe', 'C:\\Roblox\\RobloxStudioBeta.exe --task EditFile', 'C:\\Studio Workers\\worker''s-directory')",
-    );
-    expect(script).toContain('Start(string application, string commandLine, string currentDirectory)');
-    expect(script.match(/IntPtr\.Zero, currentDirectory, ref startup/g)).toHaveLength(2);
-    expect(script).toContain('CREATE_SUSPENDED');
-
+  test('Windows Studio launch rejects malformed environment and working-directory inputs', () => {
     expect(() => buildWindowsStudioStartScript('Studio.exe', [], {
       set: { 'STUDIO_LAUNCH_LOADER; Remove-Item Env:PATH': 'loader.dll' },
     })).toThrow(/Invalid process environment variable name/);

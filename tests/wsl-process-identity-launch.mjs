@@ -21,19 +21,18 @@ export async function runProcessIdentityRegression({
   let processIdentity;
   let bodyError;
   let worker;
-  let launchAttempted = false;
-  let closeConfirmed = false;
 
   try {
     assertProfile();
     assertIsolation();
-    worker = createWorker({ prefix: 'process-identity' });
+    worker = await createWorker({ prefix: 'process-identity' });
     client = createClient({
       command: process.execPath,
       args: [DIST],
       startupTimeoutMs: 60000,
       env: {
         ...process.env,
+        ...worker.environment,
         ROBLOXSTUDIO_MCP_MANAGED_INSTANCE_REGISTRY_DIR: worker.managedInstanceRegistryDirectory,
       },
     });
@@ -41,7 +40,6 @@ export async function runProcessIdentityRegression({
     await client.initialize();
 
     console.log('\n=== WSL process identity launch without a working directory ===');
-    launchAttempted = true;
     const launch = await client.callTool('manage_instance', {
       action: 'launch',
       source: 'baseplate',
@@ -75,7 +73,6 @@ export async function runProcessIdentityRegression({
       launch_id: launchId,
     });
     assert(closed.close_status === 'closed', 'the suspended Studio launch is aborted by exact identity');
-    closeConfirmed = true;
     console.log('\n✅ WSL process identity launch regression PASSED');
   } catch (error) {
     bodyError = error;
@@ -88,7 +85,6 @@ export async function runProcessIdentityRegression({
           launch_id: launchId,
         });
         assert(['closed', 'already_closed'].includes(closed.close_status), 'managed cleanup confirms Studio is closed');
-        closeConfirmed = true;
       } catch (error) {
         cleanupErrors.push(error);
       }
@@ -96,7 +92,6 @@ export async function runProcessIdentityRegression({
     if (processIdentity) {
       try {
         await closeProcess(processIdentity);
-        closeConfirmed = true;
       } catch (error) {
         cleanupErrors.push(error);
       }
@@ -108,11 +103,9 @@ export async function runProcessIdentityRegression({
         cleanupErrors.push(error);
       }
     }
-    if (worker && launchAttempted && !closeConfirmed) {
-      console.error(`Retaining worker for unconfirmed Studio launch recovery: ${worker.workingDirectory}`);
-    } else if (worker && cleanupErrors.length === 0) {
+    if (worker) {
       try {
-        worker.cleanup();
+        await worker.cleanup();
       } catch (error) {
         cleanupErrors.push(error);
       }

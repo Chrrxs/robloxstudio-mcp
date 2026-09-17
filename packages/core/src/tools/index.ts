@@ -9,6 +9,7 @@ import {
 import { RobloxCookieClient } from '../roblox-cookie-client.js';
 import {
   parseStudioProcessEnvironmentPatch,
+  parseStudioTestWorkerJobName,
   parseStudioWorkingDirectory,
   StudioInstanceManager,
   type ManagedStudioInstance,
@@ -3181,6 +3182,7 @@ export class RobloxStudioTools {
         });
       }
       return this._textResult({
+        test_worker_job_name: parseStudioTestWorkerJobName(process.env.RSMCP_STUDIO_TEST_WORKER_JOB),
         managed: (await this.instanceManager.list())
           .filter((record) => record.closedAt === undefined)
           .map((record) => this._managedStatus(record)),

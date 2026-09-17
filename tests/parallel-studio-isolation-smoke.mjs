@@ -21,6 +21,8 @@ import { acquireSuitePort } from './lib/test-port.mjs';
 const WORKER_COUNT = 2;
 const LAUNCH_TIMEOUT_MS = 120000;
 const PLAY_TIMEOUT_MS = 60000;
+const PLAY_CYCLES = Number(process.argv.find((arg) => arg.startsWith('--cycles='))?.split('=')[1] ?? 1);
+assert.ok(Number.isSafeInteger(PLAY_CYCLES) && PLAY_CYCLES > 0, '--cycles must be a positive integer');
 const runId = randomUUID();
 
 function assertLiveDesktop() {
@@ -141,12 +143,13 @@ try {
   const settingsBefore = await assertStudioDirectoryIsolation();
 
   for (const worker of workers) {
-    worker.directory = createIsolatedStudioDirectory({ prefix: `parallel-${worker.index + 1}` });
+    worker.directory = await createIsolatedStudioDirectory({ prefix: `parallel-${worker.index + 1}` });
   }
   await settle('Port allocation failed', workers.map(async (worker) => {
     worker.lease = await acquireSuitePort({ env: {} });
     worker.env = {
       ...process.env,
+      ...worker.directory.environment,
       MCP_INSTANCE_ID: '',
       MCP_PLUGINS_DIR: worker.directory.pluginsDirectory,
       ROBLOX_STUDIO_PORT: String(worker.lease.port),
@@ -177,7 +180,6 @@ try {
 
   await settle('Port handoff failed', workers.map((worker) => worker.lease.handoff()));
   await settle('Managed Studio launch failed', workers.map(async (worker) => {
-    worker.launchAttempted = true;
     worker.session = await openManagedStudioSession({ port: worker.lease.port, env: worker.env, launchTimeoutMs: LAUNCH_TIMEOUT_MS }, {
       createControl: (env) => clientFor(worker, env, 'manager'),
     });
@@ -216,15 +218,18 @@ return marker:GetAttribute("Owner")
   }));
   await settle('Edit place isolation failed', workers.map((worker, index) => verifyMarker(worker, workers[1 - index])));
 
-  await settle('Concurrent play failed', workers.map(async (worker) => {
-    worker.playing = true;
-    const result = await tool(worker, 'solo_playtest', { action: 'start', mode: 'play' });
-    assert.equal(result.success, true, `Worker ${worker.index + 1} play start: ${JSON.stringify(result)}`);
-    await waitForRole(worker, true);
-  }));
-  await settle('Runtime place isolation failed', workers.map((worker, index) => verifyMarker(worker, workers[1 - index], 'server')));
-  await settle('Concurrent stop failed', workers.map(stopPlay));
-  await settle('Post-play isolation failed', workers.map((worker, index) => verifyMarker(worker, workers[1 - index])));
+  for (let cycle = 1; cycle <= PLAY_CYCLES; cycle += 1) {
+    console.log(`Parallel play/stop cycle ${cycle}/${PLAY_CYCLES}`);
+    await settle('Concurrent play failed', workers.map(async (worker) => {
+      worker.playing = true;
+      const result = await tool(worker, 'solo_playtest', { action: 'start', mode: 'play' });
+      assert.equal(result.success, true, `Worker ${worker.index + 1} play start: ${JSON.stringify(result)}`);
+      await waitForRole(worker, true);
+    }));
+    await settle('Runtime place isolation failed', workers.map((worker, index) => verifyMarker(worker, workers[1 - index], 'server')));
+    await settle('Concurrent stop failed', workers.map(stopPlay));
+    await settle('Post-play isolation failed', workers.map((worker, index) => verifyMarker(worker, workers[1 - index])));
+  }
 
   const [a, b] = workers;
   await a.client.stop();
@@ -252,13 +257,8 @@ return marker:GetAttribute("Owner")
   await cleanup(workers.filter((worker) => worker.lease).map((worker) => worker.lease.release()));
   for (const worker of workers) {
     if (!worker.directory) continue;
-    if (worker.launchAttempted && !worker.closed) {
-      // Retain ownership records if launch/close failed; never erase evidence needed for exact-process recovery.
-      console.error(`Retained worker ${worker.index + 1} recovery directory: ${worker.directory.workingDirectory}`);
-      continue;
-    }
     try {
-      worker.directory.cleanup();
+      await worker.directory.cleanup();
     } catch (error) {
       cleanupFailures.push(error);
     }

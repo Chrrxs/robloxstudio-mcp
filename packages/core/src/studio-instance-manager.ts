@@ -429,11 +429,19 @@ export function quoteWindowsCommandLineArg(value: string): string {
   return `${quoted}${'\\'.repeat(backslashes * 2)}"`;
 }
 
+export function parseStudioTestWorkerJobName(name: string | undefined): string | undefined {
+  if (name !== undefined && !/^Local\\RsmcpStudioWorker-[a-f0-9]{32}$/u.test(name)) {
+    throw new Error('Invalid Studio test worker job name.');
+  }
+  return name;
+}
+
 export function buildWindowsStudioStartScript(
   exe: string,
   args: string[],
   processEnvironment?: StudioProcessEnvironmentPatch,
   studioWorkingDirectory?: string,
+  testWorkerJobName: string | undefined = process.env.RSMCP_STUDIO_TEST_WORKER_JOB,
 ): string {
   const workingDirectory = parseStudioWorkingDirectory(studioWorkingDirectory);
   return buildWindowsStudioStartScriptFromConvertedExe(
@@ -441,6 +449,7 @@ export function buildWindowsStudioStartScript(
     args,
     processEnvironment,
     workingDirectory ? toStudioLaunchArg(workingDirectory) : undefined,
+    testWorkerJobName,
   );
 }
 
@@ -449,8 +458,10 @@ function buildWindowsStudioStartScriptFromConvertedExe(
   args: string[],
   processEnvironment?: StudioProcessEnvironmentPatch,
   windowsWorkingDirectory?: string,
+  testWorkerJobName: string | undefined = process.env.RSMCP_STUDIO_TEST_WORKER_JOB,
 ): string {
   const environmentPatch = parseStudioProcessEnvironmentPatch(processEnvironment);
+  parseStudioTestWorkerJobName(testWorkerJobName);
   const commandLine = [windowsExe, ...args].map(quoteWindowsCommandLineArg).join(' ');
   return [
     "$ErrorActionPreference = 'Stop'",
@@ -563,6 +574,15 @@ public sealed class McpSuspendedStudio : IDisposable
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     private static extern IntPtr CreateJobObjectW(IntPtr jobAttributes, string name);
 
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern IntPtr OpenJobObjectW(uint access, bool inheritHandle, string name);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool GetHandleInformation(IntPtr handle, out uint flags);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool QueryInformationJobObject(IntPtr job, int informationClass, IntPtr information, uint informationLength, out uint returned);
+
     [DllImport("kernel32.dll", SetLastError = true)]
     private static extern bool SetInformationJobObject(
         IntPtr job,
@@ -650,20 +670,60 @@ public sealed class McpSuspendedStudio : IDisposable
             throw new InvalidOperationException("Unexpected Studio process wait result: " + wait);
     }
 
-    public static McpSuspendedStudio Start(string application, string commandLine, string currentDirectory)
+    private static Win32Exception TestWorkerError(string operation)
+    {
+        int error = Marshal.GetLastWin32Error();
+        return new Win32Exception(error, operation + " (Win32 " + error + "): " + new Win32Exception(error).Message);
+    }
+
+    private static IntPtr OpenTestWorkerJob(string name)
+    {
+        if (name == null) return IntPtr.Zero;
+        if (!System.Text.RegularExpressions.Regex.IsMatch(name, @"\\ALocal\\\\RsmcpStudioWorker-[a-f0-9]{32}\\z"))
+            throw new ArgumentException("Invalid Studio test worker job name");
+        IntPtr handle = OpenJobObjectW(5, false, name);
+        if (handle == IntPtr.Zero)
+            throw TestWorkerError("Open test worker job failed");
+        try
+        {
+            uint flags;
+            if (!GetHandleInformation(handle, out flags))
+                throw TestWorkerError("Get test worker job handle flags failed");
+            if ((flags & 1) != 0)
+                throw new InvalidOperationException("Test worker job handle must not be inherited");
+            int length = Marshal.SizeOf(typeof(ExtendedLimitInformation));
+            IntPtr buffer = Marshal.AllocHGlobal(length);
+            try
+            {
+                uint returned;
+                if (!QueryInformationJobObject(handle, JOB_OBJECT_EXTENDED_LIMIT_INFORMATION, buffer, (uint)length, out returned))
+                    throw TestWorkerError("Query test worker job limits failed");
+                var information = (ExtendedLimitInformation)Marshal.PtrToStructure(buffer, typeof(ExtendedLimitInformation));
+                if (returned != length || information.BasicLimitInformation.LimitFlags != JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE)
+                    throw new InvalidOperationException("Test worker job must retain kill-on-close without breakaway");
+            }
+            finally { Marshal.FreeHGlobal(buffer); }
+            return handle;
+        }
+        catch { CloseHandle(handle); throw; }
+    }
+
+    public static McpSuspendedStudio Start(string application, string commandLine, string currentDirectory, string testWorkerJobName)
     {
         if (String.IsNullOrEmpty(currentDirectory))
             currentDirectory = null;
         IntPtr jobHandle = CreateJobObjectW(IntPtr.Zero, null);
         if (jobHandle == IntPtr.Zero)
             throw new Win32Exception(Marshal.GetLastWin32Error(), "CreateJobObjectW failed");
+        IntPtr workerJob = IntPtr.Zero;
         try
         {
             ConfigureKillOnClose(jobHandle, true);
+            workerJob = OpenTestWorkerJob(testWorkerJobName);
             var startup = new StartupInfo();
             startup.cb = Marshal.SizeOf(startup);
             ProcessInformation created;
-            uint flags = CREATE_SUSPENDED | CREATE_BREAKAWAY_FROM_JOB;
+            uint flags = CREATE_SUSPENDED | (workerJob == IntPtr.Zero ? CREATE_BREAKAWAY_FROM_JOB : 0);
             bool started = CreateProcessW(application, new StringBuilder(commandLine), IntPtr.Zero, IntPtr.Zero, false, flags, IntPtr.Zero, currentDirectory, ref startup, out created);
             if (!started && Marshal.GetLastWin32Error() == 5)
                 started = CreateProcessW(application, new StringBuilder(commandLine), IntPtr.Zero, IntPtr.Zero, false, CREATE_SUSPENDED, IntPtr.Zero, currentDirectory, ref startup, out created);
@@ -671,6 +731,10 @@ public sealed class McpSuspendedStudio : IDisposable
                 throw new Win32Exception(Marshal.GetLastWin32Error(), "CreateProcessW failed");
             try
             {
+                // Worker lifetime encloses the private launch-authorization job.
+                // COMPLETE may release authorization, never test-worker ownership.
+                if (workerJob != IntPtr.Zero && !AssignProcessToJobObject(workerJob, created.hProcess))
+                    throw TestWorkerError("Assign Studio to test worker job failed");
                 if (!AssignProcessToJobObject(jobHandle, created.hProcess))
                     throw new Win32Exception(Marshal.GetLastWin32Error(), "AssignProcessToJobObject failed");
                 return new McpSuspendedStudio(created, jobHandle);
@@ -693,6 +757,10 @@ public sealed class McpSuspendedStudio : IDisposable
         {
             CloseHandle(jobHandle);
             throw;
+        }
+        finally
+        {
+            if (workerJob != IntPtr.Zero) CloseHandle(workerJob);
         }
     }
 
@@ -743,7 +811,7 @@ public sealed class McpSuspendedStudio : IDisposable
     }
 }
 '@`,
-    `$launch = [McpSuspendedStudio]::Start(${powershellStringLiteral(windowsExe)}, ${powershellStringLiteral(commandLine)}, ${windowsWorkingDirectory === undefined ? '$null' : powershellStringLiteral(windowsWorkingDirectory)})`,
+    `$launch = [McpSuspendedStudio]::Start(${powershellStringLiteral(windowsExe)}, ${powershellStringLiteral(commandLine)}, ${windowsWorkingDirectory === undefined ? '$null' : powershellStringLiteral(windowsWorkingDirectory)}, ${testWorkerJobName === undefined ? '$null' : powershellStringLiteral(testWorkerJobName)})`,
     'try {',
     '[Console]::Out.WriteLine((ConvertTo-Json @{ pid = $launch.ProcessId; started = [string]$launch.StartedAtFileTime } -Compress)); [Console]::Out.Flush()',
     '$accepted = $false',
@@ -796,11 +864,13 @@ async function spawnWindowsStudio(
   const windowsWorkingDirectory = studioWorkingDirectory
     ? await toStudioLaunchArgAsync(studioWorkingDirectory)
     : undefined;
+  const testWorkerJobName = process.env.RSMCP_STUDIO_TEST_WORKER_JOB;
   const script = buildWindowsStudioStartScriptFromConvertedExe(
     windowsExe,
     args,
     processEnvironment,
     windowsWorkingDirectory,
+    testWorkerJobName,
   );
   const launcher = spawn("powershell.exe", ["-NoProfile", "-Command", script], {
     cwd:
@@ -1165,6 +1235,39 @@ function prepareStudioLaunchOptions(options: StudioLaunchOptions): StudioLaunchO
   };
 }
 
+function resolveStudioExeFromVersions(root: string): string {
+  if (!existsSync(root)) {
+    throw new Error(`Roblox Studio Versions folder not found: ${root}. Set ROBLOX_STUDIO_EXE.`);
+  }
+
+  const candidates = readdirSync(root)
+    .filter((name) => name.startsWith('version-'))
+    .map((name) => path.join(root, name, 'RobloxStudioBeta.exe'))
+    .filter((candidate) => existsSync(candidate))
+    .sort((a, b) => statSync(b).mtimeMs - statSync(a).mtimeMs);
+
+  if (candidates.length === 0) {
+    throw new Error(`RobloxStudioBeta.exe not found under ${root}. Set ROBLOX_STUDIO_EXE.`);
+  }
+
+  // Reject the newest installation rather than falling back: launching an older
+  // version can start the same interrupted update again.
+  const exe = candidates[0];
+  const installationDir = path.dirname(exe);
+  const hasIncompleteDownload = readdirSync(installationDir).some((name) => /\.crdownload$/i.test(name));
+  const settings = statSync(path.join(installationDir, 'AppSettings.xml'), { throwIfNoEntry: false });
+  if (hasIncompleteDownload || !settings?.isFile() || settings.size === 0) {
+    const reason = hasIncompleteDownload
+      ? 'an unfinished .crdownload download is present'
+      : 'AppSettings.xml is missing, empty, or not a regular file';
+    throw new Error(
+      `Roblox Studio installation/update is incomplete at ${installationDir}: ${reason}. ` +
+      'Complete the installation/update or reinstall Roblox Studio under the owning Windows account before launching.',
+    );
+  }
+  return exe;
+}
+
 export function resolveStudioExe(): string {
   if (process.env.ROBLOX_STUDIO_EXE) return process.env.ROBLOX_STUDIO_EXE;
 
@@ -1181,21 +1284,7 @@ export function resolveStudioExe(): string {
     ? path.join(toWslPath(localAppData), 'Roblox', 'Versions')
     : path.join(os.homedir(), 'AppData', 'Local', 'Roblox', 'Versions');
 
-  if (!existsSync(root)) {
-    throw new Error(`Roblox Studio Versions folder not found: ${root}. Set ROBLOX_STUDIO_EXE.`);
-  }
-
-  const candidates = readdirSync(root)
-    .filter((name) => name.startsWith('version-'))
-    .map((name) => path.join(root, name, 'RobloxStudioBeta.exe'))
-    .filter((candidate) => existsSync(candidate))
-    .sort((a, b) => statSync(b).mtimeMs - statSync(a).mtimeMs);
-
-  if (candidates.length === 0) {
-    throw new Error(`RobloxStudioBeta.exe not found under ${root}. Set ROBLOX_STUDIO_EXE.`);
-  }
-
-  return candidates[0];
+  return resolveStudioExeFromVersions(root);
 }
 
 async function resolveStudioExeAsync(): Promise<string> {
@@ -1211,18 +1300,7 @@ async function resolveStudioExeAsync(): Promise<string> {
   const root = localAppData
     ? path.join(await toWslPathAsync(localAppData), 'Roblox', 'Versions')
     : path.join(os.homedir(), 'AppData', 'Local', 'Roblox', 'Versions');
-  if (!existsSync(root)) {
-    throw new Error(`Roblox Studio Versions folder not found: ${root}. Set ROBLOX_STUDIO_EXE.`);
-  }
-  const candidates = readdirSync(root)
-    .filter((name) => name.startsWith('version-'))
-    .map((name) => path.join(root, name, 'RobloxStudioBeta.exe'))
-    .filter((candidate) => existsSync(candidate))
-    .sort((a, b) => statSync(b).mtimeMs - statSync(a).mtimeMs);
-  if (candidates.length === 0) {
-    throw new Error(`RobloxStudioBeta.exe not found under ${root}. Set ROBLOX_STUDIO_EXE.`);
-  }
-  return candidates[0];
+  return resolveStudioExeFromVersions(root);
 }
 
 const WINDOWS_STUDIO_PROCESS_QUERY = [

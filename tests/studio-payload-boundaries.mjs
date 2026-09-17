@@ -106,6 +106,7 @@ async function main(config) {
   let managedLaunchAttempted = false;
   let fixtureCreated = false;
   let closeConfirmed = false;
+  let workerDrained = false;
   const sha256 = value => createHash('sha256').update(value).digest('hex');
   const emit = row => { rows.push(row); console.log(JSON.stringify(row)); };
 
@@ -535,9 +536,10 @@ async function main(config) {
     assertStudioDirectoryIsolation();
     portLease = await acquireSuitePort({ env: {} });
     recorderLease = await acquireSuitePort({ env: {} });
-    worker = createIsolatedStudioDirectory({ prefix: 'payload-boundaries' });
+    worker = await createIsolatedStudioDirectory({ prefix: 'payload-boundaries' });
     runtimeEnv = {
       ...process.env, MCP_PLUGINS_DIR: worker.pluginsDirectory,
+      ...worker.environment,
       RSMCP_STUDIO_WORKING_DIRECTORY: worker.workingDirectory,
       ROBLOXSTUDIO_MCP_MANAGED_INSTANCE_REGISTRY_DIR: worker.managedInstanceRegistryDirectory,
       ROBLOX_STUDIO_PORT: String(portLease.port), RSMCP_AUTO_ASSIGNED_PORT: '0',
@@ -601,11 +603,8 @@ async function main(config) {
       else closeConfirmed = !managedLaunchAttempted;
     } catch (error) { cleanupErrors.push(error); }
     try { await recorder?.close(); } catch (error) { cleanupErrors.push(error); }
-    // openManagedStudioSession closes only its launch ID / exact PID+start-time.
-    // Keep the worker on close failure rather than delete files under a live Studio.
-    if (closeConfirmed) {
-      try { worker?.cleanup(); } catch (error) { cleanupErrors.push(error); }
-    }
+    try { await worker?.cleanup(); workerDrained = true; }
+    catch (error) { cleanupErrors.push(error); }
     try { await recorderLease?.release(); } catch (error) { cleanupErrors.push(error); }
     try { await portLease?.release(); } catch (error) { cleanupErrors.push(error); }
     emit({ type: 'summary', NativeBuild: native?.NativeBuild, platform: native?.platform,
@@ -617,7 +616,7 @@ async function main(config) {
       responseRejections: rows.filter(row => row.classification === 'response_rejection').length,
       failures: failures.map(error => error.message), cleanupErrors: cleanupErrors.map(error => error.message),
       managedCloseConfirmed: closeConfirmed,
-      ...(!closeConfirmed && worker ? { retainedWorkerDirectory: worker.workingDirectory } : {}) });
+      ...(!workerDrained && worker ? { retainedWorkerDirectory: worker.workingDirectory } : {}) });
   }
   if (failures.length || cleanupErrors.length) throw new AggregateError([...failures, ...cleanupErrors], 'Native payload boundary probe failed; see JSON observations above');
 }

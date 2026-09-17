@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { spawn } from 'node:child_process';
+import { randomBytes } from 'node:crypto';
 import { createConnection } from 'node:net';
 import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { mkdtemp } from 'node:fs/promises';
@@ -8,6 +9,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
+import { inspect } from 'node:util';
 import {
   BASE_PORT,
   McpClient,
@@ -16,6 +18,11 @@ import {
   selectEditInstance,
 } from './lib/mcp-client.mjs';
 import { acquireSuitePort, windowsPortIsAvailable } from './lib/test-port.mjs';
+import {
+  assertFunctionalArtifactSource,
+  runFunctionalInMatchingSession,
+  validatePreparedArtifacts,
+} from './lib/installer-session.mjs';
 import {
   closeStudioProcess,
   assertStudioDirectoryIsolation,
@@ -42,12 +49,14 @@ const VARIANTS = {
 
 const SERVER_ENV = {
   ROBLOX_STUDIO_PROXY_PROMOTION_INTERVAL_MS: '600000',
+  ROBLOX_STUDIO_AUTH_TOKEN: process.env.ROBLOX_STUDIO_AUTH_TOKEN?.trim() || randomBytes(32).toString('hex'),
+  ROBLOX_STUDIO_NO_AUTH: '0',
 };
 const ARTIFACT_SOURCE = process.env.RSMCP_E2E_ARTIFACT_SOURCE ?? 'local';
+const WITH_FUNCTIONAL = process.argv.includes('--with-functional');
 
 let localBuildDone = false;
 let studioIsolation;
-let studioLaunchPending = false;
 const ownedStudioLaunches = new Map();
 const deferredCleanupErrors = [];
 
@@ -167,6 +176,7 @@ export function runProcess(
     cwd = REPO_ROOT,
     env = {},
     timeoutMs = 30000,
+    forwardOutput = false,
     spawnImpl = spawn,
     platform = process.platform,
     terminateProcessTreeImpl = terminateProcessTree,
@@ -210,8 +220,14 @@ export function runProcess(
 
     proc.stdout?.setEncoding('utf8');
     proc.stderr?.setEncoding('utf8');
-    proc.stdout?.on('data', (chunk) => { stdout += chunk; });
-    proc.stderr?.on('data', (chunk) => { stderr += chunk; });
+    proc.stdout?.on('data', (chunk) => {
+      stdout += chunk;
+      if (forwardOutput) process.stdout.write(chunk);
+    });
+    proc.stderr?.on('data', (chunk) => {
+      stderr += chunk;
+      if (forwardOutput) process.stderr.write(chunk);
+    });
     proc.once('error', (spawnError) => {
       finish({ code: null, spawnError });
     });
@@ -248,7 +264,7 @@ function throwIfSpawnFailed(command, args, result) {
 export async function runChecked(command, args, options) {
   const result = await runProcess(command, args, options);
   throwIfSpawnFailed(command, args, result);
-  if (result.code !== 0) {
+  if (result.code !== 0 || result.signal || result.killed) {
     throw new Error(`${command} ${args.join(' ')} failed (${result.code})\n${result.stdout}\n${result.stderr}`);
   }
   return result;
@@ -333,8 +349,14 @@ async function packLatest(def, tmpRoot) {
   return artifactFromPackage(def, 'latest', packageDir);
 }
 
+
 async function ensureLocalBuild(tmpRoot) {
   if (localBuildDone) return;
+  if (process.env.RSMCP_STUDIO_TEST_PREPARED === '1') {
+    validatePreparedArtifacts(REPO_ROOT);
+    localBuildDone = true;
+    return;
+  }
   const buildInstallDir = path.join(tmpRoot, 'local-build-plugin-install');
   await runChecked('npm', ['run', 'build'], { timeoutMs: 120000 });
   await runChecked('npm', ['run', 'compile:plugin'], { timeoutMs: 120000 });
@@ -476,6 +498,7 @@ async function selectArtifact(def, tmpRoot, { forceLocal = false } = {}) {
   return latest;
 }
 
+
 async function waitForEditInstance(client, expected, instanceId, timeoutMs = 120000) {
   const deadline = Date.now() + timeoutMs;
   let last;
@@ -516,6 +539,7 @@ async function startClient(label, artifact, { autoInstall }) {
       ...SERVER_ENV,
       ...(studioIsolation
         ? {
+            ...studioIsolation.environment,
             MCP_PLUGINS_DIR: studioIsolation.pluginsDirectory,
             RSMCP_STUDIO_WORKING_DIRECTORY: studioIsolation.workingDirectory,
             ROBLOXSTUDIO_MCP_MANAGED_INSTANCE_REGISTRY_DIR: studioIsolation.managedInstanceRegistryDirectory,
@@ -536,7 +560,7 @@ async function startManagerForArtifact(label, managerArtifact) {
 async function launchManagedPlace(managerClient, { waitForConnection = true } = {}) {
   assertStudioTestProfile();
   assertStudioDirectoryIsolation();
-  studioLaunchPending = true;
+  await requireStudioWorkerCapability(managerClient, studioIsolation.environment.RSMCP_STUDIO_TEST_WORKER_JOB);
   const launched = await managerClient.callTool('manage_instance', {
     action: 'launch',
     source: 'baseplate',
@@ -554,7 +578,6 @@ async function launchManagedPlace(managerClient, { waitForConnection = true } = 
     `manage_instance returned exact Studio process identity (${JSON.stringify(launched)})`,
   );
   ownedStudioLaunches.set(launched.launch_id, launched);
-  studioLaunchPending = false;
 
   const authorized = await managerClient.callTool('manage_instance', {
     action: 'authorize',
@@ -717,6 +740,15 @@ async function runMatchingCase(artifact, managerArtifact, pluginsDir) {
       serverVersion: artifact.version,
     }, instanceId);
     await assertToolSurface(client, artifact, edit.instanceId);
+    if (WITH_FUNCTIONAL && artifact.variant === 'main') {
+      await runFunctionalInMatchingSession({
+        artifact,
+        instanceId: edit.instanceId,
+        client,
+        env: process.env,
+        execute: runChecked,
+      });
+    }
   } catch (error) {
     matchingBodyError = error;
     throw error;
@@ -858,12 +890,30 @@ async function runMismatchCase(artifact, managerArtifact, pluginsDir) {
   }
 }
 
+export function createAutoInstallCleanupError(cleanupErrors, bodyError) {
+  const errors = bodyError ? [bodyError, ...cleanupErrors] : cleanupErrors;
+  const details = errors.map(error => inspect(error, { depth: null, colors: false })).join('; ');
+  return new AggregateError(
+    errors,
+    `${bodyError ? 'Auto-install E2E failed and Studio cleanup also failed' : 'Auto-install E2E Studio cleanup failed'}: ${details}`,
+    { cause: bodyError ?? cleanupErrors[0] },
+  );
+}
+
+export async function requireStudioWorkerCapability(managerClient, expectedJobName) {
+  const status = await managerClient.callTool('manage_instance', { action: 'status' });
+  if (!expectedJobName || status?.test_worker_job_name !== expectedJobName) {
+    throw new Error('This artifact cannot guarantee the requested worker-job containment. Use local worktree artifacts or a published build with test-worker job support; no Studio launch was requested.');
+  }
+}
+
 async function main() {
-  assertStudioTestProfile();
-  assertStudioDirectoryIsolation();
   if (ARTIFACT_SOURCE !== 'local' && ARTIFACT_SOURCE !== 'latest') {
     throw new Error('RSMCP_E2E_ARTIFACT_SOURCE must be "local" or "latest".');
   }
+  if (WITH_FUNCTIONAL) assertFunctionalArtifactSource(ARTIFACT_SOURCE);
+  assertStudioTestProfile();
+  assertStudioDirectoryIsolation();
   if (await isPortOpen(BASE_PORT)) {
     throw new Error(`Port ${BASE_PORT} is already occupied. Stop existing MCP servers before running this E2E.`);
   }
@@ -877,7 +927,7 @@ async function main() {
   }
 
   const tmpRoot = await mkdtemp(path.join(os.tmpdir(), 'robloxstudio-mcp-e2e-'));
-  studioIsolation = createIsolatedStudioDirectory({ prefix: 'auto-install-e2e' });
+  studioIsolation = await createIsolatedStudioDirectory({ prefix: 'auto-install-e2e' });
   const pluginsDir = studioIsolation.pluginsDirectory;
 
   let bodyError;
@@ -908,27 +958,16 @@ async function main() {
         cleanupErrors.push(error);
       }
     }
-    await delay(1000);
-    if (!studioLaunchPending && ownedStudioLaunches.size === 0) {
-      try {
-        studioIsolation.cleanup();
-      } catch (error) {
-        cleanupErrors.push(error);
-      }
-    } else {
-      console.warn(`Retaining Studio worker and managed registry after unconfirmed closure: ${studioIsolation.workingDirectory}`);
+    try {
+      await studioIsolation.cleanup();
+    } catch (error) {
+      cleanupErrors.push(error);
+      console.warn(`Retaining Studio worker after unconfirmed job drain: ${studioIsolation.workingDirectory}`);
     }
     studioIsolation = undefined;
     rmSync(tmpRoot, { recursive: true, force: true });
     if (cleanupErrors.length > 0) {
-      if (bodyError) {
-        throw new AggregateError(
-          [bodyError, ...cleanupErrors],
-          `Auto-install E2E failed and Studio cleanup also failed: ${cleanupErrors.map(String).join('; ')}`,
-          { cause: bodyError },
-        );
-      }
-      throw new AggregateError(cleanupErrors, 'Auto-install E2E Studio cleanup failed');
+      throw createAutoInstallCleanupError(cleanupErrors, bodyError);
     }
   }
 }

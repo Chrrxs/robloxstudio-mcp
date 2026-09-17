@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
-import { existsSync, mkdtempSync, rmSync, statSync } from 'node:fs';
-import os from 'node:os';
+import { randomUUID } from 'node:crypto';
+import { existsSync, mkdirSync, mkdtempSync, statSync } from 'node:fs';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import {
@@ -12,6 +12,8 @@ import {
   selectRoutingPeer,
   startPlaytestAndWait,
 } from './lib/mcp-client.mjs';
+import { finishProfilerArtifacts, writeProfilerCaptureSummary } from './lib/profiler-artifacts.mjs';
+import { microProfilerCaptureFixtureCode } from './lib/micro-profiler-capture-fixture.mjs';
 
 const MAX_CONCURRENT_RESPONSE_MS = 3000;
 const CAPTURE_DURATION_MS = 5000;
@@ -53,7 +55,9 @@ function newSevereProfilerLogs(logs) {
 
 await runTest('high-volume MicroProfiler capture remains cooperative', async ({ track }) => {
   const client = track(new McpClient('micro-profiler-responsiveness'));
-  const outputDirectory = mkdtempSync(path.join(os.tmpdir(), 'rsmcp-profiler-responsive-'));
+  const artifactRoot = path.join(process.cwd(), 'tmp');
+  mkdirSync(artifactRoot, { recursive: true });
+  const outputDirectory = mkdtempSync(path.join(artifactRoot, 'profiler-responsive-'));
   const rawOutputPath = path.join(outputDirectory, 'capture.mp');
   const cleanupErrors = [];
   let bodyError;
@@ -63,6 +67,12 @@ await runTest('high-volume MicroProfiler capture remains cooperative', async ({ 
   try {
     await client.start();
     await client.initialize();
+    const fixture = await client.callTool('execute_luau', {
+      target: 'edit',
+      code: microProfilerCaptureFixtureCode,
+    });
+    assert(fixture.success === true && fixture.returnValue === 'MICRO_PROFILER_CACHE_REGRESSION_OK',
+      `actual handler refreshes empty and stale profiler caches (${JSON.stringify(fixture)})`);
     playtestStarted = true;
     await startPlaytestAndWait(client, { timeoutSec: 60 });
 
@@ -135,6 +145,7 @@ await runTest('high-volume MicroProfiler capture remains cooperative', async ({ 
 
     const capture = await capturePromise;
     const captureElapsedMs = Date.now() - captureStartedAt;
+    writeProfilerCaptureSummary(outputDirectory, { capture, captureElapsedMs, probes });
     assert(capture.ok === true && !capture.error,
       `high-volume capture_micro_profiler succeeds (${JSON.stringify({ error: capture.error, counts: capture.counts })})`);
     assert(capture.applied?.max_events === MAX_EVENTS && capture.applied?.frame_window === 2000,
@@ -158,18 +169,79 @@ await runTest('high-volume MicroProfiler capture remains cooperative', async ({ 
     assertDescending(capture.top_call_edges, 'inclusive_us', 'cooperative call-edge sort');
     assertDescending(capture.frame_summary?.top_frames, 'duration_us', 'cooperative frame sort');
 
-    const adjacentCapture = await client.callTool('capture_micro_profiler', {
+    // A new scope name cannot be present in the first capture's cached data.
+    const marker = `RSMCP_PROFILER_FRESH_${randomUUID().replaceAll('-', '')}`;
+    const adjacentDirectory = path.join(outputDirectory, 'freshness');
+    mkdirSync(adjacentDirectory);
+    const workloadStartedAt = Date.now();
+    let workloadCompletedAt;
+    // Keep the execute_luau request alive: its temporary payload is destroyed
+    // on return, so detached task.spawn work is not a reliable capture source.
+    const foregroundWorkload = client.callTool('execute_luau', {
       target: 'server',
-      duration_ms: 100,
-      max_events: 10_000,
-      frame_window: 30,
+      code: `
+local marker = ${JSON.stringify(marker)}
+local deadline = os.clock() + 2
+local iterations = 0
+local checksum = 0
+while os.clock() < deadline do
+  debug.profilebegin(marker)
+  for index = 1, 5000 do checksum += math.sqrt(index) end
+  debug.profileend()
+  iterations += 1
+  task.wait()
+end
+return {marker = marker, iterations = iterations, checksum = checksum}`,
+    }, 10_000).finally(() => {
+      workloadCompletedAt = Date.now();
+    });
+    const adjacentStartedAt = Date.now();
+    let adjacentCompletedAt;
+    capturePromise = client.callTool('capture_micro_profiler', {
+      target: 'server',
+      duration_ms: 1000,
+      max_events: MAX_EVENTS,
+      frame_window: 4,
+      filter: marker,
+      min_total_us: 0,
       max_timers: 5,
       max_groups: 5,
       max_timers_per_group: 0,
       max_related_timers: 0,
-    }, 60_000);
+      output_path: path.join(adjacentDirectory, 'capture.mp'),
+    }, 60_000).finally(() => {
+      adjacentCompletedAt = Date.now();
+    });
+    // Settle both requests before assertions or playtest teardown, including
+    // failures, so no request outlives the workload's capture session.
+    const [captureOutcome, workloadOutcome] = await Promise.allSettled([capturePromise, foregroundWorkload]);
+    const timings = { workloadStartedAt, workloadCompletedAt, adjacentStartedAt, adjacentCompletedAt };
+    writeProfilerCaptureSummary(adjacentDirectory, {
+      capture: captureOutcome.status === 'fulfilled' ? captureOutcome.value : undefined,
+      captureError: captureOutcome.status === 'rejected' ? String(captureOutcome.reason) : undefined,
+      workload: workloadOutcome.status === 'fulfilled' ? workloadOutcome.value : undefined,
+      workloadError: workloadOutcome.status === 'rejected' ? String(workloadOutcome.reason) : undefined,
+      marker,
+      timings,
+    });
+    if (captureOutcome.status === 'rejected' || workloadOutcome.status === 'rejected') {
+      throw new AggregateError(
+        [captureOutcome, workloadOutcome].filter((outcome) => outcome.status === 'rejected').map((outcome) => outcome.reason),
+        'freshness capture or foreground workload failed',
+      );
+    }
+    const adjacentCapture = captureOutcome.value;
+    const workload = workloadOutcome.value;
+    assert(workload.success === true, `foreground profiled workload succeeds (${JSON.stringify(workload)})`);
+    const workloadResult = JSON.parse(workload.returnValue);
+    assert(workloadResult.marker === marker && workloadResult.iterations > 0 && Number.isFinite(workloadResult.checksum) && workloadResult.checksum > 0,
+      'the foreground workload completed profiled work for the unique marker');
+    assert(workloadStartedAt <= adjacentStartedAt && workloadCompletedAt >= adjacentStartedAt + 1000,
+      `the foreground workload overlaps the complete requested capture interval (${JSON.stringify(timings)})`);
     assert(adjacentCapture.ok === true && adjacentCapture.counts?.events_sampled > 0,
       `a follow-up bounded profiler capture succeeds (${JSON.stringify(adjacentCapture.counts)})`);
+    assert(adjacentCapture.top_timers?.some((timer) => typeof timer.name === 'string' && timer.name.endsWith(marker) && timer.count > 0),
+      `the follow-up capture contains its new scope, not stale cached events (${JSON.stringify(adjacentCapture.top_timers)})`);
 
     const after = await client.callTool('execute_luau', {
       target: 'server',
@@ -214,7 +286,7 @@ await runTest('high-volume MicroProfiler capture remains cooperative', async ({ 
       }
     }
     try {
-      rmSync(outputDirectory, { recursive: true, force: true });
+      await finishProfilerArtifacts(outputDirectory, bodyError !== undefined || cleanupErrors.length > 0);
     } catch (error) {
       cleanupErrors.push(error instanceof Error ? error : new Error(String(error)));
     }

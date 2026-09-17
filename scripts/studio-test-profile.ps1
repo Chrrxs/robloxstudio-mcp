@@ -167,12 +167,16 @@ try {
             Write-Host 'Preparing the Windows harness checkout under the dedicated account; source-user profile and default Studio plugins are unchanged.'
             $nativeExit = Invoke-StudioHarnessNode @nativeOptions -NodeArguments @($npmCli, 'ci')
             if ($nativeExit -ne 0) { throw ('Root npm ci failed with exit code ' + $nativeExit + '. Retry setup; saved Windows credentials are retained.') }
-            $nativeExit = Invoke-StudioHarnessNode @nativeOptions -NodeArguments @($npmCli, '--prefix', 'studio-plugin', 'ci')
-            if ($nativeExit -ne 0) { throw ('Studio plugin npm ci failed with exit code ' + $nativeExit + '. Retry setup; saved Windows credentials are retained.') }
-            $nativeExit = Invoke-StudioHarnessNode @nativeOptions -NodeArguments @($npmCli, 'run', 'build')
-            if ($nativeExit -ne 0) { throw ('Harness build failed with exit code ' + $nativeExit + '. Retry setup; saved Windows credentials are retained.') }
-            $nativeExit = Invoke-StudioHarnessNode @nativeOptions -NodeArguments @($npmCli, 'run', 'build:plugin:artifact')
-            if ($nativeExit -ne 0) { throw ('Studio plugin artifact build failed with exit code ' + $nativeExit + '. Retry setup; saved Windows credentials are retained.') }
+            if (-not $config.resetSafetyReason -and -not $config.diagnoseStudio -and -not $config.repairStudio) {
+                $nativeExit = Invoke-StudioHarnessNode @nativeOptions -NodeArguments @($npmCli, '--prefix', 'studio-plugin', 'ci')
+                if ($nativeExit -ne 0) { throw ('Studio plugin npm ci failed with exit code ' + $nativeExit + '. Retry setup; saved Windows credentials are retained.') }
+                $nativeExit = Invoke-StudioHarnessNode @nativeOptions -NodeArguments @($npmCli, 'run', 'build')
+                if ($nativeExit -ne 0) { throw ('Harness build failed with exit code ' + $nativeExit + '. Retry setup; saved Windows credentials are retained.') }
+                $nativeExit = Invoke-StudioHarnessNode @nativeOptions -NodeArguments @($npmCli, 'run', 'build:plugin:artifact')
+                if ($nativeExit -ne 0) { throw ('Studio plugin artifact build failed with exit code ' + $nativeExit + '. Retry setup; saved Windows credentials are retained.') }
+                $nativeExit = Invoke-StudioHarnessNode @nativeOptions -NodeArguments @('scripts/build-plugin.mjs', '--variant', 'inspector', '--build-only')
+                if ($nativeExit -ne 0) { throw ('Inspector plugin artifact build failed with exit code ' + $nativeExit + '. Saved Windows credentials are retained.') }
+            }
         }
         $nativeExit = Invoke-StudioHarnessNode @nativeOptions -NodeArguments @($entrypoint, '_child', $Payload)
         exit $nativeExit
@@ -207,10 +211,14 @@ try {
 
     # The job handle is owned only by this source process. Windows closes it on
     # cancellation or abrupt source exit, terminating all contained descendants.
+    function Initialize-StudioHarnessJob {
     Add-Type -TypeDefinition @'
 using System;
 using System.ComponentModel;
+using System.Diagnostics;
+using System.IO;
 using System.Runtime.InteropServices;
+using System.Text;
 using Microsoft.Win32.SafeHandles;
 public sealed class StudioHarnessJob : IDisposable {
     [StructLayout(LayoutKind.Sequential)]
@@ -238,7 +246,21 @@ public sealed class StudioHarnessJob : IDisposable {
     private static extern bool SetInformationJobObject(SafeFileHandle job, int infoClass, ref ExtendedLimits limits, uint size);
     [DllImport("kernel32.dll", SetLastError = true)]
     private static extern bool AssignProcessToJobObject(SafeFileHandle job, IntPtr process);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool QueryInformationJobObject(SafeFileHandle job, int infoClass, IntPtr information, uint size, out uint returned);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern SafeFileHandle OpenProcess(uint access, bool inherit, uint processId);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool IsProcessInJob(SafeFileHandle process, SafeFileHandle job, out bool belongs);
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern bool QueryFullProcessImageName(SafeFileHandle process, uint flags, StringBuilder image, ref uint size);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool GetExitCodeProcess(SafeFileHandle process, out uint exitCode);
     private readonly SafeFileHandle handle;
+    public const long MaximumInstallerGraceMilliseconds = 10 * 60 * 1000;
+    private bool graceReported;
+    private long nextScanMilliseconds;
+    private readonly StringBuilder image = new StringBuilder(32768);
     public StudioHarnessJob() {
         handle = CreateJobObject(IntPtr.Zero, null);
         if (handle.IsInvalid) throw new Win32Exception(Marshal.GetLastWin32Error());
@@ -253,9 +275,132 @@ public sealed class StudioHarnessJob : IDisposable {
     public void Assign(IntPtr process) {
         if (!AssignProcessToJobObject(handle, process)) throw new Win32Exception(Marshal.GetLastWin32Error());
     }
+    private uint[] OwnedProcessIds() {
+        // JobObjectBasicProcessIdList uses pointer-sized IDs after two DWORDs.
+        // Bound allocation/retries even if descendants continuously multiply.
+        for (int capacity = 64; capacity <= 65536; capacity *= 2) {
+            int size = checked(8 + capacity * IntPtr.Size);
+            IntPtr information = Marshal.AllocHGlobal(size);
+            try {
+                uint returned;
+                if (!QueryInformationJobObject(handle, 3, information, (uint)size, out returned)) {
+                    int error = Marshal.GetLastWin32Error();
+                    if (error == 234) continue; // ERROR_MORE_DATA: rescan, never truncate.
+                    throw new Win32Exception(error, "QueryInformationJobObject(JobObjectBasicProcessIdList) failed");
+                }
+                int count = Marshal.ReadInt32(information, 4);
+                if (count < 0 || count > capacity) throw new InvalidOperationException("Invalid containment job process list.");
+                uint[] ids = new uint[count];
+                for (int index = 0; index < count; index++) {
+                    ids[index] = checked((uint)Marshal.ReadIntPtr(information, 8 + index * IntPtr.Size).ToInt64());
+                }
+                Array.Sort(ids);
+                return ids;
+            } finally { Marshal.FreeHGlobal(information); }
+        }
+        throw new InvalidOperationException("Containment job process list exceeded its bounded scan capacity.");
+    }
+    private static bool SameProcessIds(uint[] first, uint[] second) {
+        if (first.Length != second.Length) return false;
+        for (int index = 0; index < first.Length; index++) {
+            if (first[index] != second[index]) return false;
+        }
+        return true;
+    }
+    private static Win32Exception ProcessFailure(string operation, uint id, int error) {
+        return new Win32Exception(error, operation + " failed for PID " + id + " (Win32 " + error + ")");
+    }
+    private static bool IsRunning(SafeFileHandle process, uint id) {
+        uint exitCode;
+        if (!GetExitCodeProcess(process, out exitCode)) throw ProcessFailure("GetExitCodeProcess", id, Marshal.GetLastWin32Error());
+        return exitCode == 259; // STILL_ACTIVE is not affirmative proof of exit.
+    }
+    private static bool ConfirmExited(SafeFileHandle process, long scanStarted, long remainingMilliseconds) {
+        long raceStarted = Stopwatch.GetTimestamp();
+        while (true) {
+            uint exitCode;
+            if (!GetExitCodeProcess(process, out exitCode)) return false;
+            if (exitCode != 259) return true;
+            long now = Stopwatch.GetTimestamp();
+            long scanElapsed = (now - scanStarted) * 1000 / Stopwatch.Frequency;
+            long raceElapsed = (now - raceStarted) * 1000 / Stopwatch.Frequency;
+            long remaining = Math.Min(1000 - raceElapsed, remainingMilliseconds - scanElapsed);
+            if (remaining <= 0) return false;
+            System.Threading.Thread.Sleep((int)Math.Min(10, remaining));
+        }
+    }
+    private bool HasOwnedInstaller(long remainingMilliseconds) {
+        long scanStarted = Stopwatch.GetTimestamp();
+        for (int attempt = 0; attempt < 8; attempt++) {
+            uint[] ids = OwnedProcessIds();
+            foreach (uint id in ids) {
+                // Retain this exact process object through ownership, image and
+                // liveness checks; never wait on or act on a reopened/reused PID.
+                using (SafeFileHandle process = OpenProcess(0x1000, false, id)) { // PROCESS_QUERY_LIMITED_INFORMATION only
+                    if (process.IsInvalid) {
+                        int error = Marshal.GetLastWin32Error();
+                        if (error == 87) continue; // Process exited between enumeration and open.
+                        throw ProcessFailure("OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION)", id, error);
+                    }
+                    bool belongs;
+                    if (!IsProcessInJob(process, handle, out belongs)) throw ProcessFailure("IsProcessInJob", id, Marshal.GetLastWin32Error());
+                    if (!belongs || !IsRunning(process, id)) continue;
+                    image.Length = 0;
+                    uint size = (uint)image.Capacity;
+                    if (!QueryFullProcessImageName(process, 0, image, ref size)) {
+                        int error = Marshal.GetLastWin32Error();
+                        // Query access can fail during teardown. Poll only this
+                        // verified-owned handle; SYNCHRONIZE is not required to
+                        // classify non-installers or confirm their exit.
+                        if (ConfirmExited(process, scanStarted, remainingMilliseconds)) continue;
+                        throw ProcessFailure("QueryFullProcessImageName (exit not confirmed)", id, error);
+                    }
+                    string name = Path.GetFileName(image.ToString());
+                    if (String.Equals(name, "RobloxStudioInstaller.exe", StringComparison.OrdinalIgnoreCase) ||
+                        String.Equals(name, "RobloxPlayerInstaller.exe", StringComparison.OrdinalIgnoreCase)) return true;
+                }
+            }
+            // A parent can launch its replacement and exit during the scan.
+            // Do not call the job installer-free until membership is stable.
+            if (SameProcessIds(ids, OwnedProcessIds())) return false;
+        }
+        throw new InvalidOperationException("Containment job membership did not stabilize during its bounded scan.");
+    }
+    public bool ContinueInstallerGrace(long elapsedMilliseconds) {
+        // Called only after ordinary wrapper exit, with a monotonic stopwatch.
+        // Normal scans never block; an image-query teardown race can poll at
+        // most one second on its retained owned handle, within the grace cap.
+        // Elapsed time is explicit so native fixtures can exercise the hard cap
+        // without real installers or a ten-minute test.
+        if (elapsedMilliseconds < 0) throw new ArgumentOutOfRangeException("elapsedMilliseconds");
+        if (elapsedMilliseconds >= MaximumInstallerGraceMilliseconds) {
+            if (graceReported) Console.Error.WriteLine("Owned Roblox installer completion grace expired after 10 minutes; closing containment and terminating owned leftovers. The installation may be incomplete.");
+            return false;
+        }
+        if (graceReported && elapsedMilliseconds < nextScanMilliseconds) return true;
+        bool active;
+        try { active = HasOwnedInstaller(MaximumInstallerGraceMilliseconds - elapsedMilliseconds); }
+        catch (Exception error) {
+            Win32Exception nativeError = error as Win32Exception;
+            string detail = error.Message + (nativeError == null ? "" : " (Win32 " + nativeError.NativeErrorCode + ")");
+            throw new InvalidOperationException("Cannot verify owned Roblox installer completion: " + detail + "; failing closed and terminating this containment job only.", error);
+        }
+        if (!active) {
+            if (graceReported) Console.Error.WriteLine("Owned Roblox installers exited; closing containment and terminating any owned Studio or other leftovers.");
+            return false;
+        }
+        if (!graceReported) {
+            Console.Error.WriteLine("Harness exited with an owned Roblox installer still active; allowing up to 10 minutes for installer completion before containment cleanup. No Studio retry is started. Explicit cancellation still terminates this job immediately.");
+            graceReported = true;
+        }
+        nextScanMilliseconds = Math.Min(elapsedMilliseconds + 250, MaximumInstallerGraceMilliseconds);
+        return true;
+    }
     public void Dispose() { handle.Dispose(); }
 }
 '@
+    }
+    Initialize-StudioHarnessJob
 
     $logDirectory = Join-Path ([IO.Path]::GetTempPath()) ('rsmcp-test-profile-' + [Guid]::NewGuid().ToString('N'))
     $null = New-Item -ItemType Directory -Path $logDirectory
@@ -266,6 +411,7 @@ public sealed class StudioHarnessJob : IDisposable {
     $stdoutLog = $null
     $stderrLog = $null
     $exitCode = 1
+    $installerGraceClock = $null
     try {
         $acl = New-Object Security.AccessControl.DirectorySecurity
         $acl.SetAccessRuleProtection($true, $false)
@@ -341,11 +487,15 @@ public sealed class StudioHarnessJob : IDisposable {
         $stderrBuffer = New-Object char[] 4096
         $stdoutRead = $process.StandardOutput.ReadAsync($stdoutBuffer, 0, $stdoutBuffer.Length)
         $stderrRead = $process.StandardError.ReadAsync($stderrBuffer, 0, $stderrBuffer.Length)
-        while ($null -ne $stdoutRead -or $null -ne $stderrRead -or -not $process.HasExited) {
+        while ($null -ne $stdoutRead -or $null -ne $stderrRead -or -not $process.HasExited -or $null -ne $job) {
             if ($process.HasExited -and $null -ne $job) {
-                # Descendants must not keep inherited output pipes open forever.
-                $job.Dispose()
-                $job = $null
+                # An ordinary harness failure must not interrupt an in-progress
+                # owned update. Keep draining inherited pipes during its grace.
+                if ($null -eq $installerGraceClock) { $installerGraceClock = [Diagnostics.Stopwatch]::StartNew() }
+                if (-not $job.ContinueInstallerGrace($installerGraceClock.ElapsedMilliseconds)) {
+                    $job.Dispose()
+                    $job = $null
+                }
             }
             if ($null -ne $stdoutRead -and $stdoutRead.IsCompleted) {
                 $count = $stdoutRead.GetAwaiter().GetResult()
@@ -370,6 +520,7 @@ public sealed class StudioHarnessJob : IDisposable {
         if ($null -ne $selection) { $selection.Credential.Password.Dispose(); $selection = $null }
         $credential = $null
         if ($null -ne $startInfo) { $startInfo.Password = $null }
+        # Exceptions/cancellation bypass ordinary-exit grace and fail closed.
         if ($null -ne $job) { $job.Dispose() }
         # Assignment failure can leave only the gated wrapper outside the job.
         if ($null -ne $process) {
@@ -384,7 +535,7 @@ public sealed class StudioHarnessJob : IDisposable {
         if ($exitCode -eq 0) {
             Remove-Item -LiteralPath $logDirectory -Recurse -Force -ErrorAction SilentlyContinue
         } else {
-            [Console]::Error.WriteLine('Abnormal launch: diagnostics retained at ' + $logDirectory + '. Descendants are terminated by the containment job; inspect leftover worker directories only in the dedicated test profile.')
+            [Console]::Error.WriteLine('Abnormal launch: diagnostics retained at ' + $logDirectory + '. Containment cleanup terminated owned leftovers after any ordinary-exit installer grace; cancellation and verification failures receive no grace. Inspect leftover worker directories only in the dedicated test profile.')
         }
     }
     exit $exitCode

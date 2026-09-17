@@ -15,6 +15,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
 import { testBasePort } from './test-port.mjs';
+import { withStudioTestToolLaunch } from '../../scripts/studio-test-safety.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 export const REPO_ROOT = resolve(__dirname, '..', '..');
@@ -210,7 +211,7 @@ export class McpClient {
   }
 
   /** Return the parsed body and protocol status for tests of either outcome. */
-  async callToolResult(name, args = {}, timeoutMs = 30_000) {
+  async callToolResult(name, args = {}, timeoutMs = 30_000, { onDispatch } = {}) {
     const routedArgs = { ...args };
     if (
       process.env.MCP_INSTANCE_ID &&
@@ -220,29 +221,33 @@ export class McpClient {
     ) {
       routedArgs.instance_id = process.env.MCP_INSTANCE_ID;
     }
-    const res = await this.rpc('tools/call', { name, arguments: routedArgs }, timeoutMs);
-    const text = res?.content?.[0]?.text;
-    if (text == null) {
-      throw new Error(`Tool ${name} returned no text content: ${JSON.stringify(res)}`);
-    }
-    try {
-      return { body: JSON.parse(text), isError: res.isError === true };
-    } catch {
-      return { body: text, isError: res.isError === true };
-    }
+    return withStudioTestToolLaunch(name, routedArgs, { ...process.env, ...this.env }, async () => {
+      // Timing-sensitive tests measure RPC latency, not intentional admission wait.
+      onDispatch?.();
+      const res = await this.rpc('tools/call', { name, arguments: routedArgs }, timeoutMs);
+      const text = res?.content?.[0]?.text;
+      if (text == null) {
+        throw new Error(`Tool ${name} returned no text content: ${JSON.stringify(res)}`);
+      }
+      try {
+        return { body: JSON.parse(text), isError: res.isError === true };
+      } catch {
+        return { body: text, isError: res.isError === true };
+      }
+    });
   }
 
   /** Successful calls remain fail-fast; expected failures must opt in. */
-  async callTool(name, args = {}, timeoutMs = 30_000) {
-    const result = await this.callToolResult(name, args, timeoutMs);
+  async callTool(name, args = {}, timeoutMs = 30_000, options = {}) {
+    const result = await this.callToolResult(name, args, timeoutMs, options);
     if (result.isError) {
       throw new Error(`Tool ${name} returned isError: ${JSON.stringify(result.body)}`);
     }
     return result.body;
   }
 
-  async callToolError(name, args = {}, timeoutMs = 30_000) {
-    const result = await this.callToolResult(name, args, timeoutMs);
+  async callToolError(name, args = {}, timeoutMs = 30_000, options = {}) {
+    const result = await this.callToolResult(name, args, timeoutMs, options);
     if (!result.isError) {
       throw new Error(`Tool ${name} did not return isError: true: ${JSON.stringify(result.body)}`);
     }

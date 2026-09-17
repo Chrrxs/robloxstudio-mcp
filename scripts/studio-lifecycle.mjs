@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { execFileSync, spawn } from 'node:child_process';
+import { once } from 'node:events';
 import {
   chmodSync,
   existsSync,
@@ -13,6 +14,7 @@ import {
   statSync,
   writeFileSync,
 } from 'node:fs';
+import { rm } from 'node:fs/promises';
 import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
@@ -20,6 +22,8 @@ import { pathToFileURL } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
 import lockfile from 'proper-lockfile';
 import { SaxesParser } from 'saxes';
+import { withStudioTestLaunch } from './studio-test-safety.mjs';
+import { createStudioWorkerJob, launchInStudioWorkerJob, STUDIO_WORKER_JOB_ENV } from './studio-worker-job.mjs';
 
 const STUDIO_PROCESS = 'RobloxStudioBeta';
 const DEFAULT_MCP_PORT = Number.parseInt(process.env.ROBLOX_STUDIO_PORT ?? '58741', 10);
@@ -416,7 +420,25 @@ export async function configureStudioDirectoryIsolation({
   }
 }
 
-export function createIsolatedStudioDirectory({ prefix = 'worker' } = {}) {
+export function createStudioWorkerCleanup(directory, { drain, removeDirectory = rm } = {}) {
+  if (typeof drain !== 'function') throw new Error('Studio worker cleanup requires retained job ownership.');
+  let cleaned = false;
+  let pending;
+  return async () => {
+    if (cleaned) return;
+    if (!pending) {
+      pending = (async () => {
+        await drain();
+        await removeDirectory(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+        cleaned = true;
+      })();
+    }
+    try { await pending; }
+    finally { pending = undefined; }
+  };
+}
+
+export async function createIsolatedStudioDirectory({ prefix = 'worker', env = process.env } = {}) {
   if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/u.test(prefix)) {
     throw new Error('Studio worker prefix must contain only letters, numbers, dot, underscore, or dash.');
   }
@@ -431,16 +453,20 @@ export function createIsolatedStudioDirectory({ prefix = 'worker' } = {}) {
   mkdirSync(pluginsDirectory);
   const managedInstanceRegistryDirectory = path.join(workingDirectory, 'managed-instances');
   mkdirSync(managedInstanceRegistryDirectory);
-  let cleaned = false;
+  let lifetime;
+  try {
+    lifetime = await createStudioWorkerJob(workerJobOptions(env));
+  } catch (error) {
+    // No launch was possible before the broker acknowledged its new job.
+    await rm(workingDirectory, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+    throw error;
+  }
   return {
     workingDirectory,
     pluginsDirectory,
     managedInstanceRegistryDirectory,
-    cleanup() {
-      if (cleaned) return;
-      cleaned = true;
-      rmSync(workingDirectory, { recursive: true, force: true });
-    },
+    environment: lifetime.environment,
+    cleanup: createStudioWorkerCleanup(workingDirectory, { drain: () => lifetime.drain() }),
   };
 }
 
@@ -457,6 +483,29 @@ export function resolvePluginsDir() {
   return path.join(os.homedir(), 'Documents', 'Roblox', 'Plugins');
 }
 
+export function selectInstalledStudioExecutable(root) {
+  if (!existsSync(root)) {
+    throw new Error(`Roblox Studio Versions folder not found: ${root}. Set ROBLOX_STUDIO_EXE.`);
+  }
+  const candidates = readdirSync(root)
+    .filter((name) => name.startsWith('version-'))
+    .map((name) => path.join(root, name, 'RobloxStudioBeta.exe'))
+    .filter((candidate) => existsSync(candidate))
+    .sort((a, b) => statSync(b).mtimeMs - statSync(a).mtimeMs);
+  if (candidates.length === 0) {
+    throw new Error(`RobloxStudioBeta.exe not found under ${root}. Set ROBLOX_STUDIO_EXE.`);
+  }
+  const newest = candidates[0];
+  const directory = path.dirname(newest);
+  const settings = path.join(directory, 'AppSettings.xml');
+  const settingsInfo = statSync(settings, { throwIfNoEntry: false });
+  if (readdirSync(directory).some((name) => /\.crdownload$/i.test(name)) ||
+      !settingsInfo?.isFile() || settingsInfo.size === 0) {
+    throw new Error(`Roblox Studio installation/update is incomplete at ${directory}: unfinished download or missing/empty AppSettings.xml. Complete or repair Studio under its owning account before launching; refusing to fall back to an older version.`);
+  }
+  return newest;
+}
+
 export function resolveStudioExe() {
   if (process.env.ROBLOX_STUDIO_EXE) return process.env.ROBLOX_STUDIO_EXE;
 
@@ -468,20 +517,7 @@ export function resolveStudioExe() {
   const root = localAppData
     ? path.join(toWslPath(localAppData), 'Roblox', 'Versions')
     : path.join(os.homedir(), 'AppData', 'Local', 'Roblox', 'Versions');
-  if (!existsSync(root)) {
-    throw new Error(`Roblox Studio Versions folder not found: ${root}. Set ROBLOX_STUDIO_EXE.`);
-  }
-
-  const candidates = readdirSync(root)
-    .filter((name) => name.startsWith('version-'))
-    .map((name) => path.join(root, name, 'RobloxStudioBeta.exe'))
-    .filter((candidate) => existsSync(candidate))
-    .sort((a, b) => statSync(b).mtimeMs - statSync(a).mtimeMs);
-
-  if (candidates.length === 0) {
-    throw new Error(`RobloxStudioBeta.exe not found under ${root}. Set ROBLOX_STUDIO_EXE.`);
-  }
-  return candidates[0];
+  return selectInstalledStudioExecutable(root);
 }
 
 export function listStudioProcesses({ strict = false, currentUserOnly = false } = {}) {
@@ -589,20 +625,40 @@ export async function closeAllStudio({ requireEnv = true, timeoutMs = 30000 } = 
   throw new Error(`Studio processes still running: ${JSON.stringify(listStudioProcesses())}`);
 }
 
-export function launchStudio(args = [], { workingDirectory } = {}) {
-  assertStudioTestProfile();
-  assertStudioDirectoryIsolation();
-  const exe = resolveStudioExe();
-  const studioArgs = args.map(toStudioLaunchArg);
-  const cwd = workingDirectory ?? process.env.RSMCP_STUDIO_WORKING_DIRECTORY ??
-    (isWsl() && existsSync('/mnt/c/Windows') ? '/mnt/c/Windows' : process.cwd());
-  const proc = spawn(exe, studioArgs, {
-    cwd,
-    detached: true,
-    stdio: 'ignore',
+function workerJobOptions(env) {
+  return {
+    env: windowsPowerShellEnvironment(env),
+    cwd: isWsl() && existsSync('/mnt/c/Windows') ? '/mnt/c/Windows' : process.cwd(),
+    toWindowsPath: toStudioLaunchArg,
+  };
+}
+
+export async function launchStudio(args = [], { workingDirectory, env = process.env } = {}, {
+  assertProfile = assertStudioTestProfile,
+  assertIsolation = assertStudioDirectoryIsolation,
+  resolveExecutable = resolveStudioExe,
+  spawnProcess = spawn,
+  launchOwnedProcess = launchInStudioWorkerJob,
+} = {}) {
+  assertProfile();
+  assertIsolation();
+  if (!env.RSMCP_STUDIO_TEST_SAFETY_DIR) {
+    throw new Error('Direct test launches require the guarded dedicated-profile runner: node scripts/studio-test-profile.mjs run -- scripts/studio-lifecycle.mjs launch');
+  }
+  return withStudioTestLaunch(env, 1, async () => {
+    const exe = resolveExecutable();
+    const studioArgs = args.map(toStudioLaunchArg);
+    const cwd = workingDirectory ?? env.RSMCP_STUDIO_WORKING_DIRECTORY ??
+      (isWsl() && existsSync('/mnt/c/Windows') ? '/mnt/c/Windows' : process.cwd());
+    if (env[STUDIO_WORKER_JOB_ENV] !== undefined) {
+      const pid = await launchOwnedProcess(exe, studioArgs, cwd, workerJobOptions(env));
+      return { pid, exe, args: studioArgs, workingDirectory: cwd };
+    }
+    const proc = spawnProcess(exe, studioArgs, { cwd, env, detached: true, stdio: 'ignore' });
+    await once(proc, 'spawn');
+    proc.unref();
+    return { pid: proc.pid, exe, args: studioArgs, workingDirectory: cwd };
   });
-  proc.unref();
-  return { pid: proc.pid, exe, args: studioArgs, workingDirectory: cwd };
 }
 
 function readHealth(port = DEFAULT_MCP_PORT) {
@@ -702,7 +758,7 @@ async function main() {
     return;
   }
   if (command === 'launch') {
-    console.log(JSON.stringify(launchStudio(process.argv.slice(3)), null, 2));
+    console.log(JSON.stringify(await launchStudio(process.argv.slice(3)), null, 2));
     return;
   }
   if (command === 'wait-connected') {
