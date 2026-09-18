@@ -56,8 +56,8 @@ claude mcp add robloxstudio -- npx -y @chrrxs/robloxstudio-mcp@latest --auto-ins
 # Codex CLI
 codex mcp add robloxstudio -- npx -y @chrrxs/robloxstudio-mcp@latest --auto-install-plugin
 
-# Gemini CLI
-gemini mcp add robloxstudio npx --trust -- -y @chrrxs/robloxstudio-mcp@latest --auto-install-plugin
+# Antigravity CLI
+agy mcp add robloxstudio -- npx -y @chrrxs/robloxstudio-mcp@latest --auto-install-plugin
 ```
 
 2. After the plugin is installed or updated, fully close and reopen Studio. The plugin shows **Connected** when it is ready.
