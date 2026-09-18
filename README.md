@@ -30,7 +30,7 @@ screenshots, memory reports, and profiler captures from each peer.
 - Use `set_properties` for instance properties and `find_and_replace_in_scripts` for script text. For project-specific bulk edits, use `execute_luau`.
 - For large generated Luau, use the [verified chunk-staging workflow](docs/large-inputs.md): explicit instance routing, UTF-8 byte/hash readback, ownership-checked cleanup, and bounded recovery without blindly replaying mutations.
 - Use `selection` to inspect or update Studio selection and frame a part or model before capturing the viewport.
-- Capture the viewport with `capture_screenshot`, then send mouse or keyboard input. When Studio's own capture APIs cannot see the play viewport (a blank frame or an EditableImage error during a playtest), the server grabs the Studio window through the host OS instead and crops it to the viewport — this works with Studio behind other windows, though not minimized. See [Configuration](docs/configuration.md#host-window-capture).
+- Capture the viewport with `capture_screenshot`, then send mouse or keyboard input. See [Configuration](docs/configuration.md#host-window-capture).
 
 ### Inspect Creator Store assets
 
@@ -47,27 +47,39 @@ See the [complete tool list](packages/core/src/tools/definitions.ts).
 
 ## Setup
 
-1. Add the server to your MCP client. `--auto-install-plugin` also installs the matching Studio plugin:
+### 1. Connect your client
+
+Choose your MCP client below. Each setup installs the matching Studio plugin automatically.
+
+<details>
+<summary>Codex CLI</summary>
 
 ```bash
-# Claude Code
-claude mcp add robloxstudio -- npx -y @chrrxs/robloxstudio-mcp@latest --auto-install-plugin
-
-# Codex CLI
 codex mcp add robloxstudio -- npx -y @chrrxs/robloxstudio-mcp@latest --auto-install-plugin
+```
 
-# Antigravity CLI
+</details>
+
+<details>
+<summary>Claude Code</summary>
+
+```bash
+claude mcp add robloxstudio -- npx -y @chrrxs/robloxstudio-mcp@latest --auto-install-plugin
+```
+
+</details>
+
+<details>
+<summary>Antigravity CLI</summary>
+
+```bash
 agy mcp add robloxstudio -- npx -y @chrrxs/robloxstudio-mcp@latest --auto-install-plugin
 ```
 
-2. After the plugin is installed or updated, fully close and reopen Studio. The plugin shows **Connected** when it is ready.
-
-Multiple open places can connect to the same server. Call `get_connected_instances`, then pass either a top-level `instances[].id` or a role-suffixed key from `multiplayerGroups[].instances` as `instance_id` with later tool calls.
-
-Set `MCP_PLUGINS_DIR` to use a custom Plugins folder. For a manual plugin install, run `npx -y @chrrxs/robloxstudio-mcp@latest --install-plugin`.
+</details>
 
 <details>
-<summary>Other MCP clients (Claude Desktop, Cursor, etc.)</summary>
+<summary>Other clients (Cursor, Claude Desktop, etc..)</summary>
 
 ```json
 {
@@ -80,45 +92,81 @@ Set `MCP_PLUGINS_DIR` to use a custom Plugins folder. For a manual plugin instal
 }
 ```
 
-On Windows, wrap with `cmd /c` if `npx` doesn't resolve:
-```json
-{
-  "mcpServers": {
-    "robloxstudio-mcp": {
-      "command": "cmd",
-      "args": ["/c", "npx", "-y", "@chrrxs/robloxstudio-mcp@latest", "--auto-install-plugin"]
-    }
-  }
-}
-```
 </details>
 
-## Inspector edition (DataModel read-only)
+### 2. Restart Studio
+
+Fully close and reopen Studio after installation or updates.
+When the plugin displays **Connected**, you're ready.
+
+<details>
+<summary>Advanced setup</summary>
+
+**Custom Plugins folder.** Set `MCP_PLUGINS_DIR` to use a custom location.
+
+**Manual plugin installation.**
+
+```bash
+npx -y @chrrxs/robloxstudio-mcp@latest --install-plugin
+```
+
+</details>
+
+## Inspector edition
+
+Read-only access to the DataModel.
 
 [![NPM Version](https://img.shields.io/npm/v/@chrrxs/robloxstudio-mcp-inspector)](https://www.npmjs.com/package/@chrrxs/robloxstudio-mcp-inspector)
 
-24 Studio-safe inspection tools: no DataModel or script edits. The selection
-tool can change editor selection and camera framing; export and profiler tools
-can write files only to explicit local paths. Install only one variant at a time
-(the installers remove the other automatically):
+<details>
+<summary>Installation and permissions</summary>
+
+No DataModel or script edits. The selection tool can change editor selection and
+camera framing; export and profiler tools can write files only to explicit local
+paths.
+
+Install only one variant at a time (the installers remove the other automatically):
+
+**Codex CLI**
+
+```bash
+codex mcp add robloxstudio-inspector -- npx -y @chrrxs/robloxstudio-mcp-inspector@latest --auto-install-plugin
+```
+
+**Claude Code**
 
 ```bash
 claude mcp add robloxstudio-inspector -- npx -y @chrrxs/robloxstudio-mcp-inspector@latest --auto-install-plugin
 ```
 
-## More
+**Antigravity CLI**
 
-- [Configuration and HTTP bridge](docs/configuration.md)
-- [Large Luau inputs, staged transfers, and recovery](docs/large-inputs.md)
-- [Creator Store asset workflow](docs/creator-store-assets.md)
-- [Report a security vulnerability](SECURITY.md)
-- [Building from source](docs/building-from-source.md)
-- [3.0 tool removals and replacements](docs/deprecated-api.md)
-- [Token-efficiency contract and budget](docs/token-efficiency.md)
+```bash
+agy mcp add robloxstudio-inspector -- npx -y @chrrxs/robloxstudio-mcp-inspector@latest --auto-install-plugin
+```
+
+**Other clients (Cursor, Claude Desktop, etc.)**
+
+```json
+{
+  "mcpServers": {
+    "robloxstudio-inspector": {
+      "command": "npx",
+      "args": ["-y", "@chrrxs/robloxstudio-mcp-inspector@latest", "--auto-install-plugin"]
+    }
+  }
+}
+```
+
+</details>
+
+## Documentation
+
+| Topic | Guides |
+| --- | --- |
+| **Setup & usage** | [Configuration and HTTP bridge](docs/configuration.md) · [Large inputs & recovery](docs/large-inputs.md) · [Creator Store assets](docs/creator-store-assets.md) |
+| **Development** | [Building from source](docs/building-from-source.md) · [API migration](docs/deprecated-api.md) · [Token budgets](docs/token-efficiency.md) |
 
 ---
 
-<!-- VERSION_LINE -->
-**v3.1.5**
-
-[Report Issues](https://github.com/chrrxs/robloxstudio-mcp/issues) · MIT Licensed · Based on [boshyxd/robloxstudio-mcp](https://github.com/boshyxd/robloxstudio-mcp) v2.7.0
+[Report issues](https://github.com/chrrxs/robloxstudio-mcp/issues) · [Report a security vulnerability](SECURITY.md) · MIT Licensed · Based on [boshyxd/robloxstudio-mcp](https://github.com/boshyxd/robloxstudio-mcp) v2.7.0

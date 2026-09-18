@@ -37,20 +37,6 @@ for (const dir of packageDirs) {
   }
 }
 
-// Sync version in README.md
-const readmePath = join(rootDir, 'README.md');
-const readme = readFileSync(readmePath, 'utf8');
-const updatedReadme = readme.replace(
-  /<!-- VERSION_LINE -->\n\*\*v[\d.]+\*\*/,
-  `<!-- VERSION_LINE -->\n**v${version}**`
-);
-if (updatedReadme !== readme) {
-  writeFileSync(readmePath, updatedReadme, 'utf8');
-  console.log(`  README.md: updated version line to v${version}`);
-} else {
-  console.log(`  README.md: v${version} (already synced)`);
-}
-
 console.log('\nBuilding all packages...');
 run('npm run build:all');
 
