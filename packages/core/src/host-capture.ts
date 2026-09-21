@@ -16,16 +16,22 @@
 // pins four magenta squares to the viewport corners so the window capture can
 // be cropped to exactly the viewport — the coordinate space simulate_mouse_input
 // expects — without guessing at Studio's dock layout or the DPI scale.
+// On macOS, ScreenCaptureKit captures only the selected Studio window after
+// verifying existing Screen Recording permission and its stable window identity.
 import { spawn } from 'child_process';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
+import { captureMacStudioWindow, prepareMacHostCapture } from './host-capture-macos.js';
+
+export type HostWindowIdentity = { windowId: number; processId: number; bundleIdentifier: string };
 
 export type HostWindowCapture = {
   width: number;
   height: number;
   rgba: Buffer;
   title: string;
+  identity?: HostWindowIdentity;
 };
 
 export type HostCaptureResult =
@@ -54,11 +60,15 @@ export function isHostCaptureDisabled(env: NodeJS.ProcessEnv = process.env): boo
 }
 
 export function isHostCaptureSupported(platform: NodeJS.Platform = process.platform): boolean {
-  return platform === 'win32';
+  return platform === 'win32' || platform === 'darwin';
 }
 
 export function hostCaptureUnsupportedReason(platform: NodeJS.Platform = process.platform): string {
-  return `host window capture is only implemented on Windows (this is ${platform})`;
+  return `host window capture is only implemented on Windows and macOS (this is ${platform})`;
+}
+
+export async function prepareHostWindowCapture(): Promise<void> {
+  if (process.platform === 'darwin' && !isHostCaptureDisabled()) await prepareMacHostCapture();
 }
 
 // True when every pixel has the same RGB value — what Studio returns when the
@@ -346,15 +356,16 @@ function runWindowsCapture(titleHint: string | undefined, outFile: string): Prom
   });
 }
 
-// Captures the Studio window's client area as RGBA. `titleHint` is the place
+// Captures the Studio window (the client area on Windows) as RGBA. `titleHint` is the place
 // name shown in the window title (used to pick among several open places).
-export async function captureStudioWindow(titleHint?: string): Promise<HostCaptureResult> {
+export async function captureStudioWindow(titleHint?: string, expectedIdentity?: HostWindowIdentity): Promise<HostCaptureResult> {
   if (isHostCaptureDisabled()) {
     return { ok: false, error: 'host window capture is disabled by ROBLOX_STUDIO_HOST_CAPTURE' };
   }
   if (!isHostCaptureSupported()) {
     return { ok: false, error: hostCaptureUnsupportedReason() };
   }
+  if (process.platform === 'darwin') return captureMacStudioWindow(titleHint, expectedIdentity);
   const outFile = path.join(os.tmpdir(), `robloxstudio-mcp-capture-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}.bgra`);
   try {
     const report = await runWindowsCapture(titleHint, outFile);
