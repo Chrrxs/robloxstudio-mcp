@@ -12,6 +12,7 @@ const STUDIO_BUNDLE_ID = 'com.Roblox.RobloxStudio';
 // This helper is only executed by captureStudioWindow's Darwin backend.
 export const MACOS_CAPTURE_SOURCE = String.raw`
 import Foundation
+import AppKit
 import CoreGraphics
 import ScreenCaptureKit
 
@@ -24,11 +25,15 @@ func emit(_ value: [String: Any]) {
 }
 
 @available(macOS 14.0, *)
+@MainActor
 func capture() async throws {
     // Never request or bypass Screen Recording permission from an MCP call.
     guard CGPreflightScreenCaptureAccess() else {
         try fail("macOS Screen Recording permission is not granted to the MCP host. Enable it in System Settings > Privacy & Security > Screen Recording, then restart the MCP host.")
     }
+    // A command-line helper must establish its WindowServer connection before
+    // ScreenCaptureKit uses Core Graphics. Do not activate or create any UI.
+    NSApplication.shared.setActivationPolicy(.prohibited)
     let env = ProcessInfo.processInfo.environment
     let hint = env["MCP_CAPTURE_TITLE_HINT"] ?? ""
     let content = try await SCShareableContent.excludingDesktopWindows(true, onScreenWindowsOnly: true)
@@ -85,6 +90,7 @@ func capture() async throws {
 }
 
 @main struct Main {
+    @MainActor
     static func main() async {
         do {
             if #available(macOS 14.0, *) { try await capture() }
