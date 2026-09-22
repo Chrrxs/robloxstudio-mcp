@@ -1217,8 +1217,8 @@ export class RobloxStudioTools {
     return this._requestPeer(endpoint, data, resolved.targetPeerId, timeoutMs, signal, operationId);
   }
 
-  // Prefer the first client role in the selected process/group scope for live
-  // viewport and input operations; otherwise retain the default Peer's Instance.
+  // Honor an explicitly selected client for viewport/input operations; otherwise
+  // prefer the first client in the scope, then retain the default Peer's Instance.
   private _resolveRuntime(instance_id?: string): { instanceId: string; clientRole?: string } {
     const resolved = this.bridge.resolveTarget({ instance_id, target: undefined });
     if (!resolved.ok) throw new RoutingFailure(resolved.error);
@@ -1229,8 +1229,13 @@ export class RobloxStudioTools {
         data: this._routingErrorData(),
       });
     }
-    const client = this.bridge.getPeersInScope(resolved.targetInstanceId)
-      .filter((peer) => /^client-\d+$/.test(peer.role))
+    const clients = this.bridge.getPeersInScope(resolved.targetInstanceId)
+      .filter((peer) => /^client-\d+$/.test(peer.role));
+    // Generic routing selects a group scope. Preserve a client process/role alias
+    // supplied by the caller before applying the scope's default client.
+    const selectedClients = clients.filter((peer) =>
+      instance_id === peer.instanceId || instance_id === `${peer.instanceId}-${peer.role}`);
+    const client = selectedClients.length === 1 ? selectedClients[0] : clients
       .sort((a, b) => a.role.localeCompare(b.role) || a.peerId.localeCompare(b.peerId))[0];
     return {
       instanceId: client?.instanceId ?? resolved.targetInstanceId,
