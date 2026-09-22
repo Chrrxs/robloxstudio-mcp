@@ -95,11 +95,23 @@ the host OS and crops it to the viewport:
 - On Windows the capture uses `PrintWindow(PW_RENDERFULLCONTENT)` via
   PowerShell, which reads the composited window even when it is behind other
   windows. A minimized window cannot be captured; the tool says so.
-- Other platforms currently report that host capture is unavailable and return
-  Studio's original result or error.
+- On macOS 14 or newer, ScreenCaptureKit captures only the selected Roblox Studio
+  window. The MCP host must already have Screen Recording permission, and Xcode
+  Command Line Tools must provide `xcrun swiftc`. The helper compiles once per
+  server process before viewport markers are shown; it never prompts for
+  permission or captures the desktop. Missing permission, ambiguous matching
+  windows, or a changed window identity produce an error instead of capturing
+  another window.
+- Other platforms report that host capture is unavailable and return Studio's
+  original result or error.
 
 The returned image keeps the `simulate_mouse_input` coordinate contract: it is
 resampled to the viewport's logical size, so image pixels are viewport pixels.
+The response includes the capture `source` and, when applicable, the reason the
+Studio fast path was unavailable. An explicit multiplayer client `instance_id`
+selects that client rather than the first client in its group. Use the exact ID
+returned by `get_connected_instances`.
+
 The tool message states when the host path was used. Set
 `ROBLOX_STUDIO_HOST_CAPTURE=0` to disable the fallback.
 

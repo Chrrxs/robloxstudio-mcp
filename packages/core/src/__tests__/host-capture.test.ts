@@ -5,7 +5,7 @@ import {
   hostCaptureUnsupportedReason,
   isUniformFrame,
 } from '../host-capture.js';
-import type { HostCaptureResult, HostWindowIdentity } from '../host-capture.js';
+import type { HostCaptureResult } from '../host-capture.js';
 import * as hostCaptureModule from '../host-capture.js';
 import { BridgeService } from '../bridge-service.js';
 import { RobloxStudioTools } from '../tools/index.js';
@@ -611,7 +611,7 @@ describe('capture_screenshot host window fallback', () => {
   test.each(['win32', 'darwin'] as const)('pins the clean and cached grabs to the marked window on %s', async (platform) => {
     Object.defineProperty(process, 'platform', { value: platform });
     const markerState = { shown: false };
-    const hostCapture = jest.fn(async (_titleHint?: string, _expectedIdentity?: HostWindowIdentity): Promise<HostCaptureResult> => ({
+    const hostCapture = jest.fn<ReturnType<HostWindowCaptureFn>, Parameters<HostWindowCaptureFn>>(async () => ({
       ok: true,
       capture: { identity: { ...windowIdentity }, width: 400, height: 200, title: 't', rgba: studioWindow(400, 200, viewport, markerState.shown) },
     }));
@@ -638,7 +638,7 @@ describe('capture_screenshot host window fallback', () => {
     const markerState = { shown: false };
     const mismatchAt = phase === 'fresh' ? 2 : 3;
     let calls = 0;
-    const hostCapture = jest.fn(async (_titleHint?: string, _expectedIdentity?: HostWindowIdentity): Promise<HostCaptureResult> => ({
+    const hostCapture = jest.fn<ReturnType<HostWindowCaptureFn>, Parameters<HostWindowCaptureFn>>(async () => ({
       ok: true,
       capture: {
         identity: ++calls === mismatchAt ? returnedIdentity : { ...windowIdentity }, width: 400, height: 200,
