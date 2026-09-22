@@ -101,7 +101,8 @@ the host OS and crops it to the viewport:
   server process before viewport markers are shown; it never prompts for
   permission or captures the desktop. Missing permission, ambiguous matching
   windows, or a changed window identity produce an error instead of capturing
-  another window.
+  another window. Local-file window titles containing an absolute path are
+  matched by basename; multiple matches are still rejected.
 - Other platforms report that host capture is unavailable and return Studio's
   original result or error.
 
@@ -114,6 +115,10 @@ returned by `get_connected_instances`.
 
 The tool message states when the host path was used. Set
 `ROBLOX_STUDIO_HOST_CAPTURE=0` to disable the fallback.
+
+For the native Swift helper regression test on macOS, run `npm run build` then
+`node tests/macos-capture-helper.mjs`. This compiles the shipped helper and checks
+title matching without capturing a window or requiring Screen Recording access.
 
 ## Environment variables
 

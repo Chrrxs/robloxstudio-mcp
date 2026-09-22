@@ -24,6 +24,17 @@ func emit(_ value: [String: Any]) {
     }
 }
 
+// Local files can use their absolute path in the macOS window title while
+// Studio reports only the basename as DataModel.Name. Match that basename
+// after removing Studio's exact title suffix; retain ambiguity checks below.
+func matchesStudioTitle(_ title: String, hint: String) -> Bool {
+    if hint.isEmpty || title == hint || title.hasPrefix(hint) { return true }
+    let suffix = " - Roblox Studio"
+    guard title.hasSuffix(suffix) else { return false }
+    let place = String(title.dropLast(suffix.count))
+    return place.hasPrefix("/") && (place as NSString).lastPathComponent == hint
+}
+
 @available(macOS 14.0, *)
 @MainActor
 func capture() async throws {
@@ -41,7 +52,7 @@ func capture() async throws {
         window.owningApplication?.bundleIdentifier == "com.Roblox.RobloxStudio" &&
         window.windowLayer == 0 && window.isOnScreen &&
         window.frame.width > 0 && window.frame.height > 0 &&
-        (hint.isEmpty || (window.title ?? "") == hint || (window.title ?? "").hasPrefix(hint))
+        matchesStudioTitle(window.title ?? "", hint: hint)
     }
     guard candidates.count == 1, let window = candidates.first, let app = window.owningApplication else {
         try fail(candidates.isEmpty ? "no visible Roblox Studio window matches the requested place title" : "multiple Roblox Studio windows match the requested place title; the capture is ambiguous")
