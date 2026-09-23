@@ -569,7 +569,9 @@ function showMarkers(captureId: unknown): unknown {
 	const gui = new Instance("ScreenGui");
 	gui.Name = MARKER_GUI_NAME;
 	gui.IgnoreGuiInset = true;
-	gui.ScreenInsets = Enum.ScreenInsets.None;
+	// Camera.ViewportSize reports the device safe area, so markers must bound it too.
+	gui.ScreenInsets = Enum.ScreenInsets.DeviceSafeInsets;
+	gui.SafeAreaCompatibility = Enum.SafeAreaCompatibility.None;
 	gui.DisplayOrder = 2147483647;
 	gui.ResetOnSpawn = false;
 	gui.ZIndexBehavior = Enum.ZIndexBehavior.Global;

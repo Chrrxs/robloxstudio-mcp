@@ -2,13 +2,16 @@ import {
   cropToViewport,
   findViewportRect,
   isHostCaptureDisabled,
+  hostCaptureUnsupportedReason,
   isUniformFrame,
 } from '../host-capture.js';
 import type { HostCaptureResult } from '../host-capture.js';
+import * as hostCaptureModule from '../host-capture.js';
 import { BridgeService } from '../bridge-service.js';
 import { RobloxStudioTools } from '../tools/index.js';
 import type { HostWindowCaptureFn } from '../tools/index.js';
 import { StudioHttpClient } from '../tools/studio-client.js';
+import { StudioInstanceManager } from '../studio-instance-manager.js';
 import { rgbaToPng } from '../png-encoder.js';
 import { decodePngToRgba } from '../image-decode.js';
 
@@ -173,8 +176,18 @@ describe('isHostCaptureDisabled', () => {
 });
 
 describe('capture_screenshot host window fallback', () => {
+  const platformDescriptor = Object.getOwnPropertyDescriptor(process, 'platform')!;
+  beforeEach(() => {
+    // Exercise the supported fallback independently of the test runner's OS.
+    Object.defineProperty(process, 'platform', { value: 'win32' });
+    jest.replaceProperty(process, 'env', { ...process.env, ROBLOX_STUDIO_HOST_CAPTURE: '1' });
+    // Capture tests use synthetic peers, never the user's managed Studio state.
+    jest.spyOn(StudioInstanceManager.prototype, 'pendingLaunches').mockResolvedValue([]);
+  });
+
   afterEach(() => {
     jest.restoreAllMocks();
+    Object.defineProperty(process, 'platform', platformDescriptor);
   });
 
   function registerRole(bridge: BridgeService, peerId: string, role: string, isRunning: boolean, transportPeerId = peerId) {
@@ -192,6 +205,7 @@ describe('capture_screenshot host window fallback', () => {
   }
 
   const viewport = { x: 50, y: 30, width: 300, height: 120 };
+  const windowIdentity = { windowId: 456, processId: 123, bundleIdentifier: 'com.roblox.RobloxStudio' };
   const blackFrame = solid(300, 120, [0, 0, 0]).toString('base64');
 
   function studioThatReturnsBlackPlayFrames(markerState: { shown: boolean }) {
@@ -222,6 +236,115 @@ describe('capture_screenshot host window fallback', () => {
     (tools as unknown as { hostWindowCapture: HostWindowCaptureFn }).hostWindowCapture = hostCapture;
     return { tools, request };
   }
+
+  test.each(['linux', 'disabled'] as const)('does not prepare markers or scaling when host capture is %s', async (mode) => {
+    if (mode === 'disabled') process.env.ROBLOX_STUDIO_HOST_CAPTURE = '0';
+    else Object.defineProperty(process, 'platform', { value: mode });
+    const hostCapture = jest.fn(async (): Promise<HostCaptureResult> => ({ ok: false, error: 'must not run' }));
+    const { tools, request } = makeTools(hostCapture, studioThatReturnsBlackPlayFrames({ shown: false }));
+
+    const result = await tools.captureScreenshot('instance:test', 'png');
+    const text = JSON.parse((result.content[0] as { text: string }).text);
+    expect(text.message).toContain(mode === 'disabled' ? 'disabled by ROBLOX_STUDIO_HOST_CAPTURE' : hostCaptureUnsupportedReason(mode));
+    expect(text.message).toContain('may be blank');
+    expect(text.source).toBe('CaptureService');
+    expect(text.studioFastPathUnavailable).toBe('StudioCaptureService cannot capture this DataModel right now');
+    expect(hostCapture).not.toHaveBeenCalled();
+    expect(request.mock.calls.some(([endpoint]) => endpoint === '/api/capture-markers')).toBe(false);
+    const image = result.content.find((item) => 'data' in item);
+    if (!image || !('data' in image) || typeof image.data !== 'string') throw new Error('Expected original blank frame');
+    const decoded = decodePngToRgba(Buffer.from(image.data, 'base64'));
+    expect(isUniformFrame(decoded.rgba, decoded.width, decoded.height)).toBe(true);
+  });
+
+  test('prepares the default host helper before opening the marker transaction', async () => {
+    Object.defineProperty(process, 'platform', { value: 'darwin' });
+    const markerState = { shown: false };
+    const events: string[] = [];
+    const prepare = jest.spyOn(hostCaptureModule, 'prepareHostWindowCapture').mockImplementation(async () => {
+      events.push('helper-ready');
+    });
+    const capture = jest.spyOn(hostCaptureModule, 'captureStudioWindow').mockImplementation(async () => ({
+      ok: true,
+      capture: { identity: { ...windowIdentity }, width: 400, height: 200, title: 't', rgba: studioWindow(400, 200, viewport, markerState.shown) },
+    }));
+    const studio = studioThatReturnsBlackPlayFrames(markerState);
+    const { tools } = makeTools(hostCaptureModule.captureStudioWindow, async (endpoint, data) => {
+      if (endpoint === '/api/capture-markers') events.push((data as { action: string }).action);
+      return studio(endpoint, data);
+    });
+    const result = await tools.captureScreenshot('instance:test', 'png');
+    expect(JSON.parse((result.content[0] as { text: string }).text).source).toBe('host-window');
+    expect(prepare).toHaveBeenCalledTimes(1);
+    expect(capture).toHaveBeenCalledTimes(2);
+    expect(events).toEqual(['helper-ready', 'prepare', 'query', 'show', 'hide', 'finish']);
+  });
+
+  test('does not mutate the viewport when default host helper preparation fails', async () => {
+    Object.defineProperty(process, 'platform', { value: 'darwin' });
+    jest.spyOn(hostCaptureModule, 'prepareHostWindowCapture').mockRejectedValue(new Error('Swift compiler failed'));
+    const capture = jest.spyOn(hostCaptureModule, 'captureStudioWindow').mockRejectedValue(new Error('must not capture'));
+    const { tools, request } = makeTools(hostCaptureModule.captureStudioWindow, studioThatReturnsBlackPlayFrames({ shown: false }));
+    const result = await tools.captureScreenshot('instance:test', 'png');
+    const text = JSON.parse((result.content[0] as { text: string }).text);
+    expect(text.message).toContain('could not prepare host capture: Swift compiler failed');
+    expect(text.source).toBe('CaptureService');
+    expect(capture).not.toHaveBeenCalled();
+    expect(request.mock.calls.some(([endpoint]) => endpoint === '/api/capture-markers')).toBe(false);
+  });
+
+  test('does not prepare a native helper for an injected host capture backend', async () => {
+    Object.defineProperty(process, 'platform', { value: 'darwin' });
+    const prepare = jest.spyOn(hostCaptureModule, 'prepareHostWindowCapture').mockRejectedValue(new Error('must not compile'));
+    const { tools } = makeTools(async () => ({ ok: false, error: 'synthetic capture failure' }), studioThatReturnsBlackPlayFrames({ shown: false }));
+    const result = await tools.captureScreenshot('instance:test', 'png');
+    expect(JSON.parse((result.content[0] as { text: string }).text).message).toContain('synthetic capture failure');
+    expect(prepare).not.toHaveBeenCalled();
+  });
+
+  test.each([
+    [{ error: 'Screenshot callback timed out' }, 'Screenshot callback timed out'],
+    [{}, 'no content id returned from client'],
+  ])('uses the common host fallback after capture-begin returns %j', async (begin, reason) => {
+    const markerState = { shown: false };
+    const studio = studioThatReturnsBlackPlayFrames(markerState);
+    const hostCapture = jest.fn(async (): Promise<HostCaptureResult> => ({
+      ok: true,
+      capture: { width: 400, height: 200, title: 't', rgba: studioWindow(400, 200, viewport, markerState.shown) },
+    }));
+    const { tools, request } = makeTools(hostCapture, async (endpoint, data) => {
+      if (endpoint === '/api/capture-begin') return begin;
+      return studio(endpoint, data);
+    });
+
+    const result = await tools.captureScreenshot('instance:test', 'png');
+    const text = JSON.parse((result.content[0] as { text: string }).text);
+    expect(text.error).toBeUndefined();
+    expect(text.message).toContain(reason);
+    expect(text.source).toBe('host-window');
+    expect(text.studioFastPathUnavailable).toBe('StudioCaptureService cannot capture this DataModel right now');
+    expect([text.width, text.height]).toEqual([300, 120]);
+    expect(hostCapture).toHaveBeenCalledTimes(2);
+    expect(request.mock.calls.some(([endpoint]) => endpoint === '/api/capture-read')).toBe(false);
+    expect(markerState.shown).toBe(false);
+  });
+
+  test('preserves a capture-begin error and fast-path reason when host capture is unsupported', async () => {
+    Object.defineProperty(process, 'platform', { value: 'linux' });
+    const hostCapture = jest.fn(async (): Promise<HostCaptureResult> => ({ ok: false, error: 'must not run' }));
+    const { tools, request } = makeTools(hostCapture, async (endpoint) => {
+      if (endpoint === '/api/capture-studio') return { unavailable: 'Client capture unavailable' };
+      if (endpoint === '/api/capture-begin') return { error: 'Screenshot callback timed out' };
+      throw new Error(`Unexpected endpoint ${endpoint}`);
+    });
+    const result = await tools.captureScreenshot('instance:test', 'png');
+    const text = JSON.parse((result.content[0] as { text: string }).text);
+    expect(text.error).toContain('Screenshot callback timed out');
+    expect(text.error).toContain(hostCaptureUnsupportedReason('linux'));
+    expect(text.studioFastPathUnavailable).toBe('Client capture unavailable');
+    expect(hostCapture).not.toHaveBeenCalled();
+    expect(request.mock.calls.some(([endpoint]) => endpoint === '/api/capture-markers')).toBe(false);
+  });
 
   test('replaces a blank play-client frame with the viewport cropped from the Studio window', async () => {
     const markerState = { shown: false };
@@ -274,6 +397,7 @@ describe('capture_screenshot host window fallback', () => {
     const result = await tools.captureScreenshot('instance:test', 'png');
     const text = result.content.find((item) => 'text' in item);
     expect(text && 'text' in text && text.text).toContain('Captured from the Studio window through the host OS');
+    expect(text && 'text' in text && text.text).toContain("Studio's StudioCaptureService returned a blank");
     const image = result.content.find((item) => 'data' in item);
     if (!image || !('data' in image) || typeof image.data !== 'string') throw new Error('Screenshot did not include an image');
     const decoded = decodePngToRgba(Buffer.from(image.data, 'base64'));
@@ -484,6 +608,65 @@ describe('capture_screenshot host window fallback', () => {
     expect(markerActions).toEqual(['prepare', 'query', 'finish']);
   });
 
+  test.each(['win32', 'darwin'] as const)('pins the clean and cached grabs to the marked window on %s', async (platform) => {
+    Object.defineProperty(process, 'platform', { value: platform });
+    const markerState = { shown: false };
+    const hostCapture = jest.fn<ReturnType<HostWindowCaptureFn>, Parameters<HostWindowCaptureFn>>(async () => ({
+      ok: true,
+      capture: { identity: { ...windowIdentity }, width: 400, height: 200, title: 't', rgba: studioWindow(400, 200, viewport, markerState.shown) },
+    }));
+    const { tools, request } = makeTools(hostCapture, studioThatReturnsBlackPlayFrames(markerState));
+
+    const first = await tools.captureScreenshot('instance:test', 'png');
+    expect(JSON.parse((first.content[0] as { text: string }).text).source).toBe('host-window');
+    request.mockClear();
+    const second = await tools.captureScreenshot('instance:test', 'png');
+    expect(JSON.parse((second.content[0] as { text: string }).text).source).toBe('host-window');
+    expect(hostCapture.mock.calls).toEqual([
+      ['TestPlace'], ['TestPlace', windowIdentity], ['TestPlace', windowIdentity],
+    ]);
+    expect(request.mock.calls.filter(([endpoint]) => endpoint === '/api/capture-markers')
+      .map(([, data]) => (data as { action: string }).action)).toEqual(['prepare', 'query', 'finish']);
+  });
+
+  test.each([
+    ['fresh', { ...windowIdentity, windowId: 999 }], ['fresh', undefined],
+    ['fresh', { ...windowIdentity, processId: 999 }], ['fresh', { ...windowIdentity, bundleIdentifier: 'another.app' }],
+    ['cached', { ...windowIdentity, windowId: 999 }], ['cached', undefined],
+    ['cached', { ...windowIdentity, processId: 999 }], ['cached', { ...windowIdentity, bundleIdentifier: 'another.app' }],
+  ] as const)('rejects a same-size %s grab with changed or missing window identity %j', async (phase, returnedIdentity) => {
+    const markerState = { shown: false };
+    const mismatchAt = phase === 'fresh' ? 2 : 3;
+    let calls = 0;
+    const hostCapture = jest.fn<ReturnType<HostWindowCaptureFn>, Parameters<HostWindowCaptureFn>>(async () => ({
+      ok: true,
+      capture: {
+        identity: ++calls === mismatchAt ? returnedIdentity : { ...windowIdentity }, width: 400, height: 200,
+        title: 't', rgba: studioWindow(400, 200, viewport, markerState.shown),
+      },
+    }));
+    const { tools, request } = makeTools(hostCapture, studioThatReturnsBlackPlayFrames(markerState));
+    if (phase === 'cached') await tools.captureScreenshot('instance:test', 'png');
+    const result = await tools.captureScreenshot('instance:test', 'png');
+    const text = JSON.parse((result.content[0] as { text: string }).text);
+    expect(text.source).toBe('CaptureService');
+    expect(text.message).toContain('window identity changed');
+    expect(text.message).toContain('may be blank');
+    expect(hostCapture.mock.calls[mismatchAt - 1]).toEqual(['TestPlace', windowIdentity]);
+    expect(markerState.shown).toBe(false);
+    const image = result.content.find((item) => 'data' in item);
+    if (!image || !('data' in image) || typeof image.data !== 'string') throw new Error('Expected original blank frame');
+    const decoded = decodePngToRgba(Buffer.from(image.data, 'base64'));
+    expect(isUniformFrame(decoded.rgba, decoded.width, decoded.height)).toBe(true);
+    // Rejected identity invalidates the cache: a retry must locate markers anew.
+    request.mockClear();
+    const retry = await tools.captureScreenshot('instance:test', 'png');
+    expect(JSON.parse((retry.content[0] as { text: string }).text).source).toBe('host-window');
+    expect(hostCapture.mock.calls[mismatchAt]).toEqual(['TestPlace']);
+    expect(request.mock.calls.filter(([endpoint]) => endpoint === '/api/capture-markers')
+      .map(([, data]) => (data as { action: string }).action)).toEqual(['prepare', 'query', 'show', 'hide', 'finish']);
+  });
+
   test('re-locates the viewport when the Studio window size changes', async () => {
     const markerState = { shown: false };
     let windowWidth = 400;
@@ -528,7 +711,7 @@ describe('capture_screenshot host window fallback', () => {
 
   test('keeps the Studio error and explains why the host fallback could not help', async () => {
     const markerState = { shown: false };
-    const hostCapture: HostWindowCaptureFn = async () => ({ ok: false, error: 'host window capture is only implemented on Windows (this is darwin)' });
+    const hostCapture: HostWindowCaptureFn = async () => ({ ok: false, error: 'screen recording permission is unavailable' });
     const studio = studioThatReturnsBlackPlayFrames(markerState);
     const { tools } = makeTools(hostCapture, async (endpoint, data) => {
       if (endpoint === '/api/capture-read') return { error: 'Screenshot capture timed out' };
@@ -538,7 +721,7 @@ describe('capture_screenshot host window fallback', () => {
     const result = await tools.captureScreenshot('instance:test');
     const text = JSON.parse((result.content[0] as { text: string }).text);
     expect(text.error).toContain('Screenshot capture timed out');
-    expect(text.error).toContain('Host window capture also failed: host window capture is only implemented on Windows');
+    expect(text.error).toContain('Host window capture also failed: screen recording permission is unavailable');
   });
 
   test('returns the blank frame with a warning when the host fallback is unavailable', async () => {
