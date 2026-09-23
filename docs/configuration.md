@@ -95,6 +95,9 @@ the host OS and crops it to the viewport:
 - On Windows the capture uses `PrintWindow(PW_RENDERFULLCONTENT)` via
   PowerShell, which reads the composited window even when it is behind other
   windows. A minimized window cannot be captured; the tool says so.
+  Initial capture rejects multiple matching windows rather than picking the first
+  one. Clean and cached captures verify the selected window handle and process ID;
+  a missing or changed identity fails instead of switching to another client.
 - On macOS 14 or newer, ScreenCaptureKit captures only the selected Roblox Studio
   window. The MCP host must already have Screen Recording permission, and Xcode
   Command Line Tools must provide `xcrun swiftc`. The helper compiles once per
@@ -119,6 +122,11 @@ The tool message states when the host path was used. Set
 For the native Swift helper regression test on macOS, run `npm run build` then
 `node tests/macos-capture-helper.mjs`. This compiles the shipped helper and checks
 title matching without capturing a window or requiring Screen Recording access.
+
+For the Windows selector regression, run `npm run build -w packages/core` then
+`node tests/windows-capture-helper.mjs` on Windows or WSL with PowerShell interop.
+It exercises the shipped selector with synthetic window entries, without
+enumerating or capturing any real windows.
 
 ## Environment variables
 

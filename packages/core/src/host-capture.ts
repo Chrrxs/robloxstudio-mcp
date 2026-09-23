@@ -24,6 +24,7 @@ import * as os from 'os';
 import * as path from 'path';
 import { captureMacStudioWindow, prepareMacHostCapture } from './host-capture-macos.js';
 
+// macOS uses the app bundle ID; Windows uses the verified executable name.
 export type HostWindowIdentity = { windowId: number; processId: number; bundleIdentifier: string };
 
 export type HostWindowCapture = {
@@ -207,7 +208,7 @@ export function cropToViewport(
 // PowerShell program that finds the Studio window and dumps its client area
 // as raw 32-bit BGRA. Inputs arrive through environment variables so no
 // shell quoting is involved; the single JSON line on stdout is the result.
-const WINDOWS_CAPTURE_SCRIPT = String.raw`
+export const WINDOWS_CAPTURE_SCRIPT = String.raw`
 $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 Add-Type -AssemblyName System.Drawing
@@ -256,13 +257,25 @@ $hint = $env:MCP_CAPTURE_TITLE_HINT
 $outFile = $env:MCP_CAPTURE_OUT
 $candidates = [McpStudioCapture]::Find('RobloxStudioBeta')
 if ($candidates.Count -eq 0) { Emit @{ ok = $false; error = 'no visible Roblox Studio window was found' }; exit 0 }
-$pick = $null
-if ($hint) { $pick = $candidates | Where-Object { $_.Title.StartsWith($hint) } | Select-Object -First 1 }
-if ($pick -eq $null -and $candidates.Count -eq 1) { $pick = $candidates[0] }
-if ($pick -eq $null) {
-  $titles = ($candidates | ForEach-Object { $_.Title }) -join ' | '
-  Emit @{ ok = $false; error = "could not pick a Studio window for '$hint' among: $titles" }; exit 0
+$matching = @($candidates | Where-Object { -not $hint -or $_.Title.StartsWith($hint, [StringComparison]::Ordinal) })
+$expectedJson = $env:MCP_CAPTURE_EXPECTED_IDENTITY
+if ($expectedJson) {
+  try { $expected = $expectedJson | ConvertFrom-Json -ErrorAction Stop }
+  catch { Emit @{ ok = $false; error = 'invalid expected Studio window identity' }; exit 0 }
+  $matching = @($matching | Where-Object {
+    $_.Handle.ToInt64() -eq $expected.windowId -and $_.Pid -eq $expected.processId -and
+    $expected.bundleIdentifier -ceq 'RobloxStudioBeta'
+  })
+  if ($matching.Count -ne 1) {
+    Emit @{ ok = $false; error = 'the selected Roblox Studio window identity changed between captures' }; exit 0
+  }
+} elseif ($matching.Count -ne 1) {
+  $reason = if ($matching.Count -eq 0) { 'no visible Roblox Studio window matches the requested place title' }
+    else { 'multiple Roblox Studio windows match the requested place title; the capture is ambiguous' }
+  Emit @{ ok = $false; error = $reason }; exit 0
 }
+$pick = $matching[0]
+$identity = @{ windowId = $pick.Handle.ToInt64(); processId = [long]$pick.Pid; bundleIdentifier = 'RobloxStudioBeta' }
 if ([McpStudioCapture]::IsIconic($pick.Handle)) {
   Emit @{ ok = $false; error = "the Studio window '$($pick.Title)' is minimized; restore it (it may stay behind other windows)" }; exit 0
 }
@@ -284,17 +297,40 @@ $bytes = New-Object byte[] ($data.Stride * $h)
 $stride = $data.Stride
 $bmp.UnlockBits($data); $bmp.Dispose()
 [System.IO.File]::WriteAllBytes($outFile, $bytes)
-Emit @{ ok = $true; width = $w; height = $h; stride = $stride; title = $pick.Title }
+Emit @{ ok = $true; width = $w; height = $h; stride = $stride; title = $pick.Title; identity = $identity }
 `;
 
-type WindowsCaptureReport = {
-  ok: boolean;
-  error?: string;
-  width?: number;
-  height?: number;
-  stride?: number;
-  title?: string;
-};
+type WindowsCaptureReport =
+  | { ok: false; error: string }
+  | { ok: true; width: number; height: number; stride: number; title: string; identity: HostWindowIdentity };
+
+function validWindowsIdentity(value: unknown): value is HostWindowIdentity {
+  return value !== null && typeof value === 'object' &&
+    'windowId' in value && typeof value.windowId === 'number' && Number.isSafeInteger(value.windowId) && value.windowId > 0 &&
+    'processId' in value && typeof value.processId === 'number' && Number.isSafeInteger(value.processId) &&
+    value.processId > 0 && value.processId <= 0xffffffff &&
+    'bundleIdentifier' in value && value.bundleIdentifier === 'RobloxStudioBeta';
+}
+
+function parseWindowsCaptureReport(value: unknown, expectedIdentity?: HostWindowIdentity): WindowsCaptureReport {
+  if (value === null || typeof value !== 'object' || !('ok' in value)) throw new Error('invalid Windows capture report');
+  if (value.ok === false && 'error' in value && typeof value.error === 'string') return { ok: false, error: value.error };
+  if (!('identity' in value) || !validWindowsIdentity(value.identity)) throw new Error('invalid Windows capture window identity');
+  const identity = value.identity;
+  if (expectedIdentity && (identity.windowId !== expectedIdentity.windowId || identity.processId !== expectedIdentity.processId ||
+      identity.bundleIdentifier !== expectedIdentity.bundleIdentifier)) {
+    throw new Error('the selected Roblox Studio window identity changed between captures');
+  }
+  if (value.ok !== true ||
+      !('width' in value) || typeof value.width !== 'number' || !Number.isSafeInteger(value.width) || value.width <= 0 ||
+      !('height' in value) || typeof value.height !== 'number' || !Number.isSafeInteger(value.height) || value.height <= 0 ||
+      !('stride' in value) || typeof value.stride !== 'number' || !Number.isSafeInteger(value.stride) || value.stride < value.width * 4 ||
+      value.width > 16384 || value.height > 16384 || value.stride * value.height > 128 * 1024 * 1024 ||
+      !('title' in value) || typeof value.title !== 'string') {
+    throw new Error('invalid Windows capture dimensions or title');
+  }
+  return { ok: true, width: value.width, height: value.height, stride: value.stride, title: value.title, identity };
+}
 
 function powershellPath(): string {
   const systemRoot = process.env.SystemRoot ?? process.env.windir;
@@ -305,55 +341,58 @@ function powershellPath(): string {
   return 'powershell.exe';
 }
 
-function runWindowsCapture(titleHint: string | undefined, outFile: string): Promise<WindowsCaptureReport> {
-  return new Promise((resolve, reject) => {
-    const encoded = Buffer.from(WINDOWS_CAPTURE_SCRIPT, 'utf16le').toString('base64');
-    const child = spawn(
-      powershellPath(),
-      ['-NoProfile', '-NonInteractive', '-NoLogo', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', encoded],
-      {
-        env: { ...process.env, MCP_CAPTURE_TITLE_HINT: titleHint ?? '', MCP_CAPTURE_OUT: outFile },
-        stdio: ['ignore', 'pipe', 'pipe'],
-        windowsHide: true,
+function runWindowsCapture(titleHint: string | undefined, outFile: string, expectedIdentity?: HostWindowIdentity): Promise<unknown> {
+  const { promise, resolve, reject } = Promise.withResolvers<unknown>();
+  const encoded = Buffer.from(WINDOWS_CAPTURE_SCRIPT, 'utf16le').toString('base64');
+  const child = spawn(
+    powershellPath(),
+    ['-NoProfile', '-NonInteractive', '-NoLogo', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', encoded],
+    {
+      env: {
+        ...process.env, MCP_CAPTURE_TITLE_HINT: titleHint ?? '', MCP_CAPTURE_OUT: outFile,
+        MCP_CAPTURE_EXPECTED_IDENTITY: expectedIdentity ? JSON.stringify(expectedIdentity) : '',
       },
-    );
-    let stdout = '';
-    let stderr = '';
-    let settled = false;
-    const timer = setTimeout(() => {
-      if (settled) return;
-      settled = true;
-      child.kill();
-      reject(new Error(`host window capture timed out after ${HOST_CAPTURE_TIMEOUT_MS}ms`));
-    }, HOST_CAPTURE_TIMEOUT_MS);
-    child.stdout.setEncoding('utf8');
-    child.stderr.setEncoding('utf8');
-    child.stdout.on('data', (chunk: string) => { stdout += chunk; });
-    child.stderr.on('data', (chunk: string) => { stderr += chunk; });
-    child.on('error', (error) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      reject(new Error(`could not start PowerShell for host window capture: ${error.message}`));
-    });
-    child.on('close', (code) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      const lines = stdout.split(/\r?\n/).map((line) => line.trim()).filter((line) => line.length > 0);
-      const last = lines[lines.length - 1];
-      if (last && last.startsWith('{')) {
-        try {
-          resolve(JSON.parse(last) as WindowsCaptureReport);
-          return;
-        } catch {
-          // fall through to the generic failure below
-        }
-      }
-      const detail = (stderr.trim() || stdout.trim()).slice(0, 600);
-      reject(new Error(`host window capture helper exited with code ${code}${detail ? `: ${detail}` : ''}`));
-    });
+      stdio: ['ignore', 'pipe', 'pipe'],
+      windowsHide: true,
+    },
+  );
+  let stdout = '';
+  let stderr = '';
+  let settled = false;
+  const timer = setTimeout(() => {
+    if (settled) return;
+    settled = true;
+    child.kill();
+    reject(new Error(`host window capture timed out after ${HOST_CAPTURE_TIMEOUT_MS}ms`));
+  }, HOST_CAPTURE_TIMEOUT_MS);
+  child.stdout.setEncoding('utf8');
+  child.stderr.setEncoding('utf8');
+  child.stdout.on('data', (chunk: string) => { stdout += chunk; });
+  child.stderr.on('data', (chunk: string) => { stderr += chunk; });
+  child.on('error', (error) => {
+    if (settled) return;
+    settled = true;
+    clearTimeout(timer);
+    reject(new Error(`could not start PowerShell for host window capture: ${error.message}`));
   });
+  child.on('close', (code) => {
+    if (settled) return;
+    settled = true;
+    clearTimeout(timer);
+    const lines = stdout.split(/\r?\n/).map((line) => line.trim()).filter((line) => line.length > 0);
+    const last = lines[lines.length - 1];
+    if (last && last.startsWith('{')) {
+      try {
+        resolve(JSON.parse(last));
+        return;
+      } catch {
+        // fall through to the generic failure below
+      }
+    }
+    const detail = (stderr.trim() || stdout.trim()).slice(0, 600);
+    reject(new Error(`host window capture helper exited with code ${code}${detail ? `: ${detail}` : ''}`));
+  });
+  return promise;
 }
 
 // Captures the Studio window (the client area on Windows) as RGBA. `titleHint` is the place
@@ -368,11 +407,10 @@ export async function captureStudioWindow(titleHint?: string, expectedIdentity?:
   if (process.platform === 'darwin') return captureMacStudioWindow(titleHint, expectedIdentity);
   const outFile = path.join(os.tmpdir(), `robloxstudio-mcp-capture-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}.bgra`);
   try {
-    const report = await runWindowsCapture(titleHint, outFile);
-    if (!report.ok || !report.width || !report.height || !report.stride) {
-      return { ok: false, error: report.error ?? 'host window capture returned no image' };
-    }
+    const report = parseWindowsCaptureReport(await runWindowsCapture(titleHint, outFile, expectedIdentity), expectedIdentity);
+    if (!report.ok) return report;
     const raw = fs.readFileSync(outFile);
+    if (raw.length !== report.stride * report.height) throw new Error('Windows capture returned an invalid BGRA byte count');
     const { width, height, stride } = report;
     const rgba = Buffer.alloc(width * height * 4);
     for (let y = 0; y < height; y++) {
@@ -387,7 +425,7 @@ export async function captureStudioWindow(titleHint?: string, expectedIdentity?:
         rgba[d + 3] = 255;
       }
     }
-    return { ok: true, capture: { width, height, rgba, title: report.title ?? '' } };
+    return { ok: true, capture: { width, height, rgba, title: report.title, identity: report.identity } };
   } catch (error) {
     return { ok: false, error: error instanceof Error ? error.message : String(error) };
   } finally {
