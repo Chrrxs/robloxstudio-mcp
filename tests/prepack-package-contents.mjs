@@ -62,11 +62,17 @@ try {
     writeFileSync(path.join(destination, 'stale-source.ts'), 'left by an interrupted pack');
 
     const result = spawnSync(
-      process.platform === 'win32' ? 'npm.cmd' : 'npm',
-      ['pack', '--dry-run', '--json', '--silent'],
+      process.platform === 'win32' ? process.execPath : 'npm',
+      [
+        ...(process.platform === 'win32'
+          ? [process.env.npm_execpath ?? path.join(path.dirname(process.execPath), 'node_modules/npm/bin/npm-cli.js')]
+          : []),
+        'pack', '--dry-run', '--json', '--silent',
+      ],
       {
         cwd: packageDir,
         encoding: 'utf8',
+        env: { ...process.env, npm_config_cache: path.join(fixtureRoot, 'npm-cache') },
       },
     );
     assert.equal(

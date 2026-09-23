@@ -2195,7 +2195,7 @@ export class StudioInstanceManager {
 
     // Sending a signal (or completing an adapter's stop request) is not proof of
     // exit. Never use plugin connectivity, cached, or pre-stop observations here.
-    while (true) {
+    for (;;) {
       const observation = await beforeCloseDeadline(
         () => this.observeClosingProcess(processId, startedAt, deadline), deadline, processId,
       );

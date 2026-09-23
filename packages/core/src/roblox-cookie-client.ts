@@ -40,6 +40,7 @@ export class RobloxCookieClient {
     url: string,
     options: RequestInit = {}
   ): Promise<Response> {
+    options = { ...options, signal: options.signal ?? AbortSignal.timeout(30_000) };
     const headers: Record<string, string> = {
       Cookie: `.ROBLOSECURITY=${this.cookie}`,
       ...(options.headers as Record<string, string> || {}),
@@ -56,6 +57,7 @@ export class RobloxCookieClient {
       if (newToken) {
         this.csrfToken = newToken;
         headers['X-CSRF-TOKEN'] = newToken;
+        await response.body?.cancel();
         return fetch(url, { ...options, headers });
       }
     }

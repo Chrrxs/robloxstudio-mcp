@@ -12,6 +12,17 @@ This is an **existing-tool recipe**, not a new upload protocol. The reusable [wo
 | Local HTTP request body, including HTTP proxy requests | 52,428,800 (50 MiB) | Entire serialized UTF-8 JSON body, not just `code` |
 | Studio transport request/frame and retained response ceiling | 67,108,864 (64 MiB) | Encoded transport payload, including its envelope |
 
+`import_rbxm` applies a shared raw-byte budget to files, URLs, and inline base64:
+below 37.5 MiB, reduced by source/parent metadata and a 16 KiB envelope reserve.
+This allows for base64 expansion within the smaller 50 MiB HTTP proxy limit,
+even when called through primary stdio. Files are checked before reading and
+bounded while reading; downloads are bounded while streaming, including when
+`Content-Length` is absent or wrong. URL downloads have a 30-second deadline
+covering the body, and MCP cancellation interrupts downloads and bridge dispatch.
+Inline base64 accepts padded or unpadded standard base64 and rejects malformed
+encoding. These admission checks do not guarantee that Studio can deserialize
+every accepted model.
+
 A source string below a limit can still exceed it after JSON escaping and envelope overhead. A source that returns or prints a huge value can exceed the **response** limit even when its request is tiny. Successful execution and successful result delivery are separate facts. Keep mutation responses small and verify effects with a separate small readback. `set_properties` with `operation_id` can also write staged text, but it still needs ownership, readback, and final assembly checks; splitting calls alone is not a transaction.
 
 For `set_properties`, **HTTP 200 or a normal MCP result is not all-writes success**. Require `summary.failed === 0` and inspect every per-property entry in `results`, then read back the intended values. Successful writes in a partially failing batch are preserved; a known property error can therefore coexist with side effects. Native property-size failures expose `results[].details` with `stage: "property_write"`, actual `bytes`, and `limitBytes: 199999`. Even when every property write fails, rejection does not roll back earlier unrelated `execute_luau` edits. Do not retry the whole batch blindly.

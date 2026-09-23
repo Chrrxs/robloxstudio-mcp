@@ -37,7 +37,8 @@ async function download(url: string, redirects = 0): Promise<Buffer> {
     if (redirects >= MAX_REDIRECTS) throw new Error(`Too many redirects (max ${MAX_REDIRECTS})`);
     const location = res.headers.location;
     if (!location) throw new Error('Redirect with no location header');
-    for await (const _chunk of res) {
+    for await (const chunk of res) {
+      void chunk;
       // Drain the response before following the redirect.
     }
     return download(location, redirects + 1);
@@ -154,8 +155,8 @@ export async function installPlugin(options: InstallOptions = {}): Promise<void>
     return;
   }
 
-  log('Fetching latest release...');
-  const release = await fetchJson(`https://api.github.com/repos/${REPO}/releases/latest`) as {
+  log('Fetching matching release...');
+  const release = await fetchJson(`https://api.github.com/repos/${REPO}/releases/tags/v${encodeURIComponent(packageVersion())}`) as {
     tag_name: string;
     assets: { name: string; browser_download_url: string }[];
   };
@@ -172,7 +173,7 @@ export async function installPlugin(options: InstallOptions = {}): Promise<void>
     assetName: ASSET_NAME,
     otherAssetName: OTHER_VARIANT,
     source: downloaded,
-    expectedVersion: release.tag_name.replace(/^v/, ''),
+    expectedVersion: packageVersion(),
     expectedVariant: 'inspector',
     replaceVariant,
     log,

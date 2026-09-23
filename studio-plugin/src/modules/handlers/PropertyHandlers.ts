@@ -1,7 +1,7 @@
 import Utils from "../Utils";
 import Recording from "../Recording";
 
-const { getInstanceByPath, convertPropertyValue } = Utils;
+const { getInstanceByPath, convertPropertyValue, applyScriptSource } = Utils;
 const { beginRecording, finishRecording } = Recording;
 
 // Native StringValue rejects UTF-8 strings of 200000 bytes or more.
@@ -27,7 +27,10 @@ function setProperties(requestData: Record<string, unknown>) {
 	for (const [propName, propValue] of pairs(properties)) {
 		const [success, err] = pcall(() => {
 			if (propName === "Parent" || propName === "PrimaryPart") {
-				if (typeIs(propValue, "string")) {
+				if (!typeIs(propValue, "string")) error(`${propName} must be an instance path string (or an empty string to clear)`);
+				if (propValue === "") {
+					inst[propName as string] = undefined;
+				} else {
 					const refInstance = getInstanceByPath(propValue as string);
 					if (!refInstance) error(`${propName} reference not found: ${propValue}`);
 					inst[propName as string] = refInstance;
@@ -35,7 +38,9 @@ function setProperties(requestData: Record<string, unknown>) {
 			} else if (propName === "Name") {
 				instance.Name = tostring(propValue);
 			} else if (propName === "Source" && instance.IsA("LuaSourceContainer")) {
-				(instance as unknown as { Source: string }).Source = tostring(propValue);
+				if (!typeIs(propValue, "string")) error("Source must be a string");
+				const result = applyScriptSource(instance as LuaSourceContainer, propValue as string);
+				if (!result.success) error(result.error ?? "Script source update failed");
 			} else {
 				const converted = convertPropertyValue(instance, propName as string, propValue);
 				inst[propName as string] = converted !== undefined ? converted : propValue;

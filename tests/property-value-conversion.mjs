@@ -91,6 +91,20 @@ label.Parent = screenGui
 local part = Instance.new("Part")
 part.Name = "__RSMCP_Vector3Conversion"
 part.Parent = workspace
+local value = Instance.new("StringValue")
+value.Name = "StringProbe"
+value.Parent = part
+local scriptProbe = Instance.new("Script")
+scriptProbe.Name = "SourceProbe"
+scriptProbe.Disabled = true
+scriptProbe.Parent = part
+local model = Instance.new("Model")
+model.Name = "ReferenceProbe"
+model.Parent = part
+local primary = Instance.new("Part")
+primary.Name = "Primary"
+primary.Parent = model
+model.PrimaryPart = primary
 return true
 `,
     });
@@ -113,6 +127,46 @@ return true
     const positionResult = findResult(positionSet, 'Position');
     assert(positionSet.summary?.failed === 0 && positionResult?.success === true,
       'set_properties preserves {X,Y,Z} for Vector3 properties');
+
+    for (const text of ['true', 'false']) {
+      for (const [instancePath, property] of [[labelPath, 'Text'], [`${partPath}.StringProbe`, 'Value'], [partPath, 'Anchored']]) {
+        const result = await client.callTool('set_properties', {
+          instancePath, properties: { [property]: text }, instance_id: instanceId,
+        });
+        assert(result.summary?.failed === 0, `${property} accepts ${text}`);
+      }
+      const result = await client.callTool('execute_luau', {
+        target: 'edit', instance_id: instanceId,
+        code: `return game.StarterGui.__RSMCP_Vector2Conversion.AnchorPointProbe.Text == "${text}" and workspace.__RSMCP_Vector3Conversion.StringProbe.Value == "${text}" and workspace.__RSMCP_Vector3Conversion.Anchored == ${text}`,
+      });
+      assert(String(result.returnValue) === 'true', 'boolean-looking text preserves the destination property type');
+    }
+
+    const cleared = await client.callTool('set_properties', {
+      instancePath: `${partPath}.ReferenceProbe`, properties: { PrimaryPart: '' }, instance_id: instanceId,
+    });
+    assert(cleared.summary?.failed === 0, 'empty PrimaryPart path clears the reference');
+    const nilReference = await client.callTool('execute_luau', {
+      target: 'edit', instance_id: instanceId,
+      code: 'return workspace.__RSMCP_Vector3Conversion.ReferenceProbe.PrimaryPart == nil',
+    });
+    assert(String(nilReference.returnValue) === 'true', 'cleared PrimaryPart reads back as nil');
+    for (const property of ['Parent', 'PrimaryPart']) {
+      const rejected = await client.callToolError('set_properties', {
+        instancePath: `${partPath}.ReferenceProbe`, properties: { [property]: false }, instance_id: instanceId,
+      });
+      assert(rejected.summary?.failed === 1, `invalid ${property} value is reported as a failed write`);
+    }
+
+    const sourceWrite = await client.callTool('set_properties', {
+      instancePath: `${partPath}.SourceProbe`, properties: { Source: 'return 42' }, instance_id: instanceId,
+    });
+    assert(sourceWrite.summary?.failed === 0, 'Source writes through set_properties succeed');
+    const editorReadback = await client.callTool('execute_luau', {
+      target: 'edit', instance_id: instanceId,
+      code: 'return game:GetService("ScriptEditorService"):GetEditorSource(workspace.__RSMCP_Vector3Conversion.SourceProbe) == "return 42"',
+    });
+    assert(String(editorReadback.returnValue) === 'true', 'Source write is visible to ScriptEditorService');
 
     const missing = await client.callToolError('set_properties', {
       instancePath: `${partPath}.Missing`,

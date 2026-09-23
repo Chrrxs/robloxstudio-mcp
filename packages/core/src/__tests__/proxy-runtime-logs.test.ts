@@ -1,6 +1,6 @@
 import { BridgeService, MultiplayerGroupInUseError, RequestFailure } from '../bridge-service.js';
 import { ProxyBridgeService } from '../proxy-bridge-service.js';
-import { RobloxStudioTools } from '../tools/index.js';
+import { RobloxStudioTools } from './test-tools.js';
 
 interface RuntimeLogResult {
   instanceId: string;

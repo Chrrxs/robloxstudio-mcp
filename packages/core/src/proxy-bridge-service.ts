@@ -183,6 +183,7 @@ export class ProxyBridgeService extends BridgeService {
     const response = await fetch(`${this.primaryBaseUrl}/create-multiplayer-group`, {
       method: 'POST',
       headers: this.authHeaders({ 'Content-Type': 'application/json' }),
+      signal: AbortSignal.timeout(5_000),
       body: JSON.stringify({ groupId, controllerInstanceId }),
     });
     if (!response.ok) {
@@ -222,6 +223,7 @@ export class ProxyBridgeService extends BridgeService {
     const response = await fetch(`${this.primaryBaseUrl}/remove-multiplayer-group`, {
       method: 'POST',
       headers: this.authHeaders({ 'Content-Type': 'application/json' }),
+      signal: AbortSignal.timeout(5_000),
       body: JSON.stringify({ groupId }),
     });
     if (response.status === 409) {
@@ -270,6 +272,7 @@ export class ProxyBridgeService extends BridgeService {
     const response = await fetch(`${this.primaryBaseUrl}/unregister-instance-id`, {
       method: 'POST',
       headers: this.authHeaders({ 'Content-Type': 'application/json' }),
+      signal: AbortSignal.timeout(5_000),
       body: JSON.stringify({ instanceId }),
     });
 
@@ -308,6 +311,7 @@ export class ProxyBridgeService extends BridgeService {
   override async getRequestStatusEverywhere(requestId: string): Promise<RequestStatus | undefined> {
     const response = await fetch(`${this.primaryBaseUrl}/request-status?requestId=${encodeURIComponent(requestId)}`, {
       headers: this.authHeaders(),
+      signal: AbortSignal.timeout(5_000),
     });
     if (!response.ok) throw new Error(`Proxy request status failed (${response.status})`);
     const body: unknown = await response.json();

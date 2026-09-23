@@ -110,6 +110,11 @@ When the plugin displays **Connected**, you're ready.
 npx -y @chrrxs/robloxstudio-mcp@latest --install-plugin
 ```
 
+Both editions prefer the bundled plugin. If it is missing, installation downloads
+the GitHub release matching the installed npm package version and validates the
+plugin's version and edition before replacing the installed file. This also
+applies to development versions; a missing matching release is an error.
+
 </details>
 
 ## Inspector edition
