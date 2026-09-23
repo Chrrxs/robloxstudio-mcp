@@ -10,6 +10,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { rgbaToPng } from '../png-encoder.js';
+import * as hostCapture from '../host-capture.js';
 
 const SMOKE_TEST_CLAIM_OWNER = 'smoke-test';
 
@@ -4160,64 +4161,74 @@ describe('Smoke', () => {
   });
 
   test('capture_device_matrix rejects the tool call when an entry capture fails', async () => {
-    const bridge = new BridgeService();
-    const tools = new RobloxStudioTools(bridge);
-    bridge.registerPeer(READY);
+    // Keep this transport test independent of native compiler/permission state.
+    const supported = jest.spyOn(hostCapture, 'isHostCaptureSupported').mockReturnValue(true);
+    const disabled = jest.spyOn(hostCapture, 'isHostCaptureDisabled').mockReturnValue(false);
+    const prepare = jest.spyOn(hostCapture, 'prepareHostWindowCapture').mockResolvedValue();
+    try {
+      const bridge = new BridgeService();
+      const tools = new RobloxStudioTools(bridge);
+      bridge.registerPeer(READY);
 
-    const resultPromise = tools.captureDeviceMatrix(
-      [{ label: 'phone', deviceId: 'iphone_XR' }],
-      'edit',
-      'jpeg',
-      80,
-      0,
-      true,
-      'instance:test',
-    );
+      const resultPromise = tools.captureDeviceMatrix(
+        [{ label: 'phone', deviceId: 'iphone_XR' }],
+        'edit',
+        'jpeg',
+        80,
+        0,
+        true,
+        'instance:test',
+      );
 
-    const snapshotPending = claimQueuedRequest(bridge, 'session-1');
-    bridge.resolveRequest(snapshotPending!.requestId, {
-      success: true,
-      returnValue: JSON.stringify({ activeDeviceId: 'default', isSimulating: false, devices: [] }),
-    });
-
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    const setPending = claimQueuedRequest(bridge, 'session-1');
-    bridge.resolveRequest(setPending!.requestId, {
-      success: true,
-      returnValue: JSON.stringify({
+      const snapshotPending = claimQueuedRequest(bridge, 'session-1');
+      bridge.resolveRequest(snapshotPending!.requestId, {
         success: true,
-        applied: { deviceId: 'iphone_XR' },
-        before: { activeDeviceId: 'default', isSimulating: false },
-        after: { activeDeviceId: 'iphone_XR', isSimulating: true },
-      }),
-    });
+        returnValue: JSON.stringify({ activeDeviceId: 'default', isSimulating: false, devices: [] }),
+      });
 
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    const capturePending = claimQueuedRequest(bridge, 'session-1');
-    expect(capturePending?.request).toMatchObject({ endpoint: '/api/capture-studio' });
-    bridge.resolveRequest(capturePending!.requestId, { error: 'screenshot boom' });
-
-    // A failed Studio capture is retried through the host window; a plugin
-    // without the marker endpoint ends that attempt and the tool moves on.
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    const markersPending = claimQueuedRequest(bridge, 'session-1');
-    expect(markersPending?.request).toMatchObject({ endpoint: '/api/capture-markers', data: { action: 'prepare' } });
-    bridge.resolveRequest(markersPending!.requestId, { error: 'Unknown endpoint: /api/capture-markers' });
-
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    const restorePending = claimQueuedRequest(bridge, 'session-1');
-    expect(restorePending?.request.data.code).toContain('StopSimulationAsync');
-    bridge.resolveRequest(restorePending!.requestId, {
-      success: true,
-      returnValue: JSON.stringify({
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      const setPending = claimQueuedRequest(bridge, 'session-1');
+      bridge.resolveRequest(setPending!.requestId, {
         success: true,
-        applied: { stopSimulation: true },
-        before: { activeDeviceId: 'iphone_XR', isSimulating: true },
-        after: { activeDeviceId: 'default', isSimulating: false },
-      }),
-    });
+        returnValue: JSON.stringify({
+          success: true,
+          applied: { deviceId: 'iphone_XR' },
+          before: { activeDeviceId: 'default', isSimulating: false },
+          after: { activeDeviceId: 'iphone_XR', isSimulating: true },
+        }),
+      });
 
-    await expect(resultPromise).rejects.toThrow(/capture_device_matrix failed.*phone.*screenshot boom.*Host window capture also failed/);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      const capturePending = claimQueuedRequest(bridge, 'session-1');
+      expect(capturePending?.request).toMatchObject({ endpoint: '/api/capture-studio' });
+      bridge.resolveRequest(capturePending!.requestId, { error: 'screenshot boom' });
+
+      // A failed Studio capture is retried through the host window; a plugin
+      // without the marker endpoint ends that attempt and the tool moves on.
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      const markersPending = claimQueuedRequest(bridge, 'session-1');
+      expect(markersPending?.request).toMatchObject({ endpoint: '/api/capture-markers', data: { action: 'prepare' } });
+      bridge.resolveRequest(markersPending!.requestId, { error: 'Unknown endpoint: /api/capture-markers' });
+
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      const restorePending = claimQueuedRequest(bridge, 'session-1');
+      expect(restorePending?.request.data.code).toContain('StopSimulationAsync');
+      bridge.resolveRequest(restorePending!.requestId, {
+        success: true,
+        returnValue: JSON.stringify({
+          success: true,
+          applied: { stopSimulation: true },
+          before: { activeDeviceId: 'iphone_XR', isSimulating: true },
+          after: { activeDeviceId: 'default', isSimulating: false },
+        }),
+      });
+
+      await expect(resultPromise).rejects.toThrow(/capture_device_matrix failed.*phone.*screenshot boom.*Host window capture also failed/);
+    } finally {
+      prepare.mockRestore();
+      disabled.mockRestore();
+      supported.mockRestore();
+    }
   });
 
   test('capture_device_matrix rejects the tool call when restore fails', async () => {
