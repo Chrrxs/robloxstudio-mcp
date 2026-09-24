@@ -77,7 +77,7 @@ try {
     'concurrent exports own different directories');
   for (const snapshot of snapshots) {
     // Windows TEMP may contain an 8.3 alias; snapshots return canonical paths.
-    assert.equal(path.dirname(snapshot.workingDirectory), realpathSync(destinationParent));
+    assert.equal(path.dirname(snapshot.workingDirectory), realpathSync.native(destinationParent));
     assert.match(path.basename(snapshot.workingDirectory), /^snapshot-[A-Za-z0-9]+$/,
       'exports satisfy the Windows managed-snapshot permission boundary');
     assert.deepEqual(files(snapshot.workingDirectory), expected,
