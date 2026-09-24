@@ -5,6 +5,9 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+# Exercise the BOM-emitting stdin default seen on Windows CI even when the
+# developer's console uses a different code page.
+[Console]::InputEncoding = New-Object System.Text.UTF8Encoding($true)
 # Load only the production native helper, never the credential/account launcher.
 $tokens = $null
 $parseErrors = $null
@@ -146,8 +149,18 @@ function Start-OwnedFixture {
     $started = $false
     $assigned = $false
     try {
-        $null = $child.Start()
-        $started = $true
+        # Windows PowerShell's framework has no StandardInputEncoding option.
+        # Process.Start builds its stdin writer from Console.InputEncoding and
+        # may immediately emit its preamble. Capture a BOM-free encoding there,
+        # then restore the caller's encoding even if process creation fails.
+        $inputEncoding = [Console]::InputEncoding
+        try {
+            [Console]::InputEncoding = New-Object System.Text.UTF8Encoding($false)
+            $null = $child.Start()
+            $started = $true
+        } finally {
+            [Console]::InputEncoding = $inputEncoding
+        }
         $info.Password = $null
         # Start draining before opening the gate. Descendants inherit this pipe;
         # completion is collected after disposal, never awaited during grace.
