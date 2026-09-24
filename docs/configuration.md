@@ -7,7 +7,7 @@ requests unless their origin is explicitly allowed. The normal stdio MCP
 transport is unaffected by HTTP authentication.
 
 HTTP endpoints that can invoke tools (`/mcp`, `/mcp/<tool>`, `/proxy`,
-`/instances`, and `/unregister-instance-id`) require a shared-secret token. The
+`/topology`, and `/unregister-instance-id`) require a shared-secret token. The
 server creates one at `~/.robloxstudio-mcp/auth-token` on first run and uses
 mode `0600` on platforms that support POSIX permissions. HTTP MCP clients can
 send the token as either:

@@ -21,6 +21,9 @@ state it starts.
 
 GitHub Actions runs lint, typechecking, server builds, plugin compilation, and
 `npm test` on Windows and Linux with Node 22. These checks do not launch Studio.
+Run `npm run build` before `npm test` or `npm run test:package-contents`: the
+package checks also exercise both built CLIs from relocated fixture packages,
+with plugin installation redirected to temporary directories.
 Core Jest tests use temporary, suite-specific managed-instance registries and
 remove them after the run, so synthetic peers cannot alter a developer's registry.
 The live gates below still require the dedicated Studio test profile.

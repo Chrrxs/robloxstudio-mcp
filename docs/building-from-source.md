@@ -1,6 +1,6 @@
 # Building from source
 
-Node.js 20 or newer is required.
+Node.js 22 or newer is required.
 
 ```bash
 npm install && cd studio-plugin && npm install && cd ..
