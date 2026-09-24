@@ -19,6 +19,12 @@ state it starts.
 
 ## Run
 
+GitHub Actions runs lint, typechecking, server builds, plugin compilation, and
+`npm test` on Windows and Linux with Node 22. These checks do not launch Studio.
+Core Jest tests use temporary, suite-specific managed-instance registries and
+remove them after the run, so synthetic peers cannot alter a developer's registry.
+The live gates below still require the dedicated Studio test profile.
+
 **Feature completion gate:** a feature is not complete until
 `npm run test:e2e` passes. This short gate exercises edit-mode tooling plus one
 solo playtest covering edit, server, and client execution. Run the targeted

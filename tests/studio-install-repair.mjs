@@ -272,7 +272,13 @@ try {
     const target = finalizationFixture(directory, `reject-${mutation}`);
     if (mutation === 'nonempty') writeFileSync(target.marker, 'unfinished');
     if (mutation === 'new') utimesSync(target.marker, finalizeNow / 1000, finalizeNow / 1000);
-    if (mutation === 'symlink') { rmSync(target.marker); symlinkSync(target.settings, target.marker); }
+    if (mutation === 'symlink') {
+      rmSync(target.marker);
+      // Junctions exercise reparse-point rejection without requiring Windows
+      // Developer Mode or the privilege needed to create file symlinks.
+      symlinkSync(process.platform === 'win32' ? path.dirname(target.settings) : target.settings,
+        target.marker, process.platform === 'win32' ? 'junction' : 'file');
+    }
     if (mutation === 'settings') writeFileSync(target.settings, '');
     if (mutation === 'stale-log') utimesSync(target.logFile, (finalizeNow - 3_600_000) / 1000, (finalizeNow - 3_600_000) / 1000);
     let checks = 0;

@@ -1,5 +1,5 @@
 import { randomBytes, createHash, timingSafeEqual } from 'crypto';
-import { existsSync, mkdirSync, readFileSync, writeFileSync, chmodSync } from 'fs';
+import { mkdirSync, readFileSync, writeFileSync, linkSync, unlinkSync } from 'fs';
 import { join, dirname } from 'path';
 import { homedir } from 'os';
 
@@ -42,21 +42,32 @@ export function resolveAuthToken(): ResolvedAuthToken {
 
   const filePath = authTokenFilePath();
   try {
-    if (existsSync(filePath)) {
+    try {
       const existing = readFileSync(filePath, 'utf8').trim();
-      if (existing) {
-        return { token: existing, source: 'file', filePath };
-      }
+      if (!existing) throw new Error('Auth token file is empty; remove it while all MCP servers are stopped to reinitialize it.');
+      return { token: existing, source: 'file', filePath };
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
     }
     const fresh = randomBytes(32).toString('hex');
     mkdirSync(dirname(filePath), { recursive: true, mode: 0o700 });
-    writeFileSync(filePath, fresh + '\n', { encoding: 'utf8', mode: 0o600 });
+    const stagingPath = `${filePath}.${process.pid}.${randomBytes(16).toString('hex')}.tmp`;
+    writeFileSync(stagingPath, fresh + '\n', { encoding: 'utf8', mode: 0o600, flag: 'wx' });
     try {
-      chmodSync(filePath, 0o600); // writeFileSync mode is ignored if the file pre-existed
-    } catch {
-      // Best-effort on platforms without POSIX permissions (Windows)
+      // Publish a complete file without replacing another process's winner.
+      // Exclusive creation of the final file alone exposes an empty file until
+      // its first write; a hard link makes both existence and contents atomic.
+      try {
+        linkSync(stagingPath, filePath);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+      }
+      const token = readFileSync(filePath, 'utf8').trim();
+      if (!token) throw new Error('Auth token file is empty.');
+      return { token, source: 'file', filePath };
+    } finally {
+      try { unlinkSync(stagingPath); } catch { /* Best-effort staging cleanup. */ }
     }
-    return { token: fresh, source: 'file', filePath };
   } catch (err) {
     // Could not persist a token (read-only home, etc). Fall back to an
     // in-memory token: this process stays protected, but proxy subprocesses

@@ -38,7 +38,8 @@ async function download(url: string, redirects = 0): Promise<Buffer> {
     if (redirects >= MAX_REDIRECTS) throw new Error(`Too many redirects (max ${MAX_REDIRECTS})`);
     const location = res.headers.location;
     if (!location) throw new Error('Redirect with no location header');
-    for await (const _chunk of res) {
+    for await (const chunk of res) {
+      void chunk;
       // Drain the response before following the redirect.
     }
     return download(location, redirects + 1);
@@ -74,21 +75,6 @@ async function fetchJson(url: string): Promise<unknown> {
     chunks.push(chunk as Buffer);
   }
   return JSON.parse(Buffer.concat(chunks).toString());
-}
-
-async function findDevRelease(): Promise<{ tag_name: string; assets: { name: string; browser_download_url: string }[] }> {
-  const releases = await fetchJson(`https://api.github.com/repos/${REPO}/releases?per_page=20`) as {
-    tag_name: string;
-    prerelease: boolean;
-    assets: { name: string; browser_download_url: string }[];
-  }[];
-  const prerelease = releases.find(
-    (r) => r.prerelease && r.assets.some((a) => a.name === ASSET_NAME),
-  );
-  if (!prerelease) {
-    throw new Error(`No prerelease found with ${ASSET_NAME}`);
-  }
-  return prerelease;
 }
 
 function bundledAssetPath(): string | null {
@@ -171,10 +157,8 @@ export async function installPlugin(options: InstallOptions = {}): Promise<void>
     return;
   }
 
-  log(dev ? 'Fetching latest dev prerelease...' : 'Fetching latest release...');
-  const release = dev
-    ? await findDevRelease()
-    : await fetchJson(`https://api.github.com/repos/${REPO}/releases/latest`) as {
+  log(dev ? 'Fetching matching dev release...' : 'Fetching matching release...');
+  const release = await fetchJson(`https://api.github.com/repos/${REPO}/releases/tags/v${encodeURIComponent(packageVersion())}`) as {
         tag_name: string;
         assets: { name: string; browser_download_url: string }[];
       };
@@ -191,7 +175,7 @@ export async function installPlugin(options: InstallOptions = {}): Promise<void>
     assetName: ASSET_NAME,
     otherAssetName: OTHER_VARIANT,
     source: downloaded,
-    expectedVersion: release.tag_name.replace(/^v/, ''),
+    expectedVersion: packageVersion(),
     expectedVariant: 'main',
     replaceVariant,
     log,

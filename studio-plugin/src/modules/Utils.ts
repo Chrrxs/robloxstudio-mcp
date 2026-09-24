@@ -399,8 +399,10 @@ function convertPropertyValue(instance: Instance, propertyName: string, property
 		if (propertyName === "BrickColor") {
 			return new BrickColor(propertyValue as unknown as number);
 		}
-		if (propertyValue === "true") return true;
-		if (propertyValue === "false") return false;
+		if (success && typeOf(currentVal) === "boolean") {
+			if (propertyValue === "true") return true;
+			if (propertyValue === "false") return false;
+		}
 	}
 
 	return propertyValue;

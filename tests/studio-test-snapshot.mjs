@@ -3,7 +3,7 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import {
-  existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync,
+  existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync,
   symlinkSync, writeFileSync,
 } from 'node:fs';
 import os from 'node:os';
@@ -76,7 +76,8 @@ try {
   assert.equal(new Set(snapshots.map(({ workingDirectory }) => workingDirectory)).size, 3,
     'concurrent exports own different directories');
   for (const snapshot of snapshots) {
-    assert.equal(path.dirname(snapshot.workingDirectory), destinationParent);
+    // Windows TEMP may contain an 8.3 alias; snapshots return canonical paths.
+    assert.equal(path.dirname(snapshot.workingDirectory), realpathSync.native(destinationParent));
     assert.match(path.basename(snapshot.workingDirectory), /^snapshot-[A-Za-z0-9]+$/,
       'exports satisfy the Windows managed-snapshot permission boundary');
     assert.deepEqual(files(snapshot.workingDirectory), expected,

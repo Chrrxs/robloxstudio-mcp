@@ -111,20 +111,20 @@ async function fetchDocCatalog(): Promise<DocRecommendation[]> {
 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
-  let response: Response;
+  let html: string;
   try {
-    response = await fetch(DOCS_INDEX_URL, {
+    const response = await fetch(DOCS_INDEX_URL, {
       signal: controller.signal,
       headers: { Accept: 'text/html' },
     });
+    if (!response.ok) {
+      await response.body?.cancel();
+      throw new Error(`Failed to fetch Roblox docs index: HTTP ${response.status}`);
+    }
+    html = await response.text();
   } finally {
     clearTimeout(timer);
   }
-  if (!response.ok) {
-    throw new Error(`Failed to fetch Roblox docs index: HTTP ${response.status}`);
-  }
-
-  const html = await response.text();
   const pages = new Map<string, DocRecommendation>();
   const routePattern = /reference\/engine\/(classes|enums|datatypes|libraries|globals)\/([A-Za-z0-9_]+)/g;
   for (const match of html.matchAll(routePattern)) {
@@ -194,31 +194,31 @@ export async function fetchRobloxDoc(category: DocCategory, name: string): Promi
 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
-  let response: Response;
   try {
-    response = await fetch(docUrl(category, name), {
+    const response = await fetch(docUrl(category, name), {
       signal: controller.signal,
       headers: { Accept: 'text/markdown, text/plain' },
     });
+    if (response.status === 404) {
+      await response.body?.cancel();
+      cacheSet(key, { fetchedAt: Date.now(), notFound: true });
+      throw new DocNotFoundError(category, name);
+    }
+    if (!response.ok) {
+      await response.body?.cancel();
+      throw new Error(`HTTP ${response.status}`);
+    }
+    const content = await response.text();
+    cacheSet(key, { fetchedAt: Date.now(), content });
+    return content;
   } catch (error) {
+    if (error instanceof DocNotFoundError) throw error;
     throw new Error(
       `Failed to fetch Roblox docs for ${key}: ${error instanceof Error ? error.message : String(error)}`
     );
   } finally {
     clearTimeout(timer);
   }
-
-  if (response.status === 404) {
-    cacheSet(key, { fetchedAt: Date.now(), notFound: true });
-    throw new DocNotFoundError(category, name);
-  }
-  if (!response.ok) {
-    throw new Error(`Failed to fetch Roblox docs for ${key}: HTTP ${response.status}`);
-  }
-
-  const content = await response.text();
-  cacheSet(key, { fetchedAt: Date.now(), content });
-  return content;
 }
 
 /** List the `## `-level section headings of a reference page. */

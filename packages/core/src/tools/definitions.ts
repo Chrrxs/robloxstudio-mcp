@@ -1674,7 +1674,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
       properties: {
         source: {
           type: 'object',
-          description: 'Exactly one path, URL, or base64 source; URLs cap at 50 MiB.',
+          description: 'Exactly one path, URL, or base64 source. All inputs are capped below 37.5 MiB to fit base64 plus routing metadata within transport limits; URL downloads have a 30-second deadline.',
           properties: {
             path: { type: 'string', description: 'Absolute local .rbxm path.' },
             url: { type: 'string', description: 'HTTP or HTTPS .rbxm URL.' },

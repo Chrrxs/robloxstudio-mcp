@@ -1,3 +1,4 @@
+import { readRbxmInput } from '../rbxm-input.js';
 import { StudioHttpClient } from './studio-client.js';
 import { BridgeService, RoutingFailure } from '../bridge-service.js';
 import type { PublicStudioPeer } from '../bridge-service.js';
@@ -1027,6 +1028,7 @@ export class RobloxStudioTools {
   private cookieClient: RobloxCookieClient;
   private instanceManager: StudioInstanceManager;
   private managedConnectionAssociations: Promise<void> = Promise.resolve();
+  private unsubscribePeerRegistered: () => void;
   private hostWindowCapture: HostWindowCaptureFn = captureStudioWindow;
   private hostViewportRects = new Map<string, HostViewportRectCacheEntry>();
   private viewportCaptureQueues = new Map<string, Promise<void>>();
@@ -1037,7 +1039,7 @@ export class RobloxStudioTools {
     this.openCloudClient = new OpenCloudClient();
     this.cookieClient = new RobloxCookieClient();
     this.instanceManager = new StudioInstanceManager();
-    this.bridge.onPeerRegistered((peer) => {
+    this.unsubscribePeerRegistered = this.bridge.onPeerRegistered((peer) => {
       const instanceManager = this.instanceManager;
       const association = this.managedConnectionAssociations.then(() =>
         this._associateManagedEditConnection(peer, instanceManager),
@@ -1052,6 +1054,11 @@ export class RobloxStudioTools {
 
   getStudioLifecycleCapabilities() {
     return this.instanceManager.getLifecycleCapabilities();
+  }
+
+  async dispose(): Promise<void> {
+    this.unsubscribePeerRegistered();
+    await this.managedConnectionAssociations;
   }
 
   private _textResult(body: Record<string, unknown>) {
@@ -3032,7 +3039,7 @@ export class RobloxStudioTools {
   }
 
   private async _deriveUniverseId(placeId: number): Promise<number> {
-    const response = await fetch(`https://apis.roblox.com/universes/v1/places/${placeId}/universe`);
+    const response = await fetch(`https://apis.roblox.com/universes/v1/places/${placeId}/universe`, { signal: AbortSignal.timeout(30_000) });
     if (!response.ok) {
       const body = await response.text().catch(() => '');
       throw new Error(`Could not resolve the universe for place_id ${placeId} (${response.status}): ${body}`);
@@ -4951,7 +4958,8 @@ export class RobloxStudioTools {
     source: { path?: string; url?: string; base64?: string } | undefined,
     parentPath: string,
     target?: string,
-    instance_id?: string
+    instance_id?: string,
+    signal?: AbortSignal,
   ) {
     if (!source || typeof source !== 'object') {
       throw new Error('source is required for import_rbxm');
@@ -4969,63 +4977,13 @@ export class RobloxStudioTools {
       throw new Error(`source must contain exactly one of { path, url, base64 } (got: ${modes.join(', ') || 'none'})`);
     }
 
-    let bytes: Buffer;
-    let sourceLabel: string;
-    if (source.path !== undefined) {
-      const resolved = path.resolve(source.path);
-      try {
-        bytes = fs.readFileSync(resolved);
-      } catch (err) {
-        return { content: [{ type: 'text', text: JSON.stringify({ error: `failed to read ${resolved}: ${(err as Error).message}` }) }] };
-      }
-      sourceLabel = resolved;
-    } else if (source.url !== undefined) {
-      // SSRF guard: only http(s). Blocks file://, ftp://, gopher://, etc.
-      // Does NOT block requests to internal IPs (127.0.0.1, 169.254.x, RFC1918) —
-      // a local MCP server has legitimate reasons to hit localhost, so internal-IP
-      // blocking should be opt-in if needed.
-      let parsedUrl: URL;
-      try {
-        parsedUrl = new URL(source.url);
-      } catch {
-        return { content: [{ type: 'text', text: JSON.stringify({ error: `import_rbxm url is not a valid URL: ${source.url}` }) }] };
-      }
-      if (parsedUrl.protocol !== 'http:' && parsedUrl.protocol !== 'https:') {
-        return { content: [{ type: 'text', text: JSON.stringify({ error: `import_rbxm url must use http(s); got ${parsedUrl.protocol}` }) }] };
-      }
-
-      // 50 MiB matches the project's existing express.json('50mb') cap and is
-      // empirically well within the Studio plugin's HttpService:RequestAsync
-      // response ceiling (probed up to 100 MiB without issue, 150+ stalls on
-      // Studio memory, not protocol). Far above any realistic rbxm size.
-      const MAX_IMPORT_BYTES = 50 * 1024 * 1024;
-      try {
-        const res = await fetch(source.url);
-        if (!res.ok) {
-          const snippet = (await res.text()).slice(0, 500);
-          return { content: [{ type: 'text', text: JSON.stringify({ error: `fetch ${source.url} returned ${res.status}: ${snippet}` }) }] };
-        }
-        const claimed = Number(res.headers.get('content-length') ?? '0');
-        if (claimed > MAX_IMPORT_BYTES) {
-          return { content: [{ type: 'text', text: JSON.stringify({ error: `fetch ${source.url}: content-length ${claimed} exceeds ${MAX_IMPORT_BYTES} byte cap` }) }] };
-        }
-        const arr = await res.arrayBuffer();
-        if (arr.byteLength > MAX_IMPORT_BYTES) {
-          return { content: [{ type: 'text', text: JSON.stringify({ error: `fetch ${source.url}: downloaded ${arr.byteLength} bytes exceeds ${MAX_IMPORT_BYTES} byte cap` }) }] };
-        }
-        bytes = Buffer.from(arr);
-      } catch (err) {
-        return { content: [{ type: 'text', text: JSON.stringify({ error: `fetch ${source.url} failed: ${(err as Error).message}` }) }] };
-      }
-      sourceLabel = source.url;
-    } else {
-      try {
-        bytes = Buffer.from(source.base64 as string, 'base64');
-      } catch (err) {
-        return { content: [{ type: 'text', text: JSON.stringify({ error: `base64 decode failed: ${(err as Error).message}` }) }] };
-      }
-      sourceLabel = `base64(${bytes.length}B)`;
+    let input: Awaited<ReturnType<typeof readRbxmInput>>;
+    try {
+      input = await readRbxmInput(source, parentPath, signal);
+    } catch (error) {
+      return this._textResult({ error: error instanceof Error ? error.message : String(error) });
     }
+    const { bytes, sourceLabel } = input;
 
     const response = await this._callSingle(
       '/api/import-rbxm',
@@ -5036,6 +4994,8 @@ export class RobloxStudioTools {
       },
       tgt,
       instance_id,
+      undefined,
+      signal,
     );
 
     return { content: [{ type: 'text', text: JSON.stringify(response) }] };

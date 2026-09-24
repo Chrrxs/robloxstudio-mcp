@@ -233,8 +233,6 @@ export class OpenCloudClient {
         signal: controller.signal,
       });
 
-      clearTimeout(timeoutId);
-
       if (!response.ok) {
         const errorBody = await response.text();
         let errorMessage: string;
@@ -258,7 +256,7 @@ export class OpenCloudClient {
 
       return (await response.json()) as T;
     } catch (error) {
-      clearTimeout(timeoutId);
+      if (controller.signal.aborted) throw new Error('Request timed out');
       if (error instanceof Error) {
         if (error.name === 'AbortError') {
           throw new Error('Request timed out');
@@ -266,6 +264,8 @@ export class OpenCloudClient {
         throw error;
       }
       throw new Error(`Unknown error: ${String(error)}`);
+    } finally {
+      clearTimeout(timeoutId);
     }
   }
 
@@ -312,7 +312,8 @@ export class OpenCloudClient {
     const url = `https://thumbnails.roblox.com/v1/assets?assetIds=${assetId}&size=${size}&format=Png`;
 
     try {
-      const response = await fetch(url);
+      const signal = AbortSignal.timeout(this.timeout);
+      const response = await fetch(url, { signal });
       if (!response.ok) return null;
 
       const data = (await response.json()) as { data: ThumbnailResponse[] };
@@ -323,7 +324,7 @@ export class OpenCloudClient {
       }
 
       // Fetch the actual image and convert to base64
-      const imageResponse = await fetch(thumbnail.imageUrl);
+      const imageResponse = await fetch(thumbnail.imageUrl, { signal });
       if (!imageResponse.ok) return null;
 
       const arrayBuffer = await imageResponse.arrayBuffer();
@@ -349,7 +350,7 @@ export class OpenCloudClient {
     for (const batch of batches) {
       const url = `https://thumbnails.roblox.com/v1/assets?assetIds=${batch.join(',')}&size=${size}&format=Png`;
       try {
-        const response = await fetch(url);
+        const response = await fetch(url, { signal: AbortSignal.timeout(this.timeout) });
         if (response.ok) {
           const data = (await response.json()) as { data: ThumbnailResponse[] };
           for (const thumbnail of data.data) {
@@ -442,7 +443,7 @@ export class OpenCloudClient {
       const chunks: Buffer[] = [];
       let totalBytes = 0;
       const reader = contentResponse.body.getReader();
-      while (true) {
+      for (;;) {
         const { done, value } = await reader.read();
         if (done) break;
         totalBytes += value.byteLength;
@@ -548,8 +549,6 @@ export class OpenCloudClient {
         signal: controller.signal,
       });
 
-      clearTimeout(timeoutId);
-
       if (!response.ok) {
         const errorBody = await response.text();
         let errorMessage: string;
@@ -573,7 +572,7 @@ export class OpenCloudClient {
 
       return (await response.json()) as T;
     } catch (error) {
-      clearTimeout(timeoutId);
+      if (controller.signal.aborted) throw new Error('Request timed out');
       if (error instanceof Error) {
         if (error.name === 'AbortError') {
           throw new Error('Request timed out');
@@ -581,6 +580,8 @@ export class OpenCloudClient {
         throw error;
       }
       throw new Error(`Unknown error: ${String(error)}`);
+    } finally {
+      clearTimeout(timeoutId);
     }
   }
 
