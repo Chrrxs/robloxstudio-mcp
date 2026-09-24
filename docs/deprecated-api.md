@@ -30,3 +30,10 @@ catalog. Update exact-name integrations as follows:
 
 The removed names are absent from both `tools/list` and the direct
 `/mcp/<tool>` compatibility routes.
+
+`ChangeHistoryService` controls DataModel history, not script text history.
+Roblox intentionally excludes `LuaSourceContainer.Source` changes, including
+`ScriptEditorService:UpdateSourceAsync`, from that undo stack. Use the Script
+Editor's own Undo/Redo for source edits. In a mixed `set_properties` batch,
+DataModel Undo/Redo affects supported ordinary properties but does not restore
+the previous script source. See [Roblox's explanation](https://devforum.roblox.com/t/changes-to-luasourcecontainersource-are-not-captured-by-changehistoryservice/4590702/4).
