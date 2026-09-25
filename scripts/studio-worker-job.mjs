@@ -133,15 +133,33 @@ export async function createStudioWorkerJob(options) {
     await connection.finish().catch(() => {});
     throw error;
   }
-  let drained = false;
+  let drainResult;
   return {
     environment: { [STUDIO_WORKER_JOB_ENV]: name },
-    async drain() {
-      if (drained) return;
-      const result = await connection.request({ op: 'drain' }, 645000);
-      if (result?.drained !== true) throw new Error('Studio worker job drain was not confirmed; retaining worker directory');
-      await connection.finish();
-      drained = true;
+    drain() {
+      drainResult ??= (async () => {
+        let drainError;
+        try {
+          const result = await connection.request({ op: 'drain' }, 645000);
+          if (result?.drained !== true) throw new Error('Studio worker job drain was not confirmed; retaining worker directory');
+        } catch (error) {
+          drainError = error;
+        }
+        // EOF releases the broker's retained ownership handle even after a
+        // native timeout. Its explicit-drain flag prevents a second grace.
+        try {
+          await connection.finish();
+        } catch (error) {
+          if (drainError && drainError !== error) {
+            throw new AggregateError([drainError, error],
+              `${drainError.message}; broker shutdown failed: ${error.message}; retaining worker directory`,
+              { cause: drainError });
+          }
+          throw error;
+        }
+        if (drainError) throw drainError;
+      })();
+      return drainResult;
     },
   };
 }

@@ -1,11 +1,69 @@
 #!/usr/bin/env node
-// Offline only: no Studio, profile operations, native commands, or timers.
+// Offline only: no Studio, profile operations, native commands, or real timers.
 import assert from 'node:assert/strict';
+import { EventEmitter } from 'node:events';
+import { PassThrough } from 'node:stream';
+import { mock } from 'node:test';
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { createStudioWorkerCleanup } from '../scripts/studio-lifecycle.mjs';
 import { requireStudioWorkerCapability, createAutoInstallCleanupError } from './auto-install-plugin-e2e.mjs';
+import { createStudioWorkerJob } from '../scripts/studio-worker-job.mjs';
+
+// A rejected native drain must close its broker, not leave the broker waiting
+// for stdin or permit a later cleanup call to start another ten-minute grace.
+for (const scenario of [
+  { response: { error: 'Owned Studio installer did not finish within worker grace' }, error: /installer did not finish/ },
+  { response: { error: 'Owned Studio installer did not finish' }, exitCode: 1, error: /installer did not finish.*broker shutdown failed.*broker exited 1/ },
+  { requestTimeout: true, error: /Timed out waiting for Studio worker broker/ },
+  { response: { drained: false }, error: /drain was not confirmed/ },
+  { response: { drained: true } },
+]) {
+  mock.timers.enable({ apis: ['setTimeout'] });
+  try {
+    const child = Object.assign(new EventEmitter(), {
+      stdin: new PassThrough(), stdout: new PassThrough(), stderr: new PassThrough(),
+      ref() {}, unref() {},
+    });
+    let drainRequests = 0;
+    let closed = false;
+    child.stdin.on('data', chunk => {
+      const request = JSON.parse(chunk.toString());
+      if (request.op === 'drain') drainRequests++;
+      if (request.op === 'drain' && scenario.requestTimeout) return;
+      const response = request.op === 'drain'
+        ? scenario.response
+        : { ready: true, name: request.name };
+      queueMicrotask(() => child.stdout.write(`${JSON.stringify(response)}\n`));
+    });
+    child.stdin.on('finish', () => {
+      closed = true;
+      child.emit('close', scenario.exitCode ?? 0);
+    });
+    const job = await createStudioWorkerJob({
+      env: {}, cwd: '.', toWindowsPath: value => value, spawnProcess: () => child,
+    });
+    const result = job.drain();
+    assert.equal(job.drain(), result, 'concurrent cleanup must share the same drain');
+    if (scenario.requestTimeout) mock.timers.tick(645000);
+    if (scenario.error) {
+      let failure;
+      await assert.rejects(result, error => {
+        failure = error;
+        return scenario.error.test(error.message);
+      });
+      await assert.rejects(job.drain(), error => error === failure);
+    } else {
+      await result;
+      await job.drain();
+    }
+    assert.equal(closed, true, 'drain must await broker exit on success and failure');
+    assert.equal(drainRequests, 1, 'a terminal drain result must not restart installer grace');
+  } finally {
+    mock.timers.reset();
+  }
+}
 
 const workerDirectory = 'C:\\fixture\\robloxstudio-mcp-workers\\auto-install-e2e-worker';
 const lockedFile = `${workerDirectory}\\managed-instances\\instance.json`;

@@ -1,11 +1,58 @@
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { collectStudioInstallDiagnostics } from '../scripts/studio-install-diagnostics.mjs';
+import { collectStudioInstallDiagnostics, collectStudioBitsDiagnostics } from '../scripts/studio-install-diagnostics.mjs';
 import { parseTestProfileArguments, runTestProfilePayload } from '../scripts/studio-test-profile.mjs';
 import { selectInstalledStudioExecutable } from '../scripts/studio-lifecycle.mjs';
 
+assert.deepEqual(collectStudioBitsDiagnostics({ platform: 'linux' }), { available: false, reason: 'Windows required' });
+const bits = collectStudioBitsDiagnostics({
+  platform: 'win32',
+  execute(command, args) {
+    assert.equal(command, 'powershell.exe');
+    const script = args.at(-1);
+    assert.doesNotMatch(script, /-AllUsers|(?:Resume|Suspend|Complete|Remove|Add|Set)-BitsTransfer/);
+    assert.match(script, /Get-BitsTransfer/);
+    assert.match(script, /GetCurrent/);
+    assert.match(script, /OwnerAccount/);
+    assert.match(script, /Select-Object -First 25/);
+    return '{"available":true,"totalJobs":1,"jobs":[{"state":"Suspended","bytesTransferred":"0","bytesTotal":"1024"}]}';
+  },
+});
+assert.equal(bits.jobs[0].state, 'Suspended');
+assert.deepEqual(collectStudioBitsDiagnostics({
+  platform: 'win32',
+  execute() { throw new Error('SECRET_BITS_URL'); },
+}), { available: false, reason: 'Current-account BITS query failed' });
+if (process.platform === 'win32') {
+  // Execute the actual PowerShell projection against fixture objects, never
+  // real transfers. Extra private fields must not escape the allowlist.
+  const projected = collectStudioBitsDiagnostics({
+    execute(command, args, options) {
+      const fixture = `
+        function Get-BitsTransfer {
+          1..30 | ForEach-Object {
+            [pscustomobject]@{
+              OwnerAccount = [Security.Principal.WindowsIdentity]::GetCurrent().Name
+              JobId = [guid]::Empty; JobState = 'TransientError'; Priority = 'Background'
+              BytesTransferred = 0; BytesTotal = 1024; FilesTransferred = 0; FilesTotal = 1
+              InternalErrorCode = -2147024891; ModificationTime = [datetime]::UtcNow
+              ErrorDescription = 'PRIVATE_ERROR_DESCRIPTION'; RemoteName = 'https://private.test/SECRET'
+            }
+          }
+        }
+      `;
+      return execFileSync(command, [...args.slice(0, -1), fixture + args.at(-1)], options);
+    },
+  });
+  assert.equal(projected.available, true);
+  assert.equal(projected.totalJobs, 30);
+  assert.equal(projected.jobs.length, 25);
+  assert.ok(projected.jobs.every(job => job.errorCode === -2147024891));
+  assert.doesNotMatch(JSON.stringify(projected), /PRIVATE_ERROR_DESCRIPTION|SECRET|private\.test/);
+}
 const root = mkdtempSync(path.join(tmpdir(), 'studio-install-diagnostics-'));
 try {
   const version = path.join(root, 'Roblox', 'Versions', 'version-aabb');
@@ -27,6 +74,17 @@ try {
   assert.match(JSON.stringify(report), /missing AppSettings.xml/);
   assert.doesNotMatch(JSON.stringify(report), /TOP_SECRET|SESSION_SECRET|URL_PRIVATE_VALUE/);
   assert.match(readFileSync(path.join(logs, 'Studio.log'), 'utf8'), /TOP_SECRET/, 'diagnosis never modifies source logs');
+  writeFileSync(path.join(logs, 'RobloxStudioInstaller_AB123.log'), [
+    ...Array.from({ length: 40 }, (_, index) => `[FLog::DesktopInstaller] Download progress ${index}`),
+    '[FLog::DesktopInstaller] Waiting for stage switch',
+    '[FLog::DesktopInstaller] Download https://example.test/private?value=INSTALLER_PRIVATE_VALUE',
+    '[FLog::DesktopInstaller] Authorization bearer INSTALLER_SECRET',
+  ].join('\n'));
+  const installerLog = collectStudioInstallDiagnostics(root).logs.find(log => log.name === 'RobloxStudioInstaller_AB123.log');
+  assert.equal(installerLog.indicators.length, 35, 'installer activity is bounded');
+  assert.ok(installerLog.indicators.includes('[FLog::DesktopInstaller] Waiting for stage switch'), 'diagnosis exposes stalled installer stages, not just errors');
+  assert.equal(installerLog.sensitiveLinesOmitted, 1);
+  assert.doesNotMatch(JSON.stringify(installerLog), /INSTALLER_SECRET|INSTALLER_PRIVATE_VALUE/);
   const versionsRoot = path.dirname(version);
   const older = path.join(versionsRoot, 'version-0011');
   mkdirSync(older);

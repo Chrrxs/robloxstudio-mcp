@@ -1,6 +1,32 @@
+import { execFileSync } from 'node:child_process';
 import { closeSync, existsSync, lstatSync, openSync, readdirSync, readSync } from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { windowsPowerShellEnvironment } from './studio-lifecycle.mjs';
+
+export function collectStudioBitsDiagnostics({ platform = process.platform, execute = execFileSync, env = process.env } = {}) {
+  if (platform !== 'win32') return { available: false, reason: 'Windows required' };
+  // Never enumerate another account's jobs or expose transfer URLs/credentials.
+  const script = [
+    "$ErrorActionPreference = 'Stop'",
+    '$sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value',
+    '$jobs = @(Get-BitsTransfer -ErrorAction Stop)',
+    '$result = @($jobs | Select-Object -First 25 | ForEach-Object {',
+    '  $owner = (New-Object Security.Principal.NTAccount($_.OwnerAccount)).Translate([Security.Principal.SecurityIdentifier]).Value',
+    '  if ($owner -ne $sid) { throw "Unexpected BITS owner" }',
+    '  [pscustomobject]@{ id = [string]$_.JobId; state = [string]$_.JobState; priority = [string]$_.Priority; bytesTransferred = [string]$_.BytesTransferred; bytesTotal = [string]$_.BytesTotal; filesTransferred = [string]$_.FilesTransferred; filesTotal = [string]$_.FilesTotal; errorCode = [int]$_.InternalErrorCode; modified = $_.ModificationTime.ToUniversalTime().ToString("o") }',
+    '})',
+    '[pscustomobject]@{ available = $true; totalJobs = $jobs.Count; jobs = $result } | ConvertTo-Json -Compress -Depth 4',
+  ].join('\n');
+  try {
+    return JSON.parse(execute('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], {
+      encoding: 'utf8', env: windowsPowerShellEnvironment(env), timeout: 15_000,
+      maxBuffer: 64 * 1024, stdio: ['ignore', 'pipe', 'pipe'],
+    }));
+  } catch {
+    return { available: false, reason: 'Current-account BITS query failed' };
+  }
+}
 
 function entries(directory) {
   if (!existsSync(directory)) return [];
@@ -58,7 +84,8 @@ export function collectStudioInstallDiagnostics(localAppData) {
       name: file.name,
       modified: new Date(file.modified).toISOString(),
       sensitiveLinesOmitted: lines.filter(line => /auth|cookie|token|password|ticket|secret|credential|api.?key/i.test(line)).length,
-      indicators: lines.filter(line => /error|exception|fail|missing|corrupt|appsettings|executable|contentprovider|version|channel|installer.*success|completed successfully/i.test(line))
+      indicators: lines.filter(line => /error|exception|fail|missing|corrupt|appsettings|executable|contentprovider|version|channel|installer.*success|completed successfully/i.test(line) ||
+          (/^RobloxStudioInstaller.*\.log$/i.test(file.name) && /\[FLog::DesktopInstaller\]/u.test(line)))
         .filter(line => !/auth|cookie|token|password|ticket|secret|credential|api.?key/i.test(line))
         .slice(-35).map(line => line.replace(/https?:\/\/\S+/gi, '<URL>').replace(/[A-Za-z0-9_+\/=\-]{80,}/g, '<REDACTED>').slice(0, 500)),
     };
@@ -68,5 +95,8 @@ export function collectStudioInstallDiagnostics(localAppData) {
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   if (process.argv.length !== 2) throw new Error('Installation diagnostics accept no commands or mutation options.');
-  console.log(JSON.stringify(collectStudioInstallDiagnostics(process.env.LOCALAPPDATA), null, 2));
+  console.log(JSON.stringify({
+    ...collectStudioInstallDiagnostics(process.env.LOCALAPPDATA),
+    backgroundTransfers: collectStudioBitsDiagnostics(),
+  }, null, 2));
 }
