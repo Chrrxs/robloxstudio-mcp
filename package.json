@@ -26,7 +26,7 @@
     "typecheck": "tsc --noEmit -p packages/core/tsconfig.json",
     "test": "npm test -w packages/core && npm run test:asset-security && npm run test:package-contents && npm run test:runner && npm run test:port-isolation",
     "test:asset-security": "jest --config jest.asset-security.config.js --runInBand",
-    "test:package-contents": "node tests/prepack-package-contents.mjs",
+    "test:package-contents": "node tests/prepack-package-contents.mjs && node tests/plugin-installer-cli.mjs",
     "test:runner": "node tests/mcp-http-client.mjs && node tests/mcp-client-output-parser.mjs && node tests/managed-studio-session.mjs && node tests/instance-routing.mjs && node tests/auto-install-run-process.mjs && node tests/studio-directory-isolation.mjs && node tests/studio-test-profile-launcher.mjs && node tests/studio-test-profile-credentials.mjs && node tests/studio-test-snapshot.mjs && node tests/wsl-process-identity-fixture.mjs && node tests/sequential-suite.mjs && node tests/studio-test-safety.mjs && node tests/studio-test-safety-processes.mjs && node tests/studio-launch-safety.mjs && node tests/release-runner.mjs && node tests/studio-install-diagnostics.mjs && node tests/studio-install-repair.mjs && node tests/studio-worker-cleanup.mjs && node tests/profiler-artifacts.mjs",
     "test:port-isolation": "node tests/test-port-allocation.mjs && node tests/test-port-wrapper-isolation.mjs && node tests/studio-test-lease.mjs",
     "test:codex-wrapper": "node tests/codex-wsl-environment.mjs",

@@ -55,3 +55,5 @@ export type {
   AssetVersionInfo,
   AssetVersionsResponse,
 } from './opencloud-client.js';
+export { createPluginInstaller } from './plugin-installer.js';
+export type { PluginInstallOptions } from './plugin-installer.js';
