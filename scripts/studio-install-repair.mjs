@@ -105,10 +105,11 @@ function logSnapshot(logsRoot) {
   return files;
 }
 
-export function readFreshInstallerEvidence(logsRoot, baseline, startedAt) {
+export function readFreshInstallerEvidence(logsRoot, baseline, startedAt, now = Date.now()) {
   let success = false;
   let failure = false;
   const paths = [];
+  const completed = [];
   for (const [file, current] of logSnapshot(logsRoot)) {
     const previous = baseline.get(file);
     if (previous && current.size === previous.size && current.modified === previous.modified) continue;
@@ -123,11 +124,21 @@ export function readFreshInstallerEvidence(logsRoot, baseline, startedAt) {
     let text;
     try { text = buffer.subarray(0, readSync(fd, buffer, 0, length, current.size - length)).toString('utf8'); }
     finally { closeSync(fd); }
+    if (current.size <= 512 * 1024) {
+      try {
+        const logName = path.basename(file);
+        validateStudioFinalizeLog(logName);
+        const receipt = parseCompletedInstallerLog(readFileSync(file, 'utf8'), now);
+        if (receipt.startedAt >= startedAt) completed.push({ logName, ...receipt });
+      } catch {
+        // Bootstrapper success, old receipts and partial logs are not completion.
+      }
+    }
     paths.push(file);
     success ||= SUCCESS.test(text);
     failure ||= FAILURE.test(text);
   }
-  return { success, failure, paths };
+  return { success, failure, paths, completed };
 }
 
 function samePath(left, right) {
@@ -336,7 +347,7 @@ export async function repairStudioInstallation(env = process.env, adapters = {},
       let success = false;
       while (now() < deadline) {
         if (child.failed()) throw new Error('Installer process could not continue.');
-        const fresh = evidence(logsRoot, baseline, startedAt);
+        const fresh = evidence(logsRoot, baseline, startedAt, now());
         for (const file of fresh.paths) paths.add(file);
         if (fresh.failure) throw new Error('Fresh installer log reports explicit failure.');
         success ||= fresh.success;
@@ -349,12 +360,21 @@ export async function repairStudioInstallation(env = process.env, adapters = {},
             return { executable, installer, logs: [...paths] };
           }
         }
+        const completed = fresh.completed?.[0];
+        if (completed) {
+          throw new Error(
+            `Completed installer ${completed.logName}, but installation validation is still blocked. ` +
+            'After owned Studio and installer processes close, inspect the diagnostics and use ' +
+            `npm run studio:test-repair -- --finalize-log ${completed.logName} ` +
+            'to verify and quarantine stale download markers without another download. No retry was attempted.',
+          );
+        }
         // Bootstrapper exit is not completion: its updater may still be running.
         await sleep(Math.min(POLL_MS, Math.max(0, deadline - now())));
       }
       throw new Error('Timed out after 10 minutes without fresh installer success AND a complete newest installation. No retry was attempted.');
     } catch (error) {
-      const known = /^(?:Dedicated account|Installer signature must|Fresh installer log|Timed out after|Installer process could|Repair finalization)/.test(error?.message ?? '');
+      const known = /^(?:Dedicated account|Installer signature must|Fresh installer log|Completed installer|Timed out after|Installer process could|Repair finalization)/.test(error?.message ?? '');
       throw new Error(`Studio repair failed during ${stage}: ${known ? error.message : 'native operation failed (details withheld to avoid exposing account data).' } Retained installer: ${installer ?? '(not downloaded)'}. Installer log directory: ${logsRoot}. Safety state was not reset.`);
     } finally {
       // Allow the containing WTI job to close residual UI only after our final

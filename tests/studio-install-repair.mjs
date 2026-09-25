@@ -154,6 +154,27 @@ for (const certificate of [{ status: 'NotSigned', signer: 'Roblox Corporation' }
   assert.equal(test.calls.starts, 1);
 }
 {
+  // A durable terminal receipt is not merely bootstrapper success: waiting
+  // cannot clear a stale marker, and only explicit finalization may move it.
+  const logName = 'RobloxStudioInstaller_ABC12.log';
+  const test = fixture({
+    evidence: () => ({
+      success: true, failure: false, paths: [path.win32.join(identity.localAppData, 'Roblox', 'logs', logName)],
+      completed: [{ logName, version: 'version-574ecee7ee2b4e60', startedAt: 1_000_000, completedAt: 1_000_000 }],
+    }),
+    installed: () => { test.calls.checks += 1; throw new Error('unfinished .crdownload fixture-secret'); },
+  });
+  await assert.rejects(test.run(), error => {
+    assert.match(error.message, /--finalize-log RobloxStudioInstaller_ABC12\.log/);
+    assert.doesNotMatch(error.message, /Timed out|fixture-secret/);
+    return true;
+  });
+  assert.ok(test.time() - 1_000_000 < 1000, 'durable completion with an incomplete installation must not consume the 600000ms timeout');
+  assert.equal(test.calls.checks, 1, 'do not repeatedly select a permanently incomplete installation');
+  assert.equal(test.calls.starts, 1);
+  assert.equal(test.calls.unrefs, 1);
+}
+{
   const test = fixture({ evidence: () => ({ success: true, failure: true, paths: ['failure.log'] }) });
   await assert.rejects(test.run(), /Fresh installer log reports explicit failure/);
   assert.equal(test.calls.starts, 1);
@@ -239,6 +260,48 @@ try {
   for (const marker of ['Installer thread completed with Failure "fixture-error"', 'Uncaught exception occurred']) {
     writeFileSync(old, `${marker}\n`);
     assert.equal(readFreshInstallerEvidence(logs, new Map(), 0).failure, true);
+  }
+
+  {
+    const logName = 'RobloxStudioInstaller_ABC12.log';
+    const records = completedLog.split('\n');
+    const expected = { logName, ...parseCompletedInstallerLog(completedLog, finalizeNow) };
+    for (const scenario of [
+      { name: 'terminal-receipt', files: [[logName, completedLog]], completed: [expected] },
+      { name: 'bootstrapper-only', files: [[logName, records.slice(0, 3).join('\n')]], completed: [] },
+      {
+        name: 'split-receipt',
+        files: [[logName, records.slice(0, 2).join('\n')], ['RobloxStudioInstaller_DEF34.log', records.slice(2).join('\n')]],
+        completed: [],
+      },
+      { name: 'old-run-fresh-file', files: [[logName, completedLog]], startedAt: finalizeStart + 30_000, completed: [] },
+      { name: 'expired-receipt', files: [[logName, completedLog]], now: finalizeNow + 3_600_000, completed: [] },
+      { name: 'unsafe-basename', files: [['RobloxStudioInstaller_secret-ticket.log', completedLog]], completed: [] },
+      { name: 'terminal-failure', files: [[logName, `${completedLog}\nReporting Installer Failure`]], completed: [] },
+    ]) {
+      const root = path.join(directory, scenario.name);
+      mkdirSync(root);
+      for (const [name, text] of scenario.files) writeFileSync(path.join(root, name), text);
+      const fresh = readFreshInstallerEvidence(root, new Map(), scenario.startedAt ?? finalizeStart, scenario.now ?? finalizeNow);
+      assert.deepEqual(fresh.completed, scenario.completed, `${scenario.name}: completion must belong to one safe, fresh, terminally successful log`);
+      assert.equal(JSON.stringify(fresh.completed).includes('secret-ticket'), false);
+    }
+
+    const root = path.join(directory, 'old-run-appended-log');
+    mkdirSync(root);
+    const file = path.join(root, logName);
+    writeFileSync(file, completedLog);
+    const previous = statSync(file);
+    const baseline = new Map([[file, {
+      size: previous.size, modified: previous.mtimeMs, created: previous.birthtimeMs, inode: previous.ino,
+    }]]);
+    assert.deepEqual(readFreshInstallerEvidence(root, baseline, finalizeStart + 30_000, finalizeNow).completed, [],
+      'unchanged baseline receipt is not evidence for this repair');
+    appendFileSync(file, '\nUnrelated progress, ticket=fixture-secret\n');
+    const fresh = readFreshInstallerEvidence(root, baseline, finalizeStart + 30_000, finalizeNow);
+    assert.equal(fresh.success, false);
+    assert.deepEqual(fresh.completed, [], 'new appended bytes cannot revive an old completed receipt');
+    assert.equal(JSON.stringify(fresh).includes('fixture-secret'), false);
   }
 
   // Exercise real maintenance admission with a blocked/pending/quota fixture.
