@@ -1524,6 +1524,8 @@ describe('Smoke', () => {
     };
 
     try {
+      // Measure this list call, not the independent five-second coordinator.
+      jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate'] });
       const manager = new StudioInstanceManager({ registryDir, processAdapter });
       for (let index = 0; index < 10; index += 1) {
         await manager.launch({ source: 'local_file', localPlaceFile: `/tmp/snapshot-${index}.rbxl` });
@@ -1533,6 +1535,8 @@ describe('Smoke', () => {
       expect(await manager.list()).toHaveLength(10);
       expect(snapshotCalls).toBe(1);
     } finally {
+      jest.clearAllTimers();
+      jest.useRealTimers();
       fs.rmSync(registryDir, { recursive: true, force: true });
     }
   });
