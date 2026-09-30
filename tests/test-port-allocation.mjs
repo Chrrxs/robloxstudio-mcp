@@ -60,22 +60,28 @@ try {
   await Promise.all([first.release(), second.release()]);
 }
 
-let windowsCheckCalls = 0;
-let windowsRejectedPort;
+// The first candidate is rejected on the Windows side only. The allocator must
+// retry and never hand out that port. Later candidates can also fail the real
+// local reservation (for example a port in a Windows excluded range on CI), so
+// assert what was handed out rather than an exact number of checks.
+const windowsChecks = [];
+let windowsOccupiedPort;
 const crossPlatformLease = await acquireSuitePort({
   env: {},
   windowsAvailabilityCheck(port) {
-    windowsCheckCalls += 1;
-    if (windowsCheckCalls === 1) {
-      windowsRejectedPort = port;
-      return false;
-    }
-    return true;
+    windowsOccupiedPort ??= port;
+    const available = port !== windowsOccupiedPort;
+    windowsChecks.push({ port, available });
+    return available;
   },
 });
 try {
-  assert.equal(windowsCheckCalls, 2, 'allocator retries a port occupied only on the Windows side');
-  assert.notEqual(crossPlatformLease.port, windowsRejectedPort);
+  const [rejected] = windowsChecks;
+  assert.ok(windowsChecks.length >= 2, 'allocator retries a port occupied only on the Windows side');
+  assert.equal(rejected.available, false);
+  assert.notEqual(crossPlatformLease.port, rejected.port, 'a Windows-occupied port is never leased');
+  assert.deepEqual(windowsChecks.at(-1), { port: crossPlatformLease.port, available: true },
+    'the leased port is the last one the Windows side approved');
 } finally {
   await crossPlatformLease.release();
 }
