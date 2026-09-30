@@ -106,7 +106,13 @@ await runTest('Screenshot beta and legacy regressions', async ({ track }) => {
   const instance = topology.instances.find(item => item.id === instanceId);
   assert.ok(instance?.peers.edit);
   assert.ok(!instance.peers.server && !instance.peers['client-1'], 'Start with an idle Studio');
-  const simulator = await tool('get_device_simulator_state', { target: 'edit' });
+  let simulator = await tool('get_device_simulator_state', { target: 'edit' });
+  if (simulator.isSimulating) {
+    // Simulator state persists across launches in the dedicated profile, so an
+    // interrupted earlier run can leave it on. Normalize it, then verify.
+    await tool('set_device_simulator', { target: 'edit', stopSimulation: true });
+    simulator = await tool('get_device_simulator_state', { target: 'edit' });
+  }
   assert.equal(simulator.isSimulating, false, 'Start with device simulation off');
   const capability = await execute("return {can=game:GetService('StudioCaptureService'):CanCaptureScreenshot()}");
   assert.equal(capability.can, enabled, 'Studio must be restarted with the expected beta flag');
@@ -114,6 +120,7 @@ await runTest('Screenshot beta and legacy regressions', async ({ track }) => {
   if (enabled) assert.equal(endpoint.source, 'StudioCaptureService');
   else assert.ok(endpoint.unavailable, JSON.stringify(endpoint));
   let playing = false;
+  let bodyCompleted = false;
   try {
     await capture('png');
     const low = await capture('jpeg', 20), high = await capture('jpeg', 90);
@@ -250,9 +257,18 @@ game:GetService('RunService').RenderStepped:Wait();game:GetService('RunService')
     const stillAlive = await execute("return game:GetService('Players').LocalPlayer.Parent == game:GetService('Players')", 'client-1');
     assert.equal(stillAlive, true, 'Large JPEG responses must not disconnect the client');
     console.log(`4K play JPEGs${enabled ? ' and concurrent 1440p transfers' : ''} passed; client remains connected`);
+    bodyCompleted = true;
   } finally {
-    if (playing) await tool('solo_playtest', { action: 'stop' });
-    await tool('set_device_simulator', { target: 'edit', stopSimulation: true });
+    // Each restoration runs even if an earlier one fails; report them all.
+    const failures = [];
+    if (playing) await tool('solo_playtest', { action: 'stop' }).catch((error) => failures.push(error));
+    await tool('set_device_simulator', { target: 'edit', stopSimulation: true }).catch((error) => failures.push(error));
+    if (failures.length) {
+      const message = `Capture regression cleanup failed: ${failures.map((error) => error.message).join('; ')}`;
+      // Never mask the original failure; fail a passing body on unrestored state.
+      if (bodyCompleted) throw new AggregateError(failures, message);
+      console.error(message);
+    }
   }
   await capture('png');
   console.log('Post-play edit capture passed');

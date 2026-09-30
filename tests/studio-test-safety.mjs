@@ -459,6 +459,32 @@ try {
     await active;
   }
 
+  {
+    // In-run preflight (the pre-launch Studio update) requires a live, healthy
+    // run held by another process's lease; it never acquires or changes state.
+    const { root, create } = fixture();
+    assert.throws(() => create().assertStudioTestRunActive(), blocked('run_inactive'));
+    const entered = Promise.withResolvers();
+    const finish = Promise.withResolvers();
+    const active = create().withStudioTestRun(async () => { entered.resolve(); await finish.promise; return 0; });
+    await entered.promise;
+    const during = readFileSync(join(root, 'state.json'), 'utf8');
+    create().assertStudioTestRunActive();
+    assert.equal(readFileSync(join(root, 'state.json'), 'utf8'), during, 'the assertion is read-only');
+    const pending = Promise.withResolvers();
+    const release = Promise.withResolvers();
+    const launch = create().withStudioTestLaunch(1, async () => { pending.resolve(); await release.promise; return ok; });
+    await pending.promise;
+    assert.throws(() => create().assertStudioTestRunActive(), blocked('pending_launch'));
+    release.resolve();
+    await launch;
+    finish.resolve();
+    await active;
+    assert.throws(() => create().assertStudioTestRunActive(), blocked('run_inactive'));
+    assert.equal(await create().withStudioTestRun(async () => 1), 1);
+    assert.throws(() => create().assertStudioTestRunActive(), blocked('run_failed'));
+  }
+
   assert.deepEqual(readdirSync(profile), ['sentinel']);
   assert.equal(readFileSync(join(profile, 'sentinel'), 'utf8'), 'untouched');
   console.log('Studio test safety offline regressions passed');

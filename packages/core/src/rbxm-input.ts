@@ -101,11 +101,15 @@ export async function readRbxmInput(
     }
     return { bytes: await readBoundedResponse(response, limit), sourceLabel: source.url };
   }
-  const encoded = source.base64!;
   const limit = rbxmInputByteLimit(parentPath, 'base64(9999999999B)');
-  // Check encoded length before validation or allocation. Padding is optional,
-  // but reject malformed input that Buffer.from would silently truncate.
-  if (encoded.length > 4 * Math.ceil(limit / 3)) throw tooLarge(limit);
+  const maxEncoded = 4 * Math.ceil(limit / 3);
+  // Check encoded length before validation or allocation. Wrapped encoder
+  // output (`base64` wraps at 76 columns, PEM at 64) adds at most one CRLF per
+  // 64 characters; strip that whitespace, then apply the exact bound. Padding
+  // is optional, but reject malformed input that Buffer.from would truncate.
+  if (source.base64!.length > maxEncoded + 2 * Math.ceil(maxEncoded / 64)) throw tooLarge(limit);
+  const encoded = source.base64!.replace(/[\t\n\r ]+/g, '');
+  if (encoded.length > maxEncoded) throw tooLarge(limit);
   if (encoded.length % 4 === 1 || !/^[A-Za-z0-9+/]*={0,2}$/.test(encoded)
     || (encoded.includes('=') && encoded.length % 4 !== 0)) {
     throw new Error('RBXM base64 must be valid base64.');

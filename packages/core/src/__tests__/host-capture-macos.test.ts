@@ -1,6 +1,8 @@
 import * as fs from 'fs';
 import * as path from 'path';
-import { captureMacStudioWindow, parseMacCaptureReport, runBoundedCaptureProcess } from '../host-capture-macos.js';
+import {
+  MISSING_SWIFT_TOOLCHAIN, assertSwiftToolchain, captureMacStudioWindow, parseMacCaptureReport, runBoundedCaptureProcess,
+} from '../host-capture-macos.js';
 
 const identity = { windowId: 42, processId: 123, bundleIdentifier: 'com.Roblox.RobloxStudio' };
 const report = { ok: true, width: 2, height: 2, title: 'Place - Roblox Studio', identity };
@@ -87,5 +89,37 @@ describe('bounded macOS helper process runner (no Studio access)', () => {
 
   it('reports failed starts', async () => {
     await expect(runBoundedCaptureProcess('/does/not/exist/mcp-capture', [], 2000)).rejects.toThrow();
+  });
+});
+
+describe('Swift toolchain preflight (never invokes the xcrun install shim)', () => {
+  const clt = '/Library/Developer/CommandLineTools';
+  const xcode = '/Applications/Xcode.app/Contents/Developer';
+
+  it('fails without prompting when no developer directory is selected', async () => {
+    const select = jest.fn(async () => { throw new Error('xcode-select: error: unable to get active developer directory'); });
+    await expect(assertSwiftToolchain({}, select, () => true)).rejects.toThrow(MISSING_SWIFT_TOOLCHAIN);
+    expect(select).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([['', true], [clt, false], ['relative/dir', true]] as const)(
+    'rejects a missing compiler for selected directory %j',
+    async (selected, present) => {
+      await expect(assertSwiftToolchain({}, async () => `${selected}\n`, () => present)).rejects.toThrow(MISSING_SWIFT_TOOLCHAIN);
+    },
+  );
+
+  it.each([
+    [clt, path.join(clt, 'usr', 'bin', 'swiftc')],
+    [xcode, path.join(xcode, 'Toolchains', 'XcodeDefault.xctoolchain', 'usr', 'bin', 'swiftc')],
+  ])('accepts the compiler under %s', async (selected, compiler) => {
+    await expect(assertSwiftToolchain({}, async () => `${selected}\n`, (file) => file === compiler)).resolves.toBeUndefined();
+  });
+
+  it('honors DEVELOPER_DIR like xcrun without consulting xcode-select', async () => {
+    const select = jest.fn(async () => clt);
+    const compiler = path.join(xcode, 'usr', 'bin', 'swiftc');
+    await expect(assertSwiftToolchain({ DEVELOPER_DIR: xcode }, select, (file) => file === compiler)).resolves.toBeUndefined();
+    expect(select).not.toHaveBeenCalled();
   });
 });

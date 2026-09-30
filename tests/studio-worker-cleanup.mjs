@@ -7,7 +7,7 @@ import { mock } from 'node:test';
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { createStudioWorkerCleanup } from '../scripts/studio-lifecycle.mjs';
+import { createStudioWorkerCleanup, settleStudioSignIns } from '../scripts/studio-lifecycle.mjs';
 import { requireStudioWorkerCapability, createAutoInstallCleanupError } from './auto-install-plugin-e2e.mjs';
 import { createStudioWorkerJob } from '../scripts/studio-worker-job.mjs';
 
@@ -18,9 +18,20 @@ for (const scenario of [
   { response: { error: 'Owned Studio installer did not finish' }, exitCode: 1, error: /installer did not finish.*broker shutdown failed.*broker exited 1/ },
   { requestTimeout: true, error: /Timed out waiting for Studio worker broker/ },
   { response: { drained: false }, error: /drain was not confirmed/ },
-  { response: { drained: true } },
+  { response: { drained: true }, reported: [] },
+  // A BITS-blocked Studio self-update is terminated and reported, not a cleanup failure.
+  {
+    response: { drained: true, deferredUpdate: true, removedDownloads: 18 },
+    reported: [/background \(BITS\) downloads cannot run.*removed 18 stalled download\(s\)\. The next profile run updates Studio/],
+  },
+  {
+    response: { drained: true, deferredUpdate: true, removedDownloads: 0, downloadCleanupError: 'Access denied' },
+    reported: [/removed 0 stalled download\(s\) \(download cleanup failed: Access denied\)/],
+  },
 ]) {
   mock.timers.enable({ apis: ['setTimeout'] });
+  const reported = [];
+  const write = mock.method(process.stderr, 'write', (text) => { reported.push(String(text)); return true; });
   try {
     const child = Object.assign(new EventEmitter(), {
       stdin: new PassThrough(), stdout: new PassThrough(), stderr: new PassThrough(),
@@ -60,7 +71,12 @@ for (const scenario of [
     }
     assert.equal(closed, true, 'drain must await broker exit on success and failure');
     assert.equal(drainRequests, 1, 'a terminal drain result must not restart installer grace');
+    if (scenario.reported) {
+      assert.equal(reported.length, scenario.reported.length, reported.join(''));
+      scenario.reported.forEach((pattern, index) => assert.match(reported[index], pattern));
+    }
   } finally {
+    write.mock.restore();
     mock.timers.reset();
   }
 }
@@ -176,6 +192,22 @@ for (const status of [{}, { test_worker_job_name: 'another-worker' }]) {
     assert.ok(aggregate.stack.includes('instance.json'));
     assert.ok(aggregate.stack.includes('auto-install-e2e-worker'));
   }
+}
+
+{
+  // Worker cleanup waits for sign-ins (never for Studios that never started)
+  // and a failed log check never blocks cleanup.
+  const calls = [];
+  assert.equal(await settleStudioSignIns('C:\\logs', 123, async (options) => { calls.push(options); return 'success'; }), 'success');
+  assert.deepEqual(calls, [{ logsRoot: 'C:\\logs', since: 123, appearMs: 0, timeoutMs: 60_000 }]);
+  const reported = [];
+  const write = mock.method(process.stderr, 'write', (text) => { reported.push(String(text)); return true; });
+  try {
+    assert.equal(await settleStudioSignIns('C:\\logs', 0, async () => 'timeout'), 'timeout');
+    assert.equal(await settleStudioSignIns('C:\\logs', 0, async () => { throw new Error('logs unreadable'); }), 'unknown');
+  } finally { write.mock.restore(); }
+  assert.match(reported[0], /still signing in after 60 s/);
+  assert.match(reported[1], /logs unreadable/);
 }
 
 const root = mkdtempSync(path.join(tmpdir(), 'studio-worker-cleanup-'));

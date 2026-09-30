@@ -321,6 +321,18 @@ export function createStudioTestSafety({ root, now = Date.now, sleep = delay, on
     }
   }
 
+  // In-run preflight (e.g. a pre-launch Studio update) runs in a child of the
+  // process holding the run lease, so it cannot take maintenance leases
+  // itself. Require that live, healthy run instead; launches it makes still
+  // go through launch admission.
+  function assertRunActive() {
+    prepare();
+    const state = load(now());
+    if (state.blocked) fail(state.blocked);
+    if (!locked(runTarget) || state.run === null) fail('run_inactive');
+    if (state.pending !== null) fail('pending_launch');
+  }
+
   async function reset(reason) {
     if (typeof reason !== 'string' || !reason.trim()) fail('reset_reason_required');
     let runLease;
@@ -350,7 +362,7 @@ export function createStudioTestSafety({ root, now = Date.now, sleep = delay, on
     return cost === 0 ? operation() : withLaunch(cost, operation);
   }
 
-  return { withStudioTestRun: withRun, withStudioTestLaunch: withLaunch, withStudioTestToolLaunch: withToolLaunch, withStudioTestMaintenance: withMaintenance, resetStudioTestSafety: reset };
+  return { withStudioTestRun: withRun, withStudioTestLaunch: withLaunch, withStudioTestToolLaunch: withToolLaunch, withStudioTestMaintenance: withMaintenance, resetStudioTestSafety: reset, assertStudioTestRunActive: assertRunActive };
 }
 
 function configured(env) {
@@ -376,4 +388,8 @@ export function resetStudioTestSafety(env, reason) {
 
 export function withStudioTestMaintenance(env, operation) {
   return configured(env).withStudioTestMaintenance(operation);
+}
+
+export function assertStudioTestRunActive(env) {
+  return configured(env).assertStudioTestRunActive();
 }

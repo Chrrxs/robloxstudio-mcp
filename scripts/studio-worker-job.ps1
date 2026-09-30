@@ -5,9 +5,40 @@ $utf8 = New-Object System.Text.UTF8Encoding($false)
 [Console]::OutputEncoding = $utf8
 $OutputEncoding = $utf8
 Add-Type -Path (Join-Path $PSScriptRoot 'studio-worker-job.cs')
+# BITS runs jobs only for owners with an interactive logon; the dedicated test
+# account runs through secondary logon, so an installer's BITS downloads never
+# start. Stalled means every download created during this worker's lifetime is
+# in a waiting state without transferred bytes; any progress or live transfer
+# (for example when the account is also signed in interactively) is healthy.
+$StalledDownloadStates = @('Suspended', 'Queued', 'TransientError', 'Error')
+function Get-StalledStudioDownloads([object[]]$Jobs, [DateTime]$SinceUtc) {
+    $recent = @($Jobs | Where-Object { $null -ne $_ -and $_.CreationTime.ToUniversalTime() -ge $SinceUtc })
+    if ($recent.Count -eq 0) { return @() }
+    foreach ($download in $recent) {
+        $bytes = [UInt64]$download.BytesTransferred
+        if ($StalledDownloadStates -notcontains [string]$download.JobState -or ($bytes -ne 0 -and $bytes -ne [UInt64]::MaxValue)) { return @() }
+    }
+    return $recent
+}
 if ($Mode -eq 'Library') { return }
 $job = $null
 $eof = $false
+$brokerStartedUtc = [DateTime]::UtcNow
+$installerNames = [string[]]@('RobloxStudioInstaller.exe', 'RobloxPlayerInstaller.exe')
+$updateBlocked = [Func[bool]]{ @(Get-StalledStudioDownloads -Jobs @(Get-BitsTransfer -ErrorAction Stop) -SinceUtc $brokerStartedUtc).Count -gt 0 }
+function Invoke-WorkerDrain {
+    $deferred = $job.Drain(600000, 30000, $installerNames, $updateBlocked, 60000)
+    if (-not $deferred) { return @{ drained = $true } }
+    # The installer is terminated; remove only its stalled downloads so they
+    # cannot accumulate toward the account's BITS job quota.
+    try {
+        $stalled = @(Get-StalledStudioDownloads -Jobs @(Get-BitsTransfer -ErrorAction Stop) -SinceUtc $brokerStartedUtc)
+        foreach ($download in $stalled) { Remove-BitsTransfer -BitsJob $download -ErrorAction Stop }
+        return @{ drained = $true; deferredUpdate = $true; removedDownloads = $stalled.Count }
+    } catch {
+        return @{ drained = $true; deferredUpdate = $true; removedDownloads = 0; downloadCleanupError = $_.Exception.Message }
+    }
+}
 function Write-WorkerResponse($value) {
     [Console]::Out.WriteLine((ConvertTo-Json -InputObject $value -Compress -Depth 8))
     [Console]::Out.Flush()
@@ -33,8 +64,7 @@ try {
                 $request = ConvertFrom-Json -InputObject $line
                 if ($request.op -ne 'drain') { throw 'Unknown Studio worker operation' }
                 $drainAttempted = $true
-                $job.Drain(600000, 30000, [string[]]@('RobloxStudioInstaller.exe', 'RobloxPlayerInstaller.exe'))
-                Write-WorkerResponse @{ drained = $true }
+                Write-WorkerResponse (Invoke-WorkerDrain)
                 break
             } catch {
                 # Keep the ownership handle while the caller decides how to report/abort.
@@ -46,7 +76,7 @@ try {
         # failed explicit drain or extend its already-consumed grace budget.
         if (-not $drainAttempted) {
             $eof = $true
-            $job.Drain(600000, 30000, [string[]]@('RobloxStudioInstaller.exe', 'RobloxPlayerInstaller.exe'))
+            $null = Invoke-WorkerDrain
         }
     }
 } catch {

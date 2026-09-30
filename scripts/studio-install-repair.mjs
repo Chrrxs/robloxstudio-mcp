@@ -1,14 +1,17 @@
 #!/usr/bin/env node
 import { execFileSync, spawn } from 'node:child_process';
 import { once } from 'node:events';
-import { closeSync, createWriteStream, lstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, readSync, realpathSync, renameSync } from 'node:fs';
+import { closeSync, createWriteStream, lstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, readSync, realpathSync, renameSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { setTimeout as delay } from 'node:timers/promises';
 import { pathToFileURL } from 'node:url';
-import { assertStudioTestProfile, selectInstalledStudioExecutable } from './studio-lifecycle.mjs';
-import { withStudioTestMaintenance } from './studio-test-safety.mjs';
+import { assertStudioTestProfile, selectInstalledStudioExecutable, workerJobOptions } from './studio-lifecycle.mjs';
+import { prefetchStudioPackages, resolveStudioTargetVersion } from './studio-package-cache.mjs';
+import { waitForStudioSignIn } from './studio-sign-in.mjs';
+import { assertStudioTestRunActive, withStudioTestLaunch, withStudioTestMaintenance } from './studio-test-safety.mjs';
+import { createStudioWorkerJob, launchInStudioWorkerJob } from './studio-worker-job.mjs';
 
 export const STUDIO_INSTALLER_URL = 'https://setup.rbxcdn.com/RobloxStudioInstaller.exe';
 const INSTALL_TIMEOUT_MS = 10 * 60 * 1000;
@@ -33,6 +36,7 @@ export function validateStudioFinalizeLog(name) {
 
 export function parseStudioRepairArguments(argv) {
   if (argv.length === 0) return {};
+  if (argv.length === 1 && argv[0] === '--if-outdated') return { ifOutdated: true };
   if (argv.length !== 2 || !['--channel', '--finalize-log'].includes(argv[0]) || argv[1] === undefined) {
     throw new Error('Installation repair accepts only --channel name OR --finalize-log basename; no commands or installer arguments.');
   }
@@ -129,7 +133,10 @@ export function readFreshInstallerEvidence(logsRoot, baseline, startedAt, now = 
         const logName = path.basename(file);
         validateStudioFinalizeLog(logName);
         const receipt = parseCompletedInstallerLog(readFileSync(file, 'utf8'), now);
-        if (receipt.startedAt >= startedAt) completed.push({ logName, ...receipt });
+        // Installer timestamps are the process start truncated to the whole
+        // second plus an offset, so a receipt for this dispatch can appear to
+        // start up to one second before the supervisor's own clock reading.
+        if (receipt.startedAt >= Math.floor(startedAt / 1000) * 1000) completed.push({ logName, ...receipt });
       } catch {
         // Bootstrapper success, old receipts and partial logs are not completion.
       }
@@ -165,7 +172,9 @@ function unchangedRepairFile(before, after) {
     before.mtimeMs === after.mtimeMs && before.ctimeMs === after.ctimeMs && before.birthtimeMs === after.birthtimeMs;
 }
 
-export function parseCompletedInstallerLog(text, now) {
+// Structural facts only (counts and timestamps), never log content, so the
+// read-only diagnostics can explain why a receipt is or is not a completion.
+export function installerReceiptFacts(text) {
   const records = text.split(/\r?\n/u).flatMap(line => {
     const match = /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z),.*\[FLog::DesktopInstaller\] (.*)$/u.exec(line);
     return match ? [{ time: Date.parse(match[1]), message: match[2] }] : [];
@@ -174,15 +183,24 @@ export function parseCompletedInstallerLog(text, now) {
     const match = /^Current version: \d+(?:\.\d+){3} and version GUID: (version-[a-f0-9]{16})$/u.exec(record.message);
     return match ? [match[1]] : [];
   });
-  const currentVersionLines = records.filter(record => record.message.startsWith('Current version:'));
-  const successes = records.filter(record => record.message === 'Reporting Installer Success');
-  const completions = records.filter(record => record.message === 'Installer thread completed successfully');
+  return {
+    records,
+    versions,
+    currentVersionLines: records.filter(record => record.message.startsWith('Current version:')).length,
+    successes: records.filter(record => record.message === 'Reporting Installer Success').map(record => record.time),
+    completions: records.filter(record => record.message === 'Installer thread completed successfully').map(record => record.time),
+    terminalFailure: FAILURE.test(text),
+  };
+}
+
+export function parseCompletedInstallerLog(text, now) {
+  const { records, versions, currentVersionLines, successes, completions, terminalFailure } = installerReceiptFacts(text);
   const startedAt = records[0]?.time;
-  const completedAt = completions[0]?.time;
-  if (versions.length !== 1 || currentVersionLines.length !== 1 || successes.length !== 1 || completions.length !== 1 ||
+  const completedAt = completions[0];
+  if (versions.length !== 1 || currentVersionLines !== 1 || successes.length !== 1 || completions.length !== 1 ||
       !Number.isFinite(startedAt) || !Number.isFinite(completedAt) ||
-      startedAt > successes[0].time || successes[0].time > completedAt ||
-      completedAt > now || now - startedAt >= 60 * 60 * 1000 || FAILURE.test(text)) {
+      startedAt > successes[0] || successes[0] > completedAt ||
+      completedAt > now || now - startedAt >= 60 * 60 * 1000 || terminalFailure) {
     throw new Error('Repair finalization requires one recent completed successful installer log with one target version and no terminal failure.');
   }
   return { version: versions[0], startedAt, completedAt };
@@ -295,6 +313,8 @@ export async function repairStudioInstallation(env = process.env, adapters = {},
     prepare = prepareDownload, download = downloadInstaller, verifySignature = signature,
     snapshot = logSnapshot, evidence = readFreshInstallerEvidence,
     start = startInstaller, spawnProcess = spawn, installed = selectInstalledStudioExecutable,
+    resolveTarget = resolveStudioTargetVersion, prefetch = prefetchStudioPackages,
+    waitSignIn = waitForStudioSignIn,
     now = Date.now, sleep = delay, log = console.log,
   } = adapters;
   if (platform !== 'win32') throw new Error('Studio installation repair requires native Windows under the dedicated profile supervisor.');
@@ -310,6 +330,7 @@ export async function repairStudioInstallation(env = process.env, adapters = {},
   return maintenance(env, async () => {
     let installer;
     let child;
+    let dispatchedAt;
     const logsRoot = path.win32.join(identity.localAppData, 'Roblox', 'logs');
     const versionsRoot = path.win32.join(identity.localAppData, 'Roblox', 'Versions');
     const paths = new Set();
@@ -327,6 +348,16 @@ export async function repairStudioInstallation(env = process.env, adapters = {},
         log(`STUDIO REPAIR FINALIZED: completed installation verified; ${result.quarantined} stale marker(s) preserved in ${result.quarantine}. No installer or Studio was launched. Safety state is unchanged.`);
         return result;
       }
+      if (channel === undefined) {
+        // The installer's own package downloads use BITS, which never runs for
+        // this secondary-logon account. Fill its cache so it needs none.
+        stage = 'package prefetch';
+        const target = await resolveTarget();
+        const cache = await prefetch({ localAppData: identity.localAppData, version: target.version, log });
+        log(`Studio ${target.version} packages are cached (${cache.downloaded} of ${cache.packages} downloaded); the installer needs no background downloads.`);
+      } else {
+        log(`Channel ${channel} packages cannot be prefetched without authentication; if its installer needs background (BITS) downloads it cannot finish under this account.`);
+      }
       stage = 'download';
       installer = prepare(temp);
       await download(installer);
@@ -342,6 +373,7 @@ export async function repairStudioInstallation(env = process.env, adapters = {},
       const deadline = startedAt + INSTALL_TIMEOUT_MS;
       stage = 'installer dispatch';
       log(`STUDIO REPAIR READY: verified Roblox Corporation installer; dispatching ONCE ${channel === undefined ? 'with no switches' : 'with the explicitly requested channel'}. UI may appear; waiting up to 10 minutes for durable installation completion. Do not stop the supervisor early.`);
+      dispatchedAt = now();
       child = await start(installer, env, installerArgs, spawnProcess);
       stage = 'installation completion';
       let success = false;
@@ -362,21 +394,33 @@ export async function repairStudioInstallation(env = process.env, adapters = {},
         }
         const completed = fresh.completed?.[0];
         if (completed) {
-          throw new Error(
+          throw Object.assign(new Error(
             `Completed installer ${completed.logName}, but installation validation is still blocked. ` +
             'After owned Studio and installer processes close, inspect the diagnostics and use ' +
             `npm run studio:test-repair -- --finalize-log ${completed.logName} ` +
             'to verify and quarantine stale download markers without another download. No retry was attempted.',
-          );
+          ), { completedLog: completed.logName });
         }
         // Bootstrapper exit is not completion: its updater may still be running.
         await sleep(Math.min(POLL_MS, Math.max(0, deadline - now())));
       }
       throw new Error('Timed out after 10 minutes without fresh installer success AND a complete newest installation. No retry was attempted.');
     } catch (error) {
-      const known = /^(?:Dedicated account|Installer signature must|Fresh installer log|Completed installer|Timed out after|Installer process could|Repair finalization)/.test(error?.message ?? '');
-      throw new Error(`Studio repair failed during ${stage}: ${known ? error.message : 'native operation failed (details withheld to avoid exposing account data).' } Retained installer: ${installer ?? '(not downloaded)'}. Installer log directory: ${logsRoot}. Safety state was not reset.`);
+      const known = /^(?:Dedicated account|Installer signature must|Fresh installer log|Completed installer|Timed out after|Installer process could|Repair finalization|Studio package|Studio version lookup)/.test(error?.message ?? '');
+      throw Object.assign(
+        new Error(`Studio repair failed during ${stage}: ${known ? error.message : 'native operation failed (details withheld to avoid exposing account data).' } Retained installer: ${installer ?? '(not downloaded)'}. Installer log directory: ${logsRoot}. Safety state was not reset.`),
+        // A validated basename only; automated updates may finalize this exact log.
+        typeof error?.completedLog === 'string' ? { completedLog: validateStudioFinalizeLog(error.completedLog) } : {},
+      );
     } finally {
+      // The installer opens Studio when it finishes, and containment ends that
+      // Studio after this verdict. Ending it during its automatic Roblox sign-in
+      // deletes the account's stored sign-in, so let sign-in settle first.
+      if (dispatchedAt !== undefined) {
+        const signIn = await waitSignIn({ logsRoot, since: dispatchedAt, now, sleep });
+        if (signIn === 'failure') log('Studio opened by the installer could not sign in automatically. A person must sign in to Roblox Studio once under the dedicated account before live tests can run.');
+        else if (signIn === 'timeout') log('Studio opened by the installer did not finish signing in within 2 minutes.');
+      }
       // Allow the containing WTI job to close residual UI only after our final
       // verdict. On timeout/failure this also permits outer job cleanup to run.
       child?.unref();
@@ -384,9 +428,121 @@ export async function repairStudioInstallation(env = process.env, adapters = {},
   });
 }
 
+function readUpdateRecord(file) {
+  try {
+    const value = JSON.parse(readFileSync(file, 'utf8'));
+    return value && typeof value.target === 'string' ? value : undefined;
+  } catch { return undefined; }
+}
+
+function writeUpdateRecord(file, value) {
+  mkdirSync(path.dirname(file), { recursive: true });
+  const temporary = `${file}.${process.pid}.tmp`;
+  writeFileSync(temporary, JSON.stringify(value));
+  renameSync(temporary, file);
+}
+
+// Studio's own updater cannot finish under this account: its BITS downloads
+// never start for a secondary-logon owner. Bring the installation to the
+// production version before any test launch so Studio has nothing to update.
+// Runs as a preflight inside the profile run lease (held by the parent), and
+// the installer dispatch — which opens Studio when it finishes — is admitted
+// as one launch. The installer runs in a worker job, so that Studio is closed
+// with the job rather than joining the test run. An update that cannot
+// complete leaves the installed version in place and does not fail the run.
+export async function updateStudioInstallation(env = process.env, adapters = {}) {
+  const {
+    platform = process.platform, assertProfile = assertStudioTestProfile,
+    assertRunActive = assertStudioTestRunActive, admitLaunch = withStudioTestLaunch,
+    resolveTarget = resolveStudioTargetVersion, installed = selectInstalledStudioExecutable,
+    repair = repairStudioInstallation, createJob = createStudioWorkerJob, launch = launchInStudioWorkerJob,
+    jobOptions = workerJobOptions, log = console.log, now = Date.now,
+    finalize = finalizeStudioRepair, processes = accountProcesses,
+  } = adapters;
+  if (platform !== 'win32') throw new Error('Studio update requires native Windows under the dedicated profile supervisor.');
+  const identity = assertProfile();
+  assertRunActive(env);
+  const versionsRoot = path.win32.join(identity.localAppData, 'Roblox', 'Versions');
+  const recordFile = path.join(identity.localAppData, 'robloxstudio-mcp', 'studio-update-attempt.json');
+  const installedVersion = () => {
+    try { return path.win32.basename(path.win32.dirname(installed(versionsRoot))); }
+    catch { return undefined; }
+  };
+  let target;
+  try { target = await resolveTarget(); }
+  catch (error) {
+    log(`Studio update check skipped (${error.message}); continuing with the installed version.`);
+    return { updated: false, reason: 'target-unavailable' };
+  }
+  const before = installedVersion();
+  if (before === target.version) return { updated: false, version: before };
+  const previous = readUpdateRecord(recordFile);
+  if (before !== undefined && previous?.target === target.version && previous.installed === before) {
+    // The official installer chose another version for this account (for
+    // example a different enrolled channel). Do not repeat it every run.
+    log(`Studio update to ${target.version} already produced ${before} for this account; not repeating it.`);
+    return { updated: false, version: before, reason: 'previous-attempt' };
+  }
+  log(`STUDIO UPDATE: installed ${before ?? '(no complete installation)'}; production is ${target.version}. Updating once before any test launch.`);
+  const worker = await createJob(jobOptions(env));
+  let failure;
+  try {
+    // repairStudioInstallation waits for the installer's Studio to finish
+    // signing in before returning, so the drain below cannot interrupt it.
+    await repair(env, {
+      resolveTarget: async () => target, log,
+      // The parent's run lease already excludes other runs and maintenance.
+      maintenance: async (_env, operation) => { assertRunActive(env); return operation(); },
+      start: async (installer, childEnv, args) => {
+        const options = jobOptions(childEnv);
+        await admitLaunch(env, 1, async () => ({
+          pid: await launch(installer, args, path.win32.dirname(installer), { ...options, env: { ...options.env, ...worker.environment } }),
+        }));
+        return { failed: () => false, unref: () => {} };
+      },
+    });
+  } catch (error) {
+    failure = error;
+  }
+  // Unknown ownership of installer/Studio processes is never ignored.
+  await worker.drain();
+  if (typeof failure?.completedLog === 'string') {
+    // This update's installer completed, but an earlier interrupted attempt
+    // (such as Studio's own BITS-blocked updater, stopped at worker cleanup)
+    // left zero-byte download markers in the version folder. Finalize exactly
+    // this verified log: only regular zero-byte markers older than its start
+    // are quarantined, and moves roll back unless the target is then selected.
+    try {
+      const result = await finalize({
+        localAppData: identity.localAppData, logName: failure.completedLog, now, env, installed,
+        safetyRoot: path.win32.join(identity.localAppData, 'robloxstudio-mcp', 'test-safety'),
+        assertIdle: async () => {
+          assertRunActive(env);
+          if ((await processes(env, identity.sid)).length) throw new Error('Repair finalization requires an idle dedicated account.');
+        },
+      });
+      log(`Quarantined ${result.quarantined} stale download marker(s) from an interrupted earlier update in ${result.quarantine}.`);
+      failure = undefined;
+    } catch (error) {
+      log(`Automatic finalization of ${failure.completedLog} was refused: ${error.message}`);
+    }
+  }
+  if (failure) {
+    log(`STUDIO UPDATE NOT COMPLETED: ${failure.message} Continuing with the installed version; Studio's own update attempt will be stopped at worker cleanup.`);
+    return { updated: false, version: installedVersion(), reason: 'failed' };
+  }
+  const after = installedVersion();
+  writeUpdateRecord(recordFile, { target: target.version, installed: after ?? null, at: new Date(now()).toISOString() });
+  if (after === target.version) log(`STUDIO UPDATE COMPLETE: ${after} installed; the installer's Studio window was closed.`);
+  else log(`Studio installer produced ${after ?? '(no complete installation)'} instead of production ${target.version}; this account may use another channel.`);
+  return { updated: true, version: after };
+}
+
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   try {
-    await repairStudioInstallation(process.env, {}, parseStudioRepairArguments(process.argv.slice(2)));
+    const options = parseStudioRepairArguments(process.argv.slice(2));
+    if (options.ifOutdated) await updateStudioInstallation(process.env);
+    else await repairStudioInstallation(process.env, {}, options);
   } catch (error) {
     console.error(error.message);
     process.exitCode = 1;

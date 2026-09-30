@@ -19,7 +19,8 @@ even when called through primary stdio. Files are checked before reading and
 bounded while reading; downloads are bounded while streaming, including when
 `Content-Length` is absent or wrong. URL downloads have a 30-second deadline
 covering the body, and MCP cancellation interrupts downloads and bridge dispatch.
-Inline base64 accepts padded or unpadded standard base64 and rejects malformed
+Inline base64 accepts padded or unpadded standard base64, including line-wrapped
+encoder output (whitespace is removed), and rejects malformed
 encoding. These admission checks do not guarantee that Studio can deserialize
 every accepted model.
 

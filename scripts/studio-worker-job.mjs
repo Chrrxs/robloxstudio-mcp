@@ -58,7 +58,7 @@ function connect(mode, configuration, { env, cwd, toWindowsPath, spawnProcess = 
     if (mode === 'Broker' && !reportedInstallerWait &&
         stderr.includes('for owned Studio installer processes before worker cleanup.')) {
       reportedInstallerWait = true;
-      process.stderr.write("Waiting for this worker's Studio update to finish before cleanup (up to 10 minutes). Do not cancel a healthy update.\n");
+      process.stderr.write("Waiting for this worker's Studio update to finish before cleanup (up to 10 minutes; about 1 minute if its downloads cannot start). Do not cancel a healthy update.\n");
     }
   });
   child.stdout.setEncoding('utf8');
@@ -142,6 +142,14 @@ export async function createStudioWorkerJob(options) {
         try {
           const result = await connection.request({ op: 'drain' }, 645000);
           if (result?.drained !== true) throw new Error('Studio worker job drain was not confirmed; retaining worker directory');
+          if (result.deferredUpdate === true) {
+            process.stderr.write(
+              'Studio started a self-update whose background (BITS) downloads cannot run for the secondary-logon test account; ' +
+              `terminated it and removed ${Number(result.removedDownloads) || 0} stalled download(s)` +
+              `${typeof result.downloadCleanupError === 'string' ? ` (download cleanup failed: ${result.downloadCleanupError})` : ''}. ` +
+              'The next profile run updates Studio before launching.\n',
+            );
+          }
         } catch (error) {
           drainError = error;
         }

@@ -62,6 +62,25 @@ export function encodeTestProfilePayload(value) {
   return Buffer.from(JSON.stringify(value), 'utf8').toString('base64');
 }
 
+const PROFILE_TEST_EXPECTATIONS = {
+  RSMCP_EXPECT_STUDIO_CAPTURE: ['enabled', 'disabled'],
+  RSMCP_EXPECT_HOST_CAPTURE: ['0', '1'],
+};
+
+// The profile child rebuilds a fresh user environment, so caller variables
+// never reach suites. These test-expectation flags (they only select
+// assertions in capture-regressions.mjs) travel in the payload instead.
+export function profileTestExpectations(source = {}) {
+  const expectations = {};
+  for (const [key, allowed] of Object.entries(PROFILE_TEST_EXPECTATIONS)) {
+    const value = source[key];
+    if (value === undefined) continue;
+    if (!allowed.includes(value)) throw new Error(`${key} must be one of: ${allowed.join(', ')}.`);
+    expectations[key] = value;
+  }
+  return expectations;
+}
+
 export function createTestProfileEnvironment(identity, { sourceSid, targetSid, nodeExecutable }, inherited = {}) {
   if (!USER_SID.test(sourceSid ?? '') || !USER_SID.test(targetSid ?? '') ||
       sourceSid === targetSid || identity.sid !== targetSid) {
@@ -151,6 +170,10 @@ export async function runTestProfilePayload(payload, {
     if (payload.repairChannel !== undefined) throw new Error('Repair finalization cannot request an installer channel.');
   }
   const env = createTestProfileEnvironment(identity, { ...payload, nodeExecutable: process.execPath }, process.env);
+  if (payload.testExpectations !== undefined) {
+    if (payload.mode !== 'run' || !payload.command?.length) throw new Error('Test expectations apply only to a suite run.');
+    Object.assign(env, profileTestExpectations(payload.testExpectations));
+  }
   // Account-global, never a snapshot/worker/port directory or inherited setting.
   env.RSMCP_STUDIO_TEST_SAFETY_DIR = path.win32.join(identity.localAppData, 'robloxstudio-mcp', 'test-safety');
   if (payload.prepareWorkspace === true) env.RSMCP_STUDIO_TEST_PREPARED = '1';
@@ -203,6 +226,12 @@ export async function runTestProfilePayload(payload, {
         payload.command.some((arg) => typeof arg !== 'string')) throw new Error('Invalid suite command payload.');
     const checked = await execute(process.execPath, [lifecycle, 'assert-test-profile'], options);
     if (checked !== 0) return checked;
+    // Studio's own updater cannot finish under this secondary-logon account
+    // (BITS never starts its downloads). Update inside the run lease before
+    // any suite launch so a new Roblox release is installed here instead of
+    // hanging in a test worker. Only setup errors fail this step.
+    const updated = await execute(process.execPath, [path.join(payload.repo, 'scripts', 'studio-install-repair.mjs'), '--if-outdated'], options);
+    if (updated !== 0) return updated;
     const completed = await execute(process.execPath, payload.command, options);
     if (completed !== 0) return completed;
     return execute(process.execPath, [lifecycle, 'assert-test-profile'], options);
@@ -221,6 +250,8 @@ async function main() {
     return runProfileChild(JSON.parse(Buffer.from(process.argv[3], 'base64').toString('utf8')));
   }
   const payload = parseTestProfileArguments(process.argv.slice(2));
+  const testExpectations = profileTestExpectations(process.env);
+  if (Object.keys(testExpectations).length && payload.mode === 'run' && payload.command.length) payload.testExpectations = testExpectations;
   if (process.platform !== 'win32' && !isWsl()) throw new Error('This launcher needs Windows or WSL with Windows PowerShell interop.');
   const scriptsDirectory = path.dirname(fileURLToPath(import.meta.url));
   let snapshot;
