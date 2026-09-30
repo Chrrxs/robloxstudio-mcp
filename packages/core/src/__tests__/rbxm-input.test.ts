@@ -55,13 +55,27 @@ test('local files are bounded before allocation; small files and base64 round-tr
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
-test.each(['!!!!', 'a', 'YW=Jj', 'YR=='])('rejects malformed base64 %s', async (base64) => {
+test.each(['!!!!', 'a', 'YW=Jj', 'YR==', 'cmJ4bS\u00a0Bi', 'cmJ4bS-Bi'])('rejects malformed base64 %s', async (base64) => {
   await expect(readRbxmInput({ base64 }, 'game.Workspace')).rejects.toThrow('base64');
 });
 
+test('accepts line-wrapped encoder output', async () => {
+  const bytes = Buffer.from(Array.from({ length: 200 }, (_, index) => index));
+  const lines = bytes.toString('base64').match(/.{1,76}/g)!;
+  for (const separator of ['\n', '\r\n']) {
+    const input = await readRbxmInput({ base64: `${lines.join(separator)}${separator}` }, 'game.Workspace');
+    expect(input.bytes).toEqual(bytes);
+    expect(input.sourceLabel).toBe('base64(200B)');
+  }
+});
+
 test('rejects an oversized base64 string before decoding', async () => {
-  const base64 = 'A'.repeat(4 * Math.ceil(rbxmInputByteLimit('game.Workspace', 'base64(9999999999B)') / 3) + 4);
-  await expect(readRbxmInput({ base64 }, 'game.Workspace')).rejects.toThrow('byte limit');
+  const maxEncoded = 4 * Math.ceil(rbxmInputByteLimit('game.Workspace', 'base64(9999999999B)') / 3);
+  await expect(readRbxmInput({ base64: 'A'.repeat(maxEncoded + 4) }, 'game.Workspace')).rejects.toThrow('byte limit');
+  // Whitespace allowance cannot admit more than the exact encoded bound.
+  const wrapped = 'A'.repeat(maxEncoded + 4).match(/.{1,76}/g)!.join('\n');
+  await expect(readRbxmInput({ base64: wrapped }, 'game.Workspace')).rejects.toThrow('byte limit');
+  await expect(readRbxmInput({ base64: ' '.repeat(maxEncoded * 2) }, 'game.Workspace')).rejects.toThrow('byte limit');
 });
 
 test('URL inputs carry cancellation through fetch and body consumption', async () => {

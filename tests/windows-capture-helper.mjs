@@ -99,6 +99,25 @@ rejected(select([{ ...second, title: 'Another Place - Roblox Studio' }], 'Same P
 // Titles are data, including quotes, shell metacharacters, and non-ASCII names.
 const unusual = { ...second, title: "雪'; $(throw 'injected') - Roblox Studio" };
 selected(select([unusual], "雪'; $(throw 'injected')"), unusual);
+
+// Local files: Studio titles carry the absolute path while DataModel.Name is the
+// basename (observed live with a managed baseplate). Match only an exact basename.
+const localFile = { ...second, title: 'C:\\Users\\StudioTests\\AppData\\Local\\Temp\\run\\Baseplate.rbxl - Roblox Studio' };
+selected(select([localFile], 'Baseplate.rbxl'), localFile);
+selected(select([{ ...localFile, title: '\\\\server\\share\\Baseplate.rbxl - Roblox Studio' }], 'Baseplate.rbxl'),
+  { ...localFile, title: '\\\\server\\share\\Baseplate.rbxl - Roblox Studio' });
+selected(select([{ ...localFile, title: 'D:/places/雪.rbxlx - Roblox Studio' }], '雪.rbxlx'), localFile);
+selected(select([localFile, { ...first, title: 'C:\\other\\Other.rbxl - Roblox Studio' }], 'Baseplate.rbxl'), localFile);
+selected(select([localFile, first], 'Baseplate.rbxl', identity), localFile);
+rejected(select([localFile, { ...first, title: 'D:\\copy\\Baseplate.rbxl - Roblox Studio' }], 'Baseplate.rbxl'), /ambiguous/);
+for (const title of [
+  'C:\\run\\Baseplate.rbxl.backup - Roblox Studio',
+  'C:\\run\\baseplate.rbxl - Roblox Studio',
+  'relative\\Baseplate.rbxl - Roblox Studio',
+  'C:\\run\\Baseplate.rbxl - Roblox Studio (copy)',
+]) {
+  rejected(select([{ ...localFile, title }], 'Baseplate.rbxl'), /no visible.*matches/);
+}
 console.log(`Windows capture selector: ${assertions} cases passed (no windows accessed)`);
 
 // Original failure scenario: concurrent explicit-client captures share a title.

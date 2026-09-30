@@ -188,8 +188,18 @@ public sealed class StudioWorkerJob : IDisposable
     }
     // Test fixtures pass a controlled executable basename, never a real installer.
     public void Drain(int installerGraceMs, int drainTimeoutMs, string[] installerNames) {
+        Drain(installerGraceMs, drainTimeoutMs, installerNames, null, 0);
+    }
+    // updateBlocked reports that every download the owned installer queued is
+    // stuck where it can never progress (BITS never runs jobs for a secondary-
+    // logon owner). Only an uninterrupted blocked observation lasting
+    // blockedConfirmMs ends the grace early; a predicate failure keeps the
+    // ordinary grace. Returns true when a blocked update was terminated.
+    public bool Drain(int installerGraceMs, int drainTimeoutMs, string[] installerNames, Func<bool> updateBlocked, int blockedConfirmMs) {
         if (installerGraceMs < 0 || installerGraceMs > 600000 || drainTimeoutMs < 1 || drainTimeoutMs > 30000)
             throw new ArgumentOutOfRangeException("Worker drain budgets are out of range");
+        if (updateBlocked != null && (blockedConfirmMs < 1 || blockedConfirmMs > installerGraceMs))
+            throw new ArgumentOutOfRangeException("Blocked-update confirmation must be within the installer grace");
         var installers = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (string name in installerNames) {
             if (String.IsNullOrEmpty(name) || Path.GetFileName(name) != name)
@@ -199,6 +209,9 @@ public sealed class StudioWorkerJob : IDisposable
         var clock = Stopwatch.StartNew();
         bool previouslyIdle = false;
         bool reportedInstallerWait = false;
+        bool reportedPredicateFailure = false;
+        bool deferredUpdate = false;
+        long blockedSince = -1, nextBlockedCheck = 0;
         while (true) {
             bool installing = false;
             var handles = OpenMembers();
@@ -223,6 +236,27 @@ public sealed class StudioWorkerJob : IDisposable
                 }
                 reportedInstallerWait = true;
             }
+            if (!installing) blockedSince = -1;
+            else if (updateBlocked != null && clock.ElapsedMilliseconds >= nextBlockedCheck) {
+                nextBlockedCheck = clock.ElapsedMilliseconds + 2000;
+                bool blocked = false;
+                try { blocked = updateBlocked(); }
+                catch (Exception error) {
+                    if (!reportedPredicateFailure) {
+                        TryReport("Cannot inspect the owned installer's downloads; keeping the full installer grace: " + error.Message);
+                        reportedPredicateFailure = true;
+                    }
+                }
+                if (!blocked) blockedSince = -1;
+                else {
+                    if (blockedSince < 0) blockedSince = clock.ElapsedMilliseconds;
+                    if (clock.ElapsedMilliseconds - blockedSince >= blockedConfirmMs) {
+                        TryReport("Owned Studio installer is blocked on background downloads that cannot run for this account; terminating it instead of waiting out the grace.");
+                        deferredUpdate = true;
+                        break;
+                    }
+                }
+            }
             if (installing && clock.ElapsedMilliseconds >= installerGraceMs)
                 throw new TimeoutException("Owned Studio installer did not finish within worker grace; retaining worker directory");
             int interval = installing
@@ -237,12 +271,16 @@ public sealed class StudioWorkerJob : IDisposable
             while (true) {
                 bool alive = false;
                 foreach (IntPtr handle in remaining) if (Alive(handle)) alive = true;
-                if (!alive && ProcessIds().Length == 0) return;
+                if (!alive && ProcessIds().Length == 0) return deferredUpdate;
                 if (clock.ElapsedMilliseconds >= drainTimeoutMs)
                     throw new TimeoutException("Studio worker job did not drain; retaining worker directory");
                 Thread.Sleep(20);
             }
         } finally { foreach (IntPtr handle in remaining) CloseHandle(handle); }
+    }
+    static void TryReport(string message) {
+        try { Console.Error.WriteLine(message); Console.Error.Flush(); }
+        catch (IOException) { /* The parent may have closed its diagnostic pipe. */ }
     }
     public static string Quote(string value) {
         if (value.Length > 0 && !Regex.IsMatch(value, "[\\s\"]")) return value;

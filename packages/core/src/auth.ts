@@ -29,6 +29,20 @@ export function authTokenFilePath(): string {
   return join(homedir(), '.robloxstudio-mcp', 'auth-token');
 }
 
+const EMPTY_TOKEN_RETRY_MS = 25;
+const EMPTY_TOKEN_RETRIES = 20;
+
+// Releases before the atomic publisher created the file and wrote the token in
+// two steps. Give such a concurrent first run a bounded moment to finish rather
+// than falling back to an unshared in-memory token for this process's lifetime.
+function readTokenFile(filePath: string): string {
+  for (let attempt = 0; ; attempt++) {
+    const token = readFileSync(filePath, 'utf8').trim();
+    if (token || attempt >= EMPTY_TOKEN_RETRIES) return token;
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, EMPTY_TOKEN_RETRY_MS);
+  }
+}
+
 export function resolveAuthToken(): ResolvedAuthToken {
   const noAuth = (process.env.ROBLOX_STUDIO_NO_AUTH || '').toLowerCase();
   if (noAuth === '1' || noAuth === 'true') {
@@ -43,7 +57,7 @@ export function resolveAuthToken(): ResolvedAuthToken {
   const filePath = authTokenFilePath();
   try {
     try {
-      const existing = readFileSync(filePath, 'utf8').trim();
+      const existing = readTokenFile(filePath);
       if (!existing) throw new Error('Auth token file is empty; remove it while all MCP servers are stopped to reinitialize it.');
       return { token: existing, source: 'file', filePath };
     } catch (error) {
@@ -62,7 +76,7 @@ export function resolveAuthToken(): ResolvedAuthToken {
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
       }
-      const token = readFileSync(filePath, 'utf8').trim();
+      const token = readTokenFile(filePath);
       if (!token) throw new Error('Auth token file is empty.');
       return { token, source: 'file', filePath };
     } finally {

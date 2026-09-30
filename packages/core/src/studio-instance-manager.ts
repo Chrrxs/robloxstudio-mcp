@@ -4,6 +4,7 @@ import { randomUUID } from 'crypto';
 import * as os from 'os';
 import * as path from 'path';
 import { promisify } from 'util';
+import { fileTimeToUnixMs, waitForStudioSignInToSettle } from './studio-sign-in.js';
 import {
   ManagedInstanceRegistry,
   type ManagedProcessObservation,
@@ -145,6 +146,12 @@ export interface StudioInstanceManagerOptions {
   snapshotCacheMs?: number;
   launchCompletionTimeoutMs?: number;
   closeTimeoutMs?: number;
+  /**
+   * Wait before terminating a Studio (identified by its creation FILETIME)
+   * so an in-progress automatic sign-in can persist its rotated credential.
+   * Defaults to reading the account's Studio logs on Windows/WSL.
+   */
+  settleSignIn?: (processStartedAtFileTime: string) => Promise<unknown>;
 }
 
 export type StudioLifecycleLauncher =
@@ -850,6 +857,21 @@ export function buildWindowsStudioStopScript(processId: number, startedAt: strin
   ].join('; ');
 }
 
+let studioLogsRoot: Promise<string | undefined> | undefined;
+
+// Default pre-close wait: see studio-sign-in.ts for why an in-progress sign-in
+// must finish before Studio is terminated.
+async function settleWindowsStudioSignIn(startedAt: string): Promise<void> {
+  studioLogsRoot ??= (async () => {
+    const localAppData = await windowsLocalAppDataAsync();
+    return localAppData ? path.join(await toWslPathAsync(localAppData), 'Roblox', 'logs') : undefined;
+  })();
+  const logsRoot = await studioLogsRoot;
+  if (!logsRoot) return;
+  const result = await waitForStudioSignInToSettle({ logsRoot, processStartedAtMs: fileTimeToUnixMs(startedAt) });
+  if (result === 'timeout') console.error('[studio] Studio was still signing in after 15 s; closing it anyway.');
+}
+
 async function stopWindowsStudio(processId: number, startedAt: string, timeoutMs = 15000): Promise<void> {
   await powershellAsync(buildWindowsStudioStopScript(processId, startedAt), timeoutMs);
 }
@@ -1497,6 +1519,7 @@ export class StudioInstanceManager {
   private readonly snapshotCacheMs: number;
   private readonly launchCompletionTimeoutMs: number;
   private readonly closeTimeoutMs: number;
+  private readonly settleSignIn?: (processStartedAtFileTime: string) => Promise<unknown>;
   private coordinatorTimer?: ReturnType<typeof setInterval>;
   private coordinatorRefresh?: Promise<void>;
   private cachedSnapshot?: StudioProcessSnapshot;
@@ -1513,6 +1536,8 @@ export class StudioInstanceManager {
     this.snapshotCacheMs = options.snapshotCacheMs ?? 0;
     this.launchCompletionTimeoutMs = options.launchCompletionTimeoutMs ?? LAUNCH_COMPLETION_TIMEOUT_MS;
     this.closeTimeoutMs = options.closeTimeoutMs ?? 10000;
+    this.settleSignIn = options.settleSignIn ??
+      (!this.processAdapter.stopProcess && (process.platform === 'win32' || isWsl()) ? settleWindowsStudioSignIn : undefined);
   }
 
   getLifecycleCapabilities(): StudioLifecycleCapabilities {
@@ -2036,7 +2061,7 @@ export class StudioInstanceManager {
         instanceId: record.instanceId,
       };
     }
-    const deadline = Date.now() + this.closeTimeoutMs;
+    let deadline = Date.now() + this.closeTimeoutMs;
     const processId = record.nativeProcessId ?? record.spawnPid;
     if (!processId) {
       throw new Error(
@@ -2095,6 +2120,9 @@ export class StudioInstanceManager {
       }
     }
 
+    // Never cut an automatic sign-in short (see studio-sign-in.ts). The wait is
+    // bounded separately and does not consume the close budget.
+    if (!abort) deadline = await this.beforeStudioStop(record.nativeProcessStartedAt, deadline);
     try {
       await this.closeProcess(
         processId,
@@ -2153,7 +2181,7 @@ export class StudioInstanceManager {
   }
 
   async closeConnectedInstance(instance: ConnectedStudioInstance): Promise<void> {
-    const deadline = Date.now() + this.closeTimeoutMs;
+    let deadline = Date.now() + this.closeTimeoutMs;
     const snapshot = await beforeCloseDeadline(
       () => this.readProcessSnapshot(deadline - Date.now()), deadline, 0,
     );
@@ -2164,7 +2192,20 @@ export class StudioInstanceManager {
     if (!process) {
       throw new Error(`Could not find a Studio process for connected instance "${instance.instanceId}".`);
     }
+    deadline = await this.beforeStudioStop(process.StartTimeUtcFileTime, deadline);
     await this.closeProcess(process.Id, process.StartTimeUtcFileTime, undefined, deadline);
+  }
+
+  private async beforeStudioStop(startedAt: string | undefined, deadline: number): Promise<number> {
+    if (!this.settleSignIn || startedAt === undefined || !/^[1-9]\d*$/u.test(startedAt)) return deadline;
+    const waitStarted = Date.now();
+    try {
+      await this.settleSignIn(startedAt);
+    } catch (error) {
+      // Log inspection is best-effort; it must never prevent a requested close.
+      console.error(`[studio] Could not check Studio sign-in before closing: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    return deadline + (Date.now() - waitStarted);
   }
 
   private async closeProcess(

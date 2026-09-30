@@ -252,4 +252,41 @@ describe('Studio close process verification', () => {
     expect(record.closedAt).toBeUndefined();
     expect(record.processObservationStatus).toBe('unknown');
   });
+
+  test('waits for an in-progress sign-in before terminating, without consuming the close budget', async () => {
+    const events: string[] = [];
+    const signIn = Promise.withResolvers<void>();
+    adapter.stopProcess = jest.fn(() => { events.push('stop'); processes = []; });
+    manager = new StudioInstanceManager({
+      registryDir, processAdapter: adapter, closeTimeoutMs: 1000,
+      settleSignIn: async (startedAt) => { events.push(`settle:${startedAt}`); await signIn.promise; },
+    });
+    const closing = manager.close(record);
+    await jest.advanceTimersByTimeAsync(5000);
+    expect(events).toEqual([`settle:${PROCESS.StartTimeUtcFileTime}`]);
+    signIn.resolve();
+    await expect(closing).resolves.toMatchObject({ status: 'closed' });
+    expect(events).toEqual([`settle:${PROCESS.StartTimeUtcFileTime}`, 'stop']);
+  });
+
+  test('a failed sign-in check never prevents closing', async () => {
+    const error = jest.spyOn(console, 'error').mockImplementation(() => {});
+    adapter.stopProcess = jest.fn(() => { processes = []; });
+    manager = new StudioInstanceManager({
+      registryDir, processAdapter: adapter, closeTimeoutMs: 1000,
+      settleSignIn: async () => { throw new Error('logs unreadable'); },
+    });
+    await expect(manager.close(record)).resolves.toMatchObject({ status: 'closed' });
+    expect(error).toHaveBeenCalledWith(expect.stringContaining('logs unreadable'));
+    error.mockRestore();
+  });
+
+  test('connected-instance close also waits for sign-in', async () => {
+    const settleSignIn = jest.fn(async () => {});
+    adapter.stopProcess = jest.fn(() => { processes = []; });
+    manager = new StudioInstanceManager({ registryDir, processAdapter: adapter, closeTimeoutMs: 1000, settleSignIn });
+    await manager.closeConnectedInstance(CONNECTED);
+    expect(settleSignIn).toHaveBeenCalledWith(PROCESS.StartTimeUtcFileTime);
+    expect(adapter.stopProcess).toHaveBeenCalled();
+  });
 });

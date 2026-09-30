@@ -157,10 +157,41 @@ export function runBoundedCaptureProcess(
   });
 }
 
+export const MISSING_SWIFT_TOOLCHAIN =
+  'macOS host capture requires Xcode or the Xcode Command Line Tools (xcrun swiftc). ' +
+  'Install them with `xcode-select --install`, then retry the capture.';
+
+// /usr/bin/xcrun is a shim: without a developer directory it opens the
+// "install command line developer tools" dialog. Resolve the directory the way
+// xcrun does (DEVELOPER_DIR, then xcode-select, which never prompts) and
+// require a compiler there before invoking it.
+export async function assertSwiftToolchain(
+  env: NodeJS.ProcessEnv = process.env,
+  selectedDeveloperDir: () => Promise<string> = () => runBoundedCaptureProcess('/usr/bin/xcode-select', ['-p'], 5_000, env),
+  exists: (file: string) => boolean = fs.existsSync,
+): Promise<void> {
+  let developerDir = env.DEVELOPER_DIR?.trim();
+  if (!developerDir) {
+    try {
+      developerDir = (await selectedDeveloperDir()).trim();
+    } catch {
+      throw new Error(MISSING_SWIFT_TOOLCHAIN);
+    }
+  }
+  const compilers = [
+    path.join(developerDir, 'usr', 'bin', 'swiftc'),
+    path.join(developerDir, 'Toolchains', 'XcodeDefault.xctoolchain', 'usr', 'bin', 'swiftc'),
+  ];
+  if (!path.isAbsolute(developerDir) || !compilers.some((compiler) => exists(compiler))) {
+    throw new Error(MISSING_SWIFT_TOOLCHAIN);
+  }
+}
+
 let compiledHelper: Promise<string> | undefined;
 async function getHelper(): Promise<string> {
   if (!compiledHelper) {
     compiledHelper = (async () => {
+      await assertSwiftToolchain();
       const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'robloxstudio-mcp-macos-helper-'));
       const cleanup = () => fs.rmSync(directory, { recursive: true, force: true });
       try {

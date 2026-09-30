@@ -24,6 +24,7 @@ import lockfile from 'proper-lockfile';
 import { SaxesParser } from 'saxes';
 import { withStudioTestLaunch } from './studio-test-safety.mjs';
 import { createStudioWorkerJob, launchInStudioWorkerJob, STUDIO_WORKER_JOB_ENV } from './studio-worker-job.mjs';
+import { waitForStudioSignIn } from './studio-sign-in.mjs';
 
 const STUDIO_PROCESS = 'RobloxStudioBeta';
 const DEFAULT_MCP_PORT = Number.parseInt(process.env.ROBLOX_STUDIO_PORT ?? '58741', 10);
@@ -454,6 +455,7 @@ export async function createIsolatedStudioDirectory({ prefix = 'worker', env = p
   const managedInstanceRegistryDirectory = path.join(workingDirectory, 'managed-instances');
   mkdirSync(managedInstanceRegistryDirectory);
   let lifetime;
+  const createdAt = Date.now();
   try {
     lifetime = await createStudioWorkerJob(workerJobOptions(env));
   } catch (error) {
@@ -461,13 +463,32 @@ export async function createIsolatedStudioDirectory({ prefix = 'worker', env = p
     await rm(workingDirectory, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
     throw error;
   }
+  const logsRoot = path.join(toWslPath(localAppData), 'Roblox', 'logs');
   return {
     workingDirectory,
     pluginsDirectory,
     managedInstanceRegistryDirectory,
     environment: lifetime.environment,
-    cleanup: createStudioWorkerCleanup(workingDirectory, { drain: () => lifetime.drain() }),
+    cleanup: createStudioWorkerCleanup(workingDirectory, {
+      drain: async () => {
+        await settleStudioSignIns(logsRoot, createdAt);
+        return lifetime.drain();
+      },
+    }),
   };
+}
+
+// The drain terminates leftover Studios. Never end one mid sign-in (see
+// studio-sign-in.mjs); sessions that settled earlier cost only a log scan.
+export async function settleStudioSignIns(logsRoot, since, wait = waitForStudioSignIn) {
+  try {
+    const outcome = await wait({ logsRoot, since, appearMs: 0, timeoutMs: 60_000 });
+    if (outcome === 'timeout') process.stderr.write('A worker Studio was still signing in after 60 s; cleaning up anyway.\n');
+    return outcome;
+  } catch (error) {
+    process.stderr.write(`Could not check worker Studio sign-in before cleanup: ${error?.message ?? error}\n`);
+    return 'unknown';
+  }
 }
 
 export function resolvePluginsDir() {
@@ -566,12 +587,19 @@ export async function closeStudioProcess({
   processId,
   startedAtFileTime,
   timeoutMs = 30000,
+  settleSignIn = settleStudioSignIns,
 }) {
   if (!Number.isSafeInteger(processId) || processId < 1) {
     throw new Error('Studio processId must be a positive integer.');
   }
   if (!/^[1-9]\d*$/u.test(String(startedAtFileTime))) {
     throw new Error('Studio startedAtFileTime must be a positive FILETIME string.');
+  }
+  // This is a hard kill: let an automatic sign-in finish first.
+  const localAppData = windowsLocalAppData();
+  if (localAppData) {
+    const startedAtMs = Number((BigInt(startedAtFileTime) - 116444736000000000n) / 10000n);
+    await settleSignIn(path.join(toWslPath(localAppData), 'Roblox', 'logs'), startedAtMs - 2000);
   }
   const expected = `[long]${startedAtFileTime}`;
   const result = powershell([
@@ -625,7 +653,7 @@ export async function closeAllStudio({ requireEnv = true, timeoutMs = 30000 } = 
   throw new Error(`Studio processes still running: ${JSON.stringify(listStudioProcesses())}`);
 }
 
-function workerJobOptions(env) {
+export function workerJobOptions(env) {
   return {
     env: windowsPowerShellEnvironment(env),
     cwd: isWsl() && existsSync('/mnt/c/Windows') ? '/mnt/c/Windows' : process.cwd(),

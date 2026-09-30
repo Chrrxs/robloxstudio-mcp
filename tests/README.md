@@ -125,6 +125,80 @@ require a reviewed explicit reset; waiting out the window does not clear them.
 Use the public profile commands rather than direct internal test entrypoints so
 these safeguards apply.
 
+### Studio updates under the dedicated account
+
+The harness runs the dedicated account through secondary logon, and Windows
+BITS never runs download jobs for such an owner (it requires an interactive
+logon). Roblox's installer downloads changed packages with BITS, so Studio's
+own self-update, and any installer that needs new packages, would wait forever.
+
+- **Before each profile run**, inside the run lease and before the suite,
+  `studio-install-repair.mjs --if-outdated` compares the newest complete
+  installation with the production version from
+  `clientsettings.roblox.com`. When they differ it downloads the version's
+  packages over HTTPS into the installer's cache
+  (`%LOCALAPPDATA%\Roblox\Downloads\roblox-studio\<md5>`), verifying each
+  package's size and MD5 before it is named. Then it runs the signature-verified
+  official installer once, counted as one launch, in a worker job. The installer
+  opens Studio when it finishes. Ending Studio during its automatic Roblox
+  sign-in deletes the account's stored sign-in, so the update waits (up to 2
+  minutes) for that Studio's `login [end]` event plus a short settle period.
+  Only then is the worker drained, closing the Studio before the suite starts.
+  A stopped updater leaves a zero-byte `.crdownload` marker in
+  the new version folder, which the next installer does not remove. If this
+  update's installer completes but only such earlier markers block validation,
+  the update runs the `--finalize-log` checks for that exact installer log,
+  after its worker is drained. An unreachable version service or an update
+  that cannot finish only logs a warning, and the run continues on the
+  installed version. An installer that picks another version (another channel)
+  is not repeated for the same production target.
+- **During cleanup**, if a Studio worker still owns an installer and every BITS
+  download created during that worker's lifetime has stayed waiting with no
+  transferred bytes for one minute, the drain stops the installer instead of
+  waiting out the 10-minute grace. It then removes only those stalled
+  downloads. The run is not marked failed, and the next run installs the update
+  before launching. Downloads that make progress, and failures to inspect BITS,
+  keep the full grace.
+- `npm run studio:test-repair` uses the same package prefetch for the default
+  (production) channel and the same sign-in settling before containment closes
+  the installer's Studio. `--channel` repairs cannot be prefetched without
+  authentication.
+
+`npm run test:studio-worker-native` (Windows node) also exercises the
+blocked-update drain with a stand-in process; it creates no BITS jobs.
+
+```bash
+npm run test:studio-worker-native
+```
+
+### Preserving the dedicated account's Studio sign-in
+
+Roblox rotates Studio's stored sign-in during automatic sign-in, and Studio
+persists the replacement. Ending Studio between the two leaves an invalidated
+credential, and the next launch comes up signed out. We observed this: a Studio
+was ended about 0.5 s after `login (automatic) [start]`, and the next launch
+logged `login [end][failure]`. Every path that hard-kills Studio therefore first
+waits, with a time limit, until that Studio is not signing in, plus a short
+persistence period. It reads only event names and timestamps from Studio's log.
+
+- **MCP `manage_instance` close**: waits up to 15 s. The wait does not use up the
+  close timeout.
+- **Worker cleanup before the drain, and `closeStudioProcess`**: wait up to 60 s.
+- **Repair and pre-run update**: wait up to 2 minutes for the Studio the
+  installer opens.
+
+Studios that already finished signing in, or never sign in (for example
+play-test children), cost only a log scan. Aborting a suspended launch that
+never ran does not wait.
+
+If the sign-in is lost anyway, `npm run studio:test-diagnose` shows
+`login [end][failure]` under `signInEvents`, plus the timestamps and log
+channels of credential activity under `sensitiveEvents`. Tests cannot sign in
+for the account. A person must sign in to Roblox Studio once in the dedicated
+account's Studio window, then reset safety.
+
+### Installation maintenance
+
 For installation failures, these fixed maintenance commands remain available
 while the safety block is set:
 

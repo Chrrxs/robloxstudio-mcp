@@ -5,7 +5,8 @@ import { EventEmitter } from 'node:events';
 import { mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync, appendFileSync, statSync, existsSync, symlinkSync, utimesSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { repairStudioInstallation, readFreshInstallerEvidence, parseStudioRepairArguments, finalizeStudioRepair, parseCompletedInstallerLog } from '../scripts/studio-install-repair.mjs';
+import { repairStudioInstallation, readFreshInstallerEvidence, parseStudioRepairArguments, finalizeStudioRepair, parseCompletedInstallerLog, updateStudioInstallation } from '../scripts/studio-install-repair.mjs';
+import { studioSignInSessions, waitForStudioSignIn } from '../scripts/studio-sign-in.mjs';
 import { createStudioTestSafety, STUDIO_TEST_LAUNCH_COST_LIMIT } from '../scripts/studio-test-safety.mjs';
 
 const identity = {
@@ -18,19 +19,31 @@ const env = {
   RSMCP_STUDIO_TEST_SAFETY_DIR: `${identity.localAppData}\\robloxstudio-mcp\\test-safety`,
 };
 function fixture(overrides = {}) {
-  const calls = { downloads: 0, starts: 0, unrefs: 0, polls: 0, checks: 0, logs: [], installerArgs: [] };
+  const calls = { downloads: 0, starts: 0, unrefs: 0, polls: 0, checks: 0, logs: [], installerArgs: [], prefetches: [], order: [] };
   let time = 1_000_000;
   const adapters = {
     platform: 'win32', assertProfile: () => identity,
     maintenance: async (_env, operation) => operation(), processes: async () => [],
     prepare: () => 'C:\\Users\\StudioTests\\AppData\\Local\\Temp\\fresh\\RobloxStudioInstaller.exe',
-    download: async () => { calls.downloads += 1; },
+    download: async () => { calls.downloads += 1; calls.order.push('installer-download'); },
+    resolveTarget: async () => ({ version: 'version-0123456789abcdef' }),
+    waitSignIn: async ({ logsRoot, since }) => {
+      assert.equal(logsRoot, path.win32.join(identity.localAppData, 'Roblox', 'logs'));
+      calls.order.push(['sign-in', since]);
+      return 'success';
+    },
+    prefetch: async ({ localAppData, version }) => {
+      calls.prefetches.push({ localAppData, version });
+      calls.order.push('prefetch');
+      return { packages: 34, downloaded: 18 };
+    },
     verifySignature: () => ({ status: 'Valid', signer: 'Roblox Corporation' }),
     snapshot: () => new Map(),
     evidence: () => { calls.polls += 1; return { success: true, failure: false, paths: ['fresh.log'] }; },
     start: async (_installer, _env, args) => {
       calls.starts += 1;
       calls.installerArgs.push(args);
+      calls.order.push('dispatch');
       return { failed: () => false, unref: () => { calls.unrefs += 1; } };
     },
     installed: () => { calls.checks += 1; return 'complete\\RobloxStudioBeta.exe'; },
@@ -47,6 +60,10 @@ function fixture(overrides = {}) {
   assert.equal(test.calls.starts, 1);
   assert.equal(test.calls.unrefs, 1);
   assert.deepEqual(test.calls.installerArgs, [[]], 'default official installer invocation has zero arguments');
+  // BITS never runs for the secondary-logon account: packages must be cached first.
+  assert.deepEqual(test.calls.prefetches, [{ localAppData: identity.localAppData, version: 'version-0123456789abcdef' }]);
+  // The installer's Studio may only be ended after its sign-in settled.
+  assert.deepEqual(test.calls.order, ['prefetch', 'installer-download', 'dispatch', ['sign-in', 1_000_000]]);
 }
 {
   const test = fixture();
@@ -55,6 +72,175 @@ function fixture(overrides = {}) {
   assert.deepEqual(test.calls.installerArgs, [['-channel', 'zbuck2release-739-control']]);
   assert.equal(test.calls.downloads, 1);
   assert.equal(test.calls.starts, 1);
+  assert.deepEqual(test.calls.prefetches, [], 'unauthenticated lookup cannot resolve another channel');
+}
+{
+  // A failed prefetch stops before downloading or dispatching an installer that would hang on BITS.
+  const test = fixture({ prefetch: async () => { throw new Error('Studio package RobloxStudio.zip failed size or MD5 verification.'); } });
+  await assert.rejects(test.run(), /during package prefetch: Studio package RobloxStudio\.zip failed size or MD5/);
+  assert.equal(test.calls.downloads, 0);
+  assert.equal(test.calls.starts, 0);
+  assert.deepEqual(test.calls.order, [], 'nothing was dispatched, so there is no sign-in to wait for');
+}
+assert.deepEqual(parseStudioRepairArguments(['--if-outdated']), { ifOutdated: true });
+assert.throws(() => parseStudioRepairArguments(['--if-outdated', 'x']), /accepts only/);
+{
+  // Pre-run update supervisor: current installs are untouched; outdated ones are
+  // updated once inside the active run, with the installer admitted as one
+  // launch in a worker job that is always drained afterwards.
+  const root = mkdtempSync(path.join(tmpdir(), 'rsmcp-update-'));
+  try {
+    const localAppData = path.join(root, 'Local');
+    let installedVersion = 'version-1111111111111111';
+    const events = [];
+    const base = (overrides = {}) => ({
+      platform: 'win32', assertProfile: () => ({ ...identity, localAppData }),
+      assertRunActive: (runEnv) => { assert.equal(runEnv, env); events.push('run-active'); },
+      admitLaunch: async (runEnv, cost, operation) => {
+        assert.equal(runEnv, env);
+        events.push(['admit', cost]);
+        const result = await operation();
+        assert.deepEqual(result, { pid: 42 }, 'launch admission sees a successful process launch');
+        return result;
+      },
+      resolveTarget: async () => ({ version: 'version-2222222222222222' }),
+      installed: () => `C:\\Versions\\${installedVersion}\\RobloxStudioBeta.exe`,
+      jobOptions: childEnv => ({ env: { ...childEnv, BASE: '1' }, cwd: 'C:\\', toWindowsPath: value => value }),
+      createJob: async () => ({ environment: { RSMCP_STUDIO_TEST_WORKER_JOB: 'job' }, drain: async () => { events.push('drain'); } }),
+      launch: async (installer, args, cwd, options) => {
+        events.push(['launch', installer, args, cwd, options.env.RSMCP_STUDIO_TEST_WORKER_JOB, options.env.BASE]);
+        return 42;
+      },
+      repair: async (_env, adapters) => {
+        assert.deepEqual(await adapters.resolveTarget(), { version: 'version-2222222222222222' });
+        await adapters.maintenance(env, async () => {
+          const child = await adapters.start('C:\\Temp\\x\\RobloxStudioInstaller.exe', { A: '1' }, []);
+          assert.equal(child.failed(), false);
+        });
+        installedVersion = 'version-2222222222222222';
+        events.push('repaired');
+        return {};
+      },
+      log: text => events.push(text),
+      now: () => 0,
+      ...overrides,
+    });
+    installedVersion = 'version-2222222222222222';
+    assert.deepEqual(await updateStudioInstallation(env, base({ createJob: async () => assert.fail('current install must not update') })),
+      { updated: false, version: 'version-2222222222222222' });
+    await assert.rejects(updateStudioInstallation(env, base({ assertRunActive: () => { throw new Error('Studio test safety blocked: run_inactive.'); } })),
+      /run_inactive/, 'the update only runs inside a live profile run');
+    events.length = 0;
+    installedVersion = 'version-1111111111111111';
+    assert.deepEqual(await updateStudioInstallation(env, base()), { updated: true, version: 'version-2222222222222222' });
+    assert.deepEqual(events.filter(event => typeof event !== 'string' || !event.startsWith('STUDIO')), [
+      'run-active', 'run-active', ['admit', 1],
+      ['launch', 'C:\\Temp\\x\\RobloxStudioInstaller.exe', [], 'C:\\Temp\\x', 'job', '1'], 'repaired', 'drain',
+    ]);
+    // An unreachable version service never blocks a run.
+    events.length = 0;
+    assert.deepEqual(await updateStudioInstallation(env, base({ resolveTarget: async () => { throw new Error('offline'); } })),
+      { updated: false, reason: 'target-unavailable' });
+    // A failed update drains the worker, keeps the installed version, and does not fail the run.
+    events.length = 0;
+    installedVersion = 'version-1111111111111111';
+    assert.deepEqual(await updateStudioInstallation(env, base({
+      resolveTarget: async () => ({ version: 'version-3333333333333333' }),
+      repair: async () => { throw new Error('Studio repair failed during download.'); },
+    })), { updated: false, version: 'version-1111111111111111', reason: 'failed' });
+    assert.equal(events.at(-2), 'drain');
+    assert.match(events.at(-1), /STUDIO UPDATE NOT COMPLETED: Studio repair failed during download/);
+    // Unknown process ownership after the update is never ignored.
+    await assert.rejects(updateStudioInstallation(env, base({
+      resolveTarget: async () => ({ version: 'version-3333333333333333' }),
+      createJob: async () => ({ environment: {}, drain: async () => { throw new Error('Studio worker job did not drain'); } }),
+    })), /did not drain/);
+    // A failed attempt is not recorded, so the next run retries the same target.
+    events.length = 0;
+    installedVersion = 'version-1111111111111111';
+    assert.deepEqual(await updateStudioInstallation(env, base({
+      resolveTarget: async () => ({ version: 'version-3333333333333333' }),
+      repair: async () => { installedVersion = 'version-3333333333333333'; return {}; },
+    })), { updated: true, version: 'version-3333333333333333' });
+    // A completed update blocked only by an earlier attempt's stale markers is
+    // finalized automatically for that exact log, after the worker is drained.
+    for (const outcome of ['finalized', 'refused']) {
+      events.length = 0;
+      installedVersion = 'version-1111111111111111';
+      const finalized = [];
+      const result = await updateStudioInstallation(env, base({
+        resolveTarget: async () => ({ version: 'version-6666666666666666' }),
+        repair: async () => {
+          throw Object.assign(new Error('Studio repair failed during installation completion: Completed installer RobloxStudioInstaller_DFECD.log'),
+            { completedLog: 'RobloxStudioInstaller_DFECD.log' });
+        },
+        processes: async () => { events.push('idle-check'); return []; },
+        finalize: async (options) => {
+          assert.equal(events.at(-1), 'drain', 'finalization waits for the drained worker');
+          await options.assertIdle();
+          finalized.push({ logName: options.logName, localAppData: options.localAppData, safetyRoot: options.safetyRoot });
+          if (outcome === 'refused') throw new Error('Repair finalization refuses nonempty or non-stale download markers.');
+          installedVersion = 'version-6666666666666666';
+          return { quarantined: 1, quarantine: 'C:\\quarantine' };
+        },
+      }));
+      assert.deepEqual(finalized, [{
+        logName: 'RobloxStudioInstaller_DFECD.log', localAppData,
+        safetyRoot: path.win32.join(localAppData, 'robloxstudio-mcp', 'test-safety'),
+      }]);
+      assert.ok(events.includes('idle-check'));
+      assert.deepEqual(result, outcome === 'finalized'
+        ? { updated: true, version: 'version-6666666666666666' }
+        : { updated: false, version: 'version-1111111111111111', reason: 'failed' });
+    }
+    // An installer that picks another channel's version is not repeated every run.
+    events.length = 0;
+    installedVersion = 'version-1111111111111111';
+    const other = base({
+      resolveTarget: async () => ({ version: 'version-4444444444444444' }),
+      repair: async () => { installedVersion = 'version-5555555555555555'; return {}; },
+    });
+    assert.deepEqual(await updateStudioInstallation(env, other), { updated: true, version: 'version-5555555555555555' });
+    assert.deepEqual(await updateStudioInstallation(env, { ...other, createJob: async () => assert.fail('must not repeat') }),
+      { updated: false, version: 'version-5555555555555555', reason: 'previous-attempt' });
+  } finally { rmSync(root, { recursive: true, force: true }); }
+}
+{
+  // Sign-in settling reads only event names and times from new Studio session logs.
+  const root = mkdtempSync(path.join(tmpdir(), 'rsmcp-sign-in-'));
+  try {
+    const base = Date.now();
+    const since = base - 1000;
+    const iso = offset => new Date(base + offset).toISOString();
+    const log = (name, lines) => writeFileSync(path.join(root, name), lines.map(([offset, text]) => `${iso(offset)},0.8,766c,6,Info ${text}`).join('\r\n'));
+    const start = '[FLog::StudioKeyEvents] login (automatic) [start]';
+    const success = '[FLog::StudioKeyEvents] login [end][success]';
+    const clock = { time: base };
+    const timing = { now: () => clock.time, sleep: async ms => { clock.time += ms; } };
+    const run = async (options = {}) => { clock.time = base + (options.at ?? 10_000); return waitForStudioSignIn({ logsRoot: root, since, ...timing, ...options }); };
+    assert.equal(await waitForStudioSignIn({ logsRoot: path.join(root, 'missing'), since, ...timing }), 'none');
+    assert.equal(await run(), 'none', 'no installer Studio appeared');
+    assert.ok(clock.time >= base + 10_000 + 30_000, 'waits for the installer Studio to appear');
+    assert.equal(await run({ appearMs: 0 }), 'none', 'worker cleanup does not wait for Studios that never started');
+    const session = '0.741.19.7411056_20260930T150353Z_Studio_6FDD2_last.log';
+    log(session, [[0, '[FLog::PluginLoadingEnhanced] noise'], [800, start]]);
+    writeFileSync(path.join(root, 'RobloxStudioInstaller_8FF59.log'), start);
+    assert.deepEqual(studioSignInSessions(root, since).map(({ name, started, outcome, endedAt }) => ({ name, started, outcome, endedAt })),
+      [{ name: session, started: true, outcome: null, endedAt: null }]);
+    assert.equal(await run(), 'timeout', 'a sign-in in progress is never cut short');
+    assert.ok(clock.time >= base + 10_000 + 120_000);
+    log(session, [[800, start], [1000, success]]);
+    assert.equal(await run({ at: 2_000 }), 'success');
+    assert.equal(clock.time, base + 6_000, 'only the rest of the persistence period after the end is waited');
+    assert.equal(await run({ at: 60_000 }), 'success');
+    assert.equal(clock.time, base + 60_000, 'a long-settled sign-in costs no wait');
+    // Play-test children never sign in: settled once no longer young.
+    log('0.741.19.7411056_20260930T150400Z_Studio_AAAA1_last.log', [[2000, '[FLog::Network] server started']]);
+    assert.equal(await run({ at: 60_000 }), 'success');
+    log('0.741.19.7411056_20260930T150404Z_Studio_9336C_last.log', [[3000, start], [3100, '[FLog::StudioKeyEvents] login [end][failure]']]);
+    assert.equal(await run({ at: 60_000 }), 'failure');
+    assert.deepEqual(studioSignInSessions(root, Date.now() + 60_000), [], 'older sessions are ignored');
+  } finally { rmSync(root, { recursive: true, force: true }); }
 }
 {
   // Exercise the production start path at its native spawn boundary, not the
@@ -166,6 +352,7 @@ for (const certificate of [{ status: 'NotSigned', signer: 'Roblox Corporation' }
   });
   await assert.rejects(test.run(), error => {
     assert.match(error.message, /--finalize-log RobloxStudioInstaller_ABC12\.log/);
+    assert.equal(error.completedLog, logName, 'automated updates can finalize exactly this validated log');
     assert.doesNotMatch(error.message, /Timed out|fixture-secret/);
     return true;
   });
@@ -275,6 +462,10 @@ try {
         completed: [],
       },
       { name: 'old-run-fresh-file', files: [[logName, completedLog]], startedAt: finalizeStart + 30_000, completed: [] },
+      // Installer timestamps are whole-second process start + offset (.188 here);
+      // a dispatch later in that same second is still this run's receipt.
+      { name: 'same-second-dispatch', files: [[logName, completedLog]], startedAt: finalizeStart + 500, completed: [expected] },
+      { name: 'next-second-dispatch', files: [[logName, completedLog]], startedAt: finalizeStart + 1000, completed: [] },
       { name: 'expired-receipt', files: [[logName, completedLog]], now: finalizeNow + 3_600_000, completed: [] },
       { name: 'unsafe-basename', files: [['RobloxStudioInstaller_secret-ticket.log', completedLog]], completed: [] },
       { name: 'terminal-failure', files: [[logName, `${completedLog}\nReporting Installer Failure`]], completed: [] },

@@ -7,7 +7,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
-  createTestProfileEnvironment,
+  createTestProfileEnvironment, profileTestExpectations,
   encodeTestProfilePayload,
   parseTestProfileArguments,
   runTestProfileCommand,
@@ -101,6 +101,32 @@ for (const key of ['MCP_INSTANCE_ID', 'MCP_PLUGINS_DIR', 'ROBLOXSTUDIO_MCP_MANAG
 assert.equal('RSMCP_STUDIO_TEST_SAFETY_DIR' in env, false);
 assert.equal('RSMCP_STUDIO_TEST_PREPARED' in env, false);
 assert.equal(inherited.MCP_INSTANCE_ID, 'personal-studio', 'normalizing the child does not mutate caller state');
+// Caller variables never reach the fresh profile environment; only the
+// validated capture-test expectation flags travel, via the payload.
+{
+  const flags = createTestProfileEnvironment(identity, invocation, { RSMCP_EXPECT_HOST_CAPTURE: '1' });
+  assert.equal('RSMCP_EXPECT_HOST_CAPTURE' in flags, false);
+  assert.deepEqual(profileTestExpectations({ RSMCP_EXPECT_STUDIO_CAPTURE: 'disabled', RSMCP_EXPECT_HOST_CAPTURE: '1', RSMCP_OTHER: 'x' }),
+    { RSMCP_EXPECT_STUDIO_CAPTURE: 'disabled', RSMCP_EXPECT_HOST_CAPTURE: '1' });
+  assert.throws(() => profileTestExpectations({ RSMCP_EXPECT_HOST_CAPTURE: 'yes' }), /must be one of: 0, 1/);
+  let suiteEnv;
+  await runTestProfilePayload({
+    ...invocation, mode: 'run', repo: 'C:\\fixture', command: ['tests/run-all.mjs'],
+    testExpectations: { RSMCP_EXPECT_STUDIO_CAPTURE: 'enabled', RSMCP_EXPECT_HOST_CAPTURE: '1' },
+  }, {
+    identity,
+    runSafely: async (_env, operation) => operation(),
+    async execute(_command, args, options) { if (args[0] === 'tests/run-all.mjs') suiteEnv = options.env; return 0; },
+  });
+  assert.equal(suiteEnv.RSMCP_EXPECT_STUDIO_CAPTURE, 'enabled');
+  assert.equal(suiteEnv.RSMCP_EXPECT_HOST_CAPTURE, '1');
+  await assert.rejects(runTestProfilePayload({
+    ...invocation, mode: 'run', repo: 'C:\\fixture', command: [], resetSafetyReason: 'x', testExpectations: { RSMCP_EXPECT_HOST_CAPTURE: '1' },
+  }, { identity, runSafely: async () => assert.fail(), execute: async () => 0, resetSafety: async () => {} }), /only to a suite run/);
+  await assert.rejects(runTestProfilePayload({
+    ...invocation, mode: 'run', repo: 'C:\\fixture', command: ['tests/run-all.mjs'], testExpectations: { RSMCP_EXPECT_HOST_CAPTURE: 'x' },
+  }, { identity, runSafely: async () => assert.fail(), execute: async () => 0 }), /must be one of/);
+}
 assert.throws(() => createTestProfileEnvironment(identity, { ...invocation, sourceSid: identity.sid }), /personal\/source Windows identity/);
 assert.throws(() => createTestProfileEnvironment({ ...identity, sid: invocation.sourceSid }, invocation), /unexpected target SID/);
 assert.throws(() => createTestProfileEnvironment({ ...identity, profileLoaded: false }, invocation), /loaded profile/);
@@ -108,12 +134,12 @@ assert.throws(() => createTestProfileEnvironment({ ...identity, interactiveSessi
 assert.throws(() => createTestProfileEnvironment({ ...identity, localAppData: 'C:\\Users\\Personal\\AppData\\Local' }, invocation), /redirected AppData/);
 
 // Exercise the production child ordering without a native account, filesystem,
-// or Studio. The safety lease must surround preflight, suite, and postflight.
+// or Studio. The safety lease must surround preflight, update, suite, and postflight.
 for (const mode of ['enroll', 'run']) {
   const steps = mode === 'enroll'
     ? ['enroll-test-profile', 'suite', 'assert-test-profile']
-    : ['assert-test-profile', 'suite', 'assert-test-profile'];
-  for (const failureIndex of [-1, 0, 1, 2]) {
+    : ['assert-test-profile', 'update-if-outdated', 'suite', 'assert-test-profile'];
+  for (const failureIndex of [-1, 0, 1, 2, ...(mode === 'run' ? [3] : [])]) {
     const trace = [];
     let insideRun = false;
     let safetyCalls = 0;
@@ -135,7 +161,9 @@ for (const mode of ['enroll', 'run']) {
       async execute(_command, args, options) {
         assert.equal(insideRun, true);
         assert.equal(options.env.USERPROFILE, identity.profileDirectory);
-        const step = args[0] === 'tests/run-all.mjs' ? 'suite' : args[1];
+        const step = args[0] === 'tests/run-all.mjs' ? 'suite'
+          : args[1] === '--if-outdated' ? (assert.equal(args[0], path.join('C:\\fixture', 'scripts', 'studio-install-repair.mjs')), 'update-if-outdated')
+          : args[1];
         trace.push(step);
         return trace.length - 1 === failureIndex ? 23 : 0;
       },

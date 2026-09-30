@@ -253,11 +253,22 @@ public static class McpStudioCapture {
 }
 "@
 function Emit($obj) { Write-Output ($obj | ConvertTo-Json -Compress) }
+# Local files show their absolute path in the window title while Studio reports
+# only the basename as DataModel.Name. Match that basename after removing
+# Studio's exact title suffix; the ambiguity checks below still apply.
+function Test-StudioTitle([string]$title, [string]$hint) {
+  if (-not $hint -or $title.StartsWith($hint, [StringComparison]::Ordinal)) { return $true }
+  $suffix = ' - Roblox Studio'
+  if (-not $title.EndsWith($suffix, [StringComparison]::Ordinal)) { return $false }
+  $place = $title.Substring(0, $title.Length - $suffix.Length)
+  if ($place -cnotmatch '^(?:[A-Za-z]:[\\/]|\\\\|/)') { return $false }
+  return $place.Substring($place.LastIndexOfAny([char[]]@([char]'\', [char]'/')) + 1) -ceq $hint
+}
 $hint = $env:MCP_CAPTURE_TITLE_HINT
 $outFile = $env:MCP_CAPTURE_OUT
 $candidates = [McpStudioCapture]::Find('RobloxStudioBeta')
 if ($candidates.Count -eq 0) { Emit @{ ok = $false; error = 'no visible Roblox Studio window was found' }; exit 0 }
-$matching = @($candidates | Where-Object { -not $hint -or $_.Title.StartsWith($hint, [StringComparison]::Ordinal) })
+$matching = @($candidates | Where-Object { Test-StudioTitle $_.Title $hint })
 $expectedJson = $env:MCP_CAPTURE_EXPECTED_IDENTITY
 if ($expectedJson) {
   try { $expected = $expectedJson | ConvertFrom-Json -ErrorAction Stop }
