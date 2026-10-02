@@ -133,6 +133,31 @@ describe('Creator Store asset search', () => {
     }
   });
 
+  test('explains the missing legacy-asset:manage scope when asset delivery returns 403', async () => {
+    const fetchSpy = jest.spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        errors: [{ code: 0, message: 'Forbidden' }],
+      }), {
+        status: 403,
+        headers: { 'Content-Type': 'application/json' },
+      }));
+    const client = new OpenCloudClient({
+      apiKey: 'asset-read-only-key',
+      baseUrl: 'https://apis.roblox.test',
+    });
+
+    try {
+      await expect(
+        client.downloadAudioAssetContent(1847608911, 1024),
+      ).rejects.toThrow(
+        'Roblox asset delivery request failed (403). The Open Cloud API key lacks the legacy-asset:manage scope required to download audio.',
+      );
+      expect(fetchSpy).toHaveBeenCalledTimes(1);
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+
   test('accepts Roblox content delivery for owned legacy audio', async () => {
     const audioBytes = Buffer.concat([
       Buffer.from('OggS'),

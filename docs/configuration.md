@@ -152,6 +152,7 @@ enumerating or capturing any real windows.
 | `ROBLOX_OPEN_CLOUD_API_KEY` | None | Roblox Open Cloud key used by features such as audio preview and place version access. Required permissions depend on the tool. |
 | `MCP_PLUGINS_DIR` | Platform Studio Plugins folder | Override the destination used by plugin installation. |
 
-Creator Store audio preview requires `asset:read` permission. See
+Creator Store audio preview requires the `legacy-asset:manage` scope (Legacy
+Assets → manage in the API key settings); `asset:read` alone returns 403. See
 [Creator Store assets](creator-store-assets.md) for its download and validation
 behavior.

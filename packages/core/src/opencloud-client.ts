@@ -373,7 +373,7 @@ export class OpenCloudClient {
   ): Promise<DownloadedAudioAsset> {
     if (!this.apiKey) {
       throw new Error(
-        'Open Cloud API key not configured. Set ROBLOX_OPEN_CLOUD_API_KEY with asset:read permission to download audio previews.',
+        'Open Cloud API key not configured. Set ROBLOX_OPEN_CLOUD_API_KEY with the legacy-asset:manage scope to download audio previews.',
       );
     }
     if (!Number.isSafeInteger(assetId) || assetId <= 0) {
@@ -397,8 +397,11 @@ export class OpenCloudClient {
         },
       );
       if (!deliveryResponse.ok) {
+        const scopeHint = deliveryResponse.status === 403
+          ? ' The Open Cloud API key lacks the legacy-asset:manage scope required to download audio.'
+          : '';
         throw new Error(
-          `Roblox asset delivery request failed (${deliveryResponse.status}).`,
+          `Roblox asset delivery request failed (${deliveryResponse.status}).${scopeHint}`,
         );
       }
 
