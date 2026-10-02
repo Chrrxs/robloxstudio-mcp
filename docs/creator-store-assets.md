@@ -22,8 +22,9 @@ It also recognizes a requested Creator Store Audio asset when Studio represents
 it as an empty wrapper model.
 
 Inline audio is enabled by default. The MCP server—not the Studio plugin—uses
-`ROBLOX_OPEN_CLOUD_API_KEY` with `asset:read` permission to request the direct
-Audio asset or each unique nested sound through Roblox's asset-delivery API.
+`ROBLOX_OPEN_CLOUD_API_KEY` with the `legacy-asset:manage` scope to request the
+direct Audio asset or each unique nested sound through Roblox's asset-delivery
+API. A key with only `asset:read` is rejected with 403.
 Set `includeAudio: false` for metadata only. `maxAudioPreviews` defaults to
 three and can be set as high as five.
 

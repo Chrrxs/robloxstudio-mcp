@@ -1426,7 +1426,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
         includeAudio: {
           type: 'boolean',
           default: true,
-          description: 'Return inline audio; needs asset:read and never writes files.'
+          description: 'Return inline audio; needs legacy-asset:manage and never writes files.'
         },
         maxAudioPreviews: {
           type: 'number',
