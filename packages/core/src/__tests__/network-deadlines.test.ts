@@ -23,6 +23,8 @@ test.each([200, 500])('Open Cloud bounds a stalled response body after HTTP %i h
       assetType: 'Model', displayName: 'test', description: '',
       creationContext: { creator: { userId: '1' } },
     }, Buffer.from('test'), 'test.rbxm')).rejects.toThrow('timed out');
+    await expect(client.updateMonetizationItem('developer_product', 1, 2, { forSale: false }))
+      .rejects.toThrow('timed out');
   } finally {
     server.closeAllConnections();
     await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));

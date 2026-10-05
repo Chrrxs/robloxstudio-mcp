@@ -1,6 +1,5 @@
-import * as fs from 'fs';
-import * as path from 'path';
 import { inflateSync } from 'zlib';
+import { readRegularFileWithinLimit } from './local-file.js';
 
 export type DecodedRgbaImage = {
   width: number;
@@ -86,55 +85,6 @@ function getBase64DecodedLength(encoded: string): number {
   }
 
   return decodedLength;
-}
-
-function readPngFileWithinLimit(resolved: string, imagePath: string): Buffer {
-  let descriptor: number;
-  try {
-    // Avoid blocking on a FIFO before fstat can reject non-regular inputs.
-    const flags = fs.constants.O_RDONLY | (fs.constants.O_NONBLOCK ?? 0);
-    descriptor = fs.openSync(resolved, flags);
-  } catch (error) {
-    if (
-      typeof error === 'object'
-      && error !== null
-      && 'code' in error
-      && error.code === 'ENOENT'
-    ) {
-      throw new Error(`image_path not found: ${imagePath}`);
-    }
-    throw error;
-  }
-
-  try {
-    const stats = fs.fstatSync(descriptor);
-    if (!stats.isFile()) {
-      throw new Error(`image_path must reference a regular file: ${imagePath}`);
-    }
-    validatePngInputSize(stats.size);
-
-    // The sentinel byte detects growth after fstat without allowing an unbounded read.
-    const data = Buffer.allocUnsafe(stats.size + 1);
-    let offset = 0;
-    while (offset < data.length) {
-      const bytesRead = fs.readSync(
-        descriptor,
-        data,
-        offset,
-        data.length - offset,
-        offset,
-      );
-      if (bytesRead === 0) break;
-      offset += bytesRead;
-    }
-    if (offset !== stats.size) {
-      validatePngInputSize(offset);
-      throw new Error(`image_path size changed while reading: ${imagePath}`);
-    }
-    return data.subarray(0, offset);
-  } finally {
-    fs.closeSync(descriptor);
-  }
 }
 
 function validateSourceDimensions(width: number, height: number, maxPixels: number): void {
@@ -430,6 +380,5 @@ export function decodePngBase64ToRgba(encoded: string): DecodedRgbaImage {
 }
 
 export function decodeImagePathToRgba(imagePath: string): DecodedRgbaImage {
-  const resolved = path.resolve(imagePath);
-  return decodePngToRgba(readPngFileWithinLimit(resolved, imagePath));
+  return decodePngToRgba(readRegularFileWithinLimit(imagePath, 'image_path', validatePngInputSize));
 }

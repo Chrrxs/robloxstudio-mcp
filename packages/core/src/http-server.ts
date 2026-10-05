@@ -86,6 +86,7 @@ const TOOL_PROXY_ENDPOINTS: Record<string, readonly string[]> = {
   export_rbxm: ['/api/export-rbxm'],
   import_rbxm: ['/api/import-rbxm'],
   find_and_replace_in_scripts: ['/api/find-and-replace-in-scripts'],
+  manage_monetization: ['/api/place-info'],
 };
 
 type PassiveStudioPeer = Omit<PublicStudioPeer, 'peerId'>;
@@ -224,6 +225,7 @@ export const TOOL_HANDLERS: Record<string, ToolHandler> = {
   set_device_simulator: (tools, body) => tools.setDeviceSimulator(body.target, body.deviceId, body.orientation, body.resolution, body.pixelDensity, body.scalingMode, body.stopSimulation, body.instance_id),
   capture_device_matrix: (tools, body) => tools.captureDeviceMatrix(body.entries, body.target, body.format, body.quality, body.settleSeconds, body.restoreAfter, body.instance_id),
   manage_instance: (tools, body) => tools.manageInstance(body),
+  manage_monetization: (tools, body) => tools.manageMonetization(body, body.instance_id),
   solo_playtest: (tools, body) => tools.soloPlaytest(body.action, body.mode, body.timeout, body.instance_id),
   multiplayer_playtest: (tools, body) => tools.multiplayerPlaytest(body.action, body.numPlayers, body.target, body.testArgs, body.value, body.timeout, body.instance_id),
   get_runtime_logs: (tools, body, context) => tools.getRuntimeLogs(body.instance_id, body.multiplayer_group_id, body.cursor, body.cursor_by_instance, body.tail, body.filter, context?.signal),

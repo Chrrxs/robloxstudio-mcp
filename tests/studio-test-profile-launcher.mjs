@@ -2,13 +2,16 @@
 
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
+import { EventEmitter } from 'node:events';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { PassThrough } from 'node:stream';
 import { fileURLToPath } from 'node:url';
 import {
   createTestProfileEnvironment, profileTestExpectations,
   encodeTestProfilePayload,
+  holdDisplayRequired,
   parseTestProfileArguments,
   runTestProfileCommand,
   runTestProfilePayload,
@@ -116,6 +119,7 @@ assert.equal(inherited.MCP_INSTANCE_ID, 'personal-studio', 'normalizing the chil
   }, {
     identity,
     runSafely: async (_env, operation) => operation(),
+    holdDisplay: async () => async () => {},
     async execute(_command, args, options) { if (args[0] === 'tests/run-all.mjs') suiteEnv = options.env; return 0; },
   });
   assert.equal(suiteEnv.RSMCP_EXPECT_STUDIO_CAPTURE, 'enabled');
@@ -143,6 +147,9 @@ for (const mode of ['enroll', 'run']) {
     const trace = [];
     let insideRun = false;
     let safetyCalls = 0;
+    let displayHolds = 0;
+    let displayReleases = 0;
+    let displayHeld = false;
     const exitCode = await runTestProfilePayload({
       ...invocation, mode, repo: 'C:\\fixture',
       command: mode === 'run' ? ['tests/run-all.mjs', '--managed'] : [],
@@ -158,8 +165,19 @@ for (const mode of ['enroll', 'run']) {
         insideRun = true;
         try { return await operation(); } finally { insideRun = false; }
       },
+      async holdDisplay() {
+        assert.equal(insideRun, true, 'the display is held inside the safety lease');
+        assert.equal(trace.length, 0, 'the display is held before any step can launch Studio');
+        displayHolds++;
+        displayHeld = true;
+        return async () => {
+          displayReleases++;
+          displayHeld = false;
+        };
+      },
       async execute(_command, args, options) {
         assert.equal(insideRun, true);
+        assert.equal(displayHeld, true, 'every step runs while the display is held');
         assert.equal(options.env.USERPROFILE, identity.profileDirectory);
         const step = args[0] === 'tests/run-all.mjs' ? 'suite'
           : args[1] === '--if-outdated' ? (assert.equal(args[0], path.join('C:\\fixture', 'scripts', 'studio-install-repair.mjs')), 'update-if-outdated')
@@ -170,10 +188,58 @@ for (const mode of ['enroll', 'run']) {
       async resetSafety() { assert.fail('ordinary runs must not reset safety'); },
     });
     assert.equal(safetyCalls, 1);
+    assert.equal(displayHolds, 1);
+    assert.equal(displayReleases, 1, 'the display hold ends even when a step fails');
+    assert.equal(displayHeld, false);
     assert.equal(insideRun, false);
     assert.equal(exitCode, failureIndex < 0 ? 0 : 23);
     assert.deepEqual(trace, failureIndex < 0 ? steps : steps.slice(0, failureIndex + 1));
   }
+}
+
+// The display hold is a helper process holding a display-required power request
+// until its stdin closes. An unavailable helper must not fail the run.
+{
+  function fakeHelper({ ready = true, exitEarly = false } = {}) {
+    const child = new EventEmitter();
+    child.stdin = new PassThrough();
+    child.stdout = new PassThrough();
+    child.kill = () => { queueMicrotask(() => child.emit('exit', null)); return true; };
+    child.stdin.on('finish', () => queueMicrotask(() => child.emit('exit', 0)));
+    queueMicrotask(() => {
+      if (exitEarly) child.emit('exit', 3);
+      else if (ready) child.stdout.write('display-required\r\n');
+    });
+    return child;
+  }
+  let spawned;
+  let helper;
+  const release = await holdDisplayRequired({
+    spawnProcess(spawnCommand, args, options) {
+      spawned = { spawnCommand, args, options };
+      helper = fakeHelper();
+      return helper;
+    },
+  });
+  assert.equal(spawned.spawnCommand, 'powershell.exe');
+  assert.equal(spawned.options.windowsHide, true);
+  const script = Buffer.from(spawned.args.at(-1), 'base64').toString('utf16le');
+  assert.match(script, /SetThreadExecutionState\(0x80000003\)/, 'the helper requests continuous system and display power');
+  assert.equal(helper.stdin.writableEnded, false, 'the request stays held until release');
+  await release();
+  assert.equal(helper.stdin.writableEnded, true, 'release closes the helper stdin, ending the request');
+
+  const warnings = [];
+  const originalWarn = console.warn;
+  console.warn = (message) => warnings.push(String(message));
+  try {
+    await (await holdDisplayRequired({ spawnProcess: () => fakeHelper({ exitEarly: true }) }))();
+    await (await holdDisplayRequired({ spawnProcess: () => { throw new Error('spawn powershell.exe ENOENT'); } }))();
+  } finally {
+    console.warn = originalWarn;
+  }
+  assert.equal(warnings.length, 2, 'an unavailable display hold warns instead of failing the run');
+  assert.match(warnings[0], /Studio renders no frames while the display is off/);
 }
 let resetCalls = 0;
 const resetExit = await runTestProfilePayload({

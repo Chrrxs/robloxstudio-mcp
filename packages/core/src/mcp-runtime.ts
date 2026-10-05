@@ -100,6 +100,7 @@ const OPEN_WORLD_TOOLS = new Set([
   'get_asset_thumbnail',
   'get_roblox_docs',
   'insert_asset',
+  'manage_monetization',
   'preview_asset',
   'search_assets',
   'upload_asset',

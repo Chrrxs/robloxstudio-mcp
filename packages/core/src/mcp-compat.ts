@@ -65,6 +65,7 @@ Read output with get_runtime_logs. Reuse nextCursor as cursor for one Instance, 
 - breakpoints clear removes only MCP-created breakpoints unless clear_all is true. clear_all also removes user-created breakpoints.
 - capture_script_profiler ranks Luau functions by CPU time. Use output_path when the raw capture is needed.
 - capture_micro_profiler attributes frame time across engine and game work. Its rows are inclusive or cumulative views, so do not sum them as disjoint totals.
+- MicroProfiler records frames only while Studio renders. Studio stops rendering when the display turns off or Studio is minimized, and the capture then fails with micro_profiler_no_frames.
 - Use baseline_path or baseline for before-and-after MicroProfiler comparisons.
 - Use get_memory_breakdown for memory categories and get_scene_analysis for instance, script, triangle, animation, or audio cost.
 
@@ -75,6 +76,16 @@ Search with search_assets, inspect a shortlist with get_asset_details or get_ass
 Studio must allow third-party asset loading for public third-party previews and insertion. preview_asset scans the complete hierarchy without returning script source. insert_asset removes every LuaSourceContainer and PackageLink before parenting the remaining content, then scans again before insertion.
 
 generate_model stages generated content under ServerStorage for review. upload_asset sends an explicit local file to the chosen Roblox user or group.
+
+## Monetization
+
+manage_monetization lists, reads, creates, and updates developer products and game passes through Roblox Open Cloud. ROBLOX_OPEN_CLOUD_API_KEY needs developer-product:read and developer-product:write, or game-pass:read and game-pass:write, with the experience added to the key. universe_id defaults to the connected Studio place; an unpublished place has no universe.
+
+- Roblox cannot delete developer products or game passes. To retire one, update it with for_sale=false.
+- create keeps new items off sale unless for_sale=true, which also needs a price.
+- create refuses a name that already exists in the universe and returns the existing item. If a create times out, list the universe before retrying.
+- update changes only the arguments supplied, then reads the item back.
+- image_path uploads a local PNG, JPEG, or BMP icon. Roblox shows icons at 512x512 inside a circle, so keep details away from the corners.
 
 ## RBXM files
 

@@ -1503,6 +1503,73 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
     }
   },
 
+  // === Monetization ===
+  {
+    name: 'manage_monetization',
+    category: 'write',
+    description: 'Use to list, inspect, create, or update developer products and game passes.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        action: {
+          type: 'string',
+          enum: ['list', 'get', 'create', 'update'],
+          description: 'Operation; create and update change live Roblox items.'
+        },
+        kind: {
+          type: 'string',
+          enum: ['developer_product', 'game_pass'],
+          description: 'Item type.'
+        },
+        universe_id: {
+          type: 'integer',
+          minimum: 1,
+          description: 'Universe ID; defaults to the connected Studio place.'
+        },
+        id: {
+          type: 'integer',
+          minimum: 1,
+          description: 'Product or pass ID; required for get and update.'
+        },
+        name: {
+          type: 'string',
+          description: 'Item name; required for create.'
+        },
+        description: {
+          type: 'string',
+          description: 'Item description shown to buyers.'
+        },
+        price: {
+          type: 'integer',
+          minimum: 1,
+          maximum: 1000000000,
+          description: 'Default price in Robux.'
+        },
+        for_sale: {
+          type: 'boolean',
+          description: 'Purchasable; create defaults to false.'
+        },
+        managed_pricing: {
+          type: 'boolean',
+          description: 'Let Roblox price optimization set the price.'
+        },
+        image_path: {
+          type: 'string',
+          description: 'Local PNG, JPEG, or BMP icon file.'
+        },
+        page_token: {
+          type: 'string',
+          description: 'Prior list page token.'
+        },
+        instance_id: {
+          type: 'string',
+          description: 'Studio process ID when ambiguous.'
+        }
+      },
+      required: ['action', 'kind']
+    }
+  },
+
   // === Input Simulation ===
   {
     name: 'simulate_mouse_input',
