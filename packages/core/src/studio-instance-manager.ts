@@ -685,7 +685,8 @@ public sealed class McpSuspendedStudio : IDisposable
 
     private static IntPtr OpenTestWorkerJob(string name)
     {
-        if (name == null) return IntPtr.Zero;
+        // PowerShell passes $null to a .NET string parameter as "", so both mean "no worker job".
+        if (String.IsNullOrEmpty(name)) return IntPtr.Zero;
         if (!System.Text.RegularExpressions.Regex.IsMatch(name, @"\\ALocal\\\\RsmcpStudioWorker-[a-f0-9]{32}\\z"))
             throw new ArgumentException("Invalid Studio test worker job name");
         IntPtr handle = OpenJobObjectW(5, false, name);
