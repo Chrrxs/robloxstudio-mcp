@@ -65,6 +65,7 @@ Read output with get_runtime_logs. Reuse nextCursor as cursor for one Instance, 
 - breakpoints clear removes only MCP-created breakpoints unless clear_all is true. clear_all also removes user-created breakpoints.
 - capture_script_profiler ranks Luau functions by CPU time. Use output_path when the raw capture is needed.
 - capture_micro_profiler attributes frame time across engine and game work. Its rows are inclusive or cumulative views, so do not sum them as disjoint totals.
+- MicroProfiler records frames only while Studio renders. Studio stops rendering when the display turns off or Studio is minimized, and the capture then fails with micro_profiler_no_frames.
 - Use baseline_path or baseline for before-and-after MicroProfiler comparisons.
 - Use get_memory_breakdown for memory categories and get_scene_analysis for instance, script, triangle, animation, or audio cost.
 

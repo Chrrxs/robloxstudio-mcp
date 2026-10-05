@@ -27,6 +27,9 @@ with plugin installation redirected to temporary directories.
 Core Jest tests use temporary, suite-specific managed-instance registries and
 remove them after the run, so synthetic peers cannot alter a developer's registry.
 The live gates below still require the dedicated Studio test profile.
+Live runs hold a Windows display-required power request so the power-saving
+timeout cannot turn the display off mid-run. Studio renders no frames while the
+display is off, and MicroProfiler captures then fail with `micro_profiler_no_frames`.
 
 **Feature completion gate:** a feature is not complete until
 `npm run test:e2e` passes. This short gate exercises edit-mode tooling plus one

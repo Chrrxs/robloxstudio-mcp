@@ -6,7 +6,7 @@ const handlerSource = readFileSync(new URL('../../studio-plugin/out/modules/hand
 // LibMP documents that active reads synchronize data while paused reads retain
 // the last synchronized cache: https://github.com/Roblox/libmp/blob/main/docs/SKILL.md
 export const microProfilerCaptureFixtureCode = `
-local function scenario(cachedGeneration, frameLimit, exportFails)
+local function scenario(cachedGeneration, frameLimit, exportFails, rendersFrames)
   local generation = cachedGeneration
   local capturing = false
   local snapshots = 0
@@ -85,7 +85,7 @@ local function scenario(cachedGeneration, frameLimit, exportFails)
     return {import = function() return {RunService = {IsRunning = function() return true end}} end}
   end
   local task = {wait = function(seconds)
-    if seconds and capturing and frameLimit > 0 then generation += 1 end
+    if seconds and capturing and frameLimit > 0 and rendersFrames ~= false then generation += 1 end
   end}
   local handler = (function()
 ${handlerSource}
@@ -96,6 +96,14 @@ ${handlerSource}
     assert(string.find(result.message, 'fixture export failed', 1, true), 'export failure detail is preserved')
     assert(not capturing, 'capture is paused even when snapshot export fails')
     assert(snapshots == 1, 'failed exports are not retried')
+    return
+  end
+  if rendersFrames == false then
+    local result = handler.captureMicroProfiler({duration_ms = 100})
+    assert(result.error == 'micro_profiler_no_frames', 'a capture without rendered frames is an error, not an empty success: ' .. tostring(result.error))
+    assert(string.find(result.message, 'rendered no frames', 1, true), 'the error explains that Studio rendered nothing')
+    assert(not capturing, 'capture is paused when no frames were rendered')
+    assert(disposed == 1, 'the empty snapshot session is released')
     return
   end
   for _ = 1, 2 do
@@ -113,5 +121,6 @@ scenario(0, 256)
 scenario(7, 256)
 scenario(0, 0)
 scenario(0, 256, true)
+scenario(0, 256, false, false)
 return 'MICRO_PROFILER_CACHE_REGRESSION_OK'
 `;

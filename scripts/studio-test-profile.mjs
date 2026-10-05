@@ -148,6 +148,60 @@ export function runTestProfileCommand(command, args, options) {
   });
 }
 
+// While the display is off, Studio keeps running but renders no frames, so
+// render-dependent checks such as MicroProfiler captures come back empty. A
+// display-required request resets the display idle timer so the power-saving
+// timeout cannot turn the display off during the run. The request ends when
+// this helper's stdin closes, including when the harness itself exits.
+const DISPLAY_REQUIRED_SCRIPT = [
+  "Add-Type -Namespace Rsmcp -Name Power -MemberDefinition '[DllImport(\"kernel32.dll\")] public static extern uint SetThreadExecutionState(uint flags);'",
+  // ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED
+  'if ([Rsmcp.Power]::SetThreadExecutionState(0x80000003) -eq 0) { exit 3 }',
+  "[Console]::Out.WriteLine('display-required')",
+  '[void][Console]::In.ReadToEnd()',
+].join('\n');
+
+export async function holdDisplayRequired({ spawnProcess = spawn, readyTimeoutMs = 15_000, releaseTimeoutMs = 5_000 } = {}) {
+  const unavailable = (reason) => {
+    console.warn(`Could not keep the display on (${reason}); Studio renders no frames while the display is off.`);
+    return async () => {};
+  };
+  let child;
+  try {
+    child = spawnProcess('powershell.exe', [
+      '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
+      '-EncodedCommand', Buffer.from(DISPLAY_REQUIRED_SCRIPT, 'utf16le').toString('base64'),
+    ], { stdio: ['pipe', 'pipe', 'ignore'], windowsHide: true });
+  } catch (error) {
+    return unavailable(error instanceof Error ? error.message : String(error));
+  }
+  const ready = Promise.withResolvers();
+  const exited = Promise.withResolvers();
+  const timer = setTimeout(() => ready.resolve('timed out'), readyTimeoutMs);
+  let output = '';
+  child.stdout.on('data', (chunk) => {
+    output += chunk;
+    if (output.includes('display-required')) ready.resolve(undefined);
+  });
+  child.once('error', (error) => ready.resolve(error.message));
+  child.once('exit', (code) => {
+    ready.resolve(`exited with code ${code}`);
+    exited.resolve();
+  });
+  const failure = await ready.promise;
+  clearTimeout(timer);
+  if (failure !== undefined) {
+    child.kill();
+    return unavailable(failure);
+  }
+  return async () => {
+    child.stdin.end();
+    const releaseTimer = setTimeout(() => child.kill(), releaseTimeoutMs);
+    await exited.promise;
+    clearTimeout(releaseTimer);
+  };
+}
+
 function windowsPath(value) {
   if (/^[A-Za-z]:[\\/]/u.test(value) || value.startsWith('\\\\')) return value;
   if (isWsl()) return execFileSync('wslpath', ['-w', path.resolve(value)], { encoding: 'utf8' }).trim();
@@ -159,6 +213,7 @@ export async function runTestProfilePayload(payload, {
   execute = runTestProfileCommand,
   runSafely = withStudioTestRun,
   resetSafety = resetStudioTestSafety,
+  holdDisplay = holdDisplayRequired,
 }) {
   if (payload.repairChannel !== undefined) {
     validateStudioRepairChannel(payload.repairChannel);
@@ -212,7 +267,7 @@ export async function runTestProfilePayload(payload, {
     console.log('Studio test safety reset acknowledged. Launch quota is unchanged; no Studio was launched.');
     return 0;
   }
-  return runSafely(env, async () => {
+  return runSafely(env, () => withDisplayRequired(holdDisplay, async () => {
     if (payload.mode === 'enroll') {
       if (payload.confirmDedicatedProfile !== true) throw new Error('Enrollment requires explicit --confirm-dedicated-profile.');
       const enrolled = await execute(process.execPath, [lifecycle, 'enroll-test-profile', '--source-sid', payload.sourceSid, '--confirm-dedicated-profile'], options);
@@ -235,7 +290,16 @@ export async function runTestProfilePayload(payload, {
     const completed = await execute(process.execPath, payload.command, options);
     if (completed !== 0) return completed;
     return execute(process.execPath, [lifecycle, 'assert-test-profile'], options);
-  });
+  }));
+}
+
+async function withDisplayRequired(holdDisplay, operation) {
+  const release = await holdDisplay();
+  try {
+    return await operation();
+  } finally {
+    await release();
+  }
 }
 
 async function runProfileChild(payload) {

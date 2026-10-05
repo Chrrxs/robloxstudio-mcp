@@ -634,6 +634,19 @@ function captureMicroProfiler(requestData: Record<string, unknown>): unknown {
 	const threadIds = session.FetchThreadIds() ?? [];
 	const frameMin = session.GetFrameIdMin();
 	const frameMax = session.GetFrameIdMax();
+	// Frame IDs start at 1. Studio cuts a frame only when it renders, so a capture
+	// without frames means nothing was drawn, not that the workload was idle.
+	if (frameMax <= 0) {
+		session.Dispose();
+		return {
+			error: "micro_profiler_no_frames",
+			message:
+				"Studio rendered no frames during the capture, so MicroProfiler recorded no data. Studio draws frames only while its window can be displayed, which stops when the display turns off (for example after the power-saving timeout) or Studio is minimized. Wake the display or restore Studio, then retry.",
+			duration_ms: durationMs,
+			buffer_bytes: buffer.len(snapshot),
+			backend,
+		};
+	}
 	const startFrame = math.max(frameMin, frameMax - frameWindow + 1);
 	const framesConsidered = frameMax >= startFrame ? frameMax - startFrame + 1 : 0;
 

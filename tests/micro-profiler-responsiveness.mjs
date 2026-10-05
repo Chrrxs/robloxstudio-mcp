@@ -147,7 +147,7 @@ await runTest('high-volume MicroProfiler capture remains cooperative', async ({ 
     const captureElapsedMs = Date.now() - captureStartedAt;
     writeProfilerCaptureSummary(outputDirectory, { capture, captureElapsedMs, probes });
     assert(capture.ok === true && !capture.error,
-      `high-volume capture_micro_profiler succeeds (${JSON.stringify({ error: capture.error, counts: capture.counts })})`);
+      `high-volume capture_micro_profiler succeeds (${JSON.stringify({ error: capture.error, message: capture.message, counts: capture.counts })})`);
     assert(capture.applied?.max_events === MAX_EVENTS && capture.applied?.frame_window === 2000,
       'high-volume capture applies the requested event and frame limits');
     assert(Number.isInteger(capture.counts?.events_sampled) && capture.counts.events_sampled > 0,
