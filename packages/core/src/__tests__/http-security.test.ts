@@ -41,6 +41,10 @@ describe('HTTP security', () => {
         endpoint: '/api/get-script-source', status: 200 },
       { label: 'simulation read', allowed: new Set(['get_simulation_state', 'get_device_simulator_state']),
         endpoint: '/api/execute-luau', status: 403 },
+      { label: 'monetization', allowed: new Set(['manage_monetization']),
+        endpoint: '/api/place-info', status: 200 },
+      { label: 'monetization only', allowed: new Set(['manage_monetization']),
+        endpoint: '/api/execute-luau', status: 403 },
     ])('enforces $label configuration', async ({ allowed, endpoint, status }) => {
       const app = createHttpServer(tools, bridge, allowed, undefined, { authToken: token });
       const dispatch = jest.spyOn(bridge, 'sendRequest').mockResolvedValue({ success: true });

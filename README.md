@@ -38,6 +38,10 @@ screenshots, memory reports, and profiler captures from each peer.
 - Check an asset's hierarchy, media metadata, and security scan with `preview_asset` before adding it to the place.
 - Add an asset with `insert_asset`. The tool removes scripts and package links, verifies the cleaned result, and then parents it in Studio.
 
+### Manage monetization
+
+- List, create, and update developer products and game passes with `manage_monetization`. New items stay off sale unless you ask, and a name that already exists is refused because Roblox cannot delete these items. Requires an Open Cloud API key; see [Configuration](docs/configuration.md#environment-variables).
+
 ### Look up Roblox APIs
 
 - Fetch official engine API documentation as Markdown with `get_roblox_docs`.

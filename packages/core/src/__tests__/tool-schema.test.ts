@@ -291,6 +291,7 @@ describe('Tool schema compatibility', () => {
       set_device_simulator: 'setDeviceSimulator',
       capture_device_matrix: 'captureDeviceMatrix',
       manage_instance: 'manageInstance',
+      manage_monetization: 'manageMonetization',
       solo_playtest: 'soloPlaytest',
       multiplayer_playtest: 'multiplayerPlaytest',
       get_runtime_logs: 'getRuntimeLogs',
@@ -401,6 +402,47 @@ describe('Tool schema compatibility', () => {
     expect((props.place_version as { description?: string }).description).toContain('place_revision');
     expect(TOOL_GUIDE_MARKDOWN).toContain('manage_instance can launch, inspect, and close Studio or list published place revisions');
     expect(TOOL_GUIDE_MARKDOWN).toContain('must be authorized and completed explicitly');
+  });
+
+  test('manage_monetization exposes guarded developer product and game pass management', () => {
+    const tool = TOOL_DEFINITIONS.find((t) => t.name === 'manage_monetization');
+    expect(tool?.category).toBe('write');
+    const schema = tool?.inputSchema ?? {};
+    expect(schema).toMatchObject({
+      required: ['action', 'kind'],
+      properties: {
+        action: { type: 'string', enum: ['list', 'get', 'create', 'update'] },
+        kind: { type: 'string', enum: ['developer_product', 'game_pass'] },
+        universe_id: { type: 'integer', minimum: 1 },
+        id: { type: 'integer', minimum: 1 },
+        name: { type: 'string' },
+        description: { type: 'string' },
+        price: { type: 'integer', minimum: 1, maximum: 1_000_000_000 },
+        for_sale: { type: 'boolean' },
+        managed_pricing: { type: 'boolean' },
+        image_path: { type: 'string' },
+        page_token: { type: 'string' },
+        instance_id: { type: 'string' },
+      },
+    });
+    const properties: unknown = Reflect.get(schema, 'properties');
+    expect(Object.keys(properties ?? {}).sort()).toEqual([
+      'action',
+      'description',
+      'for_sale',
+      'id',
+      'image_path',
+      'instance_id',
+      'kind',
+      'managed_pricing',
+      'name',
+      'page_token',
+      'price',
+      'universe_id',
+    ]);
+    expect(getReadOnlyTools().map((t) => t.name)).not.toContain('manage_monetization');
+    expect(TOOL_GUIDE_MARKDOWN).toContain('Roblox cannot delete developer products or game passes');
+    expect(TOOL_GUIDE_MARKDOWN).toContain('create refuses a name that already exists');
   });
 
   test('breakpoints schema exposes lifecycle actions and log fields', () => {

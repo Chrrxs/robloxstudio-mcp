@@ -23,6 +23,7 @@ import {
 } from '../image-decode.js';
 import { DOC_CATEGORIES, getRobloxDoc, isDocCategory } from '../roblox-docs.js';
 import { findBuiltInStudioSkill, loadBuiltInStudioSkills } from '../studio-skills.js';
+import { runManageMonetization } from './monetization.js';
 import { rgbaToJpeg } from '../jpeg-encoder.js';
 import { rgbaToPng } from '../png-encoder.js';
 import {
@@ -1646,6 +1647,30 @@ export class RobloxStudioTools {
         }
       ]
     };
+  }
+
+  async manageMonetization(request: Record<string, unknown>, instance_id?: string) {
+    return this._textResult(await runManageMonetization(request, {
+      client: this.openCloudClient,
+      connectedUniverseId: () => this._connectedUniverseId(instance_id),
+    }));
+  }
+
+  // Monetization APIs address a universe, which Studio reports as game.GameId.
+  private async _connectedUniverseId(instance_id?: string): Promise<number> {
+    let info: StudioToolResponse;
+    try {
+      info = await this._callSingle('/api/place-info', {}, undefined, instance_id);
+    } catch (error) {
+      if (error instanceof RoutingFailure) {
+        throw new RoutingFailure({
+          ...error.routingError,
+          message: `${error.routingError.message} Pass universe_id to skip Studio.`,
+        });
+      }
+      throw error;
+    }
+    return typeof info.gameId === 'number' ? info.gameId : 0;
   }
 
   async searchObjects(query: string, searchType: string = 'name', propertyName?: string, instance_id?: string) {

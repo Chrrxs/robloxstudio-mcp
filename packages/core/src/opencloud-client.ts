@@ -138,6 +138,114 @@ export interface DownloadedAudioAsset {
   mimeType: 'audio/mpeg' | 'audio/ogg' | 'audio/wav' | 'audio/flac';
 }
 
+export type MonetizationKind = 'developer_product' | 'game_pass';
+
+/** One developer product or game pass, normalized across both Open Cloud APIs. */
+export interface MonetizationItem {
+  kind: MonetizationKind;
+  id: number;
+  universeId: number;
+  name: string;
+  description: string;
+  forSale: boolean;
+  /** Default price in Robux; null when Roblox reports no price. */
+  price: number | null;
+  managedPricing: boolean;
+  iconAssetId: number | null;
+  createdAt?: string;
+  updatedAt?: string;
+  /** Developer products only: Roblox refuses edits to immutable products. */
+  immutable?: boolean;
+}
+
+export interface MonetizationItemPage {
+  items: MonetizationItem[];
+  nextPageToken?: string;
+}
+
+export interface MonetizationIcon {
+  data: Buffer;
+  fileName: string;
+  mimeType: 'image/png' | 'image/jpeg' | 'image/bmp';
+}
+
+/** Fields sent to Roblox; omitted fields keep their current values on update. */
+export interface MonetizationItemChanges {
+  name?: string;
+  description?: string;
+  price?: number;
+  forSale?: boolean;
+  managedPricing?: boolean;
+  icon?: MonetizationIcon;
+}
+
+interface MonetizationApi {
+  label: string;
+  collectionPath(universeId: number): string;
+  listField: string;
+  idField: string;
+  iconField: string;
+}
+
+// The developer product and game pass APIs differ only in paths and field names.
+const MONETIZATION_APIS: Record<MonetizationKind, MonetizationApi> = {
+  developer_product: {
+    label: 'developer product',
+    collectionPath: (universeId) => `/developer-products/v2/universes/${universeId}/developer-products`,
+    listField: 'developerProducts',
+    idField: 'productId',
+    iconField: 'iconImageAssetId',
+  },
+  game_pass: {
+    label: 'game pass',
+    collectionPath: (universeId) => `/game-passes/v1/universes/${universeId}/game-passes`,
+    listField: 'gamePasses',
+    idField: 'gamePassId',
+    iconField: 'iconAssetId',
+  },
+};
+
+function readField(source: unknown, key: string): unknown {
+  return typeof source === 'object' && source !== null ? Reflect.get(source, key) : undefined;
+}
+
+function positiveSafeInteger(value: unknown): number | undefined {
+  const parsed = typeof value === 'string' && /^\d+$/.test(value) ? Number(value) : value;
+  return typeof parsed === 'number' && Number.isSafeInteger(parsed) && parsed > 0 ? parsed : undefined;
+}
+
+function normalizeMonetizationItem(
+  kind: MonetizationKind,
+  universeId: number,
+  value: unknown,
+): MonetizationItem {
+  const api = MONETIZATION_APIS[kind];
+  const id = positiveSafeInteger(readField(value, api.idField));
+  if (id === undefined) {
+    throw new Error(`Open Cloud returned a ${api.label} without a valid ${api.idField}.`);
+  }
+  const name = readField(value, 'name');
+  const description = readField(value, 'description');
+  const price = readField(readField(value, 'priceInformation'), 'defaultPriceInRobux');
+  const createdAt = readField(value, 'createdTimestamp');
+  const updatedAt = readField(value, 'updatedTimestamp');
+  const immutable = readField(value, 'isImmutable');
+  return {
+    kind,
+    id,
+    universeId: positiveSafeInteger(readField(value, 'universeId')) ?? universeId,
+    name: typeof name === 'string' ? name : '',
+    description: typeof description === 'string' ? description : '',
+    forSale: readField(value, 'isForSale') === true,
+    price: typeof price === 'number' && Number.isSafeInteger(price) && price >= 0 ? price : null,
+    managedPricing: readField(value, 'isManagedPricingEnabled') === true,
+    iconAssetId: positiveSafeInteger(readField(value, api.iconField)) ?? null,
+    ...(typeof createdAt === 'string' ? { createdAt } : {}),
+    ...(typeof updatedAt === 'string' ? { updatedAt } : {}),
+    ...(kind === 'developer_product' && typeof immutable === 'boolean' ? { immutable } : {}),
+  };
+}
+
 type AssetDeliveryResponse = {
   location?: string;
   errors?: Array<{
@@ -172,6 +280,80 @@ function detectAudioMimeType(
     return 'audio/mpeg';
   }
   return undefined;
+}
+
+export interface OpenCloudErrorDetails {
+  errorCode?: string | number;
+  field?: string;
+  hint?: string;
+}
+
+/** A non-2xx Open Cloud response; messages keep the client's established wording. */
+export class OpenCloudRequestError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+    readonly details: OpenCloudErrorDetails = {},
+  ) {
+    super(message);
+    this.name = 'OpenCloudRequestError';
+  }
+}
+
+async function openCloudResponseError(response: Response): Promise<OpenCloudRequestError> {
+  const errorBody = await response.text();
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(errorBody);
+  } catch {
+    parsed = undefined;
+  }
+  const text = (key: string): string | undefined => {
+    const value = readField(parsed, key);
+    return typeof value === 'string' && value ? value : undefined;
+  };
+  // Most Open Cloud APIs use detail or message; monetization APIs use errorMessage.
+  const errorMessage = text('detail') ?? text('message') ?? text('errorMessage') ?? errorBody;
+  const errorCode = readField(parsed, 'errorCode');
+  const field = text('field');
+  const hint = text('hint');
+  const details: OpenCloudErrorDetails = {
+    ...(typeof errorCode === 'string' || typeof errorCode === 'number' ? { errorCode } : {}),
+    ...(field ? { field } : {}),
+    ...(hint ? { hint } : {}),
+  };
+
+  const { status } = response;
+  let message: string;
+  if (status === 401) {
+    message = 'Invalid or expired API key';
+  } else if (status === 403) {
+    message = `API key lacks required permissions: ${errorMessage}`;
+  } else if (status === 429) {
+    message = 'Rate limit exceeded. Please try again later.';
+  } else {
+    message = `Open Cloud API error (${status}): ${errorMessage}`;
+  }
+  return new OpenCloudRequestError(message, status, details);
+}
+
+function monetizationForm(changes: MonetizationItemChanges): FormData {
+  const form = new FormData();
+  if (changes.name !== undefined) form.append('name', changes.name);
+  if (changes.description !== undefined) form.append('description', changes.description);
+  if (changes.price !== undefined) form.append('price', String(changes.price));
+  if (changes.forSale !== undefined) form.append('isForSale', String(changes.forSale));
+  if (changes.managedPricing !== undefined) {
+    form.append('isManagedPricingEnabled', String(changes.managedPricing));
+  }
+  if (changes.icon) {
+    form.append(
+      'imageFile',
+      new Blob([new Uint8Array(changes.icon.data)], { type: changes.icon.mimeType }),
+      changes.icon.fileName,
+    );
+  }
+  return form;
 }
 
 export class OpenCloudClient {
@@ -233,26 +415,7 @@ export class OpenCloudClient {
         signal: controller.signal,
       });
 
-      if (!response.ok) {
-        const errorBody = await response.text();
-        let errorMessage: string;
-        try {
-          const errorJson = JSON.parse(errorBody);
-          errorMessage = errorJson.detail || errorJson.message || errorBody;
-        } catch {
-          errorMessage = errorBody;
-        }
-
-        if (response.status === 401) {
-          throw new Error('Invalid or expired API key');
-        } else if (response.status === 403) {
-          throw new Error(`API key lacks required permissions: ${errorMessage}`);
-        } else if (response.status === 429) {
-          throw new Error('Rate limit exceeded. Please try again later.');
-        } else {
-          throw new Error(`Open Cloud API error (${response.status}): ${errorMessage}`);
-        }
-      }
+      if (!response.ok) throw await openCloudResponseError(response);
 
       return (await response.json()) as T;
     } catch (error) {
@@ -302,6 +465,60 @@ export class OpenCloudClient {
         maxPageSize,
         pageToken,
       },
+    });
+  }
+
+  async listMonetizationItems(
+    kind: MonetizationKind,
+    universeId: number,
+    pageToken?: string,
+  ): Promise<MonetizationItemPage> {
+    const api = MONETIZATION_APIS[kind];
+    const response = await this.request<unknown>(`${api.collectionPath(universeId)}/creator`, {
+      params: { pageToken },
+    });
+    const rows: unknown = readField(response, api.listField);
+    if (!Array.isArray(rows)) {
+      throw new Error(`Open Cloud returned a ${api.label} list without ${api.listField}.`);
+    }
+    const nextPageToken = readField(response, 'nextPageToken');
+    return {
+      items: rows.map((row: unknown) => normalizeMonetizationItem(kind, universeId, row)),
+      ...(typeof nextPageToken === 'string' && nextPageToken ? { nextPageToken } : {}),
+    };
+  }
+
+  async getMonetizationItem(
+    kind: MonetizationKind,
+    universeId: number,
+    id: number,
+  ): Promise<MonetizationItem> {
+    const path = `${MONETIZATION_APIS[kind].collectionPath(universeId)}/${id}/creator`;
+    return normalizeMonetizationItem(kind, universeId, await this.request<unknown>(path));
+  }
+
+  async createMonetizationItem(
+    kind: MonetizationKind,
+    universeId: number,
+    item: MonetizationItemChanges & { name: string },
+  ): Promise<MonetizationItem> {
+    const response = await this.requestMultipart<unknown>(
+      MONETIZATION_APIS[kind].collectionPath(universeId),
+      monetizationForm(item),
+    );
+    return normalizeMonetizationItem(kind, universeId, response);
+  }
+
+  /** Changes only the given fields. Roblox answers with an empty 204. */
+  async updateMonetizationItem(
+    kind: MonetizationKind,
+    universeId: number,
+    id: number,
+    changes: MonetizationItemChanges,
+  ): Promise<void> {
+    const path = `${MONETIZATION_APIS[kind].collectionPath(universeId)}/${id}`;
+    await this.sendMultipart(path, monetizationForm(changes), 'PATCH', async (response) => {
+      await response.arrayBuffer();
     });
   }
 
@@ -530,9 +747,16 @@ export class OpenCloudClient {
     return mimeTypes[ext];
   }
 
-  private async requestMultipart<T>(
+  private requestMultipart<T>(endpoint: string, formData: FormData): Promise<T> {
+    return this.sendMultipart(endpoint, formData, 'POST', async (response) => (await response.json()) as T);
+  }
+
+  // readResponse runs inside the deadline, so a stalled body still times out.
+  private async sendMultipart<T>(
     endpoint: string,
-    formData: FormData
+    formData: FormData,
+    method: 'POST' | 'PATCH',
+    readResponse: (response: Response) => Promise<T>,
   ): Promise<T> {
     if (!this.apiKey) {
       throw new Error(
@@ -545,35 +769,16 @@ export class OpenCloudClient {
     const timeoutId = setTimeout(() => controller.abort(), this.timeout);
 
     try {
+      // fetch derives the multipart Content-Type and boundary from FormData.
       const response = await fetch(url, {
-        method: 'POST',
+        method,
         headers: { 'x-api-key': this.apiKey },
         body: formData,
         signal: controller.signal,
       });
 
-      if (!response.ok) {
-        const errorBody = await response.text();
-        let errorMessage: string;
-        try {
-          const errorJson = JSON.parse(errorBody);
-          errorMessage = errorJson.detail || errorJson.message || errorBody;
-        } catch {
-          errorMessage = errorBody;
-        }
-
-        if (response.status === 401) {
-          throw new Error('Invalid or expired API key');
-        } else if (response.status === 403) {
-          throw new Error(`API key lacks required permissions: ${errorMessage}`);
-        } else if (response.status === 429) {
-          throw new Error('Rate limit exceeded. Please try again later.');
-        } else {
-          throw new Error(`Open Cloud API error (${response.status}): ${errorMessage}`);
-        }
-      }
-
-      return (await response.json()) as T;
+      if (!response.ok) throw await openCloudResponseError(response);
+      return await readResponse(response);
     } catch (error) {
       if (controller.signal.aborted) throw new Error('Request timed out');
       if (error instanceof Error) {

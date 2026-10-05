@@ -76,6 +76,16 @@ Studio must allow third-party asset loading for public third-party previews and 
 
 generate_model stages generated content under ServerStorage for review. upload_asset sends an explicit local file to the chosen Roblox user or group.
 
+## Monetization
+
+manage_monetization lists, reads, creates, and updates developer products and game passes through Roblox Open Cloud. ROBLOX_OPEN_CLOUD_API_KEY needs developer-product:read and developer-product:write, or game-pass:read and game-pass:write, with the experience added to the key. universe_id defaults to the connected Studio place; an unpublished place has no universe.
+
+- Roblox cannot delete developer products or game passes. To retire one, update it with for_sale=false.
+- create keeps new items off sale unless for_sale=true, which also needs a price.
+- create refuses a name that already exists in the universe and returns the existing item. If a create times out, list the universe before retrying.
+- update changes only the arguments supplied, then reads the item back.
+- image_path uploads a local PNG, JPEG, or BMP icon. Roblox shows icons at 512x512 inside a circle, so keep details away from the corners.
+
 ## RBXM files
 
 - export_rbxm writes selected instances to an explicit local path. It can read the edit DataModel or a live server DataModel.
