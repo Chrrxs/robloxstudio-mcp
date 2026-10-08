@@ -19,6 +19,7 @@ import {
   type StudioProcessIdentityLauncher,
 } from './studio-platform.js';
 import {
+  killOrphanedWineLaunchGate,
   listWineStudioProcesses,
   spawnWineStudio,
   stopWineStudio,
@@ -1317,7 +1318,7 @@ function resolveNativeLinuxStudioExe(): string {
 }
 
 export function resolveStudioExe(): string {
-  if (process.platform === 'linux' && !isWsl()) return resolveNativeLinuxStudioExe();
+  if (process.platform === 'linux' && isWineHost()) return resolveNativeLinuxStudioExe();
   if (process.env.ROBLOX_STUDIO_EXE) return process.env.ROBLOX_STUDIO_EXE;
 
   if (process.platform === 'darwin') {
@@ -1337,7 +1338,7 @@ export function resolveStudioExe(): string {
 }
 
 async function resolveStudioExeAsync(): Promise<string> {
-  if (process.platform === 'linux' && !isWsl()) return resolveNativeLinuxStudioExe();
+  if (process.platform === 'linux' && isWineHost()) return resolveNativeLinuxStudioExe();
   if (process.env.ROBLOX_STUDIO_EXE) return process.env.ROBLOX_STUDIO_EXE;
   if (process.platform === 'darwin') {
     return '/Applications/RobloxStudio.app/Contents/MacOS/RobloxStudio';
@@ -1873,7 +1874,9 @@ export class StudioInstanceManager {
       } else if (lifecycleCapabilities.processIdentity.launcher === 'wine-retained') {
         const wineLauncher = (this.platformCapabilities ?? getStudioPlatformCapabilities()).wineLauncher;
         if (!wineLauncher) throw new Error('The Wine Studio launcher path is unavailable.');
-        proc = await spawnWineStudio(wineLauncher, exe, args, spawnOptions);
+        proc = await spawnWineStudio(wineLauncher, exe, args, spawnOptions, {
+          logDir: path.join(this.registry.dir, 'wine-launches'),
+        });
       } else {
         const child = spawn(exe, args, spawnOptions);
         proc = {
@@ -2431,21 +2434,53 @@ export class StudioInstanceManager {
     };
   }
 
-  private async sweepRegistry(snapshot: StudioProcessSnapshot): Promise<void> {
-    const sweepOptions = await this.registrySweepOptions(snapshot);
-    await this.registry.sweep(sweepOptions);
-    const persisted = await this.registry.listOpenUnchecked();
-    for (const registryRecord of persisted) {
-      const ownerPid = registryRecord.ownerPid;
+  private isOrphanedUnreleasedLaunch(
+    registryRecord: ManagedInstanceRegistryRecord,
+    currentBootId: string,
+  ): boolean {
+    const ownerPid = registryRecord.ownerPid;
+    return !(
+      registryRecord.processAuthorizationState === "released" ||
+      this.launchControls.has(registryRecord.recordId) ||
+      registryRecord.bootId !== currentBootId ||
+      ownerPid === undefined ||
+      (ownerPid !== process.pid && isProcessAlive(ownerPid))
+    );
+  }
+
+  // A broker that dies between spawn and authorization leaves its Wine launch
+  // gate stopped. The gate is /bin/sh, not Studio, so the orphan cleanup below
+  // never sees it in a Studio snapshot.
+  private async reapOrphanedWineLaunchGates(currentBootId: string): Promise<void> {
+    if (this.getLifecycleCapabilities().processIdentity.launcher !== 'wine-retained') return;
+    for (const registryRecord of await this.registry.listOpenUnchecked()) {
+      const processId = registryRecord.nativeProcessId;
+      const startedAt = registryRecord.nativeProcessStartedAt;
       if (
-        registryRecord.processAuthorizationState === "released" ||
-        this.launchControls.has(registryRecord.recordId) ||
-        registryRecord.bootId !== sweepOptions.currentBootId ||
-        ownerPid === undefined ||
-        (ownerPid !== process.pid && isProcessAlive(ownerPid))
+        registryRecord.processAuthorizationState !== 'pending' ||
+        !processId ||
+        !startedAt ||
+        !this.isOrphanedUnreleasedLaunch(registryRecord, currentBootId)
       ) {
         continue;
       }
+      try {
+        if (killOrphanedWineLaunchGate(processId, startedAt)) {
+          console.error(`[studio] Killed Wine launch gate ${processId}, left stopped by a broker that exited before authorizing it.`);
+        }
+      } catch (error) {
+        console.error(`[studio] Could not check orphaned Wine launch gate ${processId}: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+  }
+
+  private async sweepRegistry(snapshot: StudioProcessSnapshot): Promise<void> {
+    const sweepOptions = await this.registrySweepOptions(snapshot);
+    await this.reapOrphanedWineLaunchGates(sweepOptions.currentBootId);
+    await this.registry.sweep(sweepOptions);
+    const persisted = await this.registry.listOpenUnchecked();
+    for (const registryRecord of persisted) {
+      if (!this.isOrphanedUnreleasedLaunch(registryRecord, sweepOptions.currentBootId)) continue;
       const record = this.fromRegistryRecord(registryRecord);
       if (this.observeRecord(record, snapshot).status !== "running") continue;
       const processId = record.nativeProcessId ?? record.spawnPid;

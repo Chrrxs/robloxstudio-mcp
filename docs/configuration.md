@@ -163,15 +163,38 @@ exec wine "$exe" "$@"
 ```
 
 Wrappers that start Studio in a new process, such as `proton run`, do not keep
-the PID and are rejected. The launch is held stopped until it is authorized;
-after that the gated process must become `RobloxStudioBeta.exe` within 30
-seconds or it is killed. Absolute paths among the Studio arguments are passed
-as `Z:\...` paths. A launch's `process_environment` is applied to the
-launcher, so a caller can pick the prefix with `WINEPREFIX`.
+the PID and are rejected. The same applies to launchers that run Wine inside a
+sandbox with its own PID namespace, such as Flatpak, bubblewrap, or the Steam
+runtime (pressure-vessel): the server must see Studio's PID in its own `/proc`.
 
-Studio processes are identified by `/proc` PID and start time. `close` sends
-SIGTERM to that exact process, then SIGKILL if it is still running. Sign-in
-settling before close and host window capture are not available under Wine.
+The launch is held stopped until it is authorized; after that the gated process
+must become `RobloxStudioBeta.exe` within 60 seconds or it is killed. A cold
+start can be slower (the first launch starts `wineserver` and may update the
+prefix, and x86 emulation adds more), so raise
+`ROBLOX_STUDIO_WINE_START_TIMEOUT_MS` if launches time out. If the broker exits
+while a launch is still held, the next broker that uses the same registry kills
+the held process; nothing Windows-side ran in it.
+
+Absolute paths among the Studio arguments are passed as `Z:\...` paths, so the
+prefix must keep Wine's default `Z:` drive mapped to `/`. A launch's
+`process_environment` is applied to the launcher, so a caller can pick the
+prefix with `WINEPREFIX`.
+
+The launcher's stdout and stderr go to a per-launch log in `wine-launches/`
+inside the managed-instance registry directory
+(`~/.local/state/robloxstudio-mcp/managed-instances/v1/` unless
+`ROBLOXSTUDIO_MCP_MANAGED_INSTANCE_REGISTRY_DIR` is set). The newest 10 logs are
+kept, and a failed launch includes the end of its log in the error. Wine keeps
+writing to the log while Studio runs; set `WINEDEBUG=-all` in the launcher to
+keep it small.
+
+Studio processes are identified by `/proc` PID and start time, and only the
+current user's processes are listed. The start time is converted to a UTC time
+using a boot-time reference saved for each boot in the registry directory, so
+identities still match after a broker restart even if the system clock was
+stepped. `close` sends SIGTERM to that exact process, then SIGKILL if it is still
+running. Sign-in settling before close and host window capture are not available
+under Wine.
 
 ## Environment variables
 
@@ -185,8 +208,9 @@ settling before close and host window capture are not available under Wine.
 | `ROBLOX_STUDIO_HOST_CAPTURE` | Unset | Set to `0`, `false`, or `off` to disable the host window capture fallback for `capture_screenshot`. |
 | `ROBLOX_OPEN_CLOUD_API_KEY` | None | Roblox Open Cloud key used by features such as audio preview, place version access, and monetization. Required permissions depend on the tool. |
 | `MCP_PLUGINS_DIR` | Platform Studio Plugins folder | Override the destination used by plugin installation. |
-| `ROBLOX_STUDIO_EXE` | Auto-discovered on Windows, WSL, and macOS | Studio executable to launch. Required on native Linux, where it must be an existing `RobloxStudioBeta.exe` in the Wine prefix. |
+| `ROBLOX_STUDIO_EXE` | Auto-discovered on Windows, WSL, and macOS | Studio executable to launch. Required on native Linux with a Wine launcher, where it must be an existing `RobloxStudioBeta.exe` in the Wine prefix. |
 | `ROBLOX_STUDIO_WINE_LAUNCHER` | Unset | Native Linux only: executable that `exec`s Wine on Studio. See [Native Linux with Wine](#native-linux-with-wine). |
+| `ROBLOX_STUDIO_WINE_START_TIMEOUT_MS` | `60000` | Native Linux with Wine only: how long an authorized launch may take to become `RobloxStudioBeta.exe`, from 1 to 150000 ms. |
 
 Creator Store audio preview requires the `legacy-asset:manage` scope (Legacy
 Assets → manage in the API key settings); `asset:read` alone returns 403. See
