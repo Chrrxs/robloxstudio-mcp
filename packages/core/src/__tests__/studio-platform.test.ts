@@ -70,6 +70,56 @@ describe('Studio platform capabilities', () => {
     });
   });
 
+  test('native Linux without a Wine launcher names the launcher setting as remediation', () => {
+    expect(detectStudioPlatform({
+      platform: 'linux',
+      kernelVersion: NATIVE_LINUX_KERNEL,
+    }).processIdentity.reason).toContain('ROBLOX_STUDIO_WINE_LAUNCHER');
+  });
+
+  test('native Linux with an executable Wine launcher uses the retained Wine launcher', () => {
+    expect(detectStudioPlatform({
+      platform: 'linux',
+      kernelVersion: NATIVE_LINUX_KERNEL,
+      windowsInteropAvailable: false,
+      wineLauncher: '/opt/studio/launch-studio',
+      wineLauncherExecutable: true,
+    })).toEqual({
+      hostPlatform: 'linux',
+      isWsl: false,
+      windowsInteropAvailable: false,
+      processIdentity: {
+        supported: true,
+        launcher: 'wine-retained',
+      },
+      wineLauncher: '/opt/studio/launch-studio',
+    });
+  });
+
+  test('a Wine launcher that is not executable is rejected with its path', () => {
+    const capabilities = detectStudioPlatform({
+      platform: 'linux',
+      kernelVersion: NATIVE_LINUX_KERNEL,
+      wineLauncher: '/opt/studio/missing',
+      wineLauncherExecutable: false,
+    });
+    expect(capabilities).toMatchObject({
+      hostPlatform: 'linux',
+      processIdentity: { supported: false, launcher: 'unavailable' },
+    });
+    expect(capabilities.processIdentity.reason).toContain('/opt/studio/missing');
+  });
+
+  test.each([true, false])('WSL ignores the Wine launcher (Windows interop: %p)', (windowsInteropAvailable) => {
+    expect(detectStudioPlatform({
+      platform: 'linux',
+      kernelVersion: WSL_KERNEL,
+      windowsInteropAvailable,
+      wineLauncher: '/opt/studio/launch-studio',
+      wineLauncherExecutable: true,
+    }).processIdentity.launcher).toBe(windowsInteropAvailable ? 'wsl-windows-retained' : 'unavailable');
+  });
+
   test('a container sharing a WSL kernel is rejected without live Windows interop', () => {
     expect(detectStudioPlatform({
       platform: 'linux',
