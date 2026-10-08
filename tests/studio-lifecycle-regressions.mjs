@@ -16,9 +16,23 @@ import {
 } from '../scripts/studio-lifecycle.mjs';
 
 const PLACE_UUID = randomUUID();
-const PLACE_KEY = `anon:${PLACE_UUID}`;
 const REPRO_PLUGIN_NAME = '000_RSMCP_EditHistoryRepro.rbxmx';
 const SAVED_INSTANCE_ID = 'instance:old-000';
+// File > Save writes the edit DataModel as-is, so no attribute here may be MCP-owned.
+const MCP_ATTRIBUTE_PROBE = `
+local found = {}
+local holders = game:GetChildren()
+table.insert(holders, game)
+for _, holder in ipairs(holders) do
+  local ok, attributes = pcall(function() return holder:GetAttributes() end)
+  if ok then
+    for name in pairs(attributes) do
+      if string.sub(name, 1, 5) == "__MCP" then table.insert(found, holder.ClassName .. "." .. name) end
+    end
+  end
+end
+table.sort(found)
+return #found .. ":" .. table.concat(found, ",")`;
 const SERVER_ENV = {
   ROBLOX_STUDIO_PROXY_PROMOTION_INTERVAL_MS: '600000',
 };
@@ -180,6 +194,31 @@ function matchingEditPeers(body, instanceId) {
   );
 }
 
+async function assertNoMcpAttributes(client, instanceId, label) {
+  const probe = await client.callTool('execute_luau', {
+    instance_id: instanceId,
+    target: 'edit',
+    code: MCP_ATTRIBUTE_PROBE,
+  });
+  assert(probe.success === true && probe.returnValue === '0:',
+    `${label}: edit DataModel carries no __MCP attributes (${JSON.stringify(probe.returnValue ?? probe)})`);
+}
+
+async function waitForServerPeer(instanceId, label) {
+  const deadline = Date.now() + 60_000;
+  while (Date.now() < deadline) {
+    const peers = (await serverTopology()).peers ?? [];
+    if (peers.some((peer) => peer.instanceId === instanceId && peer.role === 'server')) return;
+    await delay(250);
+  }
+  throw new Error(`${label}: no server Peer registered under ${instanceId}`);
+}
+
+async function stopPlaytest(client, instanceId, label) {
+  const stopped = await client.callTool('solo_playtest', { action: 'stop', instance_id: instanceId }, 45_000);
+  assert(stopped.success === true, `${label}: playtest stops (${JSON.stringify(stopped)})`);
+}
+
 async function assertLogMarker(client, instanceId, marker, expectedCount, expectedLevel = 'ERR') {
   const logs = await client.callTool('get_runtime_logs', {
     instance_id: instanceId,
@@ -240,8 +279,6 @@ async function main() {
     const firstInstanceId = firstLaunch.instance_id;
     assert(typeof firstInstanceId === 'string' && firstInstanceId.length > 0,
       'first launch reports its Studio process Instance ID');
-    assert(firstInstanceId !== PLACE_KEY,
-      'process Instance identity is distinct from persisted place metadata');
     assert(firstInstanceId !== SAVED_INSTANCE_ID,
       'fresh edit session ignores persisted runtime topology identity');
     const firstPeers = matchingEditPeers(await serverTopology(), firstInstanceId);
@@ -249,8 +286,10 @@ async function main() {
     const firstPeerId = firstPeers[0].peerId;
     const firstTransportPeerId = firstPeers[0].transportPeerId;
     assert(firstPeerId === firstTransportPeerId, 'edit Peer directly owns its event transport');
-    assert(firstPeers[0].placeKey === PLACE_KEY,
-      'persisted anonymous place identity remains non-routing metadata');
+    const placeKey = firstPeers[0].placeKey;
+    assert(placeKey === `name:${firstPeers[0].dataModelName}` && !placeKey.includes(PLACE_UUID),
+      'unpublished place identity comes from the place name, not saved MCP metadata');
+    await assertNoMcpAttributes(client, firstInstanceId, 'place saved by an older plugin');
     const cachedIdentity = await client.callTool('execute_luau', {
       instance_id: firstInstanceId,
       target: 'edit',
@@ -330,7 +369,7 @@ async function main() {
       'second edit Peer directly owns its event transport');
     assert(topologyWithBoth.peers.some((peer) => peer.peerId === firstPeerId),
       'active stale Peer and new Peer coexist instead of colliding by place');
-    assert(secondPeers[0].placeKey === PLACE_KEY && stalePeer.placeKey === PLACE_KEY,
+    assert(secondPeers[0].placeKey === placeKey && stalePeer.placeKey === placeKey,
       'coexisting process Instances may share the same place metadata');
 
     keepOldPeerAlive.controller.abort();
@@ -377,6 +416,27 @@ async function main() {
       liveInvalidEntries[0].message.includes(`${liveInvalidMarker}\\xA3\\xB7\\xC7`),
       'live MessageOut capture escapes malformed UTF-8 bytes without dropping the log message',
     );
+
+    console.log('\n=== playtests hand off topology without saving MCP state ===');
+    const started = await client.callTool('solo_playtest', {
+      action: 'start',
+      mode: 'play',
+      instance_id: secondInstanceId,
+    }, 90_000);
+    assert(started.success === true, `MCP solo playtest starts (${JSON.stringify(started)})`);
+    await waitForServerPeer(secondInstanceId, 'MCP solo playtest');
+    await stopPlaytest(client, secondInstanceId, 'MCP solo playtest');
+    // Studio Play outside the MCP start handler takes the plugin-settings ticket path.
+    await delay(2000);
+    const directPlay = await client.callTool('execute_luau', {
+      instance_id: secondInstanceId,
+      target: 'edit',
+      code: 'task.spawn(function() game:GetService("StudioTestService"):ExecutePlayModeAsync({}) end) return true',
+    });
+    assert(directPlay.success === true, 'direct engine Play starts');
+    await waitForServerPeer(secondInstanceId, 'direct engine Play');
+    await stopPlaytest(client, secondInstanceId, 'direct engine Play');
+    await assertNoMcpAttributes(client, secondInstanceId, 'after MCP and direct playtests');
     console.log('\n✅ Studio lifecycle regressions PASSED');
   } catch (error) {
     bodyError = error;

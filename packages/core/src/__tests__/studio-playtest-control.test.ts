@@ -67,8 +67,8 @@ async function createHarness(editModeActive = false) {
     ExecuteRunModeAsync: jest.fn(() => undefined),
   };
   const pluginSession = {
-    prepareSharedTopology: jest.fn(() => 'topology-token'),
-    clearTopologyMarker: jest.fn(),
+    prepareSoloTest: jest.fn(() => ({ token: 'topology-token', testArgs: { __mcpTopology: { instanceId: 'instance:aaa-111' } } })),
+    finishTest: jest.fn(),
   };
   const stopMonitor = {
     requestStop: () => ({ ok: true, requestId: 'stop-request' }),
@@ -190,7 +190,7 @@ describe('Studio playtest lifecycle control', () => {
       error: 'Studio is not ready to start a playtest.',
       editModeReady: false,
     });
-    expect(harness.pluginSession.prepareSharedTopology).not.toHaveBeenCalled();
+    expect(harness.pluginSession.prepareSoloTest).not.toHaveBeenCalled();
     expect(harness.scheduledCount).toBe(0);
     expect(harness.studioTestService.ExecutePlayModeAsync).not.toHaveBeenCalled();
     expect(harness.studioTestService.ExecuteRunModeAsync).not.toHaveBeenCalled();

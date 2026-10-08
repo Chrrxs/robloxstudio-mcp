@@ -1,6 +1,6 @@
-// Cross-DataModel stop_playtest signaling via plugin settings. Solo edit and
-// runtime peers share one process instanceId through PluginSession's topology
-// marker, so only the intended Studio process can consume the request.
+// Cross-DataModel stop_playtest signaling via plugin settings. A solo play
+// server inherits its edit's instanceId from PluginSession (test args or a
+// plugin-settings ticket), so only the intended Studio process consumes it.
 
 import { HttpService, RunService } from "@rbxts/services";
 import PluginSession from "./PluginSession";

@@ -1,4 +1,4 @@
-import { HttpService, ServerStorage } from "@rbxts/services";
+import PluginSession from "./PluginSession";
 
 const SETTING_KEY_PREFIX = "MCP_LAST_SUCCESSFUL_SERVER_URL_";
 const GLOBAL_SETTING_KEY = "MCP_LAST_SUCCESSFUL_SERVER_URL_GLOBAL_V1";
@@ -40,19 +40,11 @@ function addUnique(values: string[], value: string): void {
 	}
 }
 
-function computePlaceKeys(options?: { createAnonymous?: boolean }): string[] {
-	const placeKeys: string[] = [];
-	if (game.PlaceId !== 0) {
-		addUnique(placeKeys, `place:${tostring(game.PlaceId)}`);
-	}
-	const existing = ServerStorage.GetAttribute("__MCPPlaceId");
-	if (typeIs(existing, "string") && existing !== "") {
-		addUnique(placeKeys, `anon:${existing}`);
-	} else if (game.PlaceId === 0 && options?.createAnonymous === true) {
-		const fresh = HttpService.GenerateGUID(false);
-		pcall(() => ServerStorage.SetAttribute("__MCPPlaceId", fresh));
-		addUnique(placeKeys, `anon:${fresh}`);
-	}
+function computePlaceKeys(): string[] {
+	const placeKeys = [PluginSession.getPlaceKey()];
+	// Unpublished places used to be keyed by a saved __MCPPlaceId attribute.
+	const legacyPlaceKey = PluginSession.getLegacyPlaceKey();
+	if (legacyPlaceKey !== undefined) addUnique(placeKeys, legacyPlaceKey);
 	return placeKeys;
 }
 
@@ -79,16 +71,13 @@ function rememberServerUrl(serverUrl: string): void {
 	const normalized = normalizeServerUrl(serverUrl);
 	if (!pluginRef || normalized === "") return;
 	writeSettingString(GLOBAL_SETTING_KEY, normalized);
-	for (const placeKey of computePlaceKeys({ createAnonymous: true })) {
-		writeSettingString(settingKey(placeKey), normalized);
-	}
+	writeSettingString(settingKey(PluginSession.getPlaceKey()), normalized);
 }
 
 function readServerUrl(): string | undefined {
 	if (!pluginRef) return undefined;
-	// Reading settings should not mint a place key. Client play DataModels have
-	// their own ServerStorage; creating a key there would not match the
-	// edit/server place-scoped setting.
+	// The legacy key is read only, so a place remembered by an older plugin
+	// version keeps its server URL until the current key is written.
 	for (const placeKey of computePlaceKeys()) {
 		const remembered = readSettingString(settingKey(placeKey));
 		if (remembered !== undefined) return remembered;
