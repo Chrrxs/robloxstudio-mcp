@@ -96,7 +96,8 @@ export function detectStudioPlatform(
         supported: true,
         launcher: 'wine-retained',
       },
-      wineLauncher: path.resolve(evidence.wineLauncher),
+      // Wine hosts are always Linux; keep POSIX semantics when tests run elsewhere.
+      wineLauncher: path.posix.resolve(evidence.wineLauncher),
     };
   }
 
