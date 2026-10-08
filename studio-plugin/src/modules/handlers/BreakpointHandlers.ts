@@ -1,14 +1,13 @@
 import Utils from "../Utils";
 import PeerRole from "../PeerRole";
+import PluginSession from "../PluginSession";
 
 const { getInstanceByPath } = Utils;
 
 const HttpService = game.GetService("HttpService");
-const ServerStorage = game.GetService("ServerStorage");
 
 const LOG_PREFIX = "Breakpoint";
 const REGISTRY_KEY_PREFIX = "MCP_BREAKPOINTS_V1_";
-const MCP_PLACE_ID_ATTRIBUTE = "__MCPPlaceId";
 
 let pluginRef: Plugin | undefined;
 let loadedRegistryKey: string | undefined;
@@ -54,6 +53,9 @@ interface PersistedBreakpointEntry {
 
 interface RegistryScope {
 	key: string;
+	// Registries saved by plugin versions that keyed unpublished places by a
+	// saved __MCPPlaceId attribute; read once so those breakpoints carry over.
+	legacyKey?: string;
 }
 
 const breakpoints = new Map<string, BreakpointEntry>();
@@ -64,19 +66,6 @@ function init(p: Plugin): void {
 
 function breakpointKey(scriptPath: string, line: number): string {
 	return `${scriptPath}:${line}`;
-}
-
-function computePlaceKey(): string {
-	if (game.PlaceId !== 0) {
-		return `place:${tostring(game.PlaceId)}`;
-	}
-	const existing = ServerStorage.GetAttribute(MCP_PLACE_ID_ATTRIBUTE);
-	if (typeIs(existing, "string") && existing !== "") {
-		return `anon:${existing}`;
-	}
-	const fresh = HttpService.GenerateGUID(false);
-	pcall(() => ServerStorage.SetAttribute(MCP_PLACE_ID_ATTRIBUTE, fresh));
-	return `anon:${fresh}`;
 }
 
 function detectRole(): string {
@@ -90,10 +79,11 @@ function requestedRole(requestData: Record<string, unknown>): string {
 }
 
 function registryScope(requestData: Record<string, unknown>): RegistryScope {
-	const placeKey = computePlaceKey();
 	const role = requestedRole(requestData);
+	const legacyPlaceKey = PluginSession.getLegacyPlaceKey();
 	return {
-		key: `${REGISTRY_KEY_PREFIX}${placeKey}:${role}`,
+		key: `${REGISTRY_KEY_PREFIX}${PluginSession.getPlaceKey()}:${role}`,
+		legacyKey: legacyPlaceKey !== undefined ? `${REGISTRY_KEY_PREFIX}${legacyPlaceKey}:${role}` : undefined,
 	};
 }
 
@@ -132,7 +122,7 @@ function loadRegistry(requestData: Record<string, unknown>): RegistryScope {
 	if (loadedRegistryFromSettings) return scope;
 	loadedRegistryFromSettings = true;
 
-	const stored = readSetting(scope.key);
+	const stored = readSetting(scope.key) ?? (scope.legacyKey !== undefined ? readSetting(scope.legacyKey) : undefined);
 	if (stored === undefined) return scope;
 
 	let decoded: unknown = stored;

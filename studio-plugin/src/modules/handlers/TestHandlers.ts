@@ -104,16 +104,16 @@ function startPlaytest(requestData: Record<string, unknown>) {
 	}
 
 	testRunning = true;
-	const topologyMarkerToken = PluginSession.prepareSharedTopology();
+	const preparedTest = PluginSession.prepareSoloTest();
 
 	task.spawn(() => {
 		const [ok, result] = pcall(() => {
 			if (mode === "play") {
-				return StudioTestService.ExecutePlayModeAsync({});
+				return StudioTestService.ExecutePlayModeAsync(preparedTest.testArgs);
 			}
-			return StudioTestService.ExecuteRunModeAsync({});
+			return StudioTestService.ExecuteRunModeAsync(preparedTest.testArgs);
 		});
-		PluginSession.clearTopologyMarker(topologyMarkerToken);
+		PluginSession.finishTest(preparedTest.token);
 
 		if (!ok) {
 			warn(`[robloxstudio-mcp] Playtest ended with error: ${result}`);
@@ -225,14 +225,14 @@ function multiplayerTestStart(requestData: Record<string, unknown>) {
 		testArgs,
 		startedAt: tick(),
 	};
-	const topologyMarkerToken = PluginSession.prepareMultiplayerTopology(testId);
+	const topologyToken = PluginSession.prepareMultiplayerTest(testId);
 
 	task.spawn(() => {
 		multiplayerState.phase = "running";
 		const [ok, result] = pcall(() => {
 			return StudioTestService.ExecuteMultiplayerTestAsync(numPlayers, testArgs);
 		});
-		PluginSession.clearTopologyMarker(topologyMarkerToken);
+		PluginSession.finishTest(topologyToken);
 
 		multiplayerState.completedAt = tick();
 		multiplayerState.ok = ok;

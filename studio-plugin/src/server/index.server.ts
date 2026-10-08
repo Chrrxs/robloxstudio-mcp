@@ -7,6 +7,7 @@ import { cleanupEditBridgeArtifacts, ensureRuntimeBridgeInstalled } from "../mod
 import RuntimeLogBuffer from "../modules/RuntimeLogBuffer";
 import StopPlayMonitor from "../modules/StopPlayMonitor";
 import StudioWebSocket from "../modules/StudioWebSocket";
+import PluginSession from "../modules/PluginSession";
 import BreakpointHandlers from "../modules/handlers/BreakpointHandlers";
 import * as RenderMonitor from "../modules/RenderMonitor";
 
@@ -26,6 +27,10 @@ RuntimeLogBuffer.install();
 StopPlayMonitor.init(plugin);
 BreakpointHandlers.init(plugin);
 ServerUrlSettings.init(plugin);
+// Before anything reads place keys: an edit session removes MCP attributes
+// that older plugin versions saved into the place, and hands its topology to
+// playtest DataModels through plugin settings instead.
+PluginSession.init(plugin, { getServerUrl: () => State.getActiveConnection().serverUrl });
 
 const startupRole = ClientBroker.forkRole();
 
@@ -114,12 +119,19 @@ function autoActivatePeer(): void {
 			warn(`[robloxstudio-mcp] Runtime eval bridge install failed: ${result.error}`);
 		}
 	}
+	if (role === "server") {
+		// Yields until this playtest server knows which edit session (or
+		// multiplayer group) it belongs to, so it registers under that identity.
+		PluginSession.resolveRuntimeTopology();
+	}
 	if (role === "edit" || role === "server") {
 		const [activationOk, activationError] = pcall(() => {
 			const conn = State.getActiveConnection();
 			if (!conn.isActive) {
 				if (role === "server") {
-					const inheritedServerUrl = ServerUrlSettings.readServerUrl() ?? ClientBroker.DEFAULT_MCP_URL;
+					const inheritedServerUrl = PluginSession.getInheritedServerUrl()
+						?? ServerUrlSettings.readServerUrl()
+						?? ClientBroker.DEFAULT_MCP_URL;
 					conn.serverUrl = ServerUrlSettings.normalizeServerUrl(inheritedServerUrl);
 					elements.urlInput.Text = conn.serverUrl;
 					const port = ServerUrlSettings.extractPort(conn.serverUrl);
