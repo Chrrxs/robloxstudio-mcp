@@ -121,6 +121,18 @@ applies to development versions; a missing matching release is an error.
 
 </details>
 
+<details>
+<summary>Native Linux (Wine)</summary>
+
+On native Linux, Studio runs under Wine. To let the server launch and close it,
+set `ROBLOX_STUDIO_WINE_LAUNCHER` to an executable script and `ROBLOX_STUDIO_EXE`
+to `RobloxStudioBeta.exe` inside your Wine prefix. The server runs
+`<launcher> <RobloxStudioBeta.exe path> <Studio arguments...>`; the launcher sets
+up the prefix and display, then must `exec wine "$@"` so Studio keeps its PID.
+See [Native Linux with Wine](docs/configuration.md#native-linux-with-wine).
+
+</details>
+
 ## Inspector edition
 
 Read-only access to the DataModel.

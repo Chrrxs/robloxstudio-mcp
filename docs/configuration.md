@@ -139,6 +139,40 @@ For the Windows selector regression, run `npm run build -w packages/core` then
 It exercises the shipped selector with synthetic window entries, without
 enumerating or capturing any real windows.
 
+## Native Linux with Wine
+
+On native Linux (not WSL) the server can launch and manage the Windows Studio
+build running under Wine. Set:
+
+- `ROBLOX_STUDIO_WINE_LAUNCHER` to an executable launcher script. Without it,
+  `/health` reports `processIdentity.supported: false` on native Linux.
+- `ROBLOX_STUDIO_EXE` to `RobloxStudioBeta.exe` inside the Wine prefix, unless
+  every launch passes `studio_executable`. The file must exist.
+
+The server runs the launcher as
+`<launcher> <unix path to RobloxStudioBeta.exe> <Studio arguments...>`. The
+launcher prepares the Wine environment (`WINEPREFIX`, display, and so on) and
+must `exec` Wine on the executable as its last step, so Studio keeps the
+launcher's PID:
+
+```sh
+#!/bin/sh
+export WINEPREFIX="${WINEPREFIX:-$HOME/.wine}"
+exe="$1"; shift
+exec wine "$exe" "$@"
+```
+
+Wrappers that start Studio in a new process, such as `proton run`, do not keep
+the PID and are rejected. The launch is held stopped until it is authorized;
+after that the gated process must become `RobloxStudioBeta.exe` within 30
+seconds or it is killed. Absolute paths among the Studio arguments are passed
+as `Z:\...` paths. A launch's `process_environment` is applied to the
+launcher, so a caller can pick the prefix with `WINEPREFIX`.
+
+Studio processes are identified by `/proc` PID and start time. `close` sends
+SIGTERM to that exact process, then SIGKILL if it is still running. Sign-in
+settling before close and host window capture are not available under Wine.
+
 ## Environment variables
 
 | Variable | Default | Purpose |
@@ -151,6 +185,8 @@ enumerating or capturing any real windows.
 | `ROBLOX_STUDIO_HOST_CAPTURE` | Unset | Set to `0`, `false`, or `off` to disable the host window capture fallback for `capture_screenshot`. |
 | `ROBLOX_OPEN_CLOUD_API_KEY` | None | Roblox Open Cloud key used by features such as audio preview, place version access, and monetization. Required permissions depend on the tool. |
 | `MCP_PLUGINS_DIR` | Platform Studio Plugins folder | Override the destination used by plugin installation. |
+| `ROBLOX_STUDIO_EXE` | Auto-discovered on Windows, WSL, and macOS | Studio executable to launch. Required on native Linux, where it must be an existing `RobloxStudioBeta.exe` in the Wine prefix. |
+| `ROBLOX_STUDIO_WINE_LAUNCHER` | Unset | Native Linux only: executable that `exec`s Wine on Studio. See [Native Linux with Wine](#native-linux-with-wine). |
 
 Creator Store audio preview requires the `legacy-asset:manage` scope (Legacy
 Assets → manage in the API key settings); `asset:read` alone returns 403. See

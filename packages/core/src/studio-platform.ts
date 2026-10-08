@@ -1,10 +1,12 @@
 import { execFileSync } from 'child_process';
-import { existsSync, readFileSync } from 'fs';
+import { accessSync, constants, existsSync, readFileSync, statSync } from 'fs';
+import * as path from 'path';
 
 export type StudioHostPlatform = 'windows' | 'wsl' | 'macos' | 'linux';
 export type StudioProcessIdentityLauncher =
   | 'windows-retained'
   | 'wsl-windows-retained'
+  | 'wine-retained'
   | 'unavailable';
 
 export interface StudioPlatformEvidence {
@@ -15,6 +17,10 @@ export interface StudioPlatformEvidence {
   windowsRootPresent?: boolean;
   wslPathPresent?: boolean;
   windowsInteropAvailable?: boolean;
+  /** Raw `ROBLOX_STUDIO_WINE_LAUNCHER` value, if set. */
+  wineLauncher?: string;
+  /** Whether `wineLauncher` names an executable regular file. */
+  wineLauncherExecutable?: boolean;
 }
 
 export interface StudioPlatformCapabilities {
@@ -26,6 +32,8 @@ export interface StudioPlatformCapabilities {
     launcher: StudioProcessIdentityLauncher;
     reason?: string;
   };
+  /** Absolute path of the verified Wine launcher when `launcher` is `wine-retained`. */
+  wineLauncher?: string;
 }
 
 const WSL_KERNEL_PATTERN = /microsoft|wsl/i;
@@ -79,9 +87,24 @@ export function detectStudioPlatform(
     };
   }
 
+  if (!hasWslKernel && evidence.wineLauncher && evidence.wineLauncherExecutable === true) {
+    return {
+      hostPlatform: 'linux',
+      isWsl: false,
+      windowsInteropAvailable: false,
+      processIdentity: {
+        supported: true,
+        launcher: 'wine-retained',
+      },
+      wineLauncher: path.resolve(evidence.wineLauncher),
+    };
+  }
+
   const reason = hasWslKernel
     ? 'The Linux kernel has a WSL signature, but the live process cannot execute the Windows launcher.'
-    : 'The retained Windows Studio launcher is unavailable on native Linux.';
+    : evidence.wineLauncher
+      ? `The retained Windows Studio launcher is unavailable on native Linux, and ROBLOX_STUDIO_WINE_LAUNCHER (${evidence.wineLauncher}) is not an executable file.`
+      : 'The retained Windows Studio launcher is unavailable on native Linux. Set ROBLOX_STUDIO_WINE_LAUNCHER to an executable Wine launcher to run Studio under Wine.';
   return {
     hostPlatform: 'linux',
     isWsl: false,
@@ -141,12 +164,23 @@ function probeWindowsInterop(kernelVersion: string): boolean {
   return false;
 }
 
+function isExecutableFile(file: string): boolean {
+  try {
+    if (!statSync(file).isFile()) return false;
+    accessSync(file, constants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 let cachedStudioPlatformCapabilities: StudioPlatformCapabilities | undefined;
 
 export function getStudioPlatformCapabilities(): StudioPlatformCapabilities {
   if (cachedStudioPlatformCapabilities) return cachedStudioPlatformCapabilities;
 
   const kernelVersion = readKernelVersion();
+  const wineLauncher = process.env.ROBLOX_STUDIO_WINE_LAUNCHER || undefined;
   cachedStudioPlatformCapabilities = detectStudioPlatform({
     platform: process.platform,
     kernelVersion,
@@ -155,6 +189,8 @@ export function getStudioPlatformCapabilities(): StudioPlatformCapabilities {
     windowsRootPresent: existsSync('/mnt/c/Windows'),
     wslPathPresent: existsSync('/usr/bin/wslpath') || existsSync('/bin/wslpath'),
     windowsInteropAvailable: probeWindowsInterop(kernelVersion),
+    wineLauncher,
+    wineLauncherExecutable: process.platform === 'linux' && wineLauncher !== undefined && isExecutableFile(wineLauncher),
   });
   return cachedStudioPlatformCapabilities;
 }

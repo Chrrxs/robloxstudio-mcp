@@ -18,6 +18,12 @@ import {
   type StudioPlatformCapabilities,
   type StudioProcessIdentityLauncher,
 } from './studio-platform.js';
+import {
+  listWineStudioProcesses,
+  spawnWineStudio,
+  stopWineStudio,
+  toWineWindowsPath,
+} from './studio-wine.js';
 
 export type StudioLaunchSource = 'baseplate' | 'local_file' | 'published_place' | 'place_revision';
 
@@ -277,6 +283,10 @@ export function isWsl(): boolean {
   return getStudioPlatformCapabilities().isWsl;
 }
 
+function isWineHost(): boolean {
+  return getStudioPlatformCapabilities().processIdentity.launcher === 'wine-retained';
+}
+
 function powershell(script: string): string {
   return run('powershell.exe', ['-NoProfile', '-Command', script], {
     cwd: isWsl() && existsSync('/mnt/c/Windows') ? '/mnt/c/Windows' : process.cwd(),
@@ -325,11 +335,13 @@ async function toWslPathAsync(windowsPath: string): Promise<string> {
 }
 
 function toStudioLaunchArg(arg: string): string {
+  if (isWineHost() && path.isAbsolute(arg) && existsSync(arg)) return toWineWindowsPath(arg);
   if (!isWsl() || !path.isAbsolute(arg) || !existsSync(arg)) return arg;
   return run('wslpath', ['-w', arg]);
 }
 
 async function toStudioLaunchArgAsync(arg: string): Promise<string> {
+  if (isWineHost() && path.isAbsolute(arg) && existsSync(arg)) return toWineWindowsPath(arg);
   if (!isWsl() || !path.isAbsolute(arg) || !existsSync(arg)) return arg;
   return runAsync('wslpath', ['-w', arg]);
 }
@@ -1291,7 +1303,21 @@ function resolveStudioExeFromVersions(root: string): string {
   return exe;
 }
 
+// Native Linux runs the Windows Studio build inside a Wine prefix, whose
+// location only the user knows.
+function resolveNativeLinuxStudioExe(): string {
+  const exe = process.env.ROBLOX_STUDIO_EXE;
+  if (!exe) {
+    throw new Error('Set ROBLOX_STUDIO_EXE to RobloxStudioBeta.exe inside your Wine prefix to launch Studio on native Linux.');
+  }
+  if (!statSync(exe, { throwIfNoEntry: false })?.isFile()) {
+    throw new Error(`ROBLOX_STUDIO_EXE does not name an existing file: ${exe}`);
+  }
+  return exe;
+}
+
 export function resolveStudioExe(): string {
+  if (process.platform === 'linux' && !isWsl()) return resolveNativeLinuxStudioExe();
   if (process.env.ROBLOX_STUDIO_EXE) return process.env.ROBLOX_STUDIO_EXE;
 
   if (process.platform === 'darwin') {
@@ -1311,6 +1337,7 @@ export function resolveStudioExe(): string {
 }
 
 async function resolveStudioExeAsync(): Promise<string> {
+  if (process.platform === 'linux' && !isWsl()) return resolveNativeLinuxStudioExe();
   if (process.env.ROBLOX_STUDIO_EXE) return process.env.ROBLOX_STUDIO_EXE;
   if (process.platform === 'darwin') {
     return '/Applications/RobloxStudio.app/Contents/MacOS/RobloxStudio';
@@ -1371,6 +1398,14 @@ export function listStudioProcesses(): StudioProcessInfo[] {
       .filter((proc) => Number.isFinite(proc.Id));
   }
 
+  if (process.platform === 'linux' && isWineHost()) {
+    try {
+      return listWineStudioProcesses();
+    } catch (error) {
+      throw new Error(`Could not enumerate Roblox Studio processes: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
   if (process.platform !== 'win32' && !isWsl()) return [];
 
   try {
@@ -1401,6 +1436,10 @@ export async function observeStudioProcesses(timeoutMs = 15000): Promise<StudioP
         })
         .filter((proc) => Number.isFinite(proc.Id));
       return { status: 'ok', observedAt, processes };
+    }
+
+    if (process.platform === 'linux' && isWineHost()) {
+      return { status: 'ok', observedAt, processes: listWineStudioProcesses() };
     }
 
     if (process.platform !== 'win32' && !isWsl()) {
@@ -1831,6 +1870,10 @@ export class StudioInstanceManager {
           processEnvironment,
           studioWorkingDirectory,
         );
+      } else if (lifecycleCapabilities.processIdentity.launcher === 'wine-retained') {
+        const wineLauncher = (this.platformCapabilities ?? getStudioPlatformCapabilities()).wineLauncher;
+        if (!wineLauncher) throw new Error('The Wine Studio launcher path is unavailable.');
+        proc = await spawnWineStudio(wineLauncher, exe, args, spawnOptions);
       } else {
         const child = spawn(exe, args, spawnOptions);
         proc = {
@@ -2226,6 +2269,11 @@ export class StudioInstanceManager {
           throw new Error('Cannot stop a Windows Studio process without its creation-time identity.');
         }
         await stopWindowsStudio(processId, startedAt, Math.max(1, deadline - Date.now()));
+      } else if (isWineHost()) {
+        if (startedAt === undefined) {
+          throw new Error('Cannot stop a Wine Studio process without its creation-time identity.');
+        }
+        await stopWineStudio(processId, startedAt, Math.max(1, deadline - Date.now()));
       } else {
         try {
           process.kill(processId, 'SIGTERM');
