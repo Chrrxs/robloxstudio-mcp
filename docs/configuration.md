@@ -42,6 +42,12 @@ creation/upgrade each have a 20-second deadline. A stalled phase is abandoned
 and retried; late completions cannot replace the current connection. An open
 socket with no valid incoming events for 20 seconds is also reconnected.
 
+The server pings each Studio socket every 10 seconds and closes one that has
+not answered for 30 seconds. A closed socket's peer is unregistered about 30
+seconds after its last answer, even when the plugin never sent `/disconnect`.
+When a playtest stops, the play server closes its socket and waits at most
+2 seconds for `/disconnect`, so it does not hold up Studio's shutdown.
+
 A previously healthy registration may be revalidated once by reconnecting its
 socket without HTTP, so transient drops can recover even when Studio's HTTP
 quota is exhausted. If that socket cannot open, including a timeout or an

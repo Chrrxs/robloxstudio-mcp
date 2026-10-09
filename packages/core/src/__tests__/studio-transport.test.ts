@@ -17,6 +17,8 @@ class FakeStudioSocket extends EventEmitter implements StudioSocket {
   closeCode?: number;
   closeReason?: string;
   autoComplete = true;
+  answerPings = true;
+  pings = 0;
   private completion?: (error?: Error) => void;
 
   send(chunk: string, callback: (error?: Error) => void): void {
@@ -44,6 +46,11 @@ class FakeStudioSocket extends EventEmitter implements StudioSocket {
   terminate(): void {
     this.readyState = 3;
     this.emit('close');
+  }
+
+  ping(): void {
+    this.pings += 1;
+    if (this.answerPings) this.emit('pong');
   }
 
   respond(requestId: string, response?: unknown, error?: unknown): void {
@@ -555,6 +562,32 @@ describe('WebSocketStudioTransport', () => {
     status = { ...STATUS, mcpConnected: false };
     transport.refreshStatus();
     expect(sink.events()[2]).toEqual({ ...STATUS, mcpConnected: false });
+  });
+
+  test('keeps a peer that answers pings and drops one whose socket stays open but silent', () => {
+    register(bridge, 'server-peer', 'instance:play', 'server');
+    const sink = new FakeStudioSocket();
+    transport.open('server-peer', sink, () => STATUS);
+
+    jest.advanceTimersByTime(120_000);
+    bridge.cleanupStalePeers();
+    expect(sink.pings).toBe(12);
+    expect(sink.ended).toBe(false);
+    expect(bridge.getPeerById('server-peer')).toBeDefined();
+
+    // A torn-down play DataModel can leave its native socket open without
+    // reading it or sending /disconnect.
+    sink.answerPings = false;
+    jest.advanceTimersByTime(20_000);
+    expect(sink.ended).toBe(false);
+    jest.advanceTimersByTime(10_000);
+    expect(sink.closeCode).toBe(1001);
+    expect(sink.closeReason).toBe('pong_timeout');
+    expect(transport.activeSocketCount).toBe(0);
+
+    jest.advanceTimersByTime(1);
+    bridge.cleanupStalePeers();
+    expect(bridge.getPeerById('server-peer')).toBeUndefined();
   });
 
   test('records a result before its ack and safely acknowledges duplicate responses', async () => {

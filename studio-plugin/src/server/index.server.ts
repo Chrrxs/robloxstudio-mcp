@@ -53,8 +53,8 @@ applyRememberedServerUrl();
 // down their VM. Close the persistent WebStreamClient while BindToClose still
 // gives this server peer a live execution context; otherwise each play cycle
 // can retain one native WebSocket until Studio itself is restarted. The
-// transport releases that native socket before yielding to unregister the
-// logical server peer.
+// transport releases that native socket first and waits at most two seconds
+// to unregister the logical server peer, so it never holds up shutdown.
 if (startupRole === "server") {
 	game.BindToClose(StudioWebSocket.suspendForShutdown);
 }

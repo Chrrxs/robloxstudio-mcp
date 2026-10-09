@@ -265,6 +265,11 @@ async function createHarness(harnessOptions: HarnessOptions = {}) {
         scheduled.push(timer);
         return timer;
       },
+      // A yielding wait lets timers and other workers run before it returns.
+      wait: (seconds: number) => {
+        advance(seconds);
+        return seconds;
+      },
       cancel: (thread: ScheduledTask | MockThread | undefined) => {
         if (thread === undefined) return;
         if (thread === runningThread) throw new Error('Cannot cancel the running thread');
@@ -344,6 +349,7 @@ async function createHarness(harnessOptions: HarnessOptions = {}) {
     module: websocket, options, streams, responseBodies, progressEvents, httpRequests, socketRequests, lifecycle, warnings, cancelledWorkers,
     dispatchRequest, onStatus, onHeartbeat, onReady, onTransportUpdate, advance,
     get stream() { return streams[streams.length - 1]; },
+    get now() { return now; },
     get scheduledTaskCount() { return scheduled.length; },
     get deferredWorkerCount() { return spawned.filter((thread) => !thread.cancelled).length; },
     exhaustHttpQuota() { httpQuotaExhausted = true; },
@@ -819,6 +825,19 @@ describe('Studio WebSocket request lifecycle', () => {
     expect(harness.lifecycle).toEqual(['ready', 'close', 'disconnect', 'ready']);
     expect(harness.responseBodies[1]).toBe(harness.responseBodies[0]);
     expect(harness.dispatchRequest).toHaveBeenCalledTimes(1);
+  });
+
+  test('shutdown stops waiting for an unregister request that never completes', async () => {
+    const harness = await createHarness();
+    harness.deferSpawns();
+    const startedAt = harness.now;
+    harness.module.suspendForShutdown();
+    expect(harness.lifecycle).toEqual(['ready', 'close']);
+    expect(harness.now - startedAt).toBeGreaterThanOrEqual(2);
+    expect(harness.now - startedAt).toBeLessThan(2.2);
+    expect(harness.scheduledTaskCount).toBe(0);
+    harness.flushSpawns();
+    expect(harness.lifecycle).toEqual(['ready', 'close', 'disconnect']);
   });
 });
 

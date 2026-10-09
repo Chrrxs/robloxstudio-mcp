@@ -28,6 +28,10 @@ const MAX_PENDING_RESPONSE_BYTES = 64 * 1024 * 1024;
 const RESERVED_ERROR_BYTES = 4096;
 // The bridge admits 128 UTF-16 code units; each can require three UTF-8 bytes.
 const MAX_REQUEST_ID_BYTES = 128 * 3;
+// BindToClose and EndTest wait on suspendForShutdown. Studio can leave the
+// unregister POST pending forever during teardown, so it never holds them longer.
+const SHUTDOWN_DISCONNECT_WAIT_SECONDS = 2;
+const SHUTDOWN_DISCONNECT_POLL_SECONDS = 0.1;
 
 interface StudioWebSocketOptions {
 	serverUrl: string;
@@ -705,7 +709,11 @@ function refresh(): void {
 }
 
 // EndTest may tear down this VM without an Unloading callback. Release the
-// native socket before yielding to unregister; a failed EndTest can resume.
+// native socket first (Close does not yield), then unregister on another
+// thread. RequestAsync can stay pending forever while Studio tears down a play
+// DataModel, so the shutdown path waits for it only briefly; the server drops a
+// peer whose socket closed or stopped answering pings. A failed EndTest can
+// resume; a late /disconnect only forces that resumed transport to re-register.
 function suspendForShutdown(): void {
 	const currentOptions = options;
 	if (!active || currentOptions === undefined) return;
@@ -717,7 +725,13 @@ function suspendForShutdown(): void {
 	reconnectAttempt = 0;
 	closeCurrentSocket();
 	cachedReady = undefined;
-	disconnectSession(currentOptions);
+	let disconnected = false;
+	task.spawn(() => {
+		disconnectSession(currentOptions);
+		disconnected = true;
+	});
+	const deadline = os.clock() + SHUTDOWN_DISCONNECT_WAIT_SECONDS;
+	while (!disconnected && os.clock() < deadline) task.wait(SHUTDOWN_DISCONNECT_POLL_SECONDS);
 }
 
 function resumeAfterShutdownFailure(): void {
