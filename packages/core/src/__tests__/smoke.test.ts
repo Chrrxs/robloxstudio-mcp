@@ -1406,6 +1406,7 @@ describe('Smoke', () => {
     try {
       const manager = new StudioInstanceManager({ registryDir, processAdapter });
       const record = await manager.launch({ source: 'local_file', localPlaceFile: '/tmp/unknown.rbxl' });
+      observedAt = record.launchedAt;
       await manager.attachInstanceId(record, 'instance:unknown');
       observationFails = true;
 
@@ -1460,16 +1461,16 @@ describe('Smoke', () => {
         confirmedExitGraceMs: 5000,
       });
       const record = await manager.launch({ source: 'local_file', localPlaceFile: '/tmp/grace.rbxl' });
-      observedAt = 1500;
+      observedAt = record.launchedAt + 500;
       await manager.attachInstanceId(record, 'instance:grace');
       spawned = false;
-      observedAt = 2000;
+      observedAt = record.launchedAt + 1000;
 
       await manager.refresh(record);
       expect(record.closedAt).toBeUndefined();
       expect(record.consecutiveConfirmedMisses).toBe(1);
 
-      observedAt = 8000;
+      observedAt = record.launchedAt + 7000;
       await manager.refresh(record);
       expect(record).toEqual(expect.objectContaining({
         state: 'exited',
@@ -1479,7 +1480,7 @@ describe('Smoke', () => {
       expect(record.closedAt).toEqual(expect.any(Number));
 
       spawned = true;
-      observedAt = 9000;
+      observedAt = record.launchedAt + 8000;
       await manager.attachInstanceId(record, 'instance:grace');
       expect(record).toEqual(expect.objectContaining({
         state: 'connected',

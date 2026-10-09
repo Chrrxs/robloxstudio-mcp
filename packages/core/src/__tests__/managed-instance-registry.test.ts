@@ -5,6 +5,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { setTimeout as waitForTimeout } from 'node:timers/promises';
 import { pathToFileURL } from 'node:url';
+import { ManagedInstanceRegistry, type ManagedInstanceRegistryRecord } from '../managed-instance-registry.js';
 
 describe('ManagedInstanceRegistry lock lifecycle', () => {
   test('a lock retry does not keep an otherwise idle Node process alive', async () => {
@@ -56,4 +57,42 @@ describe('ManagedInstanceRegistry lock lifecycle', () => {
       await fs.rm(registryDir, { recursive: true, force: true });
     }
   }, 10_000);
+});
+
+describe('ManagedInstanceRegistry process observation', () => {
+  test('a sweep observation older than the record leaves a live launch open', async () => {
+    const registryDir = await fs.mkdtemp(path.join(os.tmpdir(), 'robloxstudio-mcp-sweep-test-'));
+    const registry = new ManagedInstanceRegistry(registryDir);
+    const launch: ManagedInstanceRegistryRecord = {
+      version: 1,
+      recordId: 'stale-sweep-launch',
+      source: 'local_file',
+      nativeProcessId: 7700,
+      nativeProcessStartedAt: '133700123457',
+      spawnPid: 7700,
+      exe: 'C:\\Roblox\\RobloxStudioBeta.exe',
+      args: [],
+      launchedAt: 2000,
+      state: 'launching',
+      ownerPid: process.pid,
+      bootId: 'boot-1',
+      processObservationStatus: 'running',
+      processAuthorizationState: 'pending',
+      lastProcessObservationAt: 2000,
+      lastSuccessfulProcessObservationAt: 2000,
+      consecutiveConfirmedMisses: 0,
+    };
+
+    try {
+      await registry.upsert(launch);
+      const open = await registry.listOpen({
+        currentBootId: 'boot-1',
+        // A snapshot from before the launch saw a previous holder of the PID.
+        observeProcess: () => ({ status: 'not_running', observedAt: 1999, reason: 'identity_mismatch' }),
+      });
+      expect(open).toEqual([launch]);
+    } finally {
+      await fs.rm(registryDir, { recursive: true, force: true });
+    }
+  });
 });

@@ -494,6 +494,9 @@ export class ManagedInstanceRegistry {
       if (!options.observeProcess || !(parsed.nativeProcessId || parsed.spawnPid)) continue;
 
       const observation = await options.observeProcess(parsed);
+      const previousObservationAt = parsed.lastProcessObservationAt;
+      // Older evidence (e.g. a snapshot started before this launch) never overrides newer.
+      if (previousObservationAt !== undefined && observation.observedAt < previousObservationAt) continue;
       if (observation.status === 'unknown') {
         parsed.processObservationStatus = 'unknown';
         parsed.lastProcessObservationAt = observation.observedAt;
@@ -504,7 +507,6 @@ export class ManagedInstanceRegistry {
         continue;
       }
 
-      const previousObservationAt = parsed.lastProcessObservationAt;
       parsed.lastSuccessfulProcessObservationAt = observation.observedAt;
       parsed.lastProcessObservationAt = observation.observedAt;
       parsed.lastProcessObservationError = undefined;
