@@ -1363,21 +1363,26 @@ const WINDOWS_STUDIO_PROCESS_QUERY = [
   'ConvertTo-Json -InputObject $processes -Compress',
 ].join('; ');
 
+// Windows reports Path = $null for a process whose main module is unreadable,
+// including every launch held suspended until authorization. Exact identity is
+// the PID plus creation time, so a missing path must not fail the snapshot.
+type WindowsStudioProcessEntry = Omit<StudioProcessInfo, 'Path'> & { Path: string | null };
+
 function parseWindowsStudioProcesses(output: string): StudioProcessInfo[] {
   const parsed: unknown = JSON.parse(output);
   const processes: unknown[] = Array.isArray(parsed) ? parsed : [parsed];
-  if (!processes.every((value): value is StudioProcessInfo =>
+  if (!processes.every((value): value is WindowsStudioProcessEntry =>
     value !== null && typeof value === 'object' &&
     'Id' in value && typeof value.Id === 'number' && Number.isSafeInteger(value.Id) && value.Id > 0 &&
     'Name' in value && typeof value.Name === 'string' &&
-    'Path' in value && typeof value.Path === 'string' &&
+    'Path' in value && (typeof value.Path === 'string' || value.Path === null) &&
     'MainWindowTitle' in value && typeof value.MainWindowTitle === 'string' &&
     'StartTimeUtcFileTime' in value && typeof value.StartTimeUtcFileTime === 'string' &&
     /^[1-9]\d*$/u.test(value.StartTimeUtcFileTime)
   )) {
     throw new Error('Malformed Roblox Studio process enumeration result.');
   }
-  return processes;
+  return processes.map(({ Path, ...processInfo }) => (Path === null ? processInfo : { ...processInfo, Path }));
 }
 
 export function listStudioProcesses(): StudioProcessInfo[] {
@@ -2714,6 +2719,9 @@ export class StudioInstanceManager {
   ): Promise<void> {
     if (record.closedAt !== undefined) return;
     const previousObservationAt = record.lastProcessObservationAt;
+    // A snapshot can finish after newer evidence was recorded, e.g. one started
+    // before this launch existed. Older evidence never overrides newer.
+    if (previousObservationAt !== undefined && observation.observedAt < previousObservationAt) return;
     record.lastProcessObservationAt = observation.observedAt;
 
     if (observation.status === 'unknown') {

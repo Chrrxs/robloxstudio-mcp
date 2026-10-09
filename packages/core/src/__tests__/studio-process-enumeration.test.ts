@@ -44,20 +44,98 @@ function returnOutput(stdout: string): void {
   mockExecFileAsync.mockResolvedValue({ stdout, stderr: '' });
 }
 
+// Real PowerShell is reached through WSL interop (or a Windows runner) and can
+// fail for reasons outside the code under test. Native tests record every call
+// so a failure shows what PowerShell actually did, not only the wrapped error.
+interface PowerShellCall {
+  path: 'sync' | 'async';
+  elapsedMs: number;
+  outcome: string;
+  stdout: string;
+  stderr: string;
+}
+
+const powerShellCalls: PowerShellCall[] = [];
+
+function outputText(value: unknown): string {
+  return value === undefined || value === null ? '' : String(value);
+}
+
+function failedAsyncCall(error: unknown): Omit<PowerShellCall, 'path' | 'elapsedMs'> {
+  if (!(error instanceof Error)) return { outcome: `threw ${String(error)}`, stdout: '', stderr: '' };
+  const field = (key: string): string => outputText(Reflect.get(error, key));
+  return {
+    outcome: `failed (code ${field('code') || '-'}, signal ${field('signal') || '-'}, killed ${field('killed') || '-'}): ` +
+      error.message.split('\n')[0],
+    stdout: field('stdout'),
+    stderr: field('stderr'),
+  };
+}
+
+function describePowerShellCalls(): string {
+  const header = `PowerShell calls during this test (${powershellExecutable}, cwd ${process.cwd()}):`;
+  if (powerShellCalls.length === 0) return `${header}\n  none`;
+  return [header, ...powerShellCalls.map((call, index) => [
+    `  #${index + 1} ${call.path}: ${call.outcome} after ${call.elapsedMs} ms`,
+    `     stdout: ${JSON.stringify(call.stdout.slice(0, 2000))}`,
+    `     stderr: ${JSON.stringify(call.stderr.slice(0, 2000))}`,
+  ].join('\n'))].join('\n');
+}
+
+function withPowerShellDiagnostics<Args extends unknown[]>(
+  body: (...args: Args) => Promise<void>,
+): (...args: Args) => Promise<void> {
+  return async (...args) => {
+    powerShellCalls.length = 0;
+    try {
+      await body(...args);
+    } catch (error) {
+      if (error instanceof Error) error.message += `\n\n${describePowerShellCalls()}`;
+      throw error;
+    }
+  };
+}
+
 // Execute the production query in real Windows PowerShell, replacing only its OS
 // process source. The missing-name branch uses the actual Get-Process error.
 function usePowerShellProcessSource(body: string): void {
   const prelude = `function Get-Process { [CmdletBinding()] param([string[]]$Name) ${body} }; `;
-  mockExecFileSync.mockImplementation((_command, args) => actualChildProcess.execFileSync(
-    powershellExecutable,
-    [...args.slice(0, -1), prelude + args[args.length - 1]],
-    { encoding: 'utf8', timeout: 15000 },
-  ));
-  mockExecFileAsync.mockImplementation((_command, args) => actualExecFileAsync(
-    powershellExecutable,
-    [...args.slice(0, -1), prelude + args[args.length - 1]],
-    { encoding: 'utf8', timeout: 15000 },
-  ));
+  const withPrelude = (args: string[]) => [...args.slice(0, -1), prelude + args[args.length - 1]];
+  mockExecFileSync.mockImplementation((_command, args) => {
+    const startedAt = Date.now();
+    // spawnSync, unlike execFileSync, keeps stderr from a successful run too.
+    const result = actualChildProcess.spawnSync(powershellExecutable, withPrelude(args), { encoding: 'utf8', timeout: 15000 });
+    powerShellCalls.push({
+      path: 'sync',
+      elapsedMs: Date.now() - startedAt,
+      outcome: result.error
+        ? `failed to run: ${result.error.message}`
+        : result.status === 0 ? 'exited 0' : `exited ${result.status ?? '-'} (signal ${result.signal ?? '-'})`,
+      stdout: outputText(result.stdout),
+      stderr: outputText(result.stderr),
+    });
+    if (result.error) throw result.error;
+    if (result.status !== 0) {
+      throw Object.assign(new Error(`Command failed: ${powershellExecutable}\n${outputText(result.stderr)}`), {
+        status: result.status,
+        signal: result.signal,
+        stdout: result.stdout,
+        stderr: result.stderr,
+      });
+    }
+    return result.stdout;
+  });
+  mockExecFileAsync.mockImplementation(async (_command, args) => {
+    const startedAt = Date.now();
+    try {
+      const output = await actualExecFileAsync(powershellExecutable, withPrelude(args), { encoding: 'utf8', timeout: 15000 });
+      powerShellCalls.push({ path: 'async', elapsedMs: Date.now() - startedAt, outcome: 'exited 0', ...output });
+      return output;
+    } catch (error) {
+      powerShellCalls.push({ path: 'async', elapsedMs: Date.now() - startedAt, ...failedAsyncCall(error) });
+      throw error;
+    }
+  });
 }
 
 describe('native Studio process enumeration', () => {
@@ -71,16 +149,16 @@ describe('native Studio process enumeration', () => {
     Object.defineProperty(process, 'platform', originalPlatformDescriptor);
   });
 
-  nativeTest('a missing Studio process is a successful empty observation in both native paths', async () => {
+  nativeTest('a missing Studio process is a successful empty observation in both native paths', withPowerShellDiagnostics(async () => {
     usePowerShellProcessSource([
       "$PSBoundParameters['Name'] = 'RsmcpAbsent' + [guid]::NewGuid().ToString('N')",
       'Microsoft.PowerShell.Management\\Get-Process @PSBoundParameters',
     ].join('; '));
     expect(listStudioProcesses()).toEqual([]);
     await expect(observeStudioProcesses()).resolves.toMatchObject({ status: 'ok', processes: [] });
-  });
+  }));
 
-  nativeTest.each([1, 2])('enumerates %i Studio processes through both native paths', async (count) => {
+  nativeTest.each([1, 2])('enumerates %i Studio processes through both native paths', withPowerShellDiagnostics(async (count: number) => {
     usePowerShellProcessSource(`foreach ($idValue in 4242..${4241 + count}) { [PSCustomObject]@{
       Id = $idValue; Name = 'RobloxStudioBeta'; Path = 'C:\\RobloxStudioBeta.exe';
       MainWindowTitle = 'Studio'; StartTime = [datetime]::FromFileTimeUtc(133700123459000000)
@@ -88,13 +166,13 @@ describe('native Studio process enumeration', () => {
     const expected = count === 1 ? [processInfo] : [processInfo, { ...processInfo, Id: 4243 }];
     expect(listStudioProcesses()).toEqual(expected);
     await expect(observeStudioProcesses()).resolves.toMatchObject({ status: 'ok', processes: expected });
-  });
+  }));
 
-  nativeTest('PowerShell permission failures are not swallowed as missing processes', async () => {
+  nativeTest('PowerShell permission failures are not swallowed as missing processes', withPowerShellDiagnostics(async () => {
     usePowerShellProcessSource("Write-Error -Message 'Access denied' -Category PermissionDenied -ErrorId 'PermissionDenied'");
     expect(() => listStudioProcesses()).toThrow();
     await expect(observeStudioProcesses()).resolves.toMatchObject({ status: 'error' });
-  });
+  }));
 
   test('a valid empty JSON array confirms process absence', async () => {
     returnOutput('[]');
@@ -109,6 +187,48 @@ describe('native Studio process enumeration', () => {
     returnOutput(output);
     expect(listStudioProcesses()).toEqual(expected);
     await expect(observeStudioProcesses()).resolves.toMatchObject({ status: 'ok', processes: expected });
+  });
+
+  // Windows reports Path = $null for a process created suspended (a launch
+  // awaiting authorization): its loader has not mapped the main module yet.
+  nativeTest('a Studio process without a readable image path enumerates through both native paths', withPowerShellDiagnostics(async () => {
+    usePowerShellProcessSource(`[PSCustomObject]@{
+      Id = 4242; Name = 'RobloxStudioBeta'; Path = $null;
+      MainWindowTitle = ''; StartTime = [datetime]::FromFileTimeUtc(133700123459000000)
+    }`);
+    const expected = [{ Id: 4242, Name: 'RobloxStudioBeta', MainWindowTitle: '', StartTimeUtcFileTime: '133700123459000000' }];
+    expect(listStudioProcesses()).toEqual(expected);
+    await expect(observeStudioProcesses()).resolves.toMatchObject({ status: 'ok', processes: expected });
+  }));
+
+  test('a suspended launch without a readable image path stays observed as running', async () => {
+    returnOutput(JSON.stringify([{ ...processInfo, Path: null, MainWindowTitle: '' }]));
+    const registryDir = mkdtempSync(path.join(os.tmpdir(), 'studio-observation-'));
+    try {
+      const manager = new StudioInstanceManager({
+        registryDir,
+        processAdapter: { currentBootId: () => 'boot-1' },
+      });
+      const record: ManagedStudioInstance = {
+        recordId: 'suspended-launch',
+        source: 'local_file',
+        nativeProcessId: 4242,
+        nativeProcessStartedAt: processInfo.StartTimeUtcFileTime,
+        spawnPid: 4242,
+        exe: processInfo.Path,
+        args: [],
+        launchedAt: 1,
+        state: 'launching',
+        ownerPid: process.pid,
+        bootId: 'boot-1',
+        processAuthorizationState: 'pending',
+      };
+      await manager.refresh(record);
+      expect(record).toMatchObject({ state: 'launching', processObservationStatus: 'running' });
+      expect(record.lastProcessObservationError).toBeUndefined();
+    } finally {
+      rmSync(registryDir, { recursive: true, force: true });
+    }
   });
 
   test.each([
