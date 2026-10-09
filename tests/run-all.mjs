@@ -57,7 +57,7 @@ const FEATURE_TESTS = [
   'micro-profiler-responsiveness.mjs',
 ];
 // Long-running/inherently failing investigation scenarios are explicit opt-ins.
-const DIAGNOSTIC_TESTS = ['luau-recipe-stress.mjs', 'luau-http-budget-repro.mjs', 'studio-websocket-quota.mjs'];
+const DIAGNOSTIC_TESTS = ['luau-recipe-stress.mjs', 'luau-http-budget-repro.mjs', 'studio-websocket-quota.mjs', 'play-server-shutdown-disconnect-repro.mjs', 'studio-http-concurrency-repro.mjs'];
 // These require explicit environment setup and are not part of the default suite.
 const CONFIGURED_TESTS = ['capture-regressions.mjs'];
 const featureSmoke = process.argv.includes('--smoke');

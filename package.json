@@ -48,6 +48,7 @@
     "test:studio:payload-boundaries": "node scripts/studio-test-profile.mjs run -- tests/studio-payload-boundaries.mjs",
     "test:studio:large-input-workflow": "node scripts/studio-test-profile.mjs run -- tests/run-all.mjs --managed --test large-input-workflow.mjs",
     "test:studio:event-stream-cycles": "node scripts/studio-test-profile.mjs run -- tests/run-all.mjs --managed --test play-cycle-event-stream-regression.mjs",
+    "test:studio:shutdown-http-slots": "node scripts/studio-test-profile.mjs run -- tests/run-all.mjs --managed --test studio-http-concurrency-repro.mjs",
     "test:e2e:wsl-process-identity": "node scripts/studio-test-profile.mjs run -- tests/run-with-test-port.mjs tests/wsl-process-identity-launch.mjs",
     "test:e2e:lifecycle": "npm run test:e2e:wsl-process-identity && node scripts/studio-test-profile.mjs run -- tests/run-with-test-port.mjs tests/studio-lifecycle-regressions.mjs",
     "test:studio:tools": "node scripts/studio-test-profile.mjs run -- tests/run-with-test-port.mjs tests/studio-tooling-smoke.mjs",

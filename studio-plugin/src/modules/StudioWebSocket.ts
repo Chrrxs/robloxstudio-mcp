@@ -28,6 +28,10 @@ const MAX_PENDING_RESPONSE_BYTES = 64 * 1024 * 1024;
 const RESERVED_ERROR_BYTES = 4096;
 // The bridge admits 128 UTF-16 code units; each can require three UTF-8 bytes.
 const MAX_REQUEST_ID_BYTES = 128 * 3;
+// Upper bound on BindToClose waiting for the server to close the socket after
+// the unregister frame; it normally closes within milliseconds.
+const SHUTDOWN_UNREGISTER_WAIT_SECONDS = 2;
+const SHUTDOWN_UNREGISTER_POLL_SECONDS = 0.05;
 
 interface StudioWebSocketOptions {
 	serverUrl: string;
@@ -704,8 +708,13 @@ function refresh(): void {
 	flushRefresh();
 }
 
-// EndTest may tear down this VM without an Unloading callback. Release the
-// native socket before yielding to unregister; a failed EndTest can resume.
+// EndTest may tear down this VM without an Unloading callback, and BindToClose
+// waits for this function. It unregisters on the socket itself: Studio runs at
+// most five plugin HTTP requests at a time across the whole process, with no
+// time limit, so a /disconnect queued behind five that never finish held
+// shutdown until Studio's 30 s deadline. Closing right after Send can drop the
+// frame, so it waits briefly for the server to close the socket first. A
+// failed EndTest can resume and registers again.
 function suspendForShutdown(): void {
 	const currentOptions = options;
 	if (!active || currentOptions === undefined) return;
@@ -715,9 +724,24 @@ function suspendForShutdown(): void {
 	cancelTransportWork();
 	refreshRequested = false;
 	reconnectAttempt = 0;
+	const client = socketClient;
+	let unregistered = false;
+	if (client !== undefined && socketOpen) {
+		let serverClosed = false;
+		const closedConnection = client.Closed.Connect(() => {
+			serverClosed = true;
+		});
+		const [sent] = pcall(() => client.Send(HttpService.JSONEncode({ kind: "disconnect" })));
+		unregistered = sent;
+		const deadline = os.clock() + SHUTDOWN_UNREGISTER_WAIT_SECONDS;
+		while (sent && !serverClosed && os.clock() < deadline) task.wait(SHUTDOWN_UNREGISTER_POLL_SECONDS);
+		closedConnection.Disconnect();
+	}
 	closeCurrentSocket();
 	cachedReady = undefined;
-	disconnectSession(currentOptions);
+	// Without an open socket, unregister over HTTP on another thread rather
+	// than wait; the server also drops a peer whose socket stays closed.
+	if (!unregistered) task.spawn(() => disconnectSession(currentOptions));
 }
 
 function resumeAfterShutdownFailure(): void {
