@@ -35,6 +35,7 @@ export interface StudioTransportQueue {
   onPeerClosed(listener: (peer: StudioSession) => void): () => void;
   setDeliveryActive(transportPeerId: string, owner: string, active: boolean): void;
   updatePeerActivity(peerId: string): void;
+  unregisterPeer(peerId: string): void;
   observeTransportProgress(
     transportPeerId: string, requestId: string, phase: 'executing' | 'response_delivery', outcome?: ExecutionOutcome,
   ): void;
@@ -88,9 +89,10 @@ export interface StudioSocket {
   send(data: string, callback: (error?: Error) => void): void;
   close(code?: number, reason?: string): void;
   terminate(): void;
-  on(event: 'close' | 'error', listener: () => void): this;
+  ping(): void;
+  on(event: 'close' | 'error' | 'pong', listener: () => void): this;
   on(event: 'message', listener: (data: RawData, isBinary: boolean) => void): this;
-  removeListener(event: 'close' | 'error', listener: () => void): this;
+  removeListener(event: 'close' | 'error' | 'pong', listener: () => void): this;
   removeListener(event: 'message', listener: (data: RawData, isBinary: boolean) => void): this;
 }
 
@@ -113,13 +115,19 @@ interface ActiveStudioSocket {
   statusPending: boolean;
   heartbeatPending: boolean;
   lastStatusJson?: string;
+  lastSeenAt: number;
   acknowledgements: Map<string, StudioAckEvent>;
   onClose: () => void;
   onError: () => void;
   onMessage: (data: RawData, isBinary: boolean) => void;
+  onPong: () => void;
 }
 
 const HEARTBEAT_INTERVAL_MS = 10_000;
+// Studio answers WebSocket pings natively. A peer whose VM died without closing
+// its socket, or whose Studio stopped reading it, keeps the TCP connection
+// open; without this bound the heartbeat would keep that peer registered forever.
+const PONG_TIMEOUT_MS = 30_000;
 const MAX_PENDING_ACKS = 128;
 export const STUDIO_PROTOCOL_VERSION = 1;
 export const MAX_ACTIVE_STUDIO_SOCKETS = 64;
@@ -173,6 +181,7 @@ export class WebSocketStudioTransport {
       settling: false,
       statusPending: true,
       heartbeatPending: false,
+      lastSeenAt: Date.now(),
       acknowledgements: new Map(),
       onClose: () => {
         this.closeSocket(connection);
@@ -180,6 +189,11 @@ export class WebSocketStudioTransport {
       },
       onError: () => this.closeSocket(connection, 1011, 'socket_error'),
       onMessage: (data, isBinary) => this.receive(connection, data, isBinary),
+      onPong: () => {
+        if (!this.isCurrent(connection)) return;
+        connection.lastSeenAt = Date.now();
+        this.queue.updatePeerActivity(transportPeerId);
+      },
     };
 
     // Activate the new owner before releasing the old one. Old callbacks can
@@ -192,9 +206,19 @@ export class WebSocketStudioTransport {
     socket.on('close', connection.onClose);
     socket.on('error', connection.onError);
     socket.on('message', connection.onMessage);
+    socket.on('pong', connection.onPong);
     connection.heartbeatTimer = setInterval(() => {
       if (!this.isCurrent(connection)) return;
-      this.queue.updatePeerActivity(transportPeerId);
+      if (Date.now() - connection.lastSeenAt >= PONG_TIMEOUT_MS) {
+        this.closeSocket(connection, 1001, 'pong_timeout');
+        return;
+      }
+      try {
+        connection.socket.ping();
+      } catch {
+        this.closeSocket(connection, 1011, 'ping_failed');
+        return;
+      }
       connection.statusPending = true;
       connection.heartbeatPending = true;
       this.pump(connection);
@@ -255,6 +279,14 @@ export class WebSocketStudioTransport {
       message = JSON.parse(buffer.toString('utf8'));
     } catch {
       this.closeSocket(connection, 1007, 'invalid_json');
+      return;
+    }
+    if (message !== null && typeof message === 'object' && !Array.isArray(message)
+      && 'kind' in message && message.kind === 'disconnect') {
+      // A shutting-down peer unregisters on its own socket: HTTP /disconnect
+      // shares Studio's five plugin request slots and can wait behind them.
+      this.queue.unregisterPeer(connection.transportPeerId);
+      this.closeSocket(connection, 1000, 'peer_unregistered');
       return;
     }
     if (message === null || typeof message !== 'object' || Array.isArray(message)
@@ -404,6 +436,7 @@ export class WebSocketStudioTransport {
     connection.closed = true;
     clearInterval(connection.heartbeatTimer);
     connection.socket.removeListener('message', connection.onMessage);
+    connection.socket.removeListener('pong', connection.onPong);
     connection.acknowledgements.clear();
     if (this.sockets.get(connection.transportPeerId) === connection) this.sockets.delete(connection.transportPeerId);
     this.queue.setDeliveryActive(connection.transportPeerId, connection.claimOwner, false);

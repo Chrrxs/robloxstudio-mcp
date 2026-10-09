@@ -89,6 +89,8 @@ interface HarnessOptions {
   onCreate?(): void;
   autoStart?: boolean;
   autoOpen?: boolean;
+  // The server never closes the socket after an unregister frame.
+  dropUnregister?: boolean;
 }
 
 function repositoryRoot(): string {
@@ -223,6 +225,11 @@ async function createHarness(harnessOptions: HarnessOptions = {}) {
         Close: jest.fn(() => lifecycle.push('close')),
         Send: jest.fn((body: string) => {
           const event: unknown = JSON.parse(body);
+          if (event && typeof event === 'object' && 'kind' in event && event.kind === 'disconnect') {
+            lifecycle.push('unregister');
+            if (!harnessOptions.dropUnregister) stream.Closed.fire();
+            return;
+          }
           if (event && typeof event === 'object' && 'kind' in event && event.kind === 'progress'
             && 'requestId' in event && typeof event.requestId === 'string'
             && 'phase' in event && (event.phase === 'executing' || event.phase === 'response_delivery')) {
@@ -259,6 +266,10 @@ async function createHarness(harnessOptions: HarnessOptions = {}) {
         if (spawnsDeferred) spawned.push(thread);
         else runThread(thread);
         return thread;
+      },
+      wait: (seconds: number) => {
+        advance(seconds);
+        return seconds;
       },
       delay: (delay: number, callback: () => void) => {
         const timer = { due: now + delay, callback };
@@ -345,6 +356,7 @@ async function createHarness(harnessOptions: HarnessOptions = {}) {
     dispatchRequest, onStatus, onHeartbeat, onReady, onTransportUpdate, advance,
     get stream() { return streams[streams.length - 1]; },
     get scheduledTaskCount() { return scheduled.length; },
+    get now() { return now; },
     get deferredWorkerCount() { return spawned.filter((thread) => !thread.cancelled).length; },
     exhaustHttpQuota() { httpQuotaExhausted = true; },
     deferSpawns() { spawnsDeferred = true; },
@@ -806,19 +818,39 @@ describe('Studio WebSocket request lifecycle', () => {
     expect(harness.dispatchRequest).toHaveBeenCalledTimes(1);
   });
 
-  test('closes native resources before unregistering and resumes a failed shutdown', async () => {
+  test('unregisters on the socket before closing it, never over HTTP, and resumes a failed shutdown', async () => {
     const harness = await createHarness({ onSend() {} });
     harness.emitRequest('shutdown-result');
     harness.module.suspendForShutdown();
-    expect(harness.lifecycle).toEqual(['ready', 'close', 'disconnect']);
+    expect(harness.lifecycle).toEqual(['ready', 'unregister', 'close']);
     harness.advance(1);
+    expect(harness.lifecycle).toEqual(['ready', 'unregister', 'close']);
     expect(harness.responseBodies).toHaveLength(1);
     harness.module.resumeAfterShutdownFailure();
     harness.stream.Opened.fire(101, '');
     harness.emitRequest('shutdown-result');
-    expect(harness.lifecycle).toEqual(['ready', 'close', 'disconnect', 'ready']);
+    expect(harness.lifecycle).toEqual(['ready', 'unregister', 'close', 'ready']);
     expect(harness.responseBodies[1]).toBe(harness.responseBodies[0]);
     expect(harness.dispatchRequest).toHaveBeenCalledTimes(1);
+  });
+
+  test('stops waiting for the server to close after two seconds and closes the socket itself', async () => {
+    const harness = await createHarness({ onSend() {}, dropUnregister: true });
+    const started = harness.now;
+    harness.module.suspendForShutdown();
+    expect(harness.now - started).toBeGreaterThanOrEqual(2);
+    expect(harness.now - started).toBeLessThan(2.2);
+    expect(harness.lifecycle).toEqual(['ready', 'unregister', 'close']);
+    expect(harness.scheduledTaskCount).toBe(0);
+  });
+
+  test('falls back to /disconnect on another thread when shutdown finds no open socket', async () => {
+    const harness = await createHarness({ onSend() {}, autoOpen: false });
+    harness.deferSpawns();
+    harness.module.suspendForShutdown();
+    expect(harness.lifecycle).toEqual(['ready', 'close']);
+    harness.flushSpawns();
+    expect(harness.lifecycle).toEqual(['ready', 'close', 'disconnect']);
   });
 });
 

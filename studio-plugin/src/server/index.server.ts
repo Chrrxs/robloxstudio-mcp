@@ -53,8 +53,8 @@ applyRememberedServerUrl();
 // down their VM. Close the persistent WebStreamClient while BindToClose still
 // gives this server peer a live execution context; otherwise each play cycle
 // can retain one native WebSocket until Studio itself is restarted. The
-// transport releases that native socket before yielding to unregister the
-// logical server peer.
+// transport unregisters the server peer on that socket and waits at most two
+// seconds for the server to close it, so no HTTP request can hold up shutdown.
 if (startupRole === "server") {
 	game.BindToClose(StudioWebSocket.suspendForShutdown);
 }
@@ -102,7 +102,10 @@ plugin.Unloading.Connect(() => {
 
 
 UI.updateUIState();
-Communication.checkForUpdates();
+// Every DataModel shares Studio's five plugin HTTP request slots, and a
+// request has no time limit. Check for updates once, from the edit DataModel,
+// instead of again in every play server and client.
+if (startupRole === "edit") Communication.checkForUpdates();
 task.delay(TOOLBAR_REGISTRATION_DELAY_SECONDS, registerToolbarButton);
 
 // Auto-activate per Peer. Runtime plugin VMs can load before their first

@@ -68,6 +68,7 @@ The runner stops at the first failure and reports remaining checks as not run.
 | Payload admission, property-size rejection, or native response boundaries | `npm run test:studio:payload-boundaries` |
 | WebSocket progress, response loss/recovery, or multi-Studio capacity | `npm run test:studio:websocket-recovery` and `npm run test:studio:websocket-capacity` |
 | Plugin reconnect, registration deadlines, or listener replacement | `npm run test:studio:websocket-reconnect` |
+| Play-server shutdown, peer unregistration, or plugin HTTP requests | `npm run test:studio:shutdown-http-slots` |
 | Release | `npm run test:e2e:full`, plus affected standalone payload/WebSocket probes above |
 
 When `MCP_INSTANCE_ID` is unset, the runner starts the built MCP server as the
