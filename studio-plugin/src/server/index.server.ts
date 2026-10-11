@@ -108,6 +108,12 @@ UI.updateUIState();
 if (startupRole === "edit") Communication.checkForUpdates();
 task.delay(TOOLBAR_REGISTRATION_DELAY_SECONDS, registerToolbarButton);
 
+/** Runs one startup step so that its failure cannot skip the steps after it. */
+function runStartupStep(description: string, step: () => void): void {
+	const [ok, err] = pcall(step);
+	if (!ok) warn(`[robloxstudio-mcp] ${description} failed: ${err}`);
+}
+
 // Auto-activate per Peer. Runtime plugin VMs can load before their first
 // Heartbeat; task.delay() would then wait behind the very multiplayer startup
 // that needs this Peer to register. Start runtime initialization immediately,
@@ -125,10 +131,11 @@ function autoActivatePeer(): void {
 	if (role === "server") {
 		// Yields until this playtest server knows which edit session (or
 		// multiplayer group) it belongs to, so it registers under that identity.
-		PluginSession.resolveRuntimeTopology();
+		// On failure the server still registers, under its own identity.
+		runStartupStep("Playtest topology resolution", () => PluginSession.resolveRuntimeTopology());
 	}
 	if (role === "edit" || role === "server") {
-		const [activationOk, activationError] = pcall(() => {
+		runStartupStep(`Automatic ${role} Peer activation`, () => {
 			const conn = State.getActiveConnection();
 			if (!conn.isActive) {
 				if (role === "server") {
@@ -150,19 +157,16 @@ function autoActivatePeer(): void {
 				Communication.activatePlugin();
 			}
 		});
-		if (!activationOk) {
-			warn(`[robloxstudio-mcp] Automatic ${role} Peer activation failed: ${activationError}`);
-		}
 	}
 	if (role === "server") {
-		ClientBroker.setupServerBroker();
+		runStartupStep("Client broker setup", () => ClientBroker.setupServerBroker());
 		// The play-server DM is the only one where StudioTestService:EndTest is
 		// legal, so the stop-play monitor lives here. It consumes tokenized
 		// stop requests from plugin settings and acknowledges EndTest results.
-		StopPlayMonitor.startMonitor({
+		runStartupStep("Stop-play monitor startup", () => StopPlayMonitor.startMonitor({
 			beforeEndTest: StudioWebSocket.suspendForShutdown,
 			afterEndTestFailure: StudioWebSocket.resumeAfterShutdownFailure,
-		});
+		}));
 	} else if (role === "client") {
 		ClientBroker.setupClientBroker();
 	}

@@ -26,10 +26,12 @@ const LEGACY_TOPOLOGY_ATTRIBUTES = [
 	TOPOLOGY_TOKEN_ATTRIBUTE,
 ];
 const SESSION_IDENTITY_NAME = "__MCPSessionIdentity";
-// Attributes on the CoreGui identity value: CoreGui survives plugin reloads but
-// is never saved with the place or copied into playtest DataModels.
-const PLAY_RECORD_ATTRIBUTE = "PlayRecord";
-const RUNTIME_TOPOLOGY_ATTRIBUTE = "RuntimeTopology";
+// JSON session state lives in StringValue children of the CoreGui identity
+// value: CoreGui survives plugin reloads but is never saved with the place or
+// copied into playtest DataModels. Not attributes: with NextGenerationReplication,
+// playtest DataModels reject attribute strings longer than 50 characters.
+const PLAY_RECORD_NAME = "PlayRecord";
+const RUNTIME_TOPOLOGY_NAME = "RuntimeTopology";
 // MCP-started solo and Run playtests carry their topology in StudioTestService
 // test args, which never touch the DataModel.
 const TEST_ARGS_TOPOLOGY_KEY = "__mcpTopology";
@@ -146,12 +148,40 @@ function optionalString(value: unknown): string | undefined {
 	return typeIs(value, "string") && value !== "" ? value : undefined;
 }
 
-function readPlayRecord(): PlayRecord | undefined {
-	const raw = sessionIdentity.GetAttribute(PLAY_RECORD_ATTRIBUTE);
-	if (!typeIs(raw, "string")) return undefined;
-	const [ok, decoded] = pcall(() => HttpService.JSONDecode(raw));
+function readSessionState(name: string): Record<string, unknown> | undefined {
+	const holder = sessionIdentity.FindFirstChild(name);
+	if (holder === undefined || !holder.IsA("StringValue")) return undefined;
+	const [ok, decoded] = pcall(() => HttpService.JSONDecode(holder.Value));
 	if (!ok || !typeIs(decoded, "table")) return undefined;
-	const data = decoded as Record<string, unknown>;
+	return decoded as Record<string, unknown>;
+}
+
+/** Best effort: saved session state only lets a plugin reload resume where it left off. */
+function writeSessionState(name: string, state: object | undefined): void {
+	const [ok, err] = pcall(() => {
+		const existing = sessionIdentity.FindFirstChild(name);
+		if (state === undefined) {
+			existing?.Destroy();
+			return;
+		}
+		const encoded = HttpService.JSONEncode(state);
+		if (existing !== undefined && existing.IsA("StringValue")) {
+			existing.Value = encoded;
+			return;
+		}
+		existing?.Destroy();
+		const holder = new Instance("StringValue");
+		holder.Name = name;
+		holder.Value = encoded;
+		holder.Archivable = false;
+		holder.Parent = sessionIdentity;
+	});
+	if (!ok) warn(`[robloxstudio-mcp] Could not save ${name} session state: ${err}`);
+}
+
+function readPlayRecord(): PlayRecord | undefined {
+	const data = readSessionState(PLAY_RECORD_NAME);
+	if (data === undefined) return undefined;
 	const phase = data.phase === "armed" || data.phase === "active" ? data.phase : undefined;
 	if (phase === undefined) return undefined;
 	const armedAt = data.armedAt;
@@ -168,12 +198,7 @@ function readPlayRecord(): PlayRecord | undefined {
 }
 
 function writePlayRecord(record: PlayRecord | undefined): void {
-	if (record === undefined) {
-		sessionIdentity.SetAttribute(PLAY_RECORD_ATTRIBUTE, undefined);
-		return;
-	}
-	const [ok, encoded] = pcall(() => HttpService.JSONEncode(record));
-	if (ok && typeIs(encoded, "string")) sessionIdentity.SetAttribute(PLAY_RECORD_ATTRIBUTE, encoded);
+	writeSessionState(PLAY_RECORD_NAME, record);
 }
 
 function createTicket(instanceId: string | undefined, groupId: string | undefined): PlaytestTicket {
@@ -378,11 +403,8 @@ function topologyFromTestArgs(): RuntimeTopology | undefined {
 }
 
 function readRememberedRuntimeTopology(): RuntimeTopology | undefined {
-	const raw = sessionIdentity.GetAttribute(RUNTIME_TOPOLOGY_ATTRIBUTE);
-	if (!typeIs(raw, "string")) return undefined;
-	const [ok, decoded] = pcall(() => HttpService.JSONDecode(raw));
-	if (!ok || !typeIs(decoded, "table")) return undefined;
-	const data = decoded as Record<string, unknown>;
+	const data = readSessionState(RUNTIME_TOPOLOGY_NAME);
+	if (data === undefined) return undefined;
 	return {
 		instanceId: optionalString(data.instanceId),
 		groupId: optionalString(data.groupId),
@@ -393,8 +415,7 @@ function readRememberedRuntimeTopology(): RuntimeTopology | undefined {
 
 function adoptRuntimeTopology(topology: RuntimeTopology): void {
 	runtimeTopology = topology;
-	const [ok, encoded] = pcall(() => HttpService.JSONEncode(topology));
-	if (ok && typeIs(encoded, "string")) sessionIdentity.SetAttribute(RUNTIME_TOPOLOGY_ATTRIBUTE, encoded);
+	writeSessionState(RUNTIME_TOPOLOGY_NAME, topology);
 }
 
 /**
