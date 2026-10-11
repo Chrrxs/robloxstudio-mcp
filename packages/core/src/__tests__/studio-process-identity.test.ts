@@ -59,22 +59,31 @@ class CoreGuiStorage {
   FindFirstChild(name: string): MockInstance | undefined { return this.children.get(name); }
 }
 
+// With NextGenerationReplication, playtest DataModels reject longer attribute strings.
+const NEXT_GENERATION_ATTRIBUTE_STRING_LIMIT = 50;
+
 class MockInstance {
   Name = '';
   Value = '';
   Archivable = true;
-  private parent?: CoreGuiStorage;
+  readonly children = new Map<string, MockInstance>();
+  private parent?: CoreGuiStorage | MockInstance;
   private readonly attributes = new Map<string, unknown>();
 
-  constructor(private readonly className: string) {}
+  constructor(private readonly className: string, private readonly attributeStringLimit?: number) {}
   IsA(className: string): boolean { return this.className === className; }
+  FindFirstChild(name: string): MockInstance | undefined { return this.children.get(name); }
   GetAttribute(name: string): unknown { return this.attributes.get(name); }
   SetAttribute(name: string, value: unknown): void {
+    const limit = this.attributeStringLimit;
+    if (typeof value === 'string' && limit !== undefined && value.length > limit) {
+      throw new Error(`Attribute string value exceeds ${limit} character limit ("${name}")`);
+    }
     if (value === undefined) this.attributes.delete(name);
     else this.attributes.set(name, value);
   }
-  get Parent(): CoreGuiStorage | undefined { return this.parent; }
-  set Parent(parent: CoreGuiStorage | undefined) {
+  get Parent(): CoreGuiStorage | MockInstance | undefined { return this.parent; }
+  set Parent(parent: CoreGuiStorage | MockInstance | undefined) {
     this.parent?.children.delete(this.Name);
     this.parent = parent;
     parent?.children.set(this.Name, this);
@@ -141,6 +150,8 @@ interface DataModel {
 interface Place {
   placeId: number;
   name: string;
+  /** Workspace.NextGenerationReplication, which limits attribute strings in playtest DataModels. */
+  nextGenerationReplication?: boolean;
 }
 
 function dataModel(): DataModel {
@@ -255,6 +266,12 @@ class Studio {
     let alive = true;
     const scheduler = this.scheduler;
     const wallMs = () => this.wallBaseMs + Math.round(scheduler.seconds * 1000) + clock.wallOffsetMs;
+    const attributeStringLimit = dataModel.role !== 'edit' && dataModel.place.nextGenerationReplication
+      ? NEXT_GENERATION_ATTRIBUTE_STRING_LIMIT
+      : undefined;
+    class DataModelInstance extends MockInstance {
+      constructor(className: string) { super(className, attributeStringLimit); }
+    }
     const studioTestService = {
       get EditModeActive() { return dataModel.editModeActive; },
       GetPropertyChangedSignal: (property: string) => {
@@ -291,7 +308,7 @@ class Studio {
           return {};
         },
       },
-      Instance: MockInstance,
+      Instance: DataModelInstance,
       DateTime: { now: () => ({ UnixTimestampMillis: wallMs() }) },
       os: { clock: () => scheduler.seconds },
       tick: () => wallMs() / 1000,
@@ -678,5 +695,43 @@ describe('Plugin reloads during a playtest', () => {
       instanceId: edit.session.getInstanceId(),
       placeKey: edit.session.getPlaceKey(),
     });
+  });
+});
+
+describe('Places with NextGenerationReplication', () => {
+  const NGR_PLACE: Place = { placeId: 0, name: 'Server authority place', nextGenerationReplication: true };
+
+  test('an MCP-started solo server inherits its topology and keeps it across a plugin reload', () => {
+    const studio = new Studio();
+    const edit = studio.openPlace(NGR_PLACE);
+    const instanceId = edit.session.getInstanceId();
+    const prepared = edit.session.prepareSoloTest();
+    edit.beginPlay();
+
+    const server = studio.loadRuntime(edit, { testArgs: prepared.testArgs });
+    expect(server.ready()).toMatchObject({ instanceId, placeKey: edit.session.getPlaceKey() });
+    expect(server.session.getInheritedServerUrl()).toBe(EDIT_SERVER_URL);
+
+    server.unload();
+    const reloaded = studio.load(server.dataModel, { resolve: false });
+    expect(reloaded.ready()).toMatchObject({ instanceId, placeKey: edit.session.getPlaceKey() });
+    expect(reloaded.session.getInheritedServerUrl()).toBe(EDIT_SERVER_URL);
+  });
+
+  test('a Play-button server claims its ticket and keeps the claimed identity across a plugin reload', () => {
+    const studio = new Studio();
+    const edit = studio.openPlace(NGR_PLACE);
+    const instanceId = edit.session.getInstanceId();
+    edit.beginPlay();
+
+    const server = studio.loadRuntime(edit);
+    expect(server.ready().instanceId).toBe(instanceId);
+
+    server.unload();
+    const reloadStartedAt = studio.scheduler.seconds;
+    const reloaded = studio.load(server.dataModel);
+    expect(studio.scheduler.seconds).toBe(reloadStartedAt);
+    expect(reloaded.ready()).toMatchObject({ instanceId, placeKey: edit.session.getPlaceKey() });
+    expect(reloaded.session.getInheritedServerUrl()).toBe(EDIT_SERVER_URL);
   });
 });
