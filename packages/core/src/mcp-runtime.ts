@@ -282,7 +282,7 @@ export function serverInstructions(definitions: readonly ToolDefinition[]): stri
 
   if (has('get_connected_instances')) {
     instructions.push(
-      "When more than one Studio process scope is connected, call get_connected_instances and pass either a top-level instance id or a multiplayer group's role-suffixed instance id as instance_id.",
+      "When more than one Studio process scope is connected, call get_connected_instances and pass either a top-level instance id or a multiplayer group's role-suffixed instance id as instance_id. A role-suffixed id selects that server or client as the default target; a conflicting single-peer target is rejected.",
     );
   }
   if (has('get_request_status', 'execute_luau', 'set_properties')) {

@@ -1,7 +1,7 @@
 import { readRbxmInput } from '../rbxm-input.js';
 import { StudioHttpClient } from './studio-client.js';
 import { BridgeService, RoutingFailure } from '../bridge-service.js';
-import type { PublicStudioPeer } from '../bridge-service.js';
+import type { PublicStudioPeer, StudioPeer } from '../bridge-service.js';
 import {
   OpenCloudClient,
   type AssetSearchParams,
@@ -1022,6 +1022,20 @@ error("Unsupported device simulator operation: " .. tostring(opts.operation), 0)
 `.trim();
 }
 
+const isClientRole = (role: string): boolean => /^client-\d+$/.test(role);
+const isRuntimeRole = (role: string): boolean => role === 'server' || isClientRole(role);
+const anyRole = (): boolean => true;
+// Targets that address a whole scope rather than one Peer.
+const SCOPE_WIDE_TARGETS: ReadonlySet<string> = new Set(['all', 'all-clients', 'edit-and-clients']);
+
+/** A tool's target before an instance_id that names one Peer is applied. */
+interface TargetChoice {
+  requested: string | undefined;
+  fallback: string;
+  /** Roles the tool can act on; an instance_id naming another role only selects the scope. */
+  accepts: (role: string) => boolean;
+}
+
 export class RobloxStudioTools {
   private client: StudioHttpClient;
   private bridge: BridgeService;
@@ -1205,7 +1219,7 @@ export class RobloxStudioTools {
   private async _callSingle(
     endpoint: string,
     data: unknown,
-    target: string | undefined,
+    target: string | TargetChoice | undefined,
     instance_id: string | undefined,
     timeoutMs?: number,
     signal?: AbortSignal,
@@ -1213,7 +1227,8 @@ export class RobloxStudioTools {
   ): Promise<StudioToolResponse> {
     const refresh = this.bridge.refreshTopologyForRouting(signal);
     if (refresh) await refresh;
-    const resolved = this.bridge.resolveTarget({ instance_id, target });
+    const role = typeof target === 'object' ? this._targetForInstanceId(instance_id, target) : target;
+    const resolved = this.bridge.resolveTarget({ instance_id, target: role });
     if (!resolved.ok) throw new RoutingFailure(resolved.error);
     if (resolved.mode !== 'single') {
       throw new RoutingFailure({
@@ -1225,30 +1240,71 @@ export class RobloxStudioTools {
     return this._requestPeer(endpoint, data, resolved.targetPeerId, timeoutMs, signal, operationId);
   }
 
+  // A grouped runtime process ID, or its role-suffixed Instance ID, names exactly
+  // one Peer. Solo playtest Peers share one Instance ID, so it names none of them.
+  private _peerSelectedByInstanceId(instance_id: string | undefined): StudioPeer | undefined {
+    if (instance_id === undefined) return undefined;
+    const selected = this.bridge.getPeersInScope(instance_id).filter((peer) =>
+      isRuntimeRole(peer.role) &&
+      (instance_id === peer.instanceId || instance_id === `${peer.instanceId}-${peer.role}`));
+    return selected.length === 1 ? selected[0] : undefined;
+  }
+
+  // Apply a Peer-naming instance_id to a tool's target after topology refresh: it
+  // replaces the tool default, and a different single-Peer target is rejected
+  // instead of silently acting on another Peer.
+  private _targetForInstanceId(instance_id: string | undefined, choice: TargetChoice): string {
+    const requested = choice.requested || undefined;
+    const selected = this._peerSelectedByInstanceId(instance_id);
+    if (!selected || !choice.accepts(selected.role)) return requested ?? choice.fallback;
+    if (requested === undefined) return selected.role;
+    if (requested !== selected.role && !SCOPE_WIDE_TARGETS.has(requested)) {
+      throw new RoutingFailure({
+        code: 'ambiguous_target',
+        message: `instance_id "${instance_id}" selects ${selected.role}, but target=${requested}. Omit target, pass target=${selected.role}, or pass the controller Instance ID with target=${requested}.`,
+        data: this._routingErrorData(),
+      });
+    }
+    return requested;
+  }
+
   // Honor an explicitly selected client for viewport/input operations; otherwise
   // prefer the first client in the scope, then retain the default Peer's Instance.
   private _resolveRuntime(instance_id?: string): { instanceId: string; clientRole?: string } {
     const resolved = this.bridge.resolveTarget({ instance_id, target: undefined });
-    if (!resolved.ok) throw new RoutingFailure(resolved.error);
-    if (resolved.mode !== 'single') {
+    let scopePeers: StudioPeer[];
+    let defaultInstanceId: string | undefined;
+    if (resolved.ok) {
+      if (resolved.mode !== 'single') {
+        throw new RoutingFailure({
+          code: 'target_role_not_present_on_instance',
+          message: 'A single runtime target is required.',
+          data: this._routingErrorData(),
+        });
+      }
+      scopePeers = this.bridge.getPeersInScope(resolved.targetInstanceId);
+      defaultInstanceId = resolved.targetInstanceId;
+    } else if (resolved.error.code === 'target_role_required') {
+      // Without an edit Peer (for example, during some solo playtests), generic
+      // routing cannot pick a default role, but a client viewport is still valid.
+      // resolveTarget already confirmed exactly one scope when instance_id is omitted.
+      scopePeers = instance_id !== undefined ? this.bridge.getPeersInScope(instance_id) : this.bridge.getPeers();
+    } else {
+      throw new RoutingFailure(resolved.error);
+    }
+    const named = this._peerSelectedByInstanceId(instance_id);
+    const client = (named && isClientRole(named.role) ? named : undefined) ?? scopePeers
+      .filter((peer) => isClientRole(peer.role))
+      .sort((a, b) => a.role.localeCompare(b.role) || a.peerId.localeCompare(b.peerId))[0];
+    if (client) return { instanceId: client.instanceId, clientRole: client.role };
+    if (defaultInstanceId === undefined) {
       throw new RoutingFailure({
         code: 'target_role_not_present_on_instance',
-        message: 'A single runtime target is required.',
+        message: `No edit or client viewport is connected in this scope. Connected roles: ${scopePeers.map((peer) => peer.role).join(', ')}.`,
         data: this._routingErrorData(),
       });
     }
-    const clients = this.bridge.getPeersInScope(resolved.targetInstanceId)
-      .filter((peer) => /^client-\d+$/.test(peer.role));
-    // Generic routing selects a group scope. Preserve a client process/role alias
-    // supplied by the caller before applying the scope's default client.
-    const selectedClients = clients.filter((peer) =>
-      instance_id === peer.instanceId || instance_id === `${peer.instanceId}-${peer.role}`);
-    const client = selectedClients.length === 1 ? selectedClients[0] : clients
-      .sort((a, b) => a.role.localeCompare(b.role) || a.peerId.localeCompare(b.peerId))[0];
-    return {
-      instanceId: client?.instanceId ?? resolved.targetInstanceId,
-      clientRole: client?.role,
-    };
+    return { instanceId: defaultInstanceId };
   }
 
   // Resolve synchronously after the caller has refreshed and captured its topology.
@@ -1334,7 +1390,7 @@ export class RobloxStudioTools {
     instance_id: string | undefined,
     toolName: string,
   ): { instanceId: string; role: string; selectedTarget: string } {
-    const selectedTarget = target ?? 'edit';
+    const selectedTarget = this._targetForInstanceId(instance_id, { requested: target, fallback: 'edit', accepts: isClientRole });
     if (selectedTarget === 'server' || selectedTarget === 'all' || selectedTarget === 'all-clients') {
       throw new Error(`${toolName} target must be "edit" or "client-N" (got: ${selectedTarget})`);
     }
@@ -1349,7 +1405,7 @@ export class RobloxStudioTools {
     target: string | undefined,
     instance_id: string | undefined,
   ): { instanceId: string; selectedTarget: string; roles: string[] } {
-    const selectedTarget = target ?? 'edit';
+    const selectedTarget = this._targetForInstanceId(instance_id, { requested: target, fallback: 'edit', accepts: isClientRole });
     if (selectedTarget === 'all-clients') {
       const instanceId = this._resolveInstanceIdOnly(instance_id);
       const roles = this._clientRolesForScope(instanceId);
@@ -1380,7 +1436,7 @@ export class RobloxStudioTools {
     instance_id: string | undefined,
     toolName: string,
   ): { instanceId: string; selectedTarget: string; roles: string[]; warnings: string[] } {
-    const selectedTarget = target ?? 'edit-and-clients';
+    const selectedTarget = this._targetForInstanceId(instance_id, { requested: target, fallback: 'edit-and-clients', accepts: isClientRole });
     if (selectedTarget === 'server' || selectedTarget === 'all') {
       throw new Error(`${toolName} target must be "edit", "client-N", "all-clients", or "edit-and-clients" (got: ${selectedTarget})`);
     }
@@ -2009,7 +2065,7 @@ export class RobloxStudioTools {
     if (!code) {
       throw new Error('Code is required for execute_luau');
     }
-    const response = await this._callSingle('/api/execute-luau', { code }, target || 'edit', instance_id, undefined, undefined, operation_id);
+    const response = await this._callSingle('/api/execute-luau', { code }, { requested: target, fallback: 'edit', accepts: anyRole }, instance_id, undefined, undefined, operation_id);
     return {
       content: [
         {
@@ -2039,11 +2095,10 @@ export class RobloxStudioTools {
     if (!code) {
       throw new Error('Code is required for eval_client_runtime');
     }
-    const clientTarget = target || 'client-1';
-    if (!clientTarget.startsWith('client-')) {
-      throw new Error(`eval_client_runtime requires target=client-N (got: ${clientTarget})`);
+    if (target && !target.startsWith('client-')) {
+      throw new Error(`eval_client_runtime requires target=client-N (got: ${target})`);
     }
-    const response = await this._callSingle('/api/eval-runtime', { code }, clientTarget, instance_id);
+    const response = await this._callSingle('/api/eval-runtime', { code }, { requested: target, fallback: 'client-1', accepts: isClientRole }, instance_id);
     return {
       content: [
         {
@@ -2060,7 +2115,7 @@ export class RobloxStudioTools {
     if (refresh) await refresh;
     const instanceId = this._resolveInstanceIdOnly(instance_id);
     const clientRoles = this._clientRolesForScope(instanceId);
-    const selectedTarget = target ?? 'client-1';
+    const selectedTarget = this._targetForInstanceId(instance_id, { requested: target, fallback: 'client-1', accepts: isClientRole });
 
     let targetRoles: string[];
     if (selectedTarget === 'all-clients') {
@@ -2841,7 +2896,6 @@ export class RobloxStudioTools {
   }
 
   async captureScriptProfiler(target?: string, request: Record<string, unknown> = {}, instance_id?: string) {
-    const targetRole = target ?? 'server';
     const data: Record<string, unknown> = { ...request };
     const outputPath = data.output_path;
     delete data.output_path;
@@ -2855,6 +2909,7 @@ export class RobloxStudioTools {
 
     const refresh = this.bridge.refreshTopologyForRouting();
     if (refresh) await refresh;
+    const targetRole = this._targetForInstanceId(instance_id, { requested: target, fallback: 'server', accepts: isRuntimeRole });
     const resolved = this.bridge.resolveTarget({ instance_id, target: targetRole });
     if (!resolved.ok) throw new RoutingFailure(resolved.error);
     if (resolved.mode !== 'single') {
@@ -2895,7 +2950,6 @@ export class RobloxStudioTools {
   }
 
   async captureMicroProfiler(target?: string, request: Record<string, unknown> = {}, instance_id?: string) {
-    const targetRole = target ?? 'server';
     const data: Record<string, unknown> = { ...request };
     const outputPath = data.output_path;
     const summaryOutputPath = data.summary_output_path;
@@ -2929,6 +2983,7 @@ export class RobloxStudioTools {
 
     const refresh = this.bridge.refreshTopologyForRouting();
     if (refresh) await refresh;
+    const targetRole = this._targetForInstanceId(instance_id, { requested: target, fallback: 'server', accepts: isRuntimeRole });
     const resolved = this.bridge.resolveTarget({ instance_id, target: targetRole });
     if (!resolved.ok) throw new RoutingFailure(resolved.error);
     if (resolved.mode !== 'single') {
@@ -2992,12 +3047,12 @@ export class RobloxStudioTools {
     if (!action || typeof action !== 'string') {
       throw new Error('breakpoints requires action=set|remove|clear|list');
     }
-    const targetRole = target ?? 'edit';
     const data: Record<string, unknown> = { ...request, action };
     delete data.target;
     delete data.instance_id;
     const refresh = this.bridge.refreshTopologyForRouting();
     if (refresh) await refresh;
+    const targetRole = this._targetForInstanceId(instance_id, { requested: target, fallback: 'edit', accepts: isRuntimeRole });
     const resolved = this.bridge.resolveTarget({ instance_id, target: targetRole });
     if (!resolved.ok) throw new RoutingFailure(resolved.error);
     if (resolved.mode !== 'single') {
@@ -3847,7 +3902,7 @@ export class RobloxStudioTools {
     }
 
     if (action === 'leave_client') {
-      const body = this._parseTextResult(await this.multiplayerTestLeaveClient(target ?? 'client-1', timeout, instance_id));
+      const body = this._parseTextResult(await this.multiplayerTestLeaveClient(target, timeout, instance_id));
       return this._textResult(body.success === true && body.left === true ? {
         success: true,
         action,
@@ -4004,13 +4059,14 @@ export class RobloxStudioTools {
     };
   }
 
-  async multiplayerTestLeaveClient(target: string = 'client-1', timeout?: number, instance_id?: string) {
-    if (!/^client-\d+$/.test(target)) {
+  async multiplayerTestLeaveClient(target?: string, timeout?: number, instance_id?: string) {
+    if (target && !/^client-\d+$/.test(target)) {
       throw new Error(`multiplayer_test_leave_client requires target=client-N (got: ${target})`);
     }
     const refresh = this.bridge.refreshTopologyForRouting();
     if (refresh) await refresh;
-    const clientTarget = this._resolveSingleTarget(target, instance_id);
+    const role = this._targetForInstanceId(instance_id, { requested: target, fallback: 'client-1', accepts: isClientRole });
+    const clientTarget = this._resolveSingleTarget(role, instance_id);
     const group = this.bridge.getMultiplayerGroups().find((candidate) =>
       candidate.instanceIds.includes(clientTarget.instanceId)
     );
@@ -4793,9 +4849,10 @@ export class RobloxStudioTools {
     const refresh = this.bridge.refreshTopologyForRouting();
     if (refresh) await refresh;
     const { instanceId, clientRole } = this._resolveRuntime(instance_id);
+    const role = this._targetForInstanceId(instance_id, { requested: target, fallback: clientRole ?? 'edit', accepts: isClientRole });
     const response = await this._callSingle('/api/simulate-mouse-input', {
       action, x, y, button
-    }, target || clientRole || 'edit', instanceId);
+    }, role, instanceId);
     return {
       content: [{
         type: 'text',
@@ -4811,9 +4868,10 @@ export class RobloxStudioTools {
     const refresh = this.bridge.refreshTopologyForRouting();
     if (refresh) await refresh;
     const { instanceId, clientRole } = this._resolveRuntime(instance_id);
+    const role = this._targetForInstanceId(instance_id, { requested: target, fallback: clientRole ?? 'edit', accepts: isClientRole });
     const response = await this._callSingle('/api/simulate-keyboard-input', {
       keyCode, action, duration, text
-    }, target || clientRole || 'edit', instanceId);
+    }, role, instanceId);
     return {
       content: [{
         type: 'text',
@@ -4855,12 +4913,12 @@ export class RobloxStudioTools {
   }
 
   async getMemoryBreakdown(target?: string, tags?: string[], instance_id?: string) {
-    const tgt = target ?? 'all';
     const data: Record<string, unknown> = {};
     if (tags !== undefined) data.tags = tags;
 
     const refresh = this.bridge.refreshTopologyForRouting();
     if (refresh) await refresh;
+    const tgt = this._targetForInstanceId(instance_id, { requested: target, fallback: 'all', accepts: anyRole });
     const resolved = this.bridge.resolveTarget({ instance_id, target: tgt });
     if (!resolved.ok) throw new RoutingFailure(resolved.error);
 
@@ -4893,7 +4951,6 @@ export class RobloxStudioTools {
   }
 
   async getSceneAnalysis(mode?: string, target?: string, topN?: number, raw?: boolean, instance_id?: string) {
-    const tgt = target ?? 'all';
     const data: Record<string, unknown> = {};
     if (mode !== undefined) data.mode = mode;
     if (topN !== undefined) data.topN = topN;
@@ -4901,6 +4958,7 @@ export class RobloxStudioTools {
 
     const refresh = this.bridge.refreshTopologyForRouting();
     if (refresh) await refresh;
+    const tgt = this._targetForInstanceId(instance_id, { requested: target, fallback: 'all', accepts: anyRole });
     const resolved = this.bridge.resolveTarget({ instance_id, target: tgt });
     if (!resolved.ok) throw new RoutingFailure(resolved.error);
 
@@ -4939,15 +4997,14 @@ export class RobloxStudioTools {
     if (!outputPath || typeof outputPath !== 'string') {
       throw new Error('output_path is required for export_rbxm');
     }
-    const tgt = target || 'edit';
-    if (tgt !== 'edit' && tgt !== 'server') {
-      throw new Error(`export_rbxm target must be "edit" or "server" (got: ${tgt})`);
+    if (target && target !== 'edit' && target !== 'server') {
+      throw new Error(`export_rbxm target must be "edit" or "server" (got: ${target})`);
     }
 
     const response = await this._callSingle(
       '/api/export-rbxm',
       { instance_paths: instancePaths },
-      tgt,
+      { requested: target, fallback: 'edit', accepts: (role) => role === 'server' },
       instance_id,
     ) as { error?: string; base64?: string; instance_count?: number };
 
@@ -4992,9 +5049,8 @@ export class RobloxStudioTools {
     if (!parentPath || typeof parentPath !== 'string') {
       throw new Error('parent_path is required for import_rbxm');
     }
-    const tgt = target || 'edit';
-    if (tgt !== 'edit' && tgt !== 'server') {
-      throw new Error(`import_rbxm target must be "edit" or "server" (got: ${tgt})`);
+    if (target && target !== 'edit' && target !== 'server') {
+      throw new Error(`import_rbxm target must be "edit" or "server" (got: ${target})`);
     }
 
     const modes = ['path', 'url', 'base64'].filter((k) => (source as Record<string, unknown>)[k] !== undefined);
@@ -5017,7 +5073,7 @@ export class RobloxStudioTools {
         parent_path: parentPath,
         source_label: sourceLabel,
       },
-      tgt,
+      { requested: target, fallback: 'edit', accepts: (role) => role === 'server' },
       instance_id,
       undefined,
       signal,

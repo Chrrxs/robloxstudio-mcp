@@ -404,7 +404,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
         },
         target: {
           type: 'string',
-          description: 'Client peer; defaults to client-1.'
+          description: 'Client peer; defaults to the client named by instance_id, else client-1.'
         },
         instance_id: {
           type: 'string',

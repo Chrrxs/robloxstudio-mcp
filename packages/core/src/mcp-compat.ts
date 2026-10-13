@@ -15,7 +15,7 @@ Tool descriptions explain selection. Input schemas explain arguments. This guide
 ## Connection and paths
 
 - Use canonical DataModel paths returned by the tools. Paths usually start with game.
-- Call get_connected_instances when more than one Studio process may be connected. Pass either a top-level Instance ID or a multiplayer group's role-suffixed Instance ID as instance_id on later calls.
+- Call get_connected_instances when more than one Studio process may be connected. Pass either a top-level Instance ID or a multiplayer group's role-suffixed Instance ID as instance_id on later calls. A role-suffixed ID selects that server or client as the default target; a conflicting single-peer target is rejected.
 - Use get_place_info for the active place identity and settings.
 
 ## Discovery and edit work
