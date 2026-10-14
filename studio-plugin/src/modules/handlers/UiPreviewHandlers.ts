@@ -6,6 +6,13 @@
 // Archivable=false host is neither saved nor copied into playtest DataModels.
 // Story control state lives in the mounted renderer and persists between
 // actions until unmount, playtest start, plugin unload, or IDLE_TIMEOUT.
+//
+// Story previews hot-reload: the renderer reloads them when the story or a
+// module it requires changes. Controls the agent set are re-applied to each
+// reloaded generation (the reload itself starts from the story's defaults),
+// actions wait for an in-flight reload, and the next action reports reloads,
+// reload failures and late story errors. Native UI previews are static clones
+// and never reload.
 
 import { HttpService, RunService } from "@rbxts/services";
 import Utils from "../Utils";
@@ -23,12 +30,23 @@ const HOST_PREFIX = "__MCPUiPreview_";
 const HOST_DISPLAY_ORDER = 1073741824;
 const BACKDROP_COLOR = Color3.fromRGB(37, 38, 42);
 const IDLE_TIMEOUT = 600;
-const MONITOR_INTERVAL = 1;
+const MONITOR_INTERVAL = 0.2;
+// Bounded wait for a queued or loading hot reload before an action proceeds.
+const RELOAD_WAIT = 15;
+const RELOAD_POLL = 0.05;
+// A reloaded React story publishes its controls just after it commits.
+const CONTROLS_WAIT = 1;
+const MAX_REPORTED_ERRORS = 5;
+const ERROR_LIMIT = 600;
+const INTERACTIVE_ACTIONS: Record<string, true> = { set_controls: true, click: true, type: true };
 const CLICK_HOLD = 0.05;
 const INSPECT_LIMIT = 300;
 const TEXT_LIMIT = 120;
 const NATIVE_SCRIPT_NOTE =
 	"Scripts and LocalScripts inside native UI do not run in edit mode; the preview shows the UI's static state. Use a story module to preview behaviour.";
+const NATIVE_RELOAD_NOTE = "Native UI previews are static clones and do not hot-reload; mount again to see changes to the source.";
+const STORY_RELOAD_NOTE =
+	"Hot reloading is on: edits to the story or modules it requires reapply without remounting, and controls you set are re-applied after each reload.";
 
 interface ControlsSnapshot {
 	Controls: Record<string, unknown>;
@@ -36,11 +54,19 @@ interface ControlsSnapshot {
 }
 
 // Contract of studio-plugin/ui-renderer/Preview.tsx (compiled into the UIRenderer folder as McpPreview).
+interface ReloadStatus {
+	readonly Generation: number;
+	readonly State: "loading" | "ready" | "failed";
+	readonly Error?: string;
+}
+
 interface RendererHandle {
-	readonly StoryType?: string;
+	readonly GetStoryType: () => string | undefined;
 	readonly GetRoot: () => Frame | undefined;
 	readonly GetControls: () => ControlsSnapshot | undefined;
 	readonly SetControls: (values: Record<string, unknown>) => void;
+	readonly GetReload: () => ReloadStatus;
+	readonly GetErrors: () => readonly string[];
 	readonly Cleanup: () => void;
 }
 
@@ -72,6 +98,17 @@ interface Preview {
 	content: Frame;
 	clone?: GuiObject | ScreenGui;
 	story?: RendererHandle;
+	/** Raw control values the agent set, by name (groups nest); re-applied after every hot reload. */
+	overrides: Record<string, unknown>;
+	/** Last generation the overrides were re-applied to, and the last one reported to the agent. */
+	appliedGeneration: number;
+	reportedGeneration: number;
+	/** Count of renderer late errors already reported. */
+	reportedErrors: number;
+	/** Re-apply outcomes not yet reported. */
+	pendingReapplied?: string[];
+	pendingDropped: { name: string; reason: string }[];
+	syncing: boolean;
 	lastUsed: number;
 	restoreDevGui: boolean;
 	finishing: boolean;
@@ -139,6 +176,11 @@ function startMonitor(): void {
 			if (preview === undefined || mounting || preview.finishing) continue;
 			if (playtestActive()) endActive("playtest started");
 			else if (os.clock() - preview.lastUsed > IDLE_TIMEOUT) endActive("idle timeout");
+			else if (preview.story !== undefined && !preview.syncing) {
+				// Re-apply the agent's controls as soon as a hot reload settles, not only on the next action.
+				const [ok, err] = pcall(() => syncStory(preview, false));
+				if (!ok) warn(`[robloxstudio-mcp] UI preview reload sync failed: ${tostring(err)}`);
+			}
 		}
 		monitoring = false;
 	});
@@ -379,20 +421,145 @@ function storyControls(story: RendererHandle): defined[] {
 	return describeControls(snapshot.Controls as Record<string, ControlDefinition>, snapshot.Values);
 }
 
-function applyControls(story: RendererHandle, overrides: unknown): void {
+// Remembers raw overrides by name; control groups merge per child so later partial updates keep earlier ones.
+function recordOverrides(
+	stored: Record<string, unknown>,
+	overrides: Record<string, unknown>,
+	controls: Record<string, ControlDefinition>,
+): void {
+	for (const [name, raw] of pairs(overrides)) {
+		const definition = controls[name];
+		if (definition?.EntryType === "ControlGroup" && typeIs(raw, "table")) {
+			const group = (typeIs(stored[name], "table") ? stored[name] : {}) as Record<string, unknown>;
+			recordOverrides(group, raw as Record<string, unknown>, definition.Controls ?? {});
+			stored[name] = group;
+		} else {
+			stored[name] = raw;
+		}
+	}
+}
+
+function applyControls(preview: Preview, story: RendererHandle, overrides: unknown): void {
 	if (!typeIs(overrides, "table")) fail("controls must be an object of { controlName: value }.");
 	const snapshot = story.GetControls();
 	if (snapshot === undefined) fail("This story declares no controls.");
-	const merged = mergeControls(
-		snapshot.Controls as Record<string, ControlDefinition>,
-		snapshot.Values,
-		overrides as Record<string, unknown>,
-		"",
-	);
+	const controls = snapshot.Controls as Record<string, ControlDefinition>;
+	const merged = mergeControls(controls, snapshot.Values, overrides as Record<string, unknown>, "");
 	story.SetControls(merged);
+	recordOverrides(preview.overrides, overrides as Record<string, unknown>, controls);
 	// Let the mounter re-render and publish the new values.
 	task.wait();
 	task.wait();
+}
+
+// A reloaded generation starts from the story's own defaults. Re-apply each remembered override that still
+// fits the reloaded controls; drop (and report) ones whose control was removed or changed type.
+function reapplyOverrides(preview: Preview, story: RendererHandle): void {
+	if (next(preview.overrides)[0] === undefined) return;
+	let snapshot = story.GetControls();
+	const deadline = os.clock() + CONTROLS_WAIT;
+	while (snapshot === undefined && os.clock() < deadline) {
+		task.wait();
+		snapshot = story.GetControls();
+	}
+	if (snapshot === undefined) {
+		for (const [name] of pairs(preview.overrides)) {
+			preview.pendingDropped.push({ name: tostring(name), reason: "The reloaded story declares no controls." });
+		}
+		preview.overrides = {};
+		return;
+	}
+	const controls = snapshot.Controls as Record<string, ControlDefinition>;
+	const values = snapshot.Values;
+	const kept: Record<string, unknown> = {};
+	for (const [name, raw] of pairs(preview.overrides)) {
+		const [ok, err] = pcall(() => mergeControls(controls, values, { [name]: raw }, ""));
+		if (ok) kept[name] = raw;
+		else preview.pendingDropped.push({ name: tostring(name), reason: tostring(err) });
+	}
+	preview.overrides = kept;
+	if (next(kept)[0] === undefined) return;
+	story.SetControls(mergeControls(controls, values, kept, ""));
+	const names: string[] = [];
+	for (const [name] of pairs(kept)) names.push(tostring(name));
+	names.sort();
+	preview.pendingReapplied = names;
+	task.wait();
+	task.wait();
+}
+
+// Brings the agent's controls onto the latest settled generation. With waitForReload, first waits (bounded) for a
+// queued or loading reload so the caller acts on the reloaded story rather than the previous one.
+function syncStory(preview: Preview, waitForReload: boolean): void {
+	const story = preview.story;
+	if (story === undefined) return;
+	if (preview.syncing) {
+		if (!waitForReload) return;
+		const deadline = os.clock() + RELOAD_WAIT;
+		while (preview.syncing && os.clock() < deadline) task.wait(RELOAD_POLL);
+	}
+	preview.syncing = true;
+	const [ok, err] = pcall(() => {
+		let status = story.GetReload();
+		if (waitForReload) {
+			const deadline = os.clock() + RELOAD_WAIT;
+			while (status.State === "loading" && os.clock() < deadline) {
+				task.wait(RELOAD_POLL);
+				status = story.GetReload();
+			}
+		}
+		// A reload can land while overrides are re-applied; loop until the applied generation is the latest.
+		while (status.State === "ready" && status.Generation !== preview.appliedGeneration) {
+			preview.appliedGeneration = status.Generation;
+			reapplyOverrides(preview, story);
+			status = story.GetReload();
+		}
+	});
+	preview.syncing = false;
+	if (!ok) error(err, 0);
+}
+
+function truncate(text: string): string {
+	return text.size() > ERROR_LIMIT ? `${text.sub(1, ERROR_LIMIT)}...` : text;
+}
+
+// Reload activity since the previous action, or undefined when nothing happened.
+function takeReloadReport(preview: Preview, story: RendererHandle): Record<string, unknown> | undefined {
+	const status = story.GetReload();
+	const report: Record<string, unknown> = { status: status.State, generation: status.Generation };
+	let notable = status.State !== "ready";
+	if (status.Generation !== preview.reportedGeneration) {
+		report.reloads = status.Generation - preview.reportedGeneration;
+		preview.reportedGeneration = status.Generation;
+		notable = true;
+	}
+	if (status.State === "failed") report.error = truncate(status.Error ?? "unknown error");
+	if (status.State === "loading") {
+		report.note = `The story was still reloading after ${RELOAD_WAIT}s; this result may show the previous load.`;
+	}
+	if (preview.pendingReapplied !== undefined) {
+		report.controlsReapplied = preview.pendingReapplied;
+		preview.pendingReapplied = undefined;
+		notable = true;
+	}
+	if (preview.pendingDropped.size() > 0) {
+		report.controlsDropped = preview.pendingDropped;
+		preview.pendingDropped = [];
+		notable = true;
+	}
+	const errors = story.GetErrors();
+	if (errors.size() > preview.reportedErrors) {
+		const fresh: string[] = [];
+		for (let i = math.max(preview.reportedErrors, errors.size() - MAX_REPORTED_ERRORS); i < errors.size(); i++) {
+			fresh.push(truncate(errors[i]));
+		}
+		report.storyErrors = fresh;
+		const omitted = errors.size() - preview.reportedErrors - fresh.size();
+		if (omitted > 0) report.storyErrorsOmitted = omitted;
+		preview.reportedErrors = errors.size();
+		notable = true;
+	}
+	return notable ? report : undefined;
 }
 
 // ---------------------------------------------------------------------------
@@ -406,7 +573,7 @@ function summary(preview: Preview): Record<string, unknown> {
 		root: Utils.getInstancePath(previewRoot(preview)),
 		viewport: [math.round(size.X), math.round(size.Y)],
 	};
-	if (preview.story !== undefined) result.storyType = preview.story.StoryType;
+	if (preview.story !== undefined) result.storyType = preview.story.GetStoryType();
 	return result;
 }
 
@@ -490,6 +657,12 @@ function mountPreview(data: Record<string, unknown>): Record<string, unknown> {
 		target: Utils.getInstancePath(source),
 		host,
 		content,
+		overrides: {},
+		appliedGeneration: 0,
+		reportedGeneration: 0,
+		reportedErrors: 0,
+		pendingDropped: [],
+		syncing: false,
 		lastUsed: os.clock(),
 		restoreDevGui,
 		finishing: false,
@@ -503,8 +676,14 @@ function mountPreview(data: Record<string, unknown>): Record<string, unknown> {
 		}
 		host.Parent = StarterGui;
 		if (kind === "story") {
-			preview.story = renderer!.mount(source as ModuleScript, content, owner!);
-			if (data.controls !== undefined) applyControls(preview.story, data.controls);
+			const story = renderer!.mount(source as ModuleScript, content, owner!);
+			preview.story = story;
+			const status = story.GetReload();
+			preview.appliedGeneration = status.Generation;
+			preview.reportedGeneration = status.Generation;
+			preview.reportedErrors = story.GetErrors().size();
+			if (data.controls !== undefined) applyControls(preview, story, data.controls);
+			notes.push(STORY_RELOAD_NOTE);
 			return;
 		}
 		const clone = source.Clone() as GuiObject | ScreenGui | undefined;
@@ -525,6 +704,7 @@ function mountPreview(data: Record<string, unknown>): Record<string, unknown> {
 		}
 		const scripts = countScripts(clone);
 		notes.push(scripts > 0 ? `${NATIVE_SCRIPT_NOTE} (${scripts} script${scripts === 1 ? "" : "s"} inside.)` : NATIVE_SCRIPT_NOTE);
+		notes.push(NATIVE_RELOAD_NOTE);
 	});
 	if (!ok) {
 		const cleanupFailure = finish(preview);
@@ -692,18 +872,34 @@ function previewUi(data: Record<string, unknown>): unknown {
 		const preview = active;
 		if (preview === undefined) fail("No UI preview is mounted. Call preview_ui with action=mount first.");
 		preview.lastUsed = os.clock();
-		if (action === "set_controls") {
-			if (preview.story === undefined) fail("set_controls applies only to story previews.");
-			applyControls(preview.story, data.controls);
-			const updated = summary(preview);
-			updated.controls = storyControls(preview.story);
-			return updated;
+		const story = preview.story;
+		let reload: Record<string, unknown> | undefined;
+		if (story !== undefined) {
+			syncStory(preview, true);
+			if (active !== preview) fail("The UI preview was unmounted while waiting for a hot reload.");
+			reload = takeReloadReport(preview, story);
+			const status = story.GetReload();
+			if (INTERACTIVE_ACTIONS[action as string] === true && status.State !== "ready") {
+				fail(
+					status.State === "failed"
+						? `The story failed to hot-reload, so there is nothing to ${action}: ${truncate(status.Error ?? "unknown error")}. Fix the source; the preview reloads automatically when it changes.`
+						: `The story is still hot-reloading after ${RELOAD_WAIT}s; retry ${action} when it settles.`,
+				);
+			}
 		}
-		if (action === "click") return clickPreview(preview, data);
-		if (action === "type") return typePreview(preview, data);
-		if (action === "inspect") return inspectPreview(preview);
-		if (action === "screenshot") return summary(preview);
-		fail(`Unknown preview_ui action ${tostring(action)}.`);
+		let result: Record<string, unknown>;
+		if (action === "set_controls") {
+			if (story === undefined) fail("set_controls applies only to story previews.");
+			applyControls(preview, story, data.controls);
+			result = summary(preview);
+			result.controls = storyControls(story);
+		} else if (action === "click") result = clickPreview(preview, data);
+		else if (action === "type") result = typePreview(preview, data);
+		else if (action === "inspect") result = inspectPreview(preview);
+		else if (action === "screenshot") result = summary(preview);
+		else fail(`Unknown preview_ui action ${tostring(action)}.`);
+		if (reload !== undefined) result.reload = reload;
+		return result;
 	});
 	if (!ok) return { error: tostring(result) };
 	return { success: true, ...result };

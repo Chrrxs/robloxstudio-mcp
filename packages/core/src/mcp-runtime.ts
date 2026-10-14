@@ -320,7 +320,7 @@ export function serverInstructions(definitions: readonly ToolDefinition[]): stri
   }
   if (has('preview_ui')) {
     instructions.push(
-      'Use preview_ui instead of a playtest to view, click, type into, or inspect story modules and ScreenGuis in edit mode; unmount when done.',
+      'Use preview_ui instead of a playtest to view, click, type into, or inspect story modules and ScreenGuis in edit mode; stories hot-reload on edits; unmount when done.',
     );
   }
   if (has('get_roblox_docs')) {

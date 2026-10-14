@@ -54,6 +54,17 @@ UI state persist between calls:
   GuiObjects are cloned; the originals are never changed, and scripts inside
   them do not run in edit mode. The result lists the story's controls (name,
   type, value, options or limits).
+- Story previews hot-reload. Editing the story or any module it requires (by
+  hand, through MCP script tools, or through file sync) makes the renderer
+  reload it in place: the previous load is unmounted and cleaned up, fresh
+  source is required, and the story remounts into the same preview. Controls
+  set through `preview_ui` are re-applied to each reload; ones whose control
+  was removed or changed type are reported as `controlsDropped`. Every action
+  waits (up to 15 s) for an in-flight reload and reports reload activity in a
+  `reload` field. A failed reload (for example a syntax error) is reported as
+  `reload.error`; `click`, `type`, and `set_controls` fail until the source is
+  fixed, and the next edit reloads it. Native ScreenGui and GuiObject previews
+  are static clones and do not reload.
 - The preview lives in a non-archivable `__MCPUiPreview_*` ScreenGui under
   StarterGui with a very high DisplayOrder and a neutral backdrop
   (`backdrop: false` shows the game UI and 3D view behind it). StarterGui keeps

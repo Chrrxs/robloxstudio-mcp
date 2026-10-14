@@ -1,18 +1,25 @@
 // MCP preview lifecycle registry (GPL-3.0, compiled into the bundled story renderer as src/McpLifecycle.ts).
 // upstream.patch reports into this module from the renderer's real require/mount/cleanup paths.
 // Keys are PreviewEntry.Key values; untracked keys are ignored.
+//
+// Hot reloading: every HotReloader environment is one load "generation". Creating an environment starts a new
+// generation and resets Loaded/Mounted/Failure, so the same fields describe the initial mount and each reload.
 
 import type React from "@rbxts/react";
 import type { ComponentClass, FunctionComponent, ReactNode } from "@rbxts/react";
 
 export interface Lifecycle {
-	/** The story module resolved to a value. */
+	/** Load generation: increments each time an environment is created (initial load and every reload). */
+	Generation: number;
+	/** A source change queued a reload whose environment has not been created yet. */
+	ReloadQueued: boolean;
+	/** The current generation's story module resolved to a value. */
 	Loaded: boolean;
 	/** Mounter the renderer picked for the story (Functional, ReactLib, RoactLib, VideLib, FusionLib, IrisLib, Generic). */
 	MountType?: string;
-	/** The story reached its mounted point (non-React: mounter effects committed; React: story root committed). */
+	/** The current generation reached its mounted point (non-React: mounter effects committed; React: story root committed). */
 	Mounted: boolean;
-	/** First error reported before Mounted; the mount failed. */
+	/** First error the current generation reported before Mounted; its load or mount failed. */
 	Failure?: string;
 	/** Errors reported after Mounted or Failure (late story errors, unmount and cleanup errors). */
 	Errors: string[];
@@ -25,7 +32,15 @@ export interface Lifecycle {
 const registry = new Map<string, Lifecycle>();
 
 export function Track(key: string): Lifecycle {
-	const lifecycle: Lifecycle = { Loaded: false, Mounted: false, Errors: [], Pending: 0, LiveEnvironments: 0 };
+	const lifecycle: Lifecycle = {
+		Generation: 0,
+		ReloadQueued: false,
+		Loaded: false,
+		Mounted: false,
+		Errors: [],
+		Pending: 0,
+		LiveEnvironments: 0
+	};
 	registry.set(key, lifecycle);
 	return lifecycle;
 }
@@ -69,9 +84,21 @@ export function ReportError(key: string, err: unknown) {
 	}
 }
 
+export function ReportReloadQueued(key: string) {
+	const lifecycle = registry.get(key);
+	if (lifecycle) lifecycle.ReloadQueued = true;
+}
+
+/** Starts a generation. The previous environment is already destroyed, so its unmount errors went to Errors. */
 export function ReportEnvironmentCreated(key: string) {
 	const lifecycle = registry.get(key);
-	if (lifecycle) lifecycle.LiveEnvironments += 1;
+	if (!lifecycle) return;
+	lifecycle.LiveEnvironments += 1;
+	lifecycle.Generation += 1;
+	lifecycle.ReloadQueued = false;
+	lifecycle.Loaded = false;
+	lifecycle.Mounted = false;
+	lifecycle.Failure = undefined;
 }
 
 export function ReportEnvironmentDestroyed(key: string) {

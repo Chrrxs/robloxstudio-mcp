@@ -77,6 +77,20 @@ describe('preview_ui', () => {
     expect(result.content[1]).toMatchObject({ type: 'image', mimeType: 'image/png' });
   });
 
+  test('passes hot-reload reports through and surfaces a failed reload as a tool error', async () => {
+    const reload = { status: 'ready', generation: 3, reloads: 2, controlsReapplied: ['Title'] };
+    const { tools } = setup({
+      preview: (body) => (body.action === 'click'
+        ? { error: 'The story failed to hot-reload, so there is nothing to click: syntax error' }
+        : { success: true, ...SUMMARY, reload }),
+    });
+    const shot = await tools.previewUi({ action: 'screenshot', settle_seconds: 0 }, 'instance:edit');
+    expect(metadata(shot).reload).toEqual(reload);
+    expect(shot.content[1]).toMatchObject({ type: 'image' });
+    await expect(tools.previewUi({ action: 'click', element: 'Buy', settle_seconds: 0 }, 'instance:edit'))
+      .rejects.toThrow('preview_ui click failed: The story failed to hot-reload');
+  });
+
   test('inspect and unmount return text without capturing', async () => {
     const { tools, calls } = setup({
       preview: (body) => (body.action === 'inspect' ? { success: true, ...SUMMARY, nodes: [], nodeCount: 0 } : { success: true, unmounted: SUMMARY.target }),

@@ -1,6 +1,6 @@
 diff -r a/src/UI/StoryPreview/PreviewController/Mount.tsx b/src/UI/StoryPreview/PreviewController/Mount.tsx
---- a/src/UI/StoryPreview/PreviewController/Mount.tsx	2026-10-09 00:35:26.335231080 -0400
-+++ b/src/UI/StoryPreview/PreviewController/Mount.tsx	2026-10-09 00:35:26.390728691 -0400
+--- a/src/UI/StoryPreview/PreviewController/Mount.tsx	2026-10-14 18:34:23.594089319 -0400
++++ b/src/UI/StoryPreview/PreviewController/Mount.tsx	2026-10-14 18:34:23.609365253 -0400
 @@ -1,5 +1,6 @@
  import { Signal } from "@rbxts/lemon-signal";
 -import React from "@rbxts/react";
@@ -26,8 +26,8 @@ diff -r a/src/UI/StoryPreview/PreviewController/Mount.tsx b/src/UI/StoryPreview/
 +	return <React.Fragment>{props.children}</React.Fragment>;
  }
 diff -r a/src/UI/StoryPreview/PreviewController/Mounters/Functional.tsx b/src/UI/StoryPreview/PreviewController/Mounters/Functional.tsx
---- a/src/UI/StoryPreview/PreviewController/Mounters/Functional.tsx	2026-10-09 00:35:26.334870614 -0400
-+++ b/src/UI/StoryPreview/PreviewController/Mounters/Functional.tsx	2026-10-09 00:35:26.390852339 -0400
+--- a/src/UI/StoryPreview/PreviewController/Mounters/Functional.tsx	2026-10-14 18:34:23.593437015 -0400
++++ b/src/UI/StoryPreview/PreviewController/Mounters/Functional.tsx	2026-10-14 18:34:23.609586325 -0400
 @@ -1,5 +1,6 @@
  import React, { useEffect, useRef } from "@rbxts/react";
  import { WARNING_STORY_TYPES, WARNINGS } from "Plugin/Warnings";
@@ -57,8 +57,8 @@ diff -r a/src/UI/StoryPreview/PreviewController/Mounters/Functional.tsx b/src/UI
  		} else {
  			UILabsWarn(WARNINGS.NoCleanup);
 diff -r a/src/UI/StoryPreview/PreviewController/Mounters/FusionLib/index.tsx b/src/UI/StoryPreview/PreviewController/Mounters/FusionLib/index.tsx
---- a/src/UI/StoryPreview/PreviewController/Mounters/FusionLib/index.tsx	2026-10-09 00:35:26.334916518 -0400
-+++ b/src/UI/StoryPreview/PreviewController/Mounters/FusionLib/index.tsx	2026-10-09 00:35:26.390911667 -0400
+--- a/src/UI/StoryPreview/PreviewController/Mounters/FusionLib/index.tsx	2026-10-14 18:34:23.593539063 -0400
++++ b/src/UI/StoryPreview/PreviewController/Mounters/FusionLib/index.tsx	2026-10-14 18:34:23.609733701 -0400
 @@ -3,6 +3,7 @@
  import { InferFusionProps } from "@rbxts/ui-labs";
  import { ConvertedControls, ReturnControls } from "@rbxts/ui-labs/src/ControlTypings/Typing";
@@ -97,8 +97,8 @@ diff -r a/src/UI/StoryPreview/PreviewController/Mounters/FusionLib/index.tsx b/s
  	useStoryActionComponents(props.Entry.Key, props.Result, returnControls, controls, controlValues, setControlValues);
  
 diff -r a/src/UI/StoryPreview/PreviewController/Mounters/Generic/index.tsx b/src/UI/StoryPreview/PreviewController/Mounters/Generic/index.tsx
---- a/src/UI/StoryPreview/PreviewController/Mounters/Generic/index.tsx	2026-10-09 00:35:26.335081319 -0400
-+++ b/src/UI/StoryPreview/PreviewController/Mounters/Generic/index.tsx	2026-10-09 00:35:26.390963396 -0400
+--- a/src/UI/StoryPreview/PreviewController/Mounters/Generic/index.tsx	2026-10-14 18:34:23.593860791 -0400
++++ b/src/UI/StoryPreview/PreviewController/Mounters/Generic/index.tsx	2026-10-14 18:34:23.609852325 -0400
 @@ -4,6 +4,7 @@
  import { ConvertedControls, ReturnControls } from "@rbxts/ui-labs/src/ControlTypings/Typing";
  import { InferGenericProps, SubscribeListener } from "@rbxts/ui-labs/src/Typing/Generic";
@@ -136,8 +136,8 @@ diff -r a/src/UI/StoryPreview/PreviewController/Mounters/Generic/index.tsx b/src
  	useStoryActionComponents(props.Entry.Key, props.Result, returnControls, controls, controlValues, setControlValues);
  
 diff -r a/src/UI/StoryPreview/PreviewController/Mounters/IrisLib/index.tsx b/src/UI/StoryPreview/PreviewController/Mounters/IrisLib/index.tsx
---- a/src/UI/StoryPreview/PreviewController/Mounters/IrisLib/index.tsx	2026-10-09 00:35:26.334975671 -0400
-+++ b/src/UI/StoryPreview/PreviewController/Mounters/IrisLib/index.tsx	2026-10-09 00:35:26.391017748 -0400
+--- a/src/UI/StoryPreview/PreviewController/Mounters/IrisLib/index.tsx	2026-10-14 18:34:23.593659591 -0400
++++ b/src/UI/StoryPreview/PreviewController/Mounters/IrisLib/index.tsx	2026-10-14 18:34:23.609954517 -0400
 @@ -3,6 +3,7 @@
  import { InferIrisProps } from "@rbxts/ui-labs";
  import { ConvertedControls, ReturnControls } from "@rbxts/ui-labs/src/ControlTypings/Typing";
@@ -177,8 +177,8 @@ diff -r a/src/UI/StoryPreview/PreviewController/Mounters/IrisLib/index.tsx b/src
  	useStoryActionComponents(props.Entry.Key, props.Result, returnControls, controls, controlValues, setControlValues);
  
 diff -r a/src/UI/StoryPreview/PreviewController/Mounters/RoactReact/ReactLib.tsx b/src/UI/StoryPreview/PreviewController/Mounters/RoactReact/ReactLib.tsx
---- a/src/UI/StoryPreview/PreviewController/Mounters/RoactReact/ReactLib.tsx	2026-10-09 00:35:26.335189416 -0400
-+++ b/src/UI/StoryPreview/PreviewController/Mounters/RoactReact/ReactLib.tsx	2026-10-09 00:35:39.159152931 -0400
+--- a/src/UI/StoryPreview/PreviewController/Mounters/RoactReact/ReactLib.tsx	2026-10-14 18:34:23.594003223 -0400
++++ b/src/UI/StoryPreview/PreviewController/Mounters/RoactReact/ReactLib.tsx	2026-10-14 18:34:23.610095557 -0400
 @@ -3,6 +3,15 @@
  import { useSelectorCreator } from "@rbxts/react-reflex";
  import { InferControls } from "@rbxts/ui-labs";
@@ -290,8 +290,8 @@ diff -r a/src/UI/StoryPreview/PreviewController/Mounters/RoactReact/ReactLib.tsx
  	useStoryActionComponents(props.Entry.Key, props.Result, returnControls, controls, controlValues, setControlValues);
  
 diff -r a/src/UI/StoryPreview/PreviewController/Mounters/RoactReact/RoactLib.tsx b/src/UI/StoryPreview/PreviewController/Mounters/RoactReact/RoactLib.tsx
---- a/src/UI/StoryPreview/PreviewController/Mounters/RoactReact/RoactLib.tsx	2026-10-09 00:35:26.335203624 -0400
-+++ b/src/UI/StoryPreview/PreviewController/Mounters/RoactReact/RoactLib.tsx	2026-10-09 00:35:26.391118516 -0400
+--- a/src/UI/StoryPreview/PreviewController/Mounters/RoactReact/RoactLib.tsx	2026-10-14 18:34:23.594031191 -0400
++++ b/src/UI/StoryPreview/PreviewController/Mounters/RoactReact/RoactLib.tsx	2026-10-14 18:34:23.610214309 -0400
 @@ -3,6 +3,7 @@
  import { InferControls } from "@rbxts/ui-labs";
  import { ReturnControls } from "@rbxts/ui-labs/src/ControlTypings/Typing";
@@ -326,8 +326,8 @@ diff -r a/src/UI/StoryPreview/PreviewController/Mounters/RoactReact/RoactLib.tsx
  	useStoryActionComponents(props.Entry.Key, props.Result, returnControls, controls, controlValues, setControlValues);
  
 diff -r a/src/UI/StoryPreview/PreviewController/Mounters/VideLib/index.tsx b/src/UI/StoryPreview/PreviewController/Mounters/VideLib/index.tsx
---- a/src/UI/StoryPreview/PreviewController/Mounters/VideLib/index.tsx	2026-10-09 00:35:26.335019463 -0400
-+++ b/src/UI/StoryPreview/PreviewController/Mounters/VideLib/index.tsx	2026-10-09 00:35:26.391160164 -0400
+--- a/src/UI/StoryPreview/PreviewController/Mounters/VideLib/index.tsx	2026-10-14 18:34:23.593746967 -0400
++++ b/src/UI/StoryPreview/PreviewController/Mounters/VideLib/index.tsx	2026-10-14 18:34:23.610321253 -0400
 @@ -3,6 +3,7 @@
  import { InferVideControls, InferVideProps } from "@rbxts/ui-labs";
  import { ConvertedControls, ReturnControls } from "@rbxts/ui-labs/src/ControlTypings/Typing";
@@ -363,9 +363,9 @@ diff -r a/src/UI/StoryPreview/PreviewController/Mounters/VideLib/index.tsx b/src
  	useStoryActionComponents(props.Entry.Key, props.Result, returnControls, controls, controlValues, setControlValues);
  
 diff -r a/src/UI/StoryPreview/PreviewController/StoryRequire.ts b/src/UI/StoryPreview/PreviewController/StoryRequire.ts
---- a/src/UI/StoryPreview/PreviewController/StoryRequire.ts	2026-10-09 00:35:26.335245672 -0400
-+++ b/src/UI/StoryPreview/PreviewController/StoryRequire.ts	2026-10-09 00:35:26.391204292 -0400
-@@ -5,6 +5,13 @@
+--- a/src/UI/StoryPreview/PreviewController/StoryRequire.ts	2026-10-14 18:34:23.594114647 -0400
++++ b/src/UI/StoryPreview/PreviewController/StoryRequire.ts	2026-10-14 18:34:37.893098437 -0400
+@@ -5,6 +5,14 @@
  import { useGetInputSignalsFromFrame, useInputSignals } from "Context/UserInputContext";
  import { usePlugin } from "Hooks/Reflex/Use/Plugin";
  import Configs from "Plugin/Configs";
@@ -374,16 +374,29 @@ diff -r a/src/UI/StoryPreview/PreviewController/StoryRequire.ts b/src/UI/StoryPr
 +	ReportEnvironmentCreated,
 +	ReportEnvironmentDestroyed,
 +	ReportError,
-+	ReportLoaded
++	ReportLoaded,
++	ReportReloadQueued
 +} from "McpLifecycle";
  import { selectNodeFromModule } from "Reflex/Explorer/Nodes";
  import { selectPluginWidget } from "Reflex/Plugin";
  import { Environment } from "Utils/HotReloader/Environment";
-@@ -84,10 +91,14 @@
+@@ -19,7 +27,7 @@
+ 	const [reloader, setReloader] = useState<HotReloader>();
+ 	const [reloadQuery, setReloadQuery] = useState(false);
+ 	const [resultPromise, setResultPromise] = useState<Promise<unknown>>();
+-	const { unmountByUID, updateMountData } = useProducer<RootProducer>();
++	const { unmountByUID, updateMountData, unsetActionComponent } = useProducer<RootProducer>();
+ 	const widget = useSelector(selectPluginWidget);
+ 	const inputs = useGetInputSignalsFromFrame(entry.ListenerFrame);
+ 	const inputSignals = useInputSignals(inputs);
+@@ -84,16 +92,26 @@
  
  		const reloader = new HotReloader(node.Module);
  		reloader.HookOnReload((environment) => {
 +			ReportEnvironmentCreated(entry.Key);
++			// MCP: each (re)load publishes its own controls; drop the previous load's tab so a story that
++			// no longer declares controls does not keep exposing the stale ones.
++			unsetActionComponent(entry.Key, "ControlsTab");
  			const cleanup = InjectGlobalControls(environment);
  			environment.HookOnDestroyed(() => {
 -				cleanup();
@@ -394,8 +407,17 @@ diff -r a/src/UI/StoryPreview/PreviewController/StoryRequire.ts b/src/UI/StoryPr
 +			environment.HookOnDestroyed(() => ReportEnvironmentDestroyed(entry.Key), 3);
  		}, 2);
  
++		// MCP: a source change marks the reload as queued until its environment exists (ScheduleReload defers it).
++		const queued = reloader.OnDependencyChanged.Connect(() => ReportReloadQueued(entry.Key));
  		setResultPromise(reloader.Reload());
-@@ -136,13 +147,25 @@
+ 		setReloader(reloader);
+ 
+ 		return () => {
++			queued.Disconnect();
+ 			reloader.Destroy();
+ 		};
+ 	}, [entry.UID]);
+@@ -136,13 +154,25 @@
  	const [result] = useAsync(() => {
  		if (!resultPromise) return Promise.resolve(undefined);
  
@@ -428,8 +450,8 @@ diff -r a/src/UI/StoryPreview/PreviewController/StoryRequire.ts b/src/UI/StoryPr
  
  	return CreateTuple(result, reloader);
 diff -r a/src/UI/StoryPreview/PreviewController/Utils.ts b/src/UI/StoryPreview/PreviewController/Utils.ts
---- a/src/UI/StoryPreview/PreviewController/Utils.ts	2026-10-09 00:35:26.335427528 -0400
-+++ b/src/UI/StoryPreview/PreviewController/Utils.ts	2026-10-09 00:35:26.391247925 -0400
+--- a/src/UI/StoryPreview/PreviewController/Utils.ts	2026-10-14 18:34:23.594446215 -0400
++++ b/src/UI/StoryPreview/PreviewController/Utils.ts	2026-10-14 18:34:23.610553701 -0400
 @@ -1,19 +1,28 @@
  import { Signal } from "@rbxts/lemon-signal";
  import { useMemo } from "@rbxts/react";
@@ -462,8 +484,8 @@ diff -r a/src/UI/StoryPreview/PreviewController/Utils.ts b/src/UI/StoryPreview/P
  	}, []);
  }
 diff -r a/src/UI/StoryPreview/PreviewController/index.tsx b/src/UI/StoryPreview/PreviewController/index.tsx
---- a/src/UI/StoryPreview/PreviewController/index.tsx	2026-10-09 00:35:26.335412184 -0400
-+++ b/src/UI/StoryPreview/PreviewController/index.tsx	2026-10-09 00:35:26.391288965 -0400
+--- a/src/UI/StoryPreview/PreviewController/index.tsx	2026-10-14 18:34:23.594417703 -0400
++++ b/src/UI/StoryPreview/PreviewController/index.tsx	2026-10-14 18:34:23.610655125 -0400
 @@ -7,6 +7,7 @@
  import { useInstance } from "Hooks/Utils/Instance";
  import Configs from "Plugin/Configs";
@@ -498,8 +520,8 @@ diff -r a/src/UI/StoryPreview/PreviewController/index.tsx b/src/UI/StoryPreview/
  		}
  	}, [result, reloader]);
 diff -r a/src/Utils/MiscUtils.ts b/src/Utils/MiscUtils.ts
---- a/src/Utils/MiscUtils.ts	2026-10-09 00:35:26.330946151 -0400
-+++ b/src/Utils/MiscUtils.ts	2026-10-09 00:35:26.391332533 -0400
+--- a/src/Utils/MiscUtils.ts	2026-10-14 18:34:23.585730200 -0400
++++ b/src/Utils/MiscUtils.ts	2026-10-14 18:34:23.610771685 -0400
 @@ -26,6 +26,8 @@
  	const [resume_ok, run_ok, result] = coroutine.resume(thread, fn, efn, arg);
  

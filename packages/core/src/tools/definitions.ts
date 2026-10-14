@@ -1505,14 +1505,14 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
   {
     name: 'preview_ui',
     category: 'write',
-    description: 'Use to mount, click, type into, inspect, and screenshot UI in edit mode; prefer over playtests for UI checks.',
+    description: 'Use to mount, click, type, inspect, and screenshot edit-mode UI; stories hot-reload. Prefer to playtests for UI checks.',
     inputSchema: {
       type: 'object',
       properties: {
         action: {
           type: 'string',
           enum: ['mount', 'set_controls', 'click', 'type', 'inspect', 'screenshot', 'unmount'],
-          description: 'mount first; the preview persists until unmount.'
+          description: 'mount first; the preview persists until unmount and stories hot-reload on edits.'
         },
         target: {
           type: 'string',

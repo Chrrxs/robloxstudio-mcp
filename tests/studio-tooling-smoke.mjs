@@ -704,16 +704,25 @@ async function callPreview(client, instanceId, args) {
 async function runUiPreviewSmoke(client, instanceId) {
   console.log('\n=== preview_ui isolated smoke ===');
   const modes = ['ok', 'mount_throw', 'cleanup_throw'];
-  const controlledSource = `return {
+  // Requires a sibling module so editing a dependency (not only the story) is covered by hot reload.
+  const controlledSource = `local folder = script.Parent
+local PREFIX = require(script.Parent.Prefix)
+local SUFFIX = ""
+return {
   controls = { Title = "Before" },
   render = function(props)
+    folder:SetAttribute("controlled_renders", (folder:GetAttribute("controlled_renders") or 0) + 1)
     local label = Instance.new("TextLabel")
     label.Name = "ControlledLabel"
     label.Size = UDim2.fromOffset(400, 100)
-    label.Text = props.controls.Title
+    label.Text = PREFIX .. props.controls.Title .. SUFFIX
     label.Parent = props.target
-    local unsubscribe = props.subscribe(function(values) label.Text = values.Title end)
-    return function() unsubscribe() label:Destroy() end
+    local unsubscribe = props.subscribe(function(values) label.Text = PREFIX .. values.Title .. SUFFIX end)
+    return function()
+      folder:SetAttribute("controlled_cleanups", (folder:GetAttribute("controlled_cleanups") or 0) + 1)
+      unsubscribe()
+      label:Destroy()
+    end
   end,
 }`;
   const sources = { ...Object.fromEntries(modes.map((m) => [m, previewStorySource(m)])), controlled: controlledSource };
@@ -731,6 +740,10 @@ for name, source in sources do
   module.Source = source
   module.Parent = folder
 end
+local prefix = Instance.new("ModuleScript")
+prefix.Name = "Prefix"
+prefix.Source = 'return ""'
+prefix.Parent = folder
 local gui = Instance.new("ScreenGui")
 gui.Name = "NativeHud"
 gui.Enabled = false
@@ -807,6 +820,7 @@ return true`,
 
     const native = await callPreview(client, instanceId, { action: 'mount', target: `game.Workspace.${PREVIEW_FOLDER}.NativeHud` });
     assert(native.res.isError !== true && native.body?.kind === 'screengui', `native ScreenGui mounts (${native.text})`);
+    assert(native.body?.notes?.some((note) => note.includes('do not hot-reload')), 'native previews say they do not hot-reload');
     const nativeTree = await callPreview(client, instanceId, { action: 'inspect' });
     assert(nativeTree.body?.nodes?.some((node) => node.path === 'Title' && node.text === 'RSMCP NATIVE'), 'inspect lists the cloned label');
     await callPreview(client, instanceId, { action: 'unmount' });
@@ -830,6 +844,49 @@ return true`,
       'set_controls updates the mounted story, not just its metadata');
     const unknown = await callPreview(client, instanceId, { action: 'set_controls', controls: { Missing: 'value' } });
     assert(unknown.res.isError === true && unknown.text.includes('Unknown control'), 'unknown controls are rejected');
+    assert(controlled.body?.notes?.some((note) => note.includes('Hot reloading is on')), 'story mounts report hot reloading');
+
+    // Hot reload: editing a required module or the story reloads it in place, without a remount, and
+    // re-applies the agent's controls. A syntax error is reported, then recovers on the next edit.
+    const setSource = async (name, source) => {
+      const edited = await client.callTool('execute_luau', {
+        target: 'edit',
+        instance_id: instanceId,
+        code: `workspace["${PREVIEW_FOLDER}"][${JSON.stringify(name)}].Source = ${JSON.stringify(source)}
+return true`,
+      });
+      assert(edited.success === true, `execute_luau edits ${name}`);
+    };
+    const labels = async () => {
+      const tree = await callPreview(client, instanceId, { action: 'inspect' });
+      return (tree.body?.nodes ?? []).filter((node) => node.path === 'ControlledLabel').map((node) => node.text);
+    };
+    await setSource('Prefix', 'return "v2:"');
+    const dependencyReload = await callPreview(client, instanceId, { action: 'screenshot' });
+    assert(dependencyReload.body?.reload?.reloads >= 1 && dependencyReload.body.reload.status === 'ready'
+      && dependencyReload.body.replaced === undefined, `editing a required module hot-reloads the story (${dependencyReload.text})`);
+    assert(dependencyReload.body.reload.controlsReapplied?.includes('Title'), 'agent-set controls are re-applied after a reload');
+    assert(dependencyReload.image?.mimeType === 'image/png', 'the post-reload screenshot is returned');
+    let texts = await labels();
+    assert(texts.length === 1 && texts[0] === 'v2:After', `dependency edit shows without remount and keeps controls (${texts})`);
+    const fixedStory = controlledSource.replace('local SUFFIX = ""', 'local SUFFIX = "!"');
+    await setSource('controlled.story', fixedStory);
+    texts = await labels();
+    assert(texts.length === 1 && texts[0] === 'v2:After!', `story edit hot-reloads with controls kept (${texts})`);
+    await setSource('controlled.story', 'return {');
+    const broken = await callPreview(client, instanceId, { action: 'screenshot' });
+    assert(broken.res.isError !== true && broken.body?.reload?.status === 'failed' && typeof broken.body.reload.error === 'string',
+      `a failed reload is reported in the next result (${broken.text})`);
+    const blocked = await callPreview(client, instanceId, { action: 'click', x: 10, y: 10 });
+    assert(blocked.res.isError === true && blocked.text.includes('failed to hot-reload'), 'interactions fail while the reload is broken');
+    await setSource('controlled.story', fixedStory);
+    const recovered = await callPreview(client, instanceId, { action: 'screenshot' });
+    assert(recovered.body?.reload?.status === 'ready', `fixing the source recovers the preview (${recovered.text})`);
+    texts = await labels();
+    assert(texts.length === 1 && texts[0] === 'v2:After!', `recovered story keeps the agent's controls (${texts})`);
+    const reloadState = await previewState(client, instanceId);
+    assert(reloadState.attrs.controlled_renders - reloadState.attrs.controlled_cleanups === 1,
+      `every reload cleaned up the previous load (${reloadState.attrs.controlled_renders} renders, ${reloadState.attrs.controlled_cleanups} cleanups)`);
 
     // Only this test's own managed/reused instance is touched. Starting Run
     // must dispose the edit preview before a different DataModel is rendered.
@@ -840,7 +897,9 @@ return true`,
       const stopped = await client.callTool('solo_playtest', { action: 'stop', instance_id: instanceId });
       assert(stopped.success === true, 'Run stops after checking preview disposal');
     }
-    assertPreviewClean(await previewState(client, instanceId), devGui, 'after playtest auto-unmount');
+    const afterRun = await previewState(client, instanceId);
+    assertPreviewClean(afterRun, devGui, 'after playtest auto-unmount');
+    assert(afterRun.attrs.controlled_renders === afterRun.attrs.controlled_cleanups, 'auto-unmount cleans up the hot-reloaded story');
     const expired = await callPreview(client, instanceId, { action: 'inspect' });
     assert(expired.res.isError === true && expired.text.includes('No UI preview is mounted'), 'playtest start disposes preview state');
   } finally {

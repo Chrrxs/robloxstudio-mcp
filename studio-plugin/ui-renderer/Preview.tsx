@@ -3,6 +3,11 @@
 // sandbox and mounters, using this plugin's own bundled RootProducer (never a separately installed
 // renderer plugin). Each mount builds a fresh HotReloader, so the story's current source is required.
 //
+// Hot reloading is on: editing the story or any module it requires schedules a reload through the
+// renderer's own HotReloader, which destroys the previous environment (running its unmount and cleanup
+// paths), requires fresh source and remounts into the same holder. Every reload is one McpLifecycle
+// generation; GetReload reports whether the latest one is queued/loading, mounted or failed.
+//
 // Lifecycle contract (reported by upstream.patch into McpLifecycle):
 // - mount() returns only after the story mounted: non-React mounters after their render/effects
 //   committed, React stories after the story root committed under an error boundary.
@@ -59,15 +64,26 @@ export interface ControlsSnapshot {
 	Values: Record<string, unknown>;
 }
 
+export interface ReloadStatus {
+	/** Load generation: 1 for the initial mount, +1 per hot reload. */
+	readonly Generation: number;
+	/** "loading" while a reload is queued or has not mounted yet; "failed" when it errored. */
+	readonly State: "loading" | "ready" | "failed";
+	readonly Error?: string;
+}
+
 export interface PreviewHandle {
-	/** Mounter the renderer picked for the story. */
-	readonly StoryType?: string;
+	/** Mounter the renderer picked for the latest load of the story. */
+	readonly GetStoryType: () => string | undefined;
 	/** The Frame the story renders into, or undefined once cleaned up. */
 	readonly GetRoot: () => Frame | undefined;
 	/** Current controls, or undefined when the story declares none. */
 	readonly GetControls: () => ControlsSnapshot | undefined;
 	/** Replaces the story's control values (pass a complete, new values table). */
 	readonly SetControls: (values: Record<string, unknown>) => void;
+	readonly GetReload: () => ReloadStatus;
+	/** Errors reported after a load mounted or failed (late story, unmount and cleanup errors), oldest first. */
+	readonly GetErrors: () => readonly string[];
 	readonly Cleanup: () => void;
 }
 
@@ -129,7 +145,7 @@ export function mount(story: ModuleScript, target: Frame, owner: Plugin): Previe
 		});
 		const entryKey = preview.Key;
 		if (entryKey === undefined) error("The story renderer did not create a preview entry for the story");
-		RootProducer.setMountData(entryKey, { AutoReload: false });
+		RootProducer.setMountData(entryKey, { AutoReload: true });
 		preview.Lifecycle = Track(entryKey);
 
 		const root = createLegacyRoot(new Instance("Folder"));
@@ -163,9 +179,10 @@ export function mount(story: ModuleScript, target: Frame, owner: Plugin): Previe
 	}
 
 	const key = preview.Key!;
+	const tracked = preview.Lifecycle!;
 	let disposed = false;
 	return {
-		StoryType: preview.Lifecycle?.MountType,
+		GetStoryType: () => tracked.MountType,
 		GetRoot: () => (disposed ? undefined : GetEntryByKey(RootProducer.getState(selectStoryPreviews), key)?.Holder),
 		GetControls: () => {
 			if (disposed) return undefined;
@@ -179,6 +196,15 @@ export function mount(story: ModuleScript, target: Frame, owner: Plugin): Previe
 			if (tab === undefined) error("The story declares no controls", 2);
 			tab.SetControlValues(values);
 		},
+		GetReload: () => {
+			// A queued reload supersedes the current generation's outcome, including a failure being fixed.
+			if (tracked.ReloadQueued) return { Generation: tracked.Generation, State: "loading" };
+			if (tracked.Failure !== undefined) {
+				return { Generation: tracked.Generation, State: "failed", Error: tracked.Failure };
+			}
+			return { Generation: tracked.Generation, State: tracked.Mounted ? "ready" : "loading" };
+		},
+		GetErrors: () => tracked.Errors,
 		Cleanup: () => {
 			if (disposed) return;
 			disposed = true;
