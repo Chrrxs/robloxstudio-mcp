@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { createConnection } from 'node:net';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -620,6 +620,169 @@ return true`,
   }
 }
 
+const PREVIEW_FOLDER = '__RSMCP_UiPreviewSmoke';
+
+function previewStorySource(mode) {
+  const mountThrow = mode === 'mount_throw' ? 'error("RSMCP_MOUNT_THROW")' : '';
+  const cleanupThrow = mode === 'cleanup_throw' ? 'error("RSMCP_CLEANUP_THROW")' : '';
+  return `local folder = script.Parent
+return function(target)
+  folder:SetAttribute("${mode}_mounts", (folder:GetAttribute("${mode}_mounts") or 0) + 1)
+  local panel = Instance.new("Frame")
+  panel.Name = "RSMCPPreviewPanel"
+  panel.AnchorPoint = Vector2.new(0.5, 0.5)
+  panel.Position = UDim2.fromScale(0.5, 0.5)
+  panel.Size = UDim2.fromOffset(320, 160)
+  panel.BackgroundColor3 = Color3.fromRGB(255, 0, 200)
+  panel.BorderSizePixel = 0
+  local button = Instance.new("TextButton")
+  button.Name = "Bump"
+  button.Size = UDim2.fromScale(1, 1)
+  button.BackgroundTransparency = 1
+  button.Text = "RSMCP PREVIEW"
+  button.TextColor3 = Color3.new(1, 1, 1)
+  button.TextScaled = true
+  button.Parent = panel
+  button.Activated:Connect(function()
+    folder:SetAttribute("${mode}_clicks", (folder:GetAttribute("${mode}_clicks") or 0) + 1)
+  end)
+  panel.Parent = target
+  ${mountThrow}
+  return function()
+    folder:SetAttribute("${mode}_cleanups", (folder:GetAttribute("${mode}_cleanups") or 0) + 1)
+    panel:Destroy()
+    ${cleanupThrow}
+  end
+end`;
+}
+
+async function previewState(client, instanceId) {
+  const state = await client.callTool('execute_luau', {
+    target: 'edit',
+    instance_id: instanceId,
+    code: `local HttpService = game:GetService("HttpService")
+local StarterGui = game:GetService("StarterGui")
+local leftovers = {}
+for _, child in StarterGui:GetChildren() do
+  if string.sub(child.Name, 1, 15) == "__MCPUiPreview_" then table.insert(leftovers, child.Name) end
+end
+local folder = workspace:FindFirstChild("${PREVIEW_FOLDER}")
+return HttpService:JSONEncode({ leftovers = leftovers, devGui = StarterGui.ShowDevelopmentGui, attrs = folder and folder:GetAttributes() or {} })`,
+  });
+  assert(state.success === true, 'execute_luau reads preview state');
+  return JSON.parse(String(state.returnValue));
+}
+
+function assertPreviewClean(state, devGui, label) {
+  assert(state.leftovers.length === 0, `${label}: no StarterGui __MCPUiPreview_* leftovers (${state.leftovers.join(',')})`);
+  assert(state.devGui === devGui, `${label}: StarterGui.ShowDevelopmentGui restored to ${devGui}`);
+}
+
+async function callPreview(client, instanceId, args) {
+  const res = await client.rpc('tools/call', {
+    name: 'preview_ui',
+    arguments: { settle_seconds: 0.5, format: 'png', instance_id: instanceId, ...args },
+  }, 120_000);
+  const text = String(res?.content?.[0]?.text ?? '');
+  let body;
+  try { body = JSON.parse(text); } catch { body = undefined; }
+  return { res, text, body, image: (res.content ?? []).find((item) => item.type === 'image') };
+}
+
+async function runUiPreviewSmoke(client, instanceId) {
+  console.log('\n=== preview_ui isolated smoke ===');
+  const modes = ['ok', 'mount_throw', 'cleanup_throw'];
+  const setup = await client.callTool('execute_luau', {
+    target: 'edit',
+    instance_id: instanceId,
+    code: `local old = workspace:FindFirstChild("${PREVIEW_FOLDER}")
+if old then old:Destroy() end
+local folder = Instance.new("Folder")
+folder.Name = "${PREVIEW_FOLDER}"
+local sources = game:GetService("HttpService"):JSONDecode(${JSON.stringify(JSON.stringify(Object.fromEntries(modes.map((m) => [m, previewStorySource(m)]))))})
+for name, source in sources do
+  local module = Instance.new("ModuleScript")
+  module.Name = name .. ".story"
+  module.Source = source
+  module.Parent = folder
+end
+local gui = Instance.new("ScreenGui")
+gui.Name = "NativeHud"
+gui.Enabled = false
+local label = Instance.new("TextLabel")
+label.Name = "Title"
+label.Size = UDim2.fromOffset(200, 50)
+label.Text = "RSMCP NATIVE"
+label.Parent = gui
+gui.Parent = folder
+folder.Parent = workspace
+return true`,
+  });
+  assert(setup.success === true && String(setup.returnValue) === 'true', 'execute_luau creates preview fixtures');
+  const story = (mode) => `game.Workspace.${PREVIEW_FOLDER}["${mode}.story"]`;
+
+  try {
+    const { devGui } = await previewState(client, instanceId);
+
+    const mounted = await callPreview(client, instanceId, { action: 'mount', target: story('ok') });
+    assert(mounted.res.isError !== true, `mount succeeds (${mounted.text})`);
+    assert(mounted.body?.kind === 'story' && mounted.body?.storyType === 'Functional', 'mount reports a Functional story');
+    assert(mounted.image?.mimeType === 'image/png', 'mount returns a PNG image');
+    if (process.env.RSMCP_PREVIEW_SAVE_PNG === '1') {
+      const outDir = path.join(REPO_ROOT, '.local', 'ui-preview-smoke');
+      mkdirSync(outDir, { recursive: true });
+      writeFileSync(path.join(outDir, 'ok-story.png'), Buffer.from(mounted.image.data, 'base64'));
+      console.log(`Saved preview PNG for inspection: ${outDir}`);
+    }
+
+    const inspected = await callPreview(client, instanceId, { action: 'inspect' });
+    const bump = inspected.body?.nodes?.find((node) => node.path === 'RSMCPPreviewPanel/Bump');
+    assert(bump?.button === true && bump?.visible === true, `inspect lists the story button (${inspected.text.slice(0, 300)})`);
+
+    const clicked = await callPreview(client, instanceId, { action: 'click', element: 'RSMCPPreviewPanel/Bump' });
+    assert(clicked.res.isError !== true, `click succeeds (${clicked.text})`);
+    assert((await previewState(client, instanceId)).attrs.ok_clicks === 1, 'click activates the story button once');
+
+    const unmounted = await callPreview(client, instanceId, { action: 'unmount' });
+    assert(unmounted.res.isError !== true, `unmount succeeds (${unmounted.text})`);
+    let state = await previewState(client, instanceId);
+    assert(state.attrs.ok_mounts === 1 && state.attrs.ok_cleanups === 1, 'story mounted and cleaned up once');
+    assertPreviewClean(state, devGui, 'after unmount');
+
+    const again = await callPreview(client, instanceId, { action: 'unmount' });
+    assert(again.res.isError === true && /nothing to unmount/.test(again.text), 'second unmount reports nothing mounted');
+
+    const throwing = await callPreview(client, instanceId, { action: 'mount', target: story('mount_throw') });
+    assert(throwing.res.isError === true && throwing.text.includes('RSMCP_MOUNT_THROW'), 'mount reports a story error');
+    assertPreviewClean(await previewState(client, instanceId), devGui, 'after mount failure');
+
+    const cleanupMount = await callPreview(client, instanceId, { action: 'mount', target: story('cleanup_throw') });
+    assert(cleanupMount.res.isError !== true, `cleanup_throw mounts (${cleanupMount.text})`);
+    const cleanupFailure = await callPreview(client, instanceId, { action: 'unmount' });
+    assert(cleanupFailure.res.isError === true && cleanupFailure.text.includes('RSMCP_CLEANUP_THROW'), 'unmount reports a cleanup error');
+    state = await previewState(client, instanceId);
+    assert(state.attrs.cleanup_throw_cleanups === 1, 'cleanup ran exactly once');
+    assertPreviewClean(state, devGui, 'after cleanup failure');
+
+    const native = await callPreview(client, instanceId, { action: 'mount', target: `game.Workspace.${PREVIEW_FOLDER}.NativeHud` });
+    assert(native.res.isError !== true && native.body?.kind === 'screengui', `native ScreenGui mounts (${native.text})`);
+    const nativeTree = await callPreview(client, instanceId, { action: 'inspect' });
+    assert(nativeTree.body?.nodes?.some((node) => node.path === 'Title' && node.text === 'RSMCP NATIVE'), 'inspect lists the cloned label');
+    await callPreview(client, instanceId, { action: 'unmount' });
+    assertPreviewClean(await previewState(client, instanceId), devGui, 'after native unmount');
+  } finally {
+    await callPreview(client, instanceId, { action: 'unmount' }).catch(() => undefined);
+    const deleted = await client.callTool('execute_luau', {
+      target: 'edit',
+      instance_id: instanceId,
+      code: `local folder = workspace:FindFirstChild("${PREVIEW_FOLDER}")
+if folder then folder:Destroy() end
+return true`,
+    });
+    assert(deleted.success === true, 'execute_luau cleans up preview fixtures');
+  }
+}
+
 
 async function main() {
   const existingInstanceId = process.env.MCP_INSTANCE_ID?.trim();
@@ -683,6 +846,7 @@ async function main() {
     launch = await launchManagedPlace(client, worker.workingDirectory);
     const edit = await waitForEditInstance(client, version, launch.instance_id);
     await runEditModeToolSmoke(client, edit.instanceId);
+    await runUiPreviewSmoke(client, edit.instanceId);
   } catch (error) {
     bodyError = error;
     throw error;

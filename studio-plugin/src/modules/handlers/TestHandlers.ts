@@ -2,6 +2,7 @@ import { HttpService, Players, RunService } from "@rbxts/services";
 import StopPlayMonitor from "../StopPlayMonitor";
 import PluginSession from "../PluginSession";
 import PeerRole from "../PeerRole";
+import UiPreviewHandlers from "./UiPreviewHandlers";
 
 interface StudioTestServiceMultiplayer extends StudioTestService {
 	ExecuteMultiplayerTestAsync(numPlayers: number, testArgs: unknown): unknown;
@@ -103,6 +104,7 @@ function startPlaytest(requestData: Record<string, unknown>) {
 		return { error: "A test is already running" };
 	}
 
+	UiPreviewHandlers.endForPlaytest();
 	testRunning = true;
 	const preparedTest = PluginSession.prepareSoloTest();
 
@@ -217,6 +219,7 @@ function multiplayerTestStart(requestData: Record<string, unknown>) {
 
 	const testArgs = requestData.testArgs !== undefined ? requestData.testArgs : {};
 	const testId = HttpService.GenerateGUID(false);
+	UiPreviewHandlers.endForPlaytest();
 
 	multiplayerState = {
 		phase: "starting",

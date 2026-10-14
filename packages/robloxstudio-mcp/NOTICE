@@ -1,0 +1,31 @@
+@chrrxs/robloxstudio-mcp
+
+This package distributes studio-plugin/MCPPlugin.rbxmx, a Roblox Studio plugin
+that bundles a compiled copy of a third-party story renderer licensed under the
+GNU General Public License version 3. The package as a whole is therefore
+distributed under GPL-3.0-only; the full license text is in LICENSE.
+
+Story renderer (vendor/ui-renderer)
+  UI Labs, Copyright (c) PepeElToro41 and UI Labs contributors
+  https://github.com/PepeElToro41/ui-labs
+  License: GPL-3.0
+  The pinned upstream commit is recorded in BUILDING.txt and
+  mcp/vendor/ui-renderer/UPSTREAM_COMMIT inside the source archive.
+  Only the renderer modules are bundled; the upstream toolbar plugin script is
+  not included.
+
+MCP preview adapter and renderer overlay
+  studio-plugin/ui-renderer/ (adapter sources and upstream.patch) in the MCP
+  repository are derivative of the story renderer and licensed under GPL-3.0.
+
+Roblox Studio MCP server and plugin
+  Copyright (c) 2025 (see LICENSE-MIT)
+  Based on boshyxd/robloxstudio-mcp. The MCP source code is originally licensed
+  under the MIT License, reproduced in LICENSE-MIT; that notice is preserved.
+
+Corresponding source
+  studio-plugin/MCPPlugin-source.tar.gz contains the complete corresponding
+  source for MCPPlugin.rbxmx: the MCP plugin source and build scripts, the
+  pinned renderer source, patches, configs and pnpm lockfile, the MCP preview
+  adapter, the sources, manifests and licenses of bundled Luau packages, and
+  rebuild instructions (BUILDING.txt).

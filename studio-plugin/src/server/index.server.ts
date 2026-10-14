@@ -10,6 +10,7 @@ import StudioWebSocket from "../modules/StudioWebSocket";
 import PluginSession from "../modules/PluginSession";
 import BreakpointHandlers from "../modules/handlers/BreakpointHandlers";
 import * as RenderMonitor from "../modules/RenderMonitor";
+import UiPreviewHandlers from "../modules/handlers/UiPreviewHandlers";
 
 // Track render-loop liveness so input/screenshot tools can report "window
 // minimized / not rendering" instead of silently no-op'ing. No-op in the
@@ -27,6 +28,7 @@ RuntimeLogBuffer.install();
 StopPlayMonitor.init(plugin);
 BreakpointHandlers.init(plugin);
 ServerUrlSettings.init(plugin);
+UiPreviewHandlers.init(plugin);
 // Before anything reads place keys: an edit session removes MCP attributes
 // that older plugin versions saved into the place, and hands its topology to
 // playtest DataModels through plugin settings instead.

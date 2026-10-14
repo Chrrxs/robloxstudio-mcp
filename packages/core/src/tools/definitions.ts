@@ -1502,6 +1502,81 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
       },
     }
   },
+  {
+    name: 'preview_ui',
+    category: 'write',
+    description: 'Use to mount, click, type into, inspect, and screenshot UI in edit mode; prefer over playtests for UI checks.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        action: {
+          type: 'string',
+          enum: ['mount', 'set_controls', 'click', 'type', 'inspect', 'screenshot', 'unmount'],
+          description: 'mount first; the preview persists until unmount.'
+        },
+        target: {
+          type: 'string',
+          description: 'mount: story module, ScreenGui, or GuiObject path.'
+        },
+        controls: {
+          type: 'object',
+          additionalProperties: true,
+          description: 'Story control values by name; colors as #RRGGBB.'
+        },
+        element: {
+          type: 'string',
+          description: 'click/type: path below the preview root, e.g. Shop/Buy.'
+        },
+        x: {
+          type: 'number',
+          description: 'click: pixel X in the last preview_ui screenshot.'
+        },
+        y: {
+          type: 'number',
+          description: 'click: pixel Y in the last preview_ui screenshot.'
+        },
+        text: {
+          type: 'string',
+          description: 'type: text for the element TextBox.'
+        },
+        submit: {
+          type: 'boolean',
+          default: false,
+          description: 'type: press Return after the text.'
+        },
+        backdrop: {
+          type: 'boolean',
+          default: true,
+          description: 'mount: neutral backdrop over game UI; default true.'
+        },
+        settle_seconds: {
+          type: 'number',
+          minimum: 0,
+          maximum: 5,
+          default: 0.25,
+          description: 'Wait before the screenshot, 0-5; default 0.25.'
+        },
+        format: {
+          type: 'string',
+          enum: ['jpeg', 'png'],
+          default: 'jpeg',
+          description: 'Format; jpeg is smaller, png lossless; default jpeg.'
+        },
+        quality: {
+          type: 'number',
+          minimum: 1,
+          maximum: 100,
+          default: 92,
+          description: 'JPEG quality 1-100; defaults to 92. Ignored for png.'
+        },
+        instance_id: {
+          type: 'string',
+          description: 'Studio process ID when ambiguous.'
+        }
+      },
+      required: ['action']
+    }
+  },
 
   // === Monetization ===
   {
@@ -1574,7 +1649,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
   {
     name: 'simulate_mouse_input',
     category: 'write',
-    description: 'Use to click the live playtest viewport at known pixel coordinates.',
+    description: 'Use to click the viewport at known pixel coordinates: playtest, or StarterGui UI in edit mode (not CoreGui).',
     inputSchema: {
       type: 'object',
       properties: {

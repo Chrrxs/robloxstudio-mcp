@@ -293,9 +293,10 @@ describe('MCP v2 tool runtime', () => {
     const serialized = JSON.stringify(catalog);
     const inspectorCatalog = getReadOnlyTools().map(publicToolDefinition);
 
-    expect(catalog).toHaveLength(49);
-    expect(serialized.length).toBeLessThanOrEqual(45_000);
-    expect(catalog.filter((tool) => tool.outputSchema)).toHaveLength(48);
+    expect(catalog).toHaveLength(50);
+    // 45k before preview_ui (~1.8k) joined the catalog.
+    expect(serialized.length).toBeLessThanOrEqual(47_000);
+    expect(catalog.filter((tool) => tool.outputSchema)).toHaveLength(49);
     expect(catalog.every((tool) => tool.description.length <= 120)).toBe(true);
     expect(inspectorCatalog).toHaveLength(25);
     expect(JSON.stringify(inspectorCatalog).length).toBeLessThanOrEqual(20_000);
@@ -400,6 +401,13 @@ describe('MCP v2 tool runtime', () => {
       idempotentHint: true,
       openWorldHint: false,
     });
+    expect(byName.get('preview_ui')?.annotations).toMatchObject({
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: false,
+      openWorldHint: false,
+    });
+    expect(names.has('preview_ui') && !inspectorCatalog.some((tool) => tool.name === 'preview_ui')).toBe(true);
   });
 
   test('keeps selection, argument, and behavior metadata in their contract layers', () => {

@@ -31,6 +31,7 @@ screenshots, memory reports, and profiler captures from each peer.
 - For large generated Luau, use the [verified chunk-staging workflow](docs/large-inputs.md): explicit instance routing, UTF-8 byte/hash readback, ownership-checked cleanup, and bounded recovery without blindly replaying mutations.
 - Use `selection` to inspect or update Studio selection and frame a part or model before capturing the viewport.
 - Capture the viewport with `capture_screenshot`, then send mouse or keyboard input. See [Configuration](docs/configuration.md#host-window-capture).
+- Check UI without a playtest using `preview_ui`: mount a story module (`*.story`), ScreenGui, or GuiObject in the edit viewport, change story controls, click buttons, type into TextBoxes, inspect the GUI tree, and get a screenshot after each step. The preview keeps its state until you unmount it. See [Previewing UI](docs/building-from-source.md#previewing-ui-with-preview_ui).
 
 ### Inspect Creator Store assets
 
@@ -190,4 +191,4 @@ agy mcp add robloxstudio-inspector -- npx -y @chrrxs/robloxstudio-mcp-inspector@
 
 ---
 
-[Report issues](https://github.com/chrrxs/robloxstudio-mcp/issues) · [Report a security vulnerability](SECURITY.md) · MIT Licensed · Based on [boshyxd/robloxstudio-mcp](https://github.com/boshyxd/robloxstudio-mcp) v2.7.0
+[Report issues](https://github.com/chrrxs/robloxstudio-mcp/issues) · [Report a security vulnerability](SECURITY.md) · Original MCP source MIT Licensed; the main plugin package bundles a GPL-3.0 story renderer and is distributed under GPL-3.0-only ([details](docs/building-from-source.md#licensing)) · Based on [boshyxd/robloxstudio-mcp](https://github.com/boshyxd/robloxstudio-mcp) v2.7.0

@@ -10,6 +10,7 @@ import {
   unlinkSync,
   renameSync,
   rmSync,
+  statSync,
   constants,
 } from 'fs';
 import { fileURLToPath } from 'url';
@@ -26,6 +27,11 @@ const serverDir = join(outDir, 'server');
 const modulesDir = join(outDir, 'modules');
 const includeDir = join(pluginDir, 'include');
 const nodeModulesRbxtsDir = join(pluginDir, 'node_modules', '@rbxts');
+// Compiled story renderer + MCP preview adapter (GPL-3.0), produced by
+// scripts/build-ui-renderer.mjs. Bundled into the main variant only.
+const rendererDir = join(rootDir, '.local', 'ui-renderer-build');
+const rendererOutDir = join(rendererDir, 'out');
+const rendererIncludeDir = join(rendererDir, 'include');
 
 // Three icon variants per build, swapped by the plugin at runtime to reflect
 // connection state. Until separate white/yellow/green assets are uploaded, all
@@ -101,7 +107,14 @@ function findInitFile(dir) {
 
 const INIT_FILENAMES = new Set(['init.luau', 'init.lua', 'init.server.luau', 'init.server.lua']);
 
+// pnpm links packages into node_modules via symlinks; follow them.
+function isDirectoryEntry(entry, fullPath) {
+  return entry.isDirectory() || (entry.isSymbolicLink() && statSync(fullPath).isDirectory());
+}
+
 function isLuaFile(name) {
+  // *.server/*.client entry scripts (e.g. the upstream renderer's toolbar plugin) are never serialized as modules.
+  if (/\.(server|client)\.luau?$/.test(name)) return false;
   return name.endsWith('.luau') || name.endsWith('.lua');
 }
 
@@ -109,7 +122,8 @@ function dirHasLuaContent(dir) {
   const entries = readdirSync(dir, { withFileTypes: true });
   for (const entry of entries) {
     if (entry.isFile() && isLuaFile(entry.name)) return true;
-    if (entry.isDirectory() && dirHasLuaContent(join(dir, entry.name))) return true;
+    const fullPath = join(dir, entry.name);
+    if (isDirectoryEntry(entry, fullPath) && dirHasLuaContent(fullPath)) return true;
   }
   return false;
 }
@@ -123,7 +137,7 @@ function buildModuleItems(dir, depth = 0) {
   for (const entry of entries) {
     const fullPath = join(dir, entry.name);
 
-    if (entry.isDirectory()) {
+    if (isDirectoryEntry(entry, fullPath)) {
       if (!dirHasLuaContent(fullPath)) continue;
 
       const initFile = findInitFile(fullPath);
@@ -173,12 +187,102 @@ const includeItems = buildModuleItems(includeDir);
 
 const rbxtsItems = buildModuleItems(nodeModulesRbxtsDir);
 
+function folderItem(name, children, depth) {
+  const pad = '  '.repeat(depth);
+  return `
+      ${pad}<Item class="Folder" referent="${++refId}">
+      ${pad}  <Properties>
+      ${pad}    <string name="Name">${name}</string>
+      ${pad}  </Properties>${children}
+      ${pad}</Item>`;
+}
+
+function moduleScriptItem(name, sourcePath, children, depth) {
+  const pad = '  '.repeat(depth);
+  const source = injectVersion(readFileSync(sourcePath, 'utf8'));
+  return `
+      ${pad}<Item class="ModuleScript" referent="${++refId}">
+      ${pad}  <Properties>
+      ${pad}    <string name="Name">${name}</string>
+      ${pad}    <string name="Source"><![CDATA[${escapeCdata(source)}]]></string>
+      ${pad}  </Properties>${children}
+      ${pad}</Item>`;
+}
+
+// Minimal Rojo project-node resolver for installed packages: honors $path
+// (directory with/without init, or a single Lua file) and named child nodes.
+// Nested projects are named by their project "name" as Rojo does, e.g.
+// @rbxts-js/react -> "React", which @rbxts/react requires by that name.
+function projectNodeItems(name, node, baseDir, depth) {
+  let children = '';
+  for (const [key, child] of Object.entries(node)) {
+    if (!key.startsWith('$') && child && typeof child === 'object') {
+      children += projectNodeItems(key, child, baseDir, depth + 1);
+    }
+  }
+  const target = node.$path ? join(baseDir, node.$path) : undefined;
+  if (target && existsSync(target)) {
+    if (statSync(target).isDirectory()) {
+      children = buildModuleItems(target, depth + 1) + children;
+      const initFile = findInitFile(target);
+      if (initFile) return moduleScriptItem(name, initFile, children, depth);
+    } else if (isLuaFile(target)) {
+      return moduleScriptItem(name, target, children, depth);
+    }
+  }
+  return children ? folderItem(name, children, depth) : '';
+}
+
+function buildPackageScopeItems(scopeDir, depth) {
+  let items = '';
+  const entries = readdirSync(scopeDir, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name));
+  for (const entry of entries) {
+    const packageDir = join(scopeDir, entry.name);
+    if (!isDirectoryEntry(entry, packageDir)) continue;
+    const projectPath = join(packageDir, 'default.project.json');
+    if (existsSync(projectPath)) {
+      const project = JSON.parse(readFileSync(projectPath, 'utf8'));
+      items += projectNodeItems(project.name ?? entry.name, project.tree, packageDir, depth);
+    } else if (dirHasLuaContent(packageDir)) {
+      // No project: Rojo syncs the package directory as-is (a root init.lua
+      // makes it a ModuleScript, e.g. @rbxts/services); rbxtsc imports append
+      // any subpath (e.g. "sift", "out").
+      items += projectNodeItems(entry.name, { $path: '.' }, packageDir, depth);
+    }
+  }
+  return items;
+}
+
+// Mirrors vendor/ui-renderer/default.project.json: out/ at the root, include/ as a
+// child with node_modules/@rbxts and node_modules/@rbxts-js inside it.
+function buildRendererItems() {
+  if (variantName !== 'main') return '';
+  if (!existsSync(join(rendererOutDir, 'McpPreview.luau'))) {
+    console.error(`Story renderer not built at ${rendererOutDir}`);
+    console.error('Run "node scripts/build-ui-renderer.mjs" first (requires the vendor/ui-renderer submodule and pnpm).');
+    process.exit(1);
+  }
+  const outItems = buildModuleItems(rendererOutDir, 1);
+  const runtimeItems = buildModuleItems(rendererIncludeDir, 2);
+  let scopeItems = '';
+  for (const scope of ['@rbxts', '@rbxts-js']) {
+    const scopeDir = join(rendererDir, 'node_modules', scope);
+    if (!existsSync(scopeDir)) continue;
+    const packages = buildPackageScopeItems(scopeDir, 4);
+    if (packages) scopeItems += folderItem(scope, packages, 3);
+  }
+  const nodeModules = scopeItems ? folderItem('node_modules', scopeItems, 2) : '';
+  return folderItem('UIRenderer', outItems + folderItem('include', runtimeItems + nodeModules, 1), 0);
+}
+
+const rendererItems = buildRendererItems();
+
 function countModules(dir) {
   if (!existsSync(dir)) return 0;
   let count = 0;
   const entries = readdirSync(dir, { withFileTypes: true });
   for (const entry of entries) {
-    if (entry.isDirectory()) {
+    if (isDirectoryEntry(entry, join(dir, entry.name))) {
       count += countModules(join(dir, entry.name));
       if (findInitFile(join(dir, entry.name))) count++;
     } else if (isLuaFile(entry.name) && !INIT_FILENAMES.has(entry.name)) {
@@ -215,7 +319,7 @@ const rbxmx = `<?xml version="1.0" encoding="utf-8"?>
           <string name="Name">@rbxts</string>
         </Properties>${rbxtsItems}
       </Item>
-    </Item>` : ''}
+    </Item>` : ''}${rendererItems}
   </Item>
 </roblox>
 `;
@@ -224,7 +328,7 @@ writeFileSync(outputPath, rbxmx, 'utf8');
 const moduleCount = countModules(modulesDir);
 const includeCount = countModules(includeDir);
 const rbxtsCount = countModules(nodeModulesRbxtsDir);
-console.log(`Built studio-plugin/${variant.outputName} (${moduleCount} modules${includeCount > 0 ? `, ${includeCount} runtime includes` : ''}${rbxtsCount > 0 ? `, ${rbxtsCount} @rbxts packages` : ''})`);
+console.log(`Built studio-plugin/${variant.outputName} (${moduleCount} modules${includeCount > 0 ? `, ${includeCount} runtime includes` : ''}${rbxtsCount > 0 ? `, ${rbxtsCount} @rbxts packages` : ''}${rendererItems ? ', story renderer' : ''})`);
 
 function resolveWslWindowsPluginsDir() {
   // On WSL, walk /mnt/c/Users/*/AppData/Local/Roblox/Plugins and return the

@@ -12,7 +12,11 @@
   },
   "files": [
     "dist/**/*",
-    "studio-plugin/MCPPlugin.rbxmx"
+    "studio-plugin/MCPPlugin.rbxmx",
+    "studio-plugin/MCPPlugin-source.tar.gz",
+    "LICENSE",
+    "LICENSE-MIT",
+    "NOTICE"
   ],
   "scripts": {
     "build": "tsup",
@@ -28,7 +32,7 @@
     "game-development"
   ],
   "author": "",
-  "license": "MIT",
+  "license": "GPL-3.0-only",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/chrrxs/robloxstudio-mcp.git"

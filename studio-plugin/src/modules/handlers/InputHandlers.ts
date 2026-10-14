@@ -7,8 +7,10 @@
 // capability and drives the REAL input pipeline: SendKey feeds
 // UserInputService.InputBegan/Ended and the control modules (so WASD walks the
 // character at full WalkSpeed with controls intact, no Humanoid hijack),
-// SendMouseButton feeds UIS and activates GUI buttons (and hit-tests against
-// CoreGui), and SendTextInput types into the focused TextBox.
+// SendMouseButton feeds UIS and activates GUI buttons, in the edit DataModel
+// too (StarterGui UI shown through ShowDevelopmentGui), but rejects positions
+// over CoreGui UI ("position hits CoreGUI"); SendTextInput types into the
+// focused TextBox.
 //
 // Method set on the VirtualInput object (verified live):
 //   SendKey(isDown: boolean, keyCode: Enum.KeyCode)
@@ -29,7 +31,7 @@ import * as RenderMonitor from "../RenderMonitor";
 
 const UserInputService = game.GetService("UserInputService");
 
-interface VirtualInput {
+export interface VirtualInput {
 	SendKey(isDown: boolean, keyCode: Enum.KeyCode): void;
 	SendMouseButton(position: Vector2, inputType: Enum.UserInputType, isDown: boolean): void;
 	SendTextInput(text: string): void;
@@ -52,6 +54,14 @@ function getVI(): VirtualInput | undefined {
 	return undefined;
 }
 
+// Input is silently dropped by the engine when the window isn't rendering
+// (e.g. minimized), so callers get that reason instead of a false success.
+export function readyVirtualInput(): VirtualInput | string {
+	const notRendering = RenderMonitor.notRenderingReason();
+	if (notRendering !== undefined) return notRendering;
+	return getVI() ?? "UserInputService:CreateVirtualInput() is not available in this context";
+}
+
 const MOUSE_TYPE_MAP: Record<string, Enum.UserInputType> = {
 	Left: Enum.UserInputType.MouseButton1,
 	Right: Enum.UserInputType.MouseButton2,
@@ -69,15 +79,8 @@ function simulateMouseInput(requestData: Record<string, unknown>) {
 		return { error: "x and y are required" };
 	}
 
-	// Input is silently dropped by the engine when the window isn't rendering
-	// (e.g. minimized). Surface that instead of returning a false success.
-	const notRendering = RenderMonitor.notRenderingReason();
-	if (notRendering !== undefined) return { error: notRendering };
-
-	const vi = getVI();
-	if (!vi) {
-		return { error: "UserInputService:CreateVirtualInput() is not available in this context" };
-	}
+	const vi = readyVirtualInput();
+	if (typeIs(vi, "string")) return { error: vi };
 
 	const inputType = MOUSE_TYPE_MAP[button] ?? Enum.UserInputType.MouseButton1;
 	const pos = new Vector2(x, y);
@@ -106,13 +109,8 @@ function simulateMouseInput(requestData: Record<string, unknown>) {
 }
 
 function simulateKeyboardInput(requestData: Record<string, unknown>) {
-	const notRendering = RenderMonitor.notRenderingReason();
-	if (notRendering !== undefined) return { error: notRendering };
-
-	const vi = getVI();
-	if (!vi) {
-		return { error: "UserInputService:CreateVirtualInput() is not available in this context" };
-	}
+	const vi = readyVirtualInput();
+	if (typeIs(vi, "string")) return { error: vi };
 
 	// Text mode: type a string into the focused TextBox.
 	const text = requestData.text as string | undefined;
@@ -157,7 +155,7 @@ function simulateKeyboardInput(requestData: Record<string, unknown>) {
 	return { error: `Failed to simulate keyboard input: ${err}` };
 }
 
-export = {
+export default {
 	simulateMouseInput,
 	simulateKeyboardInput,
 };

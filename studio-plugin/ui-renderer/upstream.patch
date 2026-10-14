@@ -1,0 +1,511 @@
+diff -r a/src/UI/StoryPreview/PreviewController/Mount.tsx b/src/UI/StoryPreview/PreviewController/Mount.tsx
+--- a/src/UI/StoryPreview/PreviewController/Mount.tsx	2026-10-09 00:35:26.335231080 -0400
++++ b/src/UI/StoryPreview/PreviewController/Mount.tsx	2026-10-09 00:35:26.390728691 -0400
+@@ -1,5 +1,6 @@
+ import { Signal } from "@rbxts/lemon-signal";
+-import React from "@rbxts/react";
++import React, { PropsWithChildren, useEffect } from "@rbxts/react";
++import { ReportMounted, ReportMountType } from "McpLifecycle";
+ 
+ import { RecoverControlsData } from ".";
+ import MountingMap, { Mounter } from "./Mounters";
+@@ -27,5 +28,14 @@
+ 		/>
+ 	);
+ 
+-	return renderer;
++	// MCP: React stories report their own commit (ReactLib); other mounters finish mounting in their
++	// render/effects, which run before this parent's effect.
++	ReportMountType(entry.Key, mountType);
++	if (mountType === "ReactLib") return renderer;
++	return <McpMountBeacon EntryKey={entry.Key}>{renderer}</McpMountBeacon>;
++}
++
++function McpMountBeacon(props: PropsWithChildren<{ EntryKey: string }>) {
++	useEffect(() => ReportMounted(props.EntryKey), []);
++	return <React.Fragment>{props.children}</React.Fragment>;
+ }
+diff -r a/src/UI/StoryPreview/PreviewController/Mounters/Functional.tsx b/src/UI/StoryPreview/PreviewController/Mounters/Functional.tsx
+--- a/src/UI/StoryPreview/PreviewController/Mounters/Functional.tsx	2026-10-09 00:35:26.334870614 -0400
++++ b/src/UI/StoryPreview/PreviewController/Mounters/Functional.tsx	2026-10-09 00:35:26.390852339 -0400
+@@ -1,5 +1,6 @@
+ import React, { useEffect, useRef } from "@rbxts/react";
+ import { WARNING_STORY_TYPES, WARNINGS } from "Plugin/Warnings";
++import { HoldCleanup, ReportError } from "McpLifecycle";
+ import { FastSpawn, UILabsWarn, YCall } from "Utils/MiscUtils";
+ 
+ import { MounterProps } from ".";
+@@ -16,17 +17,20 @@
+ 			} else {
+ 				UILabsWarn(WARNINGS.StoryError.format(FUNCTIONAL_ERR), err);
+ 			}
++			ReportError(props.Entry.Key, didYield ? WARNINGS.Yielding.format(FUNCTIONAL_ERR) : err);
+ 		});
+ 	}, []);
+ 
+ 	props.UnmountSignal.Connect(() => {
+ 		if (unmounter.current) {
+ 			const cleanup = unmounter.current;
++			const release = HoldCleanup(props.Entry.Key);
+ 			FastSpawn(() => {
+ 				const [success, err] = pcall(cleanup);
+ 				if (!success) {
+ 					UILabsWarn(WARNINGS.CleanupError, err);
+ 				}
++				release(success ? undefined : err);
+ 			});
+ 		} else {
+ 			UILabsWarn(WARNINGS.NoCleanup);
+diff -r a/src/UI/StoryPreview/PreviewController/Mounters/FusionLib/index.tsx b/src/UI/StoryPreview/PreviewController/Mounters/FusionLib/index.tsx
+--- a/src/UI/StoryPreview/PreviewController/Mounters/FusionLib/index.tsx	2026-10-09 00:35:26.334916518 -0400
++++ b/src/UI/StoryPreview/PreviewController/Mounters/FusionLib/index.tsx	2026-10-09 00:35:26.390911667 -0400
+@@ -3,6 +3,7 @@
+ import { InferFusionProps } from "@rbxts/ui-labs";
+ import { ConvertedControls, ReturnControls } from "@rbxts/ui-labs/src/ControlTypings/Typing";
+ import { WARNING_STORY_TYPES, WARNINGS } from "Plugin/Warnings";
++import { HoldCleanup, ReportError } from "McpLifecycle";
+ import { Cast, FastSpawn, UILabsWarn, YCall } from "Utils/MiscUtils";
+ 
+ import { MounterProps } from "..";
+@@ -64,6 +65,7 @@
+ 			} else {
+ 				UILabsWarn(WARNINGS.StoryError.format(FUSION_ERR), err);
+ 			}
++			ReportError(props.Entry.Key, didYield ? WARNINGS.Yielding.format(FUSION_ERR) : err);
+ 		});
+ 		if (value) {
+ 			if (typeIs(value, "function")) {
+@@ -88,17 +90,19 @@
+ 
+ 	useStoryUnmount(result, props.UnmountSignal, () => {
+ 		if (cleanup) {
++			const release = HoldCleanup(props.Entry.Key);
+ 			FastSpawn(() => {
+ 				const [success, err] = pcall(cleanup);
+ 				if (!success) {
+ 					UILabsWarn(WARNINGS.CleanupError, err);
+ 				}
++				release(success ? undefined : err);
+ 			});
+ 		}
+ 		if (version === "Fusion3") {
+ 			Cast<Fusion3>(fusion).doCleanup(fusion);
+ 		}
+-	});
++	}, props.Entry.Key);
+ 
+ 	useStoryActionComponents(props.Entry.Key, props.Result, returnControls, controls, controlValues, setControlValues);
+ 
+diff -r a/src/UI/StoryPreview/PreviewController/Mounters/Generic/index.tsx b/src/UI/StoryPreview/PreviewController/Mounters/Generic/index.tsx
+--- a/src/UI/StoryPreview/PreviewController/Mounters/Generic/index.tsx	2026-10-09 00:35:26.335081319 -0400
++++ b/src/UI/StoryPreview/PreviewController/Mounters/Generic/index.tsx	2026-10-09 00:35:26.390963396 -0400
+@@ -4,6 +4,7 @@
+ import { ConvertedControls, ReturnControls } from "@rbxts/ui-labs/src/ControlTypings/Typing";
+ import { InferGenericProps, SubscribeListener } from "@rbxts/ui-labs/src/Typing/Generic";
+ import { WARNING_STORY_TYPES, WARNINGS } from "Plugin/Warnings";
++import { HoldCleanup, ReportError } from "McpLifecycle";
+ import { FastSpawn, UILabsWarn, YCall } from "Utils/MiscUtils";
+ 
+ import { MounterProps } from "..";
+@@ -72,6 +73,7 @@
+ 			} else {
+ 				UILabsWarn(WARNINGS.StoryError.format(GENERIC_ERR), err);
+ 			}
++			ReportError(props.Entry.Key, didYield ? WARNINGS.Yielding.format(GENERIC_ERR) : err);
+ 		});
+ 		return value;
+ 	}, []);
+@@ -84,16 +86,18 @@
+ 	useStoryUnmount(result, props.UnmountSignal, () => {
+ 		listeners.current = [];
+ 		if (cleanup) {
++			const release = HoldCleanup(props.Entry.Key);
+ 			FastSpawn(() => {
+ 				const [success, err] = pcall(cleanup);
+ 				if (!success) {
+ 					UILabsWarn(WARNINGS.CleanupError, err);
+ 				}
++				release(success ? undefined : err);
+ 			});
+ 		} else {
+ 			UILabsWarn(WARNINGS.NoCleanup);
+ 		}
+-	});
++	}, props.Entry.Key);
+ 
+ 	useStoryActionComponents(props.Entry.Key, props.Result, returnControls, controls, controlValues, setControlValues);
+ 
+diff -r a/src/UI/StoryPreview/PreviewController/Mounters/IrisLib/index.tsx b/src/UI/StoryPreview/PreviewController/Mounters/IrisLib/index.tsx
+--- a/src/UI/StoryPreview/PreviewController/Mounters/IrisLib/index.tsx	2026-10-09 00:35:26.334975671 -0400
++++ b/src/UI/StoryPreview/PreviewController/Mounters/IrisLib/index.tsx	2026-10-09 00:35:26.391017748 -0400
+@@ -3,6 +3,7 @@
+ import { InferIrisProps } from "@rbxts/ui-labs";
+ import { ConvertedControls, ReturnControls } from "@rbxts/ui-labs/src/ControlTypings/Typing";
+ import { WARNING_STORY_TYPES, WARNINGS } from "Plugin/Warnings";
++import { HoldCleanup, ReportError } from "McpLifecycle";
+ import { FastSpawn, UILabsWarn, YCall } from "Utils/MiscUtils";
+ 
+ import { MounterProps } from "..";
+@@ -41,6 +42,7 @@
+ 			} else {
+ 				UILabsWarn(WARNINGS.StoryError.format(IRIS_ERR), err);
+ 			}
++			ReportError(props.Entry.Key, didYield ? WARNINGS.Yielding.format(IRIS_ERR) : err);
+ 		});
+ 		return [states, setupCleanup, cleanup];
+ 	}, []);
+@@ -51,18 +53,20 @@
+ 
+ 	useStoryUnmount(result, props.UnmountSignal, () => {
+ 		if (StoryCleanup) {
++			const release = HoldCleanup(props.Entry.Key);
+ 			FastSpawn(() => {
+ 				const [success, err] = pcall(StoryCleanup);
+ 				if (!success) {
+ 					UILabsWarn(WARNINGS.CleanupError, err);
+ 				}
++				release(success ? undefined : err);
+ 			});
+ 		}
+ 		SetupCleanup();
+ 
+ 		props.Result.iris.Shutdown();
+ 		uisMock.Destroy();
+-	});
++	}, props.Entry.Key);
+ 
+ 	useStoryActionComponents(props.Entry.Key, props.Result, returnControls, controls, controlValues, setControlValues);
+ 
+diff -r a/src/UI/StoryPreview/PreviewController/Mounters/RoactReact/ReactLib.tsx b/src/UI/StoryPreview/PreviewController/Mounters/RoactReact/ReactLib.tsx
+--- a/src/UI/StoryPreview/PreviewController/Mounters/RoactReact/ReactLib.tsx	2026-10-09 00:35:26.335189416 -0400
++++ b/src/UI/StoryPreview/PreviewController/Mounters/RoactReact/ReactLib.tsx	2026-10-09 00:35:39.159152931 -0400
+@@ -3,6 +3,15 @@
+ import { useSelectorCreator } from "@rbxts/react-reflex";
+ import { InferControls } from "@rbxts/ui-labs";
+ import { ReturnControls } from "@rbxts/ui-labs/src/ControlTypings/Typing";
++import {
++	BoundaryProps,
++	CommitBeaconProps,
++	CreateBoundary,
++	CreateCommitBeacon,
++	HoldCleanup,
++	ReportError,
++	ReportMounted
++} from "McpLifecycle";
+ import { WARNING_STORY_TYPES } from "Plugin/Warnings";
+ import { selectPreview } from "Reflex/StoryPreview";
+ import { UILabsWarn } from "Utils/MiscUtils";
+@@ -30,6 +39,42 @@
+ 	const GetProps = useStoryPassedProps(props);
+ 	// const injection = useEnvironmentInjection(props.Entry.Key);
+ 
++	// MCP: error boundary from the story's own React; reports render/effect errors and tracks its unmount.
++	// Readiness comes from a passive-effect beacon inside it, after the story's own passive effects.
++	const boundary = useMemo(() => {
++		const key = props.Entry.Key;
++		const state: { Mounted: boolean; Errored: boolean; Release?: (err?: unknown) => void } = {
++			Mounted: false,
++			Errored: false
++		};
++		const boundaryProps: BoundaryProps = {
++			OnError: (err: unknown) => {
++				state.Errored = true;
++				ReportError(key, err);
++			},
++			OnMount: () => {
++				state.Mounted = true;
++			},
++			OnUnmount: () => {
++				state.Mounted = false;
++				state.Release?.();
++				state.Release = undefined;
++			}
++		};
++		const beaconProps: CommitBeaconProps = {
++			OnCommit: () => {
++				if (!state.Errored) ReportMounted(key);
++			}
++		};
++		return {
++			State: state,
++			Component: CreateBoundary(result.react, "McpStoryBoundary"),
++			Props: boundaryProps,
++			Beacon: CreateCommitBeacon(result.react),
++			BeaconProps: beaconProps
++		};
++	}, []);
++
+ 	const RenderComponent = useCallback(() => {
+ 		if (typeIs(result.story, "function")) {
+ 			const storyProps = GetProps({
+@@ -44,9 +89,21 @@
+                     UILabsWarn(WARNINGS.StoryError.format(REACT_ERR), err);
+ 				}
+ 			});*/
+-			return result.react.createElement(result.story, storyProps);
++			return result.react.createElement(
++				boundary.Component,
++				boundary.Props,
++				result.react.createElement(
++					boundary.Beacon,
++					boundary.BeaconProps,
++					result.react.createElement(result.story, storyProps)
++				)
++			);
+ 		} else {
+-			return result.story;
++			return result.react.createElement(
++				boundary.Component,
++				boundary.Props,
++				result.react.createElement(boundary.Beacon, boundary.BeaconProps, result.story)
++			);
+ 		}
+ 	}, [controlValues, result]);
+ 
+@@ -61,6 +118,7 @@
+ 			return result.reactRoblox.createLegacyRoot(props.MountFrame);
+ 		} else {
+ 			UILabsWarn(`Renderer Type is not a valid type, "legacy" or "deferred" expected, got: "${rendererType}"`);
++			ReportError(props.Entry.Key, `Renderer Type is not a valid type, "legacy" or "deferred" expected, got: "${rendererType}"`);
+ 		}
+ 	}, []);
+ 
+@@ -79,9 +137,16 @@
+ 
+ 	useStoryUnmount(result, props.UnmountSignal, () => {
+ 		if (root !== undefined) {
+-			root.unmount();
++			// Deferred roots unmount on a later scheduler tick; the boundary's unmount releases this hold.
++			if (boundary.State.Mounted) boundary.State.Release = HoldCleanup(props.Entry.Key);
++			const [success, err] = pcall(() => root.unmount());
++			if (!success) {
++				boundary.State.Release?.();
++				boundary.State.Release = undefined;
++				throw err;
++			}
+ 		}
+-	});
++	}, props.Entry.Key);
+ 
+ 	useStoryActionComponents(props.Entry.Key, props.Result, returnControls, controls, controlValues, setControlValues);
+ 
+diff -r a/src/UI/StoryPreview/PreviewController/Mounters/RoactReact/RoactLib.tsx b/src/UI/StoryPreview/PreviewController/Mounters/RoactReact/RoactLib.tsx
+--- a/src/UI/StoryPreview/PreviewController/Mounters/RoactReact/RoactLib.tsx	2026-10-09 00:35:26.335203624 -0400
++++ b/src/UI/StoryPreview/PreviewController/Mounters/RoactReact/RoactLib.tsx	2026-10-09 00:35:26.391118516 -0400
+@@ -3,6 +3,7 @@
+ import { InferControls } from "@rbxts/ui-labs";
+ import { ReturnControls } from "@rbxts/ui-labs/src/ControlTypings/Typing";
+ import { WARNING_STORY_TYPES, WARNINGS } from "Plugin/Warnings";
++import { ReportError } from "McpLifecycle";
+ import { UILabsWarn, YCall } from "Utils/MiscUtils";
+ 
+ import type { MounterProps } from "..";
+@@ -25,6 +26,7 @@
+ 	);
+ 	const GetProps = useStoryPassedProps(props);
+ 
++	const entryKey = props.Entry.Key;
+ 	const RenderComponent = useCallback(() => {
+ 		if (typeIs(result.story, "function")) {
+ 			const props = GetProps({
+@@ -37,6 +39,7 @@
+ 				} else {
+ 					UILabsWarn(WARNINGS.StoryError.format(ROACT_ERR), err);
+ 				}
++				ReportError(entryKey, didYield ? WARNINGS.Yielding.format(ROACT_ERR) : err);
+ 			});
+ 		} else {
+ 			return result.story;
+@@ -62,7 +65,7 @@
+ 		if (handle) {
+ 			result.roact.unmount(handle);
+ 		}
+-	});
++	}, props.Entry.Key);
+ 
+ 	useStoryActionComponents(props.Entry.Key, props.Result, returnControls, controls, controlValues, setControlValues);
+ 
+diff -r a/src/UI/StoryPreview/PreviewController/Mounters/VideLib/index.tsx b/src/UI/StoryPreview/PreviewController/Mounters/VideLib/index.tsx
+--- a/src/UI/StoryPreview/PreviewController/Mounters/VideLib/index.tsx	2026-10-09 00:35:26.335019463 -0400
++++ b/src/UI/StoryPreview/PreviewController/Mounters/VideLib/index.tsx	2026-10-09 00:35:26.391160164 -0400
+@@ -3,6 +3,7 @@
+ import { InferVideControls, InferVideProps } from "@rbxts/ui-labs";
+ import { ConvertedControls, ReturnControls } from "@rbxts/ui-labs/src/ControlTypings/Typing";
+ import { WARNING_STORY_TYPES, WARNINGS } from "Plugin/Warnings";
++import { HoldCleanup, ReportError } from "McpLifecycle";
+ import { FastSpawn, UILabsWarn, YCall } from "Utils/MiscUtils";
+ 
+ import { MounterProps } from "..";
+@@ -49,6 +50,7 @@
+ 				} else {
+ 					UILabsWarn(WARNINGS.StoryError.format(VIDE_ERR), err);
+ 				}
++				ReportError(props.Entry.Key, didYield ? WARNINGS.Yielding.format(VIDE_ERR) : err);
+ 			});
+ 		}, props.MountFrame);
+ 		return unmount;
+@@ -56,14 +58,16 @@
+ 
+ 	useStoryUnmount(result, props.UnmountSignal, () => {
+ 		vide.step(0); // disconnect spring connection;
++		const release = HoldCleanup(props.Entry.Key);
+ 		FastSpawn(() => {
+ 			const [success, err] = pcall(cleanup);
+ 			if (!success) {
+ 				UILabsWarn(WARNINGS.CleanupError, err);
+ 			}
++			release(success ? undefined : err);
+ 		});
+ 		sourcesCleanup();
+-	});
++	}, props.Entry.Key);
+ 
+ 	useStoryActionComponents(props.Entry.Key, props.Result, returnControls, controls, controlValues, setControlValues);
+ 
+diff -r a/src/UI/StoryPreview/PreviewController/StoryRequire.ts b/src/UI/StoryPreview/PreviewController/StoryRequire.ts
+--- a/src/UI/StoryPreview/PreviewController/StoryRequire.ts	2026-10-09 00:35:26.335245672 -0400
++++ b/src/UI/StoryPreview/PreviewController/StoryRequire.ts	2026-10-09 00:35:26.391204292 -0400
+@@ -5,6 +5,13 @@
+ import { useGetInputSignalsFromFrame, useInputSignals } from "Context/UserInputContext";
+ import { usePlugin } from "Hooks/Reflex/Use/Plugin";
+ import Configs from "Plugin/Configs";
++import {
++	HoldCleanup,
++	ReportEnvironmentCreated,
++	ReportEnvironmentDestroyed,
++	ReportError,
++	ReportLoaded
++} from "McpLifecycle";
+ import { selectNodeFromModule } from "Reflex/Explorer/Nodes";
+ import { selectPluginWidget } from "Reflex/Plugin";
+ import { Environment } from "Utils/HotReloader/Environment";
+@@ -84,10 +91,14 @@
+ 
+ 		const reloader = new HotReloader(node.Module);
+ 		reloader.HookOnReload((environment) => {
++			ReportEnvironmentCreated(entry.Key);
+ 			const cleanup = InjectGlobalControls(environment);
+ 			environment.HookOnDestroyed(() => {
+-				cleanup();
++				const release = HoldCleanup(entry.Key);
++				const [success, err] = pcall(cleanup);
++				release(success ? undefined : err);
+ 			}, 2);
++			environment.HookOnDestroyed(() => ReportEnvironmentDestroyed(entry.Key), 3);
+ 		}, 2);
+ 
+ 		setResultPromise(reloader.Reload());
+@@ -136,13 +147,25 @@
+ 	const [result] = useAsync(() => {
+ 		if (!resultPromise) return Promise.resolve(undefined);
+ 
+-		return resultPromise.catch((err) => {
+-			if (Promise.Error.is(err)) {
+-				warn("Story errored while required: \n\n" + err.trace);
+-			} else {
+-				warn("Story errored while required: \n\n" + tostring(err));
++		return resultPromise.then(
++			(value) => {
++				if (value === undefined) {
++					ReportError(entry.Key, "Story module returned nil");
++				} else {
++					ReportLoaded(entry.Key);
++				}
++				return value;
++			},
++			(err) => {
++				if (Promise.Error.is(err)) {
++					warn("Story errored while required: \n\n" + err.trace);
++				} else {
++					warn("Story errored while required: \n\n" + tostring(err));
++				}
++				ReportError(entry.Key, err);
++				return undefined;
+ 			}
+-		});
++		);
+ 	}, [resultPromise]);
+ 
+ 	return CreateTuple(result, reloader);
+diff -r a/src/UI/StoryPreview/PreviewController/Utils.ts b/src/UI/StoryPreview/PreviewController/Utils.ts
+--- a/src/UI/StoryPreview/PreviewController/Utils.ts	2026-10-09 00:35:26.335427528 -0400
++++ b/src/UI/StoryPreview/PreviewController/Utils.ts	2026-10-09 00:35:26.391247925 -0400
+@@ -1,19 +1,28 @@
+ import { Signal } from "@rbxts/lemon-signal";
+ import { useMemo } from "@rbxts/react";
+ import { StoryBase } from "@rbxts/ui-labs/src/Typing/Typing";
++import { HoldCleanup, ReportError } from "McpLifecycle";
+ 
+ //This hook runs the cleanup function automatically, because I always forget to add it ;-;
+-export function useStoryUnmount(story: StoryBase, unmountSignal: Signal, unmounter: () => void) {
++export function useStoryUnmount(story: StoryBase, unmountSignal: Signal, unmounter: () => void, key: string) {
+ 	useMemo(() => {
+ 		//using useMemo for running this instantly
+ 		unmountSignal.Once(() => {
+-			unmounter();
++			const release = HoldCleanup(key);
++			const [unmounted, unmountErr] = pcall(unmounter);
++			if (!unmounted) {
++				warn("Story renderer: error while unmounting story: ", unmountErr);
++				ReportError(key, unmountErr);
++			}
++			let cleanupErr: unknown;
+ 			if (story.cleanup) {
+ 				const [success, err] = pcall(story.cleanup);
+ 				if (!success) {
+ 					warn("UI Labs: Error while running cleanup function: ", err);
++					cleanupErr = err;
+ 				}
+ 			}
++			release(cleanupErr);
+ 		});
+ 	}, []);
+ }
+diff -r a/src/UI/StoryPreview/PreviewController/index.tsx b/src/UI/StoryPreview/PreviewController/index.tsx
+--- a/src/UI/StoryPreview/PreviewController/index.tsx	2026-10-09 00:35:26.335412184 -0400
++++ b/src/UI/StoryPreview/PreviewController/index.tsx	2026-10-09 00:35:26.391288965 -0400
+@@ -7,6 +7,7 @@
+ import { useInstance } from "Hooks/Utils/Instance";
+ import Configs from "Plugin/Configs";
+ import { WARNINGS } from "Plugin/Warnings";
++import { ReportError } from "McpLifecycle";
+ import { selectClearOutputOnReload, selectStudioMode } from "Reflex/PluginSettings";
+ import { selectStorySelected } from "Reflex/StorySelection";
+ import { useStoryRequire } from "UI/StoryPreview/PreviewController/StoryRequire";
+@@ -90,6 +91,7 @@
+ 		if (result === undefined) return;
+ 		if (reloader === undefined) return;
+ 		const check = CheckStory(result);
++		if (!check.Sucess) ReportError(key, check.Error);
+ 		if (!check.Sucess) return UILabsWarn(WARNINGS.StoryTypeError, check.Error);
+ 
+ 		mountFrame.Name = RemoveExtension(props.PreviewEntry.Module.Name, Configs.Extensions.Story);
+@@ -123,10 +125,13 @@
+ 
+ 		if (environment) {
+ 			environment.HookOnDestroyed(() => {
+-				unmountSignal.Fire();
+-				unmountSignal.Destroy();
++				const [success, err] = pcall(() => {
++					unmountSignal.Fire();
++					unmountSignal.Destroy();
+ 
+-				mountFrame.ClearAllChildren();
++					mountFrame.ClearAllChildren();
++				});
++				if (!success) ReportError(key, err);
+ 			});
+ 		}
+ 	}, [result, reloader]);
+diff -r a/src/Utils/MiscUtils.ts b/src/Utils/MiscUtils.ts
+--- a/src/Utils/MiscUtils.ts	2026-10-09 00:35:26.330946151 -0400
++++ b/src/Utils/MiscUtils.ts	2026-10-09 00:35:26.391332533 -0400
+@@ -26,6 +26,8 @@
+ 	const [resume_ok, run_ok, result] = coroutine.resume(thread, fn, efn, arg);
+ 
+ 	if (coroutine.status(thread) !== "dead") {
++		// MCP: a yielded story must not resume and keep mounting after it was reported as failed.
++		coroutine.close(thread);
+ 		return err(true, "") as undefined;
+ 	}
+ 

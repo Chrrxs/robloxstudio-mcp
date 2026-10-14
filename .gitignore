@@ -12,6 +12,10 @@ studio-plugin/out/
 # Compiled rbxmx artifacts — produced by `npm run build:plugin`, attached to GitHub releases.
 studio-plugin/MCPPlugin.rbxmx
 studio-plugin/MCPInspectorPlugin.rbxmx
+# Corresponding-source archive for the GPL main plugin — produced by the plugin build.
+studio-plugin/MCPPlugin-source.tar.gz
+# Isolated story renderer build and source-archive staging.
+.local/
 # Carbon filesystem-capture session files are unrelated to MCP plugin builds.
 studio-plugin/Carbon.rbxm
 studio-plugin/.Carbon.rbxm.lock

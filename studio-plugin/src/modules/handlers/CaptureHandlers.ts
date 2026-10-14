@@ -288,6 +288,7 @@ function captureStudioFrame(wantPng: boolean): unknown | undefined {
 		OutputSize: new Vector2(w, h),
 		ResampleMode: Enum.ResamplerMode.Default,
 		Format: wantPng ? STUDIO_CAPTURE_FORMATS.PNG : STUDIO_CAPTURE_FORMATS.RGBA8,
+		UICaptureMode: Enum.UICaptureMode.All,
 	};
 
 	const [captureOk, captureResult] = pcall(() => service.CaptureScreenshot(options));

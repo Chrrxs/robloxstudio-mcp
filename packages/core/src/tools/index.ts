@@ -103,6 +103,8 @@ type EncodedViewportCapture = {
   success: true;
   width: number;
   height: number;
+  nativeWidth: number;
+  nativeHeight: number;
   format: 'jpeg' | 'png';
   quality?: number;
   note: string;
@@ -154,6 +156,13 @@ type StudioToolResponse = Record<string, unknown> & {
 
 const MAX_INLINE_IMAGE_BYTES = 6_000_000;
 const MAX_MATRIX_IMAGE_BYTES = 8_000_000;
+const PREVIEW_UI_ACTIONS = new Set(['mount', 'set_controls', 'click', 'type', 'inspect', 'screenshot', 'unmount']);
+const PREVIEW_UI_CAPTURE_ACTIONS = new Set(['mount', 'set_controls', 'click', 'type', 'screenshot']);
+const DEFAULT_PREVIEW_UI_SETTLE_SECONDS = 0.25;
+const MAX_PREVIEW_UI_SETTLE_SECONDS = 5;
+// Above the plugin's 20 s story mount bound plus its 20 s cleanup bound when a
+// mount replaces the previous preview.
+const PREVIEW_UI_TIMEOUT_MS = 90_000;
 const DEFAULT_ASSET_AUDIO_PREVIEWS = 3;
 const MAX_ASSET_AUDIO_PREVIEWS = 5;
 const MAX_INLINE_AUDIO_PREVIEW_BYTES = 3_000_000;
@@ -1047,6 +1056,8 @@ export class RobloxStudioTools {
   private hostWindowCapture: HostWindowCaptureFn = captureStudioWindow;
   private hostViewportRects = new Map<string, HostViewportRectCacheEntry>();
   private viewportCaptureQueues = new Map<string, Promise<void>>();
+  // Per Studio process: viewport pixels per pixel of the last preview_ui screenshot.
+  private previewUiScales = new Map<string, { x: number; y: number }>();
 
   constructor(bridge: BridgeService) {
     this.client = new StudioHttpClient(bridge);
@@ -1305,6 +1316,29 @@ export class RobloxStudioTools {
       });
     }
     return { instanceId: defaultInstanceId };
+  }
+
+  // Resolve one exact edit Peer whose routing scope has no running playtest.
+  // A playtest renders a different DataModel, so edit-only viewport work there
+  // would capture the game instead and could leave edit state behind.
+  private _resolveIdleEditPeer(instance_id: string | undefined, toolName: string): { instanceId: string; peerId: string } {
+    const resolved = this.bridge.resolveTarget({ instance_id, target: 'edit' });
+    if (!resolved.ok) throw new RoutingFailure(resolved.error);
+    if (resolved.mode !== 'single') {
+      throw new RoutingFailure({
+        code: 'target_role_not_present_on_instance',
+        message: `${toolName} requires a single edit DataModel.`,
+        data: this._routingErrorData(),
+      });
+    }
+    const instanceId = resolved.targetInstanceId;
+    const runtimePeers = this.bridge.getPeersInScope(instanceId)
+      .filter((peer) => peer.role !== 'edit' || peer.isRunning);
+    const grouped = this.bridge.getMultiplayerGroups().some((group) => group.instanceIds.includes(instanceId));
+    if (runtimePeers.length > 0 || grouped) {
+      throw new Error(`${toolName} runs only in an idle edit DataModel; stop the active playtest on instance "${instanceId}" first.`);
+    }
+    return { instanceId, peerId: resolved.targetPeerId };
   }
 
   // Resolve synchronously after the caller has refreshed and captured its topology.
@@ -2500,7 +2534,10 @@ export class RobloxStudioTools {
           if (settleMs > 0) await sleep(settleMs);
 
           const entryBudget = Math.max(1, Math.floor(imageBudget / (matrixEntries.length - i)));
-          const capture = await this._captureViewportImage(resolved.instanceId, resolved.role, format, quality, entryBudget);
+          const capture = await this._withViewportCaptureLock(
+            resolved.instanceId,
+            () => this._captureViewportImageNow(resolved.instanceId, resolved.role, format, quality, entryBudget),
+          );
           if (capture.success) {
             imageBudget -= Math.ceil((capture.data.length * 3) / 4);
             entrySummary.screenshot = {
@@ -5082,21 +5119,18 @@ export class RobloxStudioTools {
     return { content: [{ type: 'text', text: JSON.stringify(response) }] };
   }
 
-  // Even native capture must wait while another call has fitted the simulator
-  // or drawn markers. Otherwise it could observe temporary UI or dimensions.
-  private async _captureViewportImage(
-    instanceId: string,
-    targetRole: string,
-    format?: string,
-    quality?: number,
-    maxBytes: number = MAX_INLINE_IMAGE_BYTES,
-  ): Promise<EncodedViewportCapture> {
+  // Every viewport-visible transaction for one Studio process runs through this
+  // queue: native capture must wait while another call has fitted the simulator,
+  // drawn markers, or is changing a preview_ui preview. Otherwise it could
+  // observe temporary UI or dimensions. The queue is not reentrant; never acquire it
+  // again from inside `run`.
+  private async _withViewportCaptureLock<T>(instanceId: string, run: () => Promise<T>): Promise<T> {
     const previous = this.viewportCaptureQueues.get(instanceId) ?? Promise.resolve();
-    const capture = previous.then(() => this._captureViewportImageNow(instanceId, targetRole, format, quality, maxBytes));
-    const settled = capture.then(() => undefined, () => undefined);
+    const task = previous.then(run);
+    const settled = task.then(() => undefined, () => undefined);
     this.viewportCaptureQueues.set(instanceId, settled);
     try {
-      return await capture;
+      return await task;
     } finally {
       if (this.viewportCaptureQueues.get(instanceId) === settled) this.viewportCaptureQueues.delete(instanceId);
     }
@@ -5284,6 +5318,8 @@ export class RobloxStudioTools {
       success: true,
       width: w,
       height: h,
+      nativeWidth: nativeW,
+      nativeHeight: nativeH,
       format: fmt,
       quality: fmt === 'jpeg' ? usedQ : undefined,
       note,
@@ -5495,7 +5531,10 @@ export class RobloxStudioTools {
     const refresh = this.bridge.refreshTopologyForRouting();
     if (refresh) await refresh;
     const { instanceId, clientRole } = this._resolveRuntime(instance_id);
-    const capture = await this._captureViewportImage(instanceId, clientRole ?? 'edit', format, quality);
+    const capture = await this._withViewportCaptureLock(
+      instanceId,
+      () => this._captureViewportImageNow(instanceId, clientRole ?? 'edit', format, quality),
+    );
     if (!capture.success) {
       return this._textResult({ error: capture.error, studioFastPathUnavailable: capture.studioFastPathUnavailable });
     }
@@ -5522,5 +5561,140 @@ export class RobloxStudioTools {
         },
       ],
     };
+  }
+
+  // Stateful edit-mode UI preview. The Studio plugin owns the mounted preview
+  // (story renderer and its control state, native UI clones, the host
+  // ScreenGui); each action runs inside the per-process viewport queue so its
+  // screenshot never interleaves with other captures' temporary markers.
+  async previewUi(args: Record<string, unknown>, instance_id?: string) {
+    const action = args.action;
+    if (typeof action !== 'string' || !PREVIEW_UI_ACTIONS.has(action)) {
+      throw new Error(`preview_ui action must be one of: ${[...PREVIEW_UI_ACTIONS].join(', ')}`);
+    }
+    const settleSeconds = args.settle_seconds === undefined ? DEFAULT_PREVIEW_UI_SETTLE_SECONDS : args.settle_seconds;
+    if (typeof settleSeconds !== 'number' || !Number.isFinite(settleSeconds)
+      || settleSeconds < 0 || settleSeconds > MAX_PREVIEW_UI_SETTLE_SECONDS) {
+      throw new Error(`preview_ui settle_seconds must be a number from 0 to ${MAX_PREVIEW_UI_SETTLE_SECONDS}`);
+    }
+    const { format, quality } = args;
+    if (format !== undefined && format !== 'jpeg' && format !== 'png') {
+      throw new Error('preview_ui format must be jpeg or png');
+    }
+    if (quality !== undefined && (typeof quality !== 'number' || !Number.isFinite(quality) || quality < 1 || quality > 100)) {
+      throw new Error('preview_ui quality must be a number from 1 to 100');
+    }
+
+    const request: Record<string, unknown> = { action };
+    const isControls = (value: unknown) => typeof value === 'object' && value !== null && !Array.isArray(value);
+    const isNonEmptyString = (value: unknown): value is string => typeof value === 'string' && value.trim() !== '';
+    let point: { x: number; y: number } | undefined;
+    if (action === 'mount') {
+      if (!isNonEmptyString(args.target)) throw new Error('preview_ui mount requires target: the path of a story module, ScreenGui, or GuiObject');
+      if (args.controls !== undefined && !isControls(args.controls)) throw new Error('preview_ui controls must be an object of { controlName: value }');
+      if (args.backdrop !== undefined && typeof args.backdrop !== 'boolean') throw new Error('preview_ui backdrop must be a boolean');
+      Object.assign(request, { target: args.target, controls: args.controls, backdrop: args.backdrop });
+    } else if (action === 'set_controls') {
+      if (!isControls(args.controls) || Object.keys(args.controls as object).length === 0) {
+        throw new Error('preview_ui set_controls requires a non-empty controls object');
+      }
+      request.controls = args.controls;
+    } else if (action === 'click') {
+      const hasPoint = args.x !== undefined || args.y !== undefined;
+      if (args.element !== undefined && hasPoint) throw new Error('preview_ui click takes element or x/y, not both');
+      if (hasPoint) {
+        if (typeof args.x !== 'number' || typeof args.y !== 'number' || !Number.isFinite(args.x) || !Number.isFinite(args.y)
+          || args.x < 0 || args.y < 0) {
+          throw new Error('preview_ui click x and y must both be non-negative screenshot pixel coordinates');
+        }
+        point = { x: args.x, y: args.y };
+      } else if (!isNonEmptyString(args.element)) {
+        throw new Error('preview_ui click requires element (a path below the preview root) or x and y');
+      } else {
+        request.element = args.element;
+      }
+    } else if (action === 'type') {
+      if (!isNonEmptyString(args.element)) throw new Error('preview_ui type requires element: the TextBox path below the preview root');
+      if (typeof args.text !== 'string') throw new Error('preview_ui type requires text');
+      if (args.submit !== undefined && typeof args.submit !== 'boolean') throw new Error('preview_ui submit must be a boolean');
+      Object.assign(request, { element: args.element, text: args.text, submit: args.submit });
+    }
+
+    const refresh = this.bridge.refreshTopologyForRouting();
+    if (refresh) await refresh;
+    const { instanceId } = this._resolveIdleEditPeer(instance_id, 'preview_ui');
+
+    return this._withViewportCaptureLock(instanceId, async () => {
+      // Topology can change while earlier viewport work drains, and a playtest
+      // can start while the preview settles; its rendered world would then be
+      // captured instead. Revalidate the exact edit Peer around every step.
+      const requireIdleEditPeer = async () => {
+        const refreshed = this.bridge.refreshTopologyForRouting();
+        if (refreshed) await refreshed;
+        return this._resolveIdleEditPeer(instanceId, 'preview_ui').peerId;
+      };
+      const peerId = await requireIdleEditPeer();
+      const requireSamePeer = async () => {
+        if (await requireIdleEditPeer() !== peerId) throw new Error(`lost the edit Peer of instance "${instanceId}"`);
+      };
+
+      if (point) {
+        // x/y are read off the last preview_ui screenshot, which is downscaled
+        // when the viewport exceeds the transport limit.
+        const scale = this.previewUiScales.get(instanceId) ?? { x: 1, y: 1 };
+        request.x = Math.round(point.x * scale.x);
+        request.y = Math.round(point.y * scale.y);
+      }
+      // Outlasts the plugin's bounded story require/mount and cleanup waits.
+      const response = await this._requestPeer('/api/preview-ui', request, peerId, PREVIEW_UI_TIMEOUT_MS);
+      if (typeof response.error === 'string') {
+        if (response.error.includes('Unknown endpoint')) {
+          throw new Error('preview_ui requires the rebuilt main Studio plugin with the bundled story renderer. Install that plugin and restart Studio.');
+        }
+        throw new Error(`preview_ui ${action} failed: ${response.error}`);
+      }
+      const summary: Record<string, unknown> = { ...response };
+      delete summary.success;
+      if (action === 'unmount') this.previewUiScales.delete(instanceId);
+      if (!PREVIEW_UI_CAPTURE_ACTIONS.has(action)) return this._textResult(summary);
+
+      let capture: EncodedViewportCapture;
+      try {
+        if (settleSeconds > 0) await sleep(Math.floor(settleSeconds * 1000));
+        await requireSamePeer();
+        capture = await this._captureViewportImageNow(instanceId, 'edit', format as string | undefined, quality as number | undefined);
+        if (capture.success) await requireSamePeer();
+      } catch (error) {
+        capture = { success: false, error: errorMessage(error) };
+      }
+      if (!capture.success) {
+        if (action === 'screenshot') throw new Error(`preview_ui screenshot failed: ${capture.error}`);
+        return this._textResult({ ...summary, screenshotError: capture.error });
+      }
+      this.previewUiScales.set(instanceId, { x: capture.nativeWidth / capture.width, y: capture.nativeHeight / capture.height });
+      const downscaled = capture.nativeWidth !== capture.width || capture.nativeHeight !== capture.height;
+      return {
+        content: [
+          {
+            type: 'text',
+            text: JSON.stringify({
+              ...summary,
+              screenshot: {
+                width: capture.width,
+                height: capture.height,
+                format: capture.format,
+                ...(capture.quality === undefined ? {} : { quality: capture.quality }),
+                source: capture.source,
+                coordinates: downscaled
+                  ? `Downscaled from the ${capture.nativeWidth}x${capture.nativeHeight} viewport; preview_ui click x/y read off this image are scaled automatically.`
+                  : 'Native viewport pixels; use them directly as preview_ui click x/y.',
+                ...(capture.note ? { note: capture.note.replace(/^ — /, '') } : {}),
+              },
+            }),
+          },
+          { type: 'image', data: capture.data, mimeType: capture.mimeType },
+        ],
+      };
+    });
   }
 }

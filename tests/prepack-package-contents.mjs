@@ -22,11 +22,24 @@ const packages = [
     directory: 'robloxstudio-mcp',
     name: '@chrrxs/robloxstudio-mcp',
     asset: 'MCPPlugin.rbxmx',
+    stagedAssets: ['MCPPlugin.rbxmx', 'MCPPlugin-source.tar.gz'],
+    packageFiles: ['LICENSE', 'LICENSE-MIT', 'NOTICE'],
+    manifestFiles: [
+      'dist/**/*',
+      'studio-plugin/MCPPlugin.rbxmx',
+      'studio-plugin/MCPPlugin-source.tar.gz',
+      'LICENSE',
+      'LICENSE-MIT',
+      'NOTICE',
+    ],
   },
   {
     directory: 'robloxstudio-mcp-inspector',
     name: '@chrrxs/robloxstudio-mcp-inspector',
     asset: 'MCPInspectorPlugin.rbxmx',
+    stagedAssets: ['MCPInspectorPlugin.rbxmx'],
+    packageFiles: [],
+    manifestFiles: ['dist/**/*', 'studio-plugin/MCPInspectorPlugin.rbxmx'],
   },
 ];
 
@@ -34,6 +47,10 @@ const fixtureRoot = mkdtempSync(path.join(os.tmpdir(), 'robloxstudio-mcp-prepack
 const fixtureScriptsDir = path.join(fixtureRoot, 'scripts');
 mkdirSync(fixtureScriptsDir, { recursive: true });
 copyFileSync(prepackScript, path.join(fixtureScriptsDir, 'prepack.mjs'));
+copyFileSync(path.join(repoRoot, 'scripts', 'package-staging.mjs'), path.join(fixtureScriptsDir, 'package-staging.mjs'));
+mkdirSync(path.join(fixtureRoot, 'vendor', 'ui-renderer'), { recursive: true });
+writeFileSync(path.join(fixtureRoot, 'vendor', 'ui-renderer', 'LICENSE'), 'gpl-license');
+writeFileSync(path.join(fixtureRoot, 'LICENSE'), 'mit-license');
 
 try {
   const sourcePluginDir = path.join(fixtureRoot, 'studio-plugin');
@@ -41,6 +58,7 @@ try {
   mkdirSync(path.join(sourcePluginDir, 'include'), { recursive: true });
   writeFileSync(path.join(sourcePluginDir, 'MCPPlugin.rbxmx'), 'main-built-plugin');
   writeFileSync(path.join(sourcePluginDir, 'MCPInspectorPlugin.rbxmx'), 'inspector-built-plugin');
+  writeFileSync(path.join(sourcePluginDir, 'MCPPlugin-source.tar.gz'), 'corresponding-source');
   writeFileSync(path.join(sourcePluginDir, 'src', 'source.ts'), 'source-only');
   writeFileSync(path.join(sourcePluginDir, 'include', 'LibMP.lua'), 'large-runtime-source');
 
@@ -50,12 +68,15 @@ try {
     mkdirSync(path.join(packageDir, 'dist'), { recursive: true });
     mkdirSync(destination, { recursive: true });
     writeFileSync(path.join(packageDir, 'dist', 'index.js'), 'runtime-server');
+    if (packageDefinition.packageFiles.includes('NOTICE')) {
+      writeFileSync(path.join(packageDir, 'NOTICE'), 'notice');
+    }
     writeFileSync(
       path.join(packageDir, 'package.json'),
       JSON.stringify({
         name: packageDefinition.name,
         version: '1.0.0',
-        files: ['dist/**/*', `studio-plugin/${packageDefinition.asset}`],
+        files: packageDefinition.manifestFiles,
         scripts: { prepack: 'node ../../scripts/prepack.mjs' },
       }),
     );
@@ -85,13 +106,18 @@ try {
     const [packReport] = JSON.parse(reportJson);
     assert.deepEqual(
       packReport.files.map((file) => file.path).sort(),
-      ['dist/index.js', 'package.json', `studio-plugin/${packageDefinition.asset}`].sort(),
-      `${packageDefinition.name} tarball contains only runtime files`,
+      [
+        'dist/index.js',
+        'package.json',
+        ...packageDefinition.stagedAssets.map((asset) => `studio-plugin/${asset}`),
+        ...packageDefinition.packageFiles,
+      ].sort(),
+      `${packageDefinition.name} tarball contains only runtime and license files`,
     );
     assert.deepEqual(
-      readdirSync(destination),
-      [packageDefinition.asset],
-      `${packageDefinition.name} stages only its runtime plugin asset`,
+      readdirSync(destination).sort(),
+      [...packageDefinition.stagedAssets].sort(),
+      `${packageDefinition.name} stages only its plugin assets`,
     );
     assert.equal(
       readFileSync(path.join(destination, packageDefinition.asset), 'utf8'),
@@ -105,8 +131,8 @@ try {
     );
     assert.deepEqual(
       manifest.files,
-      ['dist/**/*', `studio-plugin/${packageDefinition.asset}`],
-      `${packageDefinition.name} publishes only dist and its runtime plugin asset`,
+      packageDefinition.manifestFiles,
+      `${packageDefinition.name} publishes only dist, plugin assets, and license files`,
     );
   }
 

@@ -78,6 +78,7 @@ const NON_DESTRUCTIVE_SIDE_EFFECT_TOOLS = new Set([
   'import_rbxm',
   'insert_asset',
   'insert_script_lines',
+  'preview_ui',
   'upload_asset',
   'selection',
 ]);
@@ -315,6 +316,11 @@ export function serverInstructions(definitions: readonly ToolDefinition[]): stri
   if (has('selection', 'capture_screenshot')) {
     instructions.push(
       'Use selection action=view before capture_screenshot when the viewport must frame a specific instance.',
+    );
+  }
+  if (has('preview_ui')) {
+    instructions.push(
+      'Use preview_ui instead of a playtest to view, click, type into, or inspect story modules and ScreenGuis in edit mode; unmount when done.',
     );
   }
   if (has('get_roblox_docs')) {

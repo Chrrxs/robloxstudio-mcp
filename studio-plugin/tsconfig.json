@@ -16,5 +16,6 @@
     "rootDir": "src",
     "outDir": "out",
     "declaration": false
-  }
+  },
+  "include": ["src/**/*"]
 }

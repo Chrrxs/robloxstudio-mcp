@@ -1,0 +1,3 @@
+[submodule "vendor/ui-renderer"]
+	path = vendor/ui-renderer
+	url = https://github.com/PepeElToro41/ui-labs

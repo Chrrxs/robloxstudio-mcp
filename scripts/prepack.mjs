@@ -14,30 +14,41 @@ import {
 } from 'fs';
 import { join } from 'path';
 
-const PLUGIN_ASSET_BY_PACKAGE = {
-  '@chrrxs/robloxstudio-mcp': 'MCPPlugin.rbxmx',
-  '@chrrxs/robloxstudio-mcp-inspector': 'MCPInspectorPlugin.rbxmx',
-};
+import { PACKAGE_STAGING } from './package-staging.mjs';
 
 const packageDir = process.cwd();
 const rootDir = join(packageDir, '..', '..');
 const packageJson = JSON.parse(readFileSync(join(packageDir, 'package.json'), 'utf8'));
-const assetName = PLUGIN_ASSET_BY_PACKAGE[packageJson.name];
+const staging = PACKAGE_STAGING[packageJson.name];
 
-if (!assetName) {
+if (!staging) {
   console.error(`No Studio plugin artifact is configured for package ${packageJson.name ?? '<unknown>'}`);
   process.exit(1);
 }
 
-const source = join(rootDir, 'studio-plugin', assetName);
 const dest = join(packageDir, 'studio-plugin');
 
-if (!existsSync(source)) {
-  console.error(`Built Studio plugin not found at ${source}. Run npm run build:plugins first.`);
-  process.exit(1);
+for (const assetName of staging.pluginAssets) {
+  const source = join(rootDir, 'studio-plugin', assetName);
+  if (!existsSync(source)) {
+    console.error(`Built Studio plugin file not found at ${source}. Run npm run build:plugins first.`);
+    process.exit(1);
+  }
+}
+for (const { from } of staging.packageFiles) {
+  if (!existsSync(join(rootDir, from))) {
+    console.error(`Package file not found at ${join(rootDir, from)}. Run git submodule update --init vendor/ui-renderer.`);
+    process.exit(1);
+  }
 }
 
 rmSync(dest, { recursive: true, force: true });
 mkdirSync(dest, { recursive: true });
-copyFileSync(source, join(dest, assetName));
-console.log(`Staged studio-plugin/${assetName} for ${packageJson.name}`);
+for (const assetName of staging.pluginAssets) {
+  copyFileSync(join(rootDir, 'studio-plugin', assetName), join(dest, assetName));
+  console.log(`Staged studio-plugin/${assetName} for ${packageJson.name}`);
+}
+for (const { from, to } of staging.packageFiles) {
+  copyFileSync(join(rootDir, from), join(packageDir, to));
+  console.log(`Staged ${to} for ${packageJson.name}`);
+}

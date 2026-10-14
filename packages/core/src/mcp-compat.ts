@@ -32,6 +32,16 @@ Tool descriptions explain selection. Input schemas explain arguments. This guide
 - Use action=view with a BasePart or Model path to frame it, or omit path to frame exactly one selected BasePart or Model. Empty, multiple, or unsupported selections require an explicit target or a changed selection. The original camera type is restored after framing, including on failure. The current viewing direction is preserved unless from or angleY overrides it. padding below 1 crops closer and above 1 pulls back.
 - For visual proof, change the instance, frame it with selection, then call capture_screenshot.
 
+## UI previews
+
+Use preview_ui to check UI without a playtest. It needs the idle edit DataModel and shows the preview in the Studio viewport.
+
+- action=mount with target set to a story module (*.story ModuleScript), a ScreenGui, or a GuiObject. Stories render through the bundled story renderer with their current source (function, React/Roact, Vide, Fusion, Iris, and generic stories). ScreenGuis and GuiObjects are cloned; the originals are never changed, and scripts inside native UI do not run in edit mode. A neutral backdrop hides game UI and the 3D view unless backdrop=false. Mounting again replaces the current preview.
+- The mount result lists the story's controls with type, current value, and options or limits. Pass controls on mount or call action=set_controls to change them; names and value types are validated. Colors are "#RRGGBB", RGBA is { "color", "transparency" }, Choose/EnumList take an option, Object takes an instance path or "" to clear, and groups nest objects.
+- action=inspect lists the GuiObject tree below the preview root with paths, classes, effective visibility, screen rects, Text/Image, and button/TextBox flags. Use those paths as element for action=click (clicks the element centre) or action=type (focuses a TextBox, enters text, submit=true presses Return). click also accepts x/y read off the last preview_ui screenshot.
+- mount, set_controls, click, type, and screenshot return a screenshot after settle_seconds. Story state and controls persist between calls.
+- Call action=unmount when done. The preview also unmounts after 10 idle minutes, when a playtest starts, and when the plugin unloads; StarterGui.ShowDevelopmentGui is restored if preview_ui turned it on.
+
 ## Script changes
 
 - Read the relevant source with get_script_source before changing it.
@@ -57,7 +67,7 @@ Read output with get_runtime_logs. Reuse nextCursor as cursor for one Instance, 
 - Apply network conditions with set_network_profile. Roblox caps packet loss at 0.5 percent.
 - Inspect built-in device IDs with get_device_simulator_state, then apply one with set_device_simulator or compare several with capture_device_matrix.
 - Clear temporary network and device settings with reset_simulation_state after a scenario.
-- Capture the viewport with capture_screenshot before simulate_mouse_input so the pixel coordinates match. Keyboard input should target a live client when game input is under test.
+- Capture the viewport with capture_screenshot before simulate_mouse_input so the pixel coordinates match. simulate_mouse_input also clicks StarterGui UI in edit mode, but positions over CoreGui UI are rejected. Keyboard input should target a live client when game input is under test.
 
 ## Debugging and profiling
 

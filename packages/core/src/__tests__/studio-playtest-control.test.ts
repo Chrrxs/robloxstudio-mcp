@@ -28,6 +28,7 @@ const dependencies: Plugin = {
     build.onResolve({ filter: /^\.\.\/(StopPlayMonitor|PluginSession|PeerRole)$/ }, (args) => ({
       path: args.path.slice(3), namespace: 'studio-playtest',
     }));
+    build.onResolve({ filter: /^\.\/UiPreviewHandlers$/ }, () => ({ path: 'UiPreviewHandlers', namespace: 'studio-playtest' }));
     build.onLoad({ filter: /.*/, namespace: 'studio-playtest' }, (args) => {
       if (args.path === 'services') {
         return {
@@ -41,6 +42,7 @@ const dependencies: Plugin = {
         StopPlayMonitor: '__STOP_MONITOR__',
         PluginSession: '__PLUGIN_SESSION__',
         PeerRole: '__PEER_ROLE__',
+        UiPreviewHandlers: '__UI_PREVIEW__',
       };
       return { contents: `export default globalThis.${globals[args.path]};`, loader: 'js' };
     });
@@ -75,6 +77,7 @@ async function createHarness(editModeActive = false) {
     waitForConsumption: (): { ok: boolean; consumed: boolean; error?: string } => ({ ok: true, consumed: true }),
     clearPending: () => undefined,
   };
+  const uiPreview = { endForPlaytest: jest.fn() };
   const commonJsModule = { exports: {} as unknown };
   const context = vm.createContext({
     module: commonJsModule,
@@ -83,6 +86,7 @@ async function createHarness(editModeActive = false) {
     __STOP_MONITOR__: stopMonitor,
     __PLUGIN_SESSION__: pluginSession,
     __PEER_ROLE__: { detect: () => 'edit' },
+    __UI_PREVIEW__: uiPreview,
     game: { GetService: () => studioTestService },
     tick: () => now,
     task: {
@@ -104,6 +108,7 @@ async function createHarness(editModeActive = false) {
     studioTestService,
     pluginSession,
     stopMonitor,
+    uiPreview,
     get now() { return now; },
     get scheduledCount() { return spawned.length; },
     onWait(callback: () => void) { onWait = callback; },
@@ -120,6 +125,8 @@ describe('Studio playtest lifecycle control', () => {
     const harness = await createHarness(mode === 'tracked');
     if (mode === 'tracked') {
       expect(harness.handlers.startPlaytest({ mode: 'play' }).success).toBe(true);
+      // The edit viewport never keeps a preview_ui preview into a playtest.
+      expect(harness.uiPreview.endForPlaytest).toHaveBeenCalledTimes(1);
       harness.studioTestService.EditModeActive = false;
     }
     harness.stopMonitor.waitForConsumption = () => {

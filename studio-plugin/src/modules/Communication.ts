@@ -10,6 +10,7 @@ import MetadataHandlers from "./handlers/MetadataHandlers";
 import TestHandlers from "./handlers/TestHandlers";
 import AssetHandlers from "./handlers/AssetHandlers";
 import CaptureHandlers from "./handlers/CaptureHandlers";
+import UiPreviewHandlers from "./handlers/UiPreviewHandlers";
 import InputHandlers from "./handlers/InputHandlers";
 import LogHandlers from "./handlers/LogHandlers";
 import SerializationHandlers from "./handlers/SerializationHandlers";
@@ -83,6 +84,7 @@ const routeMap: Record<string, Handler> = {
 	"/api/capture-begin": CaptureHandlers.captureBegin,
 	"/api/capture-read": CaptureHandlers.captureRead,
 	"/api/capture-markers": CaptureHandlers.captureMarkers,
+	"/api/preview-ui": UiPreviewHandlers.previewUi,
 	"/api/simulate-mouse-input": InputHandlers.simulateMouseInput,
 	"/api/simulate-keyboard-input": InputHandlers.simulateKeyboardInput,
 
