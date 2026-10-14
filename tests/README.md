@@ -82,6 +82,22 @@ HTTP launch response is reconciled against the pre-launch snapshot and staged
 place path. Supplying `MCP_INSTANCE_ID` instead keeps the caller-owned instance
 open and skips all launch lifecycle calls.
 
+The profile launcher requires Windows or WSL with PowerShell interop. On native
+Linux/Wine, use a separately launched, disposable Studio with its own prefix,
+plugin directory, and dev MCP server port. The tooling smoke can reuse that
+owned instance without invoking the Windows launcher:
+
+```bash
+ROBLOX_STUDIO_PORT=<dev-port> ROBLOX_STUDIO_AUTH_TOKEN=<dev-token> \
+MCP_INSTANCE_ID=<disposable-instance-id> node tests/studio-tooling-smoke.mjs
+```
+
+This runs edit-mode tooling and `preview_ui` through the actual MCP tool path,
+including mount/controls/click/type/inspect/screenshot/unmount, story and
+cleanup failures, native UI cloning, and auto-unmount when a Run playtest
+starts. It starts and stops Run on the specified instance, then leaves Studio
+open for caller-owned cleanup. Never point this at somebody else's Studio.
+
 For a self-contained run of the complete managed functional suite, including
 all edit, playtest, runtime, proxy, simulation, and multiplayer tests, use:
 

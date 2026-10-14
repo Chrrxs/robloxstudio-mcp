@@ -637,7 +637,8 @@ return function(target)
   panel.BorderSizePixel = 0
   local button = Instance.new("TextButton")
   button.Name = "Bump"
-  button.Size = UDim2.fromScale(1, 1)
+  button.Size = UDim2.new(1, 0, 0, 80)
+  button.Position = UDim2.fromOffset(0, 80)
   button.BackgroundTransparency = 1
   button.Text = "RSMCP PREVIEW"
   button.TextColor3 = Color3.new(1, 1, 1)
@@ -645,6 +646,15 @@ return function(target)
   button.Parent = panel
   button.Activated:Connect(function()
     folder:SetAttribute("${mode}_clicks", (folder:GetAttribute("${mode}_clicks") or 0) + 1)
+  end)
+  local input = Instance.new("TextBox")
+  input.Name = "Input"
+  input.Size = UDim2.new(1, 0, 0, 80)
+  input.Text = ""
+  input.Parent = panel
+  input.FocusLost:Connect(function(submitted)
+    folder:SetAttribute("${mode}_typed", input.Text)
+    folder:SetAttribute("${mode}_submitted", submitted)
   end)
   panel.Parent = target
   ${mountThrow}
@@ -683,15 +693,30 @@ async function callPreview(client, instanceId, args) {
     name: 'preview_ui',
     arguments: { settle_seconds: 0.5, format: 'png', instance_id: instanceId, ...args },
   }, 120_000);
-  const text = String(res?.content?.[0]?.text ?? '');
-  let body;
-  try { body = JSON.parse(text); } catch { body = undefined; }
+  let body = res.structuredContent;
+  const text = String(res?.content?.find((item) => item.type === 'text')?.text ?? JSON.stringify(body ?? ''));
+  if (body === undefined) {
+    try { body = JSON.parse(text); } catch { body = undefined; }
+  }
   return { res, text, body, image: (res.content ?? []).find((item) => item.type === 'image') };
 }
 
 async function runUiPreviewSmoke(client, instanceId) {
   console.log('\n=== preview_ui isolated smoke ===');
   const modes = ['ok', 'mount_throw', 'cleanup_throw'];
+  const controlledSource = `return {
+  controls = { Title = "Before" },
+  render = function(props)
+    local label = Instance.new("TextLabel")
+    label.Name = "ControlledLabel"
+    label.Size = UDim2.fromOffset(400, 100)
+    label.Text = props.controls.Title
+    label.Parent = props.target
+    local unsubscribe = props.subscribe(function(values) label.Text = values.Title end)
+    return function() unsubscribe() label:Destroy() end
+  end,
+}`;
+  const sources = { ...Object.fromEntries(modes.map((m) => [m, previewStorySource(m)])), controlled: controlledSource };
   const setup = await client.callTool('execute_luau', {
     target: 'edit',
     instance_id: instanceId,
@@ -699,7 +724,7 @@ async function runUiPreviewSmoke(client, instanceId) {
 if old then old:Destroy() end
 local folder = Instance.new("Folder")
 folder.Name = "${PREVIEW_FOLDER}"
-local sources = game:GetService("HttpService"):JSONDecode(${JSON.stringify(JSON.stringify(Object.fromEntries(modes.map((m) => [m, previewStorySource(m)]))))})
+local sources = game:GetService("HttpService"):JSONDecode(${JSON.stringify(JSON.stringify(sources))})
 for name, source in sources do
   local module = Instance.new("ModuleScript")
   module.Name = name .. ".story"
@@ -720,9 +745,15 @@ return true`,
   });
   assert(setup.success === true && String(setup.returnValue) === 'true', 'execute_luau creates preview fixtures');
   const story = (mode) => `game.Workspace.${PREVIEW_FOLDER}["${mode}.story"]`;
+  const { devGui: originalDevGui } = await previewState(client, instanceId);
 
   try {
-    const { devGui } = await previewState(client, instanceId);
+    // Exercise ownership/restoration even when the caller normally shows GUI.
+    const devGui = false;
+    await client.callTool('execute_luau', {
+      target: 'edit', instance_id: instanceId,
+      code: 'game:GetService("StarterGui").ShowDevelopmentGui = false',
+    });
 
     const mounted = await callPreview(client, instanceId, { action: 'mount', target: story('ok') });
     assert(mounted.res.isError !== true, `mount succeeds (${mounted.text})`);
@@ -742,6 +773,16 @@ return true`,
     const clicked = await callPreview(client, instanceId, { action: 'click', element: 'RSMCPPreviewPanel/Bump' });
     assert(clicked.res.isError !== true, `click succeeds (${clicked.text})`);
     assert((await previewState(client, instanceId)).attrs.ok_clicks === 1, 'click activates the story button once');
+
+    const typed = await callPreview(client, instanceId, {
+      action: 'type', element: 'RSMCPPreviewPanel/Input', text: 'preview typed text', submit: true,
+    });
+    assert(typed.res.isError !== true && typed.image?.mimeType === 'image/png', `type returns a screenshot (${typed.text})`);
+    const typedState = await previewState(client, instanceId);
+    assert(typedState.attrs.ok_typed === 'preview typed text' && typedState.attrs.ok_submitted === true,
+      'type focuses the TextBox, enters text, and submits with Return');
+    const screenshot = await callPreview(client, instanceId, { action: 'screenshot' });
+    assert(screenshot.image?.mimeType === 'image/png', 'screenshot captures the mounted UI');
 
     const unmounted = await callPreview(client, instanceId, { action: 'unmount' });
     assert(unmounted.res.isError !== true, `unmount succeeds (${unmounted.text})`);
@@ -770,6 +811,38 @@ return true`,
     assert(nativeTree.body?.nodes?.some((node) => node.path === 'Title' && node.text === 'RSMCP NATIVE'), 'inspect lists the cloned label');
     await callPreview(client, instanceId, { action: 'unmount' });
     assertPreviewClean(await previewState(client, instanceId), devGui, 'after native unmount');
+
+    const controlled = await callPreview(client, instanceId, {
+      action: 'mount', target: story('controlled'), controls: { Title: 'Initial' },
+    });
+    assert(controlled.body?.controls?.some((control) => control.name === 'Title' && control.value === 'Initial'),
+      `mount applies initial controls (${controlled.text})`);
+    const replaced = await callPreview(client, instanceId, {
+      action: 'mount', target: story('controlled'), controls: { Title: 'Replacement' },
+    });
+    assert(replaced.body?.replaced === story('controlled'), 'mount replaces an existing preview');
+    assert((await previewState(client, instanceId)).devGui === true,
+      'replacement keeps development GUI enabled without a false/true toggle');
+    const changed = await callPreview(client, instanceId, { action: 'set_controls', controls: { Title: 'After' } });
+    assert(changed.image?.mimeType === 'image/png', 'set_controls returns a screenshot');
+    const changedTree = await callPreview(client, instanceId, { action: 'inspect' });
+    assert(changedTree.body?.nodes?.some((node) => node.path === 'ControlledLabel' && node.text === 'After'),
+      'set_controls updates the mounted story, not just its metadata');
+    const unknown = await callPreview(client, instanceId, { action: 'set_controls', controls: { Missing: 'value' } });
+    assert(unknown.res.isError === true && unknown.text.includes('Unknown control'), 'unknown controls are rejected');
+
+    // Only this test's own managed/reused instance is touched. Starting Run
+    // must dispose the edit preview before a different DataModel is rendered.
+    const started = await client.callTool('solo_playtest', { action: 'start', mode: 'run', instance_id: instanceId });
+    try {
+      assert(started.success === true, 'Run starts with a preview mounted');
+    } finally {
+      const stopped = await client.callTool('solo_playtest', { action: 'stop', instance_id: instanceId });
+      assert(stopped.success === true, 'Run stops after checking preview disposal');
+    }
+    assertPreviewClean(await previewState(client, instanceId), devGui, 'after playtest auto-unmount');
+    const expired = await callPreview(client, instanceId, { action: 'inspect' });
+    assert(expired.res.isError === true && expired.text.includes('No UI preview is mounted'), 'playtest start disposes preview state');
   } finally {
     await callPreview(client, instanceId, { action: 'unmount' }).catch(() => undefined);
     const deleted = await client.callTool('execute_luau', {
@@ -777,6 +850,7 @@ return true`,
       instance_id: instanceId,
       code: `local folder = workspace:FindFirstChild("${PREVIEW_FOLDER}")
 if folder then folder:Destroy() end
+game:GetService("StarterGui").ShowDevelopmentGui = ${originalDevGui ? 'true' : 'false'}
 return true`,
     });
     assert(deleted.success === true, 'execute_luau cleans up preview fixtures');
@@ -798,6 +872,7 @@ async function main() {
       await client.start();
       await client.initialize();
       await runEditModeToolSmoke(client, existingInstanceId);
+      await runUiPreviewSmoke(client, existingInstanceId);
     } finally {
       try {
         await client.stop();

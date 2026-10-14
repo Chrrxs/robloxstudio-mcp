@@ -86,7 +86,17 @@ function fail(message: string): never {
 	error(message, 0);
 }
 
-function finish(preview: Preview): string | undefined {
+function restoreDevelopmentGui(preview: Preview): string | undefined {
+	if (!preview.restoreDevGui) return undefined;
+	const [ok, err] = pcall(() => {
+		StarterGui.ShowDevelopmentGui = false;
+	});
+	if (!ok) return `Restoring StarterGui.ShowDevelopmentGui failed: ${tostring(err)}`;
+	preview.restoreDevGui = false;
+	return undefined;
+}
+
+function finish(preview: Preview, replacing = false): string | undefined {
 	if (preview.finishing) return "UI preview cleanup is already in progress.";
 	preview.finishing = true;
 	const errors: string[] = [];
@@ -99,11 +109,9 @@ function finish(preview: Preview): string | undefined {
 		const [ok, err] = pcall(() => gui.Destroy());
 		if (!ok) errors.push(`Removing ${gui.Name} failed: ${tostring(err)}`);
 	}
-	if (preview.restoreDevGui) {
-		const [ok, err] = pcall(() => {
-			StarterGui.ShowDevelopmentGui = false;
-		});
-		if (!ok) errors.push(`Restoring StarterGui.ShowDevelopmentGui failed: ${tostring(err)}`);
+	if (!replacing) {
+		const restoreFailure = restoreDevelopmentGui(preview);
+		if (restoreFailure !== undefined) errors.push(restoreFailure);
 	}
 	if (active === preview) active = undefined;
 	return errors.size() > 0 ? errors.join("; ") : undefined;
@@ -461,10 +469,19 @@ function mountPreview(data: Record<string, unknown>): Record<string, unknown> {
 		renderer = require(adapter) as Renderer;
 	}
 
-	const replaced = active?.target;
-	if (active !== undefined) {
-		const failure = finish(active);
-		if (failure !== undefined) fail(`Unmounting the previous preview failed: ${failure}`);
+	const previous = active;
+	const replaced = previous?.target;
+	// A replacement keeps ownership of ShowDevelopmentGui. Restoring false then
+	// enabling true in the same resume races Studio's deferred GUI state update
+	// and can leave the newly mounted preview hidden. Restore only when the
+	// preview session actually ends, not when its content changes.
+	const restoreDevGui = previous?.restoreDevGui ?? false;
+	if (previous !== undefined) {
+		const failure = finish(previous, true);
+		if (failure !== undefined) {
+			const restoreFailure = restoreDevelopmentGui(previous);
+			fail(`Unmounting the previous preview failed: ${failure}${restoreFailure !== undefined ? `; ${restoreFailure}` : ""}`);
+		}
 	}
 
 	const [host, content] = createHost(data.backdrop !== false);
@@ -474,7 +491,7 @@ function mountPreview(data: Record<string, unknown>): Record<string, unknown> {
 		host,
 		content,
 		lastUsed: os.clock(),
-		restoreDevGui: false,
+		restoreDevGui,
 		finishing: false,
 	};
 	active = preview;
