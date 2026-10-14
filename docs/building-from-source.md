@@ -63,8 +63,13 @@ UI state persist between calls:
   waits (up to 15 s) for an in-flight reload and reports reload activity in a
   `reload` field. A failed reload (for example a syntax error) is reported as
   `reload.error`; `click`, `type`, and `set_controls` fail until the source is
-  fixed, and the next edit reloads it. Native ScreenGui and GuiObject previews
-  are static clones and do not reload.
+  fixed, and the next edit reloads it. After a reported `loading` or `failed`
+  state, the next action reports `status: "ready"` once the story settles. An
+  edit made on disk is only seen once file sync (Rojo, Carbon) has written it
+  into Studio: an action sent before that does not wait for it and reports
+  nothing, although a screenshot may already show the reloaded story if sync
+  lands during `settle_seconds`; the following action reports the reload.
+  Native ScreenGui and GuiObject previews are static clones and do not reload.
 - The preview lives in a non-archivable `__MCPUiPreview_*` ScreenGui under
   StarterGui with a very high DisplayOrder and a neutral backdrop
   (`backdrop: false` shows the game UI and 3D view behind it). StarterGui keeps

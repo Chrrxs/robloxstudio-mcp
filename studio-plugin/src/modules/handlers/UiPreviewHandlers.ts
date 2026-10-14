@@ -105,6 +105,8 @@ interface Preview {
 	reportedGeneration: number;
 	/** Count of renderer late errors already reported. */
 	reportedErrors: number;
+	/** Reload state last reported, so settling after a reported "loading"/"failed" is reported too. */
+	reportedState: string;
 	/** Re-apply outcomes not yet reported. */
 	pendingReapplied?: string[];
 	pendingDropped: { name: string; reason: string }[];
@@ -527,7 +529,8 @@ function truncate(text: string): string {
 function takeReloadReport(preview: Preview, story: RendererHandle): Record<string, unknown> | undefined {
 	const status = story.GetReload();
 	const report: Record<string, unknown> = { status: status.State, generation: status.Generation };
-	let notable = status.State !== "ready";
+	let notable = status.State !== "ready" || status.State !== preview.reportedState;
+	preview.reportedState = status.State;
 	if (status.Generation !== preview.reportedGeneration) {
 		report.reloads = status.Generation - preview.reportedGeneration;
 		preview.reportedGeneration = status.Generation;
@@ -661,6 +664,7 @@ function mountPreview(data: Record<string, unknown>): Record<string, unknown> {
 		appliedGeneration: 0,
 		reportedGeneration: 0,
 		reportedErrors: 0,
+		reportedState: "ready",
 		pendingDropped: [],
 		syncing: false,
 		lastUsed: os.clock(),

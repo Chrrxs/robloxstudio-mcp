@@ -709,19 +709,26 @@ async function runUiPreviewSmoke(client, instanceId) {
 local PREFIX = require(script.Parent.Prefix)
 local SUFFIX = ""
 return {
-  controls = { Title = "Before" },
+  controls = { Title = "Before", Tag = "" },
   render = function(props)
     folder:SetAttribute("controlled_renders", (folder:GetAttribute("controlled_renders") or 0) + 1)
     local label = Instance.new("TextLabel")
     label.Name = "ControlledLabel"
     label.Size = UDim2.fromOffset(400, 100)
-    label.Text = PREFIX .. props.controls.Title .. SUFFIX
+    -- Mirrors the rendered text into an attribute so tests can watch it without calling preview_ui.
+    local function show(values)
+      label.Text = PREFIX .. values.Title .. SUFFIX .. values.Tag
+      folder:SetAttribute("controlled_text", label.Text)
+    end
+    show(props.controls)
+    folder:SetAttribute("controlled_first", label.Text)
     label.Parent = props.target
-    local unsubscribe = props.subscribe(function(values) label.Text = PREFIX .. values.Title .. SUFFIX end)
+    local unsubscribe = props.subscribe(show)
     return function()
       folder:SetAttribute("controlled_cleanups", (folder:GetAttribute("controlled_cleanups") or 0) + 1)
       unsubscribe()
       label:Destroy()
+      if folder:GetAttribute("controlled_cleanup_error") then error("RSMCP_RELOAD_CLEANUP_BOOM") end
     end
   end,
 }`;
@@ -869,10 +876,11 @@ return true`,
     assert(dependencyReload.image?.mimeType === 'image/png', 'the post-reload screenshot is returned');
     let texts = await labels();
     assert(texts.length === 1 && texts[0] === 'v2:After', `dependency edit shows without remount and keeps controls (${texts})`);
-    const fixedStory = controlledSource.replace('local SUFFIX = ""', 'local SUFFIX = "!"');
+    // Also changes the default of Tag, which the agent never set: reloads start from current defaults.
+    const fixedStory = controlledSource.replace('local SUFFIX = ""', 'local SUFFIX = "!"').replace('Tag = ""', 'Tag = "+"');
     await setSource('controlled.story', fixedStory);
     texts = await labels();
-    assert(texts.length === 1 && texts[0] === 'v2:After!', `story edit hot-reloads with controls kept (${texts})`);
+    assert(texts.length === 1 && texts[0] === 'v2:After!+', `story edit hot-reloads, keeps set controls, and takes new defaults (${texts})`);
     await setSource('controlled.story', 'return {');
     const broken = await callPreview(client, instanceId, { action: 'screenshot' });
     assert(broken.res.isError !== true && broken.body?.reload?.status === 'failed' && typeof broken.body.reload.error === 'string',
@@ -883,10 +891,91 @@ return true`,
     const recovered = await callPreview(client, instanceId, { action: 'screenshot' });
     assert(recovered.body?.reload?.status === 'ready', `fixing the source recovers the preview (${recovered.text})`);
     texts = await labels();
-    assert(texts.length === 1 && texts[0] === 'v2:After!', `recovered story keeps the agent's controls (${texts})`);
+    assert(texts.length === 1 && texts[0] === 'v2:After!+', `recovered story keeps the agent's controls (${texts})`);
     const reloadState = await previewState(client, instanceId);
     assert(reloadState.attrs.controlled_renders - reloadState.attrs.controlled_cleanups === 1,
       `every reload cleaned up the previous load (${reloadState.attrs.controlled_renders} renders, ${reloadState.attrs.controlled_cleanups} cleanups)`);
+
+    // Runs Luau in the edit DataModel that watches the rendered text, so these steps prove behaviour without
+    // any preview_ui call in between.
+    const watch = async (code, label) => {
+      const watched = await client.callTool('execute_luau', {
+        target: 'edit',
+        instance_id: instanceId,
+        code: `local HttpService = game:GetService("HttpService")
+local f = workspace["${PREVIEW_FOLDER}"]
+local events = {}
+local conn = f:GetAttributeChangedSignal("controlled_text"):Connect(function()
+  table.insert(events, f:GetAttribute("controlled_text"))
+end)
+${code}
+conn:Disconnect()
+return HttpService:JSONEncode({ events = events, first = f:GetAttribute("controlled_first"), final = f:GetAttribute("controlled_text") })`,
+      });
+      assert(watched.success === true, `execute_luau ${label}`);
+      return JSON.parse(String(watched.returnValue));
+    };
+    const waitFor = (text) => `local t0 = os.clock()
+while os.clock() - t0 < 10 and f:GetAttribute("controlled_text") ~= "${text}" do task.wait() end
+task.wait(0.3)`;
+
+    // The monitor re-applies the agent's controls after a reload by itself: the new load first renders the
+    // story default, then the override, with no preview_ui action in between.
+    const background = await watch(`f.Prefix.Source = 'return "v3:"'
+${waitFor('v3:After!+')}`, 'watches a background re-apply');
+    assert(background.first === 'v3:Before!+' && background.final === 'v3:After!+',
+      `controls are re-applied in the background after a reload (first render ${background.first}; ${background.events.join(' -> ')})`);
+
+    // A second reload that lands while the first one's controls are being re-applied still ends with the
+    // overrides applied to the latest load and exactly one live story.
+    const race = await watch(`local triggered
+local trigger = f:GetAttributeChangedSignal("controlled_text"):Connect(function()
+  local text = f:GetAttribute("controlled_text")
+  if not triggered and string.sub(text, 1, 3) == "r1:" then
+    triggered = text
+    f.Prefix.Source = 'return "r2:"'
+  end
+end)
+f.Prefix.Source = 'return "r1:"'
+${waitFor('r2:After!+')}
+trigger:Disconnect()
+table.insert(events, "second reload triggered at " .. tostring(triggered))`, 'races two reloads');
+    assert(race.final === 'r2:After!+', `back-to-back reloads end with the overrides applied (${race.events.join(' -> ')})`);
+    const raced = await callPreview(client, instanceId, { action: 'screenshot' });
+    assert(raced.body?.reload?.status === 'ready' && raced.body.reload.reloads >= 2, `the next action reports both reloads (${raced.text})`);
+    texts = await labels();
+    const raceState = await previewState(client, instanceId);
+    assert(texts.length === 1 && texts[0] === 'r2:After!+'
+      && raceState.attrs.controlled_renders - raceState.attrs.controlled_cleanups === 1, `racing reloads leak nothing (${texts})`);
+
+    // Reload report fields: two reloads between actions, a cleanup error from the replaced load, and an override
+    // whose control was removed by the edit.
+    await watch(`f:SetAttribute("controlled_cleanup_error", true)
+f.Prefix.Source = 'return "v4:"'
+${waitFor('v4:After!+')}
+f:SetAttribute("controlled_cleanup_error", nil)`, 'reloads with a failing cleanup');
+    const renamed = fixedStory.replace('Title = "Before"', 'Heading = "Before"').replaceAll('values.Title', 'values.Heading');
+    await watch(`workspace["${PREVIEW_FOLDER}"]["controlled.story"].Source = ${JSON.stringify(renamed)}
+${waitFor('v4:Before!+')}`, 'renames a set control');
+    const report = await callPreview(client, instanceId, { action: 'screenshot' });
+    const reloadReport = report.body?.reload ?? {};
+    assert(reloadReport.reloads === 2, `the report counts every reload since the last action (${report.text})`);
+    assert(reloadReport.controlsDropped?.some((dropped) => dropped.name === 'Title'), 'a removed control is reported as dropped');
+    assert(reloadReport.storyErrors?.some((err) => err.includes('RSMCP_RELOAD_CLEANUP_BOOM')), 'late story errors are reported');
+
+    // A reload that stays loading longer than the action wait: results say so, interactions are refused, and the
+    // preview recovers once the slow require finishes.
+    await setSource('Prefix', 'task.wait(35) return "slow:"');
+    const pending = await callPreview(client, instanceId, { action: 'screenshot' });
+    assert(pending.body?.reload?.status === 'loading' && String(pending.body.reload.note).includes('still reloading'),
+      `a long reload is reported as still loading (${pending.text})`);
+    const refused = await callPreview(client, instanceId, { action: 'click', x: 10, y: 10 });
+    assert(refused.res.isError === true && refused.text.includes('still hot-reloading'), `interactions are refused while loading (${refused.text})`);
+    const slow = await watch(waitFor('slow:Before!+').replace('< 10', '< 30'), 'waits for the slow reload');
+    assert(slow.final === 'slow:Before!+', `the slow reload finishes (${slow.final})`);
+    const settled = await callPreview(client, instanceId, { action: 'screenshot' });
+    assert(settled.body?.reload?.status === 'ready' && settled.body.reload.reloads === undefined,
+      `the next action reports that the slow reload settled, without counting it twice (${settled.text})`);
 
     // Only this test's own managed/reused instance is touched. Starting Run
     // must dispose the edit preview before a different DataModel is rendered.

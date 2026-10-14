@@ -145,7 +145,10 @@ export function mount(story: ModuleScript, target: Frame, owner: Plugin): Previe
 		});
 		const entryKey = preview.Key;
 		if (entryKey === undefined) error("The story renderer did not create a preview entry for the story");
-		RootProducer.setMountData(entryKey, { AutoReload: true });
+		// RecoverControls would snapshot every control after any change and restore all of them on reload,
+		// freezing defaults the agent never touched. Reloads start from the story's current defaults instead;
+		// the MCP handler re-applies only the controls the agent set.
+		RootProducer.setMountData(entryKey, { AutoReload: true, RecoverControls: false });
 		preview.Lifecycle = Track(entryKey);
 
 		const root = createLegacyRoot(new Instance("Folder"));
