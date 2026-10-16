@@ -105,6 +105,23 @@ describe('explicit runtime viewport targeting', () => {
     ]);
   });
 
+  test('forwards move and the scroll wheel delta to the client', async () => {
+    const { tools, request } = setup();
+    await tools.simulateMouseInput('scroll', 30, 40, undefined, -3, 'client-2', 'instance:controller');
+    await tools.simulateMouseInput('move', 50, 60, undefined, undefined, 'client-2', 'instance:controller');
+    expect(request.mock.calls.map(([endpoint, data, peer]) => [endpoint, data, peer])).toEqual([
+      ['/api/simulate-mouse-input', { action: 'scroll', x: 30, y: 40, button: undefined, wheel: -3 }, 'peer:instance:player2:client-2'],
+      ['/api/simulate-mouse-input', { action: 'move', x: 50, y: 60, button: undefined, wheel: undefined }, 'peer:instance:player2:client-2'],
+    ]);
+  });
+
+  test.each([undefined, 0, Number.NaN])('rejects scroll with wheel %p before contacting Studio', async (wheel) => {
+    const { tools, request } = setup();
+    await expect(tools.simulateMouseInput('scroll', 30, 40, undefined, wheel, 'client-2', 'instance:controller'))
+      .rejects.toThrow(/wheel must be a non-zero number/);
+    expect(request).not.toHaveBeenCalled();
+  });
+
   test.each([1, 2, 3, 4])('eval_client_runtime follows the client-%i alias without a redundant target', async (index) => {
     const { tools, request } = setup();
     await tools.evalClientRuntime('return 1', undefined, `instance:player${index}-client-${index}`);

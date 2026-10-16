@@ -7,15 +7,20 @@
 // capability and drives the REAL input pipeline: SendKey feeds
 // UserInputService.InputBegan/Ended and the control modules (so WASD walks the
 // character at full WalkSpeed with controls intact, no Humanoid hijack),
-// SendMouseButton feeds UIS and activates GUI buttons (and hit-tests against
-// CoreGui), and SendTextInput types into the focused TextBox.
+// SendMouseButton feeds UIS and activates GUI buttons, SendMousePosition moves
+// the cursor (hover, MouseEnter, InputChanged), SendPointerAction scrolls
+// under a position, and SendTextInput types into the focused TextBox. Every method throws when the
+// input would hit interactive CoreGui.
 //
-// Method set on the VirtualInput object (verified live):
-//   SendKey(isDown: boolean, keyCode: Enum.KeyCode)
-//   SendMouseButton(position: Vector2, inputType: Enum.UserInputType, isDown: boolean)
-//   SendTextInput(text: string)
-// There is NO SendMouseMove / SendMouseWheel / SendKeyEvent — so "move" and
-// "scroll" mouse actions are not supported.
+// Verified live on a play client: move and scroll reach game scripts with
+// the device simulator stopped. Under touch device emulation the client has
+// no mouse: clicks arrive as Touch, scroll still works, but moves never reach
+// the game, so we reject move there instead of returning a false success.
+//
+// SendMouseDelta is deliberately NOT exposed. It only works while the cursor
+// is locked (MouseBehavior.LockCenter), and on desktop Studio holds that lock
+// by pinning and hiding the user's real OS cursor — an unacceptable takeover
+// of the host's input.
 //
 // Coordinate space: SendMouseButton coordinates are viewport pixels matching
 // what capture_screenshot returns (window space, origin at the top-left of the
@@ -32,6 +37,8 @@ const UserInputService = game.GetService("UserInputService");
 interface VirtualInput {
 	SendKey(isDown: boolean, keyCode: Enum.KeyCode): void;
 	SendMouseButton(position: Vector2, inputType: Enum.UserInputType, isDown: boolean): void;
+	SendMousePosition(position: Vector2): void;
+	SendPointerAction(position: Vector2, pointerAction: { Wheel: number }): void;
 	SendTextInput(text: string): void;
 }
 
@@ -58,21 +65,33 @@ const MOUSE_TYPE_MAP: Record<string, Enum.UserInputType> = {
 	Middle: Enum.UserInputType.MouseButton3,
 };
 
+const NO_MOUSE_ERROR =
+	"This client has no mouse (touch device emulation is active), so cursor movement never reaches the game. " +
+	"Stop it with set_device_simulator stopSimulation=true, then retry.";
+
 function simulateMouseInput(requestData: Record<string, unknown>) {
 	const action = requestData.action as string;
 	const x = requestData.x as number | undefined;
 	const y = requestData.y as number | undefined;
 	const button = (requestData.button as string) ?? "Left";
+	const wheel = requestData.wheel as number | undefined;
 
 	if (!action) return { error: "action is required" };
 	if (x === undefined || y === undefined) {
 		return { error: "x and y are required" };
+	}
+	if (action === "scroll" && (!typeIs(wheel, "number") || wheel === 0)) {
+		return { error: "wheel must be a non-zero number for scroll" };
 	}
 
 	// Input is silently dropped by the engine when the window isn't rendering
 	// (e.g. minimized). Surface that instead of returning a false success.
 	const notRendering = RenderMonitor.notRenderingReason();
 	if (notRendering !== undefined) return { error: notRendering };
+
+	if (action === "move" && !UserInputService.MouseEnabled) {
+		return { error: NO_MOUSE_ERROR };
+	}
 
 	const vi = getVI();
 	if (!vi) {
@@ -91,16 +110,22 @@ function simulateMouseInput(requestData: Record<string, unknown>) {
 			vi.SendMouseButton(pos, inputType, true);
 		} else if (action === "mouseUp") {
 			vi.SendMouseButton(pos, inputType, false);
+		} else if (action === "move") {
+			vi.SendMousePosition(pos);
+		} else if (action === "scroll") {
+			vi.SendPointerAction(pos, { Wheel: wheel as number });
 		} else {
 			error(
-				`Unsupported action "${action}". CreateVirtualInput supports click, mouseDown, mouseUp ` +
-					`(no move/scroll — those methods don't exist on VirtualInput).`,
+				`Unsupported action "${action}". Use click, mouseDown, mouseUp, move, or scroll.`,
 			);
 		}
 	});
 
 	if (success) {
-		return { success: true, action, x, y, button };
+		const result: Record<string, unknown> = { success: true, action, x, y };
+		if (action === "scroll") result.wheel = wheel;
+		else if (action !== "move") result.button = button;
+		return result;
 	}
 	return { error: `Failed to simulate mouse input: ${err}` };
 }
