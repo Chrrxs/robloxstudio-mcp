@@ -287,7 +287,7 @@ export function serverInstructions(definitions: readonly ToolDefinition[]): stri
   }
   if (has('get_request_status', 'execute_luau', 'set_properties')) {
     instructions.push(
-      'Supply a unique operation_id to execute_luau, set_properties, or edit_script_lines when retry safety matters. After a timeout, query get_request_status with that ID before retrying. Identical arguments reuse a retained outcome; changed arguments are rejected. Recovery and deduplication are bounded to the current server session and five-minute retention window; result payloads may be evicted earlier. Unknown status does not mean unexecuted, and cancellation cannot roll back mutations.',
+      'Supply a unique operation_id to execute_luau, set_properties, edit_script_lines, or generate_model when retry safety matters. After a timeout, query get_request_status with that ID before retrying; pass wait_ms to wait for a late result. Ending that wait never cancels the operation. Identical arguments reuse a retained outcome; changed arguments are rejected. Recovery and deduplication are bounded to the current server session and five-minute retention window; result payloads may be evicted earlier. Unknown status does not mean unexecuted, and cancellation cannot roll back mutations.',
       'Request stages are queued, dispatched, executing (plugin handler entered), and response_delivery (handler returned or admission rejected). executionOutcome is separate from waiter state and delivery outcome; handler observations do not prove user Luau instructions ran. A waiter timeout is not an execution deadline or rollback. Neither missing progress nor connection loss proves completion.',
     );
   }

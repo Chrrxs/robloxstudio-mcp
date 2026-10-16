@@ -1,4 +1,4 @@
-import { BridgeService, isRequestStage, MultiplayerGroupInUseError, parseFailureDetails, parseObservations, RequestFailure, toPublicPeer } from './bridge-service.js';
+import { BridgeService, isRequestStage, isValidOperationId, MultiplayerGroupInUseError, parseFailureDetails, parseObservations, RequestFailure, toPublicPeer } from './bridge-service.js';
 import type {
   MultiplayerGroup,
   PublicStudioPeer,
@@ -308,10 +308,14 @@ export class ProxyBridgeService extends BridgeService {
     this.refreshTimer = undefined;
   }
 
-  override async getRequestStatusEverywhere(requestId: string): Promise<RequestStatus | undefined> {
-    const response = await fetch(`${this.primaryBaseUrl}/request-status?requestId=${encodeURIComponent(requestId)}`, {
+  override async getRequestStatusEverywhere(requestId: string, waitMs = 0, signal?: AbortSignal): Promise<RequestStatus | undefined> {
+    const query = new URLSearchParams({ requestId });
+    if (waitMs > 0) query.set('waitMs', String(waitMs));
+    // The primary owns the wait; leave room for its answer to travel back.
+    const timeout = AbortSignal.timeout(Math.max(0, waitMs) + PROXY_RESPONSE_GRACE_MS);
+    const response = await fetch(`${this.primaryBaseUrl}/request-status?${query}`, {
       headers: this.authHeaders(),
-      signal: AbortSignal.timeout(5_000),
+      signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
     });
     if (!response.ok) throw new Error(`Proxy request status failed (${response.status})`);
     const body: unknown = await response.json();
@@ -329,20 +333,52 @@ export class ProxyBridgeService extends BridgeService {
     timeoutMs = this.proxyRequestTimeout,
     signal?: AbortSignal,
     operationId?: string,
+    identity?: unknown,
   ): Promise<unknown> {
+    return this.postProxy({ endpoint, data, targetPeerId, timeoutMs, operationId, identity, submit: false }, signal);
+  }
+
+  // The primary admits the operation and answers at once, so the operation
+  // never depends on this proxy or its caller staying connected.
+  override async submitRequest(
+    endpoint: string,
+    data: unknown,
+    targetPeerId: string,
+    timeoutMs = this.proxyRequestTimeout,
+    operationId?: string,
+    identity?: unknown,
+  ): Promise<RequestStatus> {
     const requestId = operationId ?? randomUUID();
+    const status = parseRequestStatus(await this.postProxy({
+      endpoint, data, targetPeerId, timeoutMs, operationId: requestId, identity, submit: true,
+    }));
+    if (status.requestId !== requestId) throw new Error('Proxy returned status for a different request');
+    return status;
+  }
+
+  private async postProxy(
+    request: {
+      endpoint: string; data: unknown; targetPeerId: string; timeoutMs: number;
+      operationId?: string; identity?: unknown; submit: boolean;
+    },
+    signal?: AbortSignal,
+  ): Promise<unknown> {
+    const { endpoint, data, targetPeerId, identity, submit } = request;
+    const requestId = request.operationId ?? randomUUID();
     const details: RequestFailureDetails = { requestId, targetPeerId, stage: 'queued', outcome: 'not_executed', executionOutcome: 'not_executed' };
-    if (typeof requestId !== 'string' || requestId.trim().length === 0 || requestId.length > 128) {
+    if (!isValidOperationId(requestId)) {
       throw new RequestFailure('operationId must be a nonempty string of at most 128 characters', 'invalid_operation_id', details);
     }
     if (signal?.aborted) throw new RequestFailure(`Request aborted: ${requestId}; queued; not_executed`, 'request_aborted', details);
     const controller = new AbortController();
-    const effectiveTimeoutMs = Math.max(1, timeoutMs);
+    const effectiveTimeoutMs = Math.max(1, request.timeoutMs);
     let requestBody: string;
     try {
       requestBody = JSON.stringify({
         endpoint, data, targetPeerId, proxyInstanceId: this.proxyInstanceId,
         timeoutMs: effectiveTimeoutMs, operationId: requestId,
+        ...(identity === undefined ? {} : { identity }),
+        ...(submit ? { submit: true } : {}),
       });
     } catch {
       throw new RequestFailure(`Request ${requestId} cannot be serialized at proxy admission; queued; not_executed`, 'request_serialization_failed', details);
@@ -360,10 +396,11 @@ export class ProxyBridgeService extends BridgeService {
     if (signal?.aborted) controller.abort();
     // The primary starts its request timer after this fetch begins. Leave room
     // for its terminal response to travel back before aborting the proxy hop.
+    // A submission is answered at admission, so it never waits for execution.
     const timeoutId = setTimeout(() => {
       timedOut = true;
       controller.abort();
-    }, effectiveTimeoutMs + PROXY_RESPONSE_GRACE_MS);
+    }, (submit ? 0 : effectiveTimeoutMs) + PROXY_RESPONSE_GRACE_MS);
     let primaryError = false;
 
     try {

@@ -1,7 +1,7 @@
 import { readRbxmInput } from '../rbxm-input.js';
 import { StudioHttpClient } from './studio-client.js';
-import { BridgeService, RoutingFailure } from '../bridge-service.js';
-import type { PublicStudioPeer, StudioPeer } from '../bridge-service.js';
+import { BridgeService, isValidOperationId, MAX_OPERATION_ID_LENGTH, MAX_OPERATION_WAIT_MS, RoutingFailure } from '../bridge-service.js';
+import type { PublicStudioPeer, RequestStatus, StudioPeer } from '../bridge-service.js';
 import {
   OpenCloudClient,
   type AssetSearchParams,
@@ -38,6 +38,7 @@ import {
   prepareHostWindowCapture,
 } from '../host-capture.js';
 import type { HostCaptureResult, HostWindowIdentity, ViewportRect } from '../host-capture.js';
+import { createHash } from 'crypto';
 import * as fs from 'fs';
 import * as path from 'path';
 
@@ -1193,15 +1194,9 @@ export class RobloxStudioTools {
     return this.bridge.getPeersInScope(instanceId).find((peer) => peer.role === role);
   }
 
-  private _requestPeer(
-    endpoint: string,
-    data: unknown,
-    targetPeerId: string,
-    timeoutMs?: number,
-    signal?: AbortSignal,
-    operationId?: string,
-  ): Promise<StudioToolResponse> {
-    return this.client.request(endpoint, data, targetPeerId, timeoutMs, signal, operationId) as Promise<StudioToolResponse>;
+  // Forwards exactly the arguments given, so optional recovery fields stay absent.
+  private _requestPeer(...args: Parameters<StudioHttpClient['request']>): Promise<StudioToolResponse> {
+    return this.client.request(...args) as Promise<StudioToolResponse>;
   }
 
   private async _request(
@@ -1235,6 +1230,17 @@ export class RobloxStudioTools {
     signal?: AbortSignal,
     operationId?: string,
   ): Promise<StudioToolResponse> {
+    return this._withSinglePeer(target, instance_id, signal, (targetPeerId) =>
+      this._requestPeer(endpoint, data, targetPeerId, timeoutMs, signal, operationId));
+  }
+
+  // Dispatch runs in the same turn as resolution, so a known topology queues at once.
+  private async _withSinglePeer<T>(
+    target: string | TargetChoice | undefined,
+    instance_id: string | undefined,
+    signal: AbortSignal | undefined,
+    dispatch: (targetPeerId: string) => Promise<T>,
+  ): Promise<T> {
     const refresh = this.bridge.refreshTopologyForRouting(signal);
     if (refresh) await refresh;
     const role = typeof target === 'object' ? this._targetForInstanceId(instance_id, target) : target;
@@ -1247,7 +1253,7 @@ export class RobloxStudioTools {
         data: this._routingErrorData(),
       });
     }
-    return this._requestPeer(endpoint, data, resolved.targetPeerId, timeoutMs, signal, operationId);
+    return dispatch(resolved.targetPeerId);
   }
 
   // A grouped runtime process ID, or its role-suffixed Instance ID, names exactly
@@ -4227,14 +4233,20 @@ export class RobloxStudioTools {
     });
   }
 
-  async getRequestStatus(request_id: string) {
-    if (typeof request_id !== 'string' || request_id.length === 0 || request_id.length > 128) {
-      throw new Error('request_id must contain between 1 and 128 characters');
+  async getRequestStatus(request_id: string, wait_ms?: number, signal?: AbortSignal) {
+    if (!isValidOperationId(request_id)) {
+      throw new Error(`request_id must contain between 1 and ${MAX_OPERATION_ID_LENGTH} characters`);
     }
-    const status = await this.bridge.getRequestStatusEverywhere(request_id);
+    if (wait_ms !== undefined && (!Number.isInteger(wait_ms) || wait_ms < 0 || wait_ms > MAX_OPERATION_WAIT_MS)) {
+      throw new Error(`wait_ms must be an integer from 0 to ${MAX_OPERATION_WAIT_MS}`);
+    }
+    return this._requestStatusResult(request_id, await this.bridge.getRequestStatusEverywhere(request_id, wait_ms ?? 0, signal));
+  }
+
+  private _requestStatusResult(requestId: string, status: RequestStatus | undefined) {
     if (status) return this._textResult({ ...status });
     return this._textResult({
-      requestId: request_id,
+      requestId,
       state: 'unknown',
       outcome: 'unknown',
       message: 'No retained operation record. It may have expired, been evicted, or belonged to an earlier server session. Do not infer that the mutation was not executed.',
@@ -4431,33 +4443,18 @@ export class RobloxStudioTools {
       modelSize = { x, y, z };
     }
 
+    let referencePng: Buffer | undefined;
     let image: GenerateModelImage | undefined;
     if (imagePath) {
       const decoded = decodeImagePathToRgba(imagePath);
-      const png = rgbaToPng(decoded.rgba, decoded.width, decoded.height);
-      const imageAssetId = await this.uploadGenerateModelReferenceImage(
-        png,
-        instance_id,
-      );
-      image = {
-        kind: 'asset',
-        asset_id: imageAssetId,
-      };
+      referencePng = rgbaToPng(decoded.rgba, decoded.width, decoded.height);
     } else if (imageBase64) {
       const imageMimeType = request.image_mime_type;
       if (imageMimeType !== 'image/png') {
         throw new Error('image_mime_type must be "image/png" when image_base64 is provided.');
       }
       const decoded = decodePngBase64ToRgba(imageBase64);
-      const png = rgbaToPng(decoded.rgba, decoded.width, decoded.height);
-      const imageAssetId = await this.uploadGenerateModelReferenceImage(
-        png,
-        instance_id,
-      );
-      image = {
-        kind: 'asset',
-        asset_id: imageAssetId,
-      };
+      referencePng = rgbaToPng(decoded.rgba, decoded.width, decoded.height);
     } else if (imageAssetId !== undefined) {
       if (imageAssetId <= 0) throw new Error('image_asset_id must be a positive number.');
       image = { kind: 'asset', asset_id: imageAssetId };
@@ -4472,6 +4469,21 @@ export class RobloxStudioTools {
     if (timeoutMs !== undefined && timeoutMs > 300000) {
       throw new Error('timeout_ms must be 300000 or less.');
     }
+    const operationId = request.operation_id;
+    if (operationId !== undefined && !isValidOperationId(operationId)) {
+      throw new Error(`operation_id must contain between 1 and ${MAX_OPERATION_ID_LENGTH} characters.`);
+    }
+    if (request.async !== undefined && typeof request.async !== 'boolean') {
+      throw new Error('async must be a boolean.');
+    }
+
+    // Every upload mints a new asset ID, so a retry is identified by the
+    // reference image's content rather than by the dispatched payload.
+    let imageIdentity: unknown;
+    if (referencePng) {
+      image = { kind: 'asset', asset_id: await this.uploadGenerateModelReferenceImage(referencePng, instance_id) };
+      imageIdentity = { kind: 'png_sha256', sha256: createHash('sha256').update(referencePng).digest('hex') };
+    }
 
     const payload: Record<string, unknown> = {
       prompt,
@@ -4485,8 +4497,17 @@ export class RobloxStudioTools {
     if (!schemaGroups) {
       payload.schema = schema ?? 'Body1';
     }
+    const identity = imageIdentity === undefined ? undefined : { ...payload, image: imageIdentity };
 
-    const response = await this._callSingle('/api/generate-model', payload, 'edit', instance_id, timeoutMs);
+    if (request.async === true) {
+      // The job stays tied to this Peer and outlives the caller; timeout_ms only
+      // bounds how long the bridge holds it open. Observe it with get_request_status.
+      const status = await this._withSinglePeer('edit', instance_id, undefined, (targetPeerId) =>
+        this.client.submit('/api/generate-model', payload, targetPeerId, timeoutMs, operationId, identity));
+      return this._requestStatusResult(status.requestId, status);
+    }
+    const response = await this._withSinglePeer('edit', instance_id, undefined, (targetPeerId) =>
+      this._requestPeer('/api/generate-model', payload, targetPeerId, timeoutMs, undefined, operationId, identity));
     return {
       content: [{
         type: 'text',

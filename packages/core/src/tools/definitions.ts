@@ -1,5 +1,6 @@
 import type { ToolAnnotations } from '@modelcontextprotocol/server';
 import { MAX_PNG_BASE64_CHARACTERS } from '../image-decode.js';
+import { MAX_OPERATION_ID_LENGTH, MAX_OPERATION_WAIT_MS } from '../bridge-service.js';
 
 export type ToolCategory = 'read' | 'write';
 
@@ -11,6 +12,14 @@ export interface ToolDefinition {
   outputSchema?: object;
   annotations?: ToolAnnotations;
 }
+
+/** Caller recovery ID shared by every tool whose retries join one retained operation. */
+const OPERATION_ID_PROPERTY = {
+  type: 'string',
+  minLength: 1,
+  maxLength: MAX_OPERATION_ID_LENGTH,
+  description: 'Unique recovery ID; reuse only for identical arguments.'
+} as const;
 
 export const TOOL_DEFINITIONS: ToolDefinition[] = [
   // === File & Instance Browsing ===
@@ -129,12 +138,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
     inputSchema: {
       type: 'object',
       properties: {
-        operation_id: {
-          type: 'string',
-          minLength: 1,
-          maxLength: 128,
-          description: 'Unique recovery ID; reuse only for identical arguments.'
-        },
+        operation_id: OPERATION_ID_PROPERTY,
         instancePath: {
           type: 'string',
           description: 'Canonical path of the target instance.'
@@ -207,12 +211,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
     inputSchema: {
       type: 'object',
       properties: {
-        operation_id: {
-          type: 'string',
-          minLength: 1,
-          maxLength: 128,
-          description: 'Unique recovery ID; reuse only for identical arguments.'
-        },
+        operation_id: OPERATION_ID_PROPERTY,
         instancePath: {
           type: 'string',
           description: 'Canonical path of the script.'
@@ -391,12 +390,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
     inputSchema: {
       type: 'object',
       properties: {
-        operation_id: {
-          type: 'string',
-          minLength: 1,
-          maxLength: 128,
-          description: 'Unique recovery ID; reuse only for identical arguments.'
-        },
+        operation_id: OPERATION_ID_PROPERTY,
         code: {
           type: 'string',
           description: 'Luau code to execute.'
@@ -1248,15 +1242,21 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
   {
     name: 'get_request_status',
     category: 'read',
-    description: 'Use to recover a retained Studio operation outcome after a timeout.',
+    description: 'Use to check, await, or recover a retained Studio operation.',
     inputSchema: {
       type: 'object',
       properties: {
         request_id: {
           type: 'string',
           minLength: 1,
-          maxLength: 128,
+          maxLength: MAX_OPERATION_ID_LENGTH,
           description: 'Caller operation ID or request ID from a server error.'
+        },
+        wait_ms: {
+          type: 'integer',
+          minimum: 0,
+          maximum: MAX_OPERATION_WAIT_MS,
+          description: 'Max ms to await settlement; never cancels.'
         }
       },
       required: ['request_id']
@@ -1374,6 +1374,11 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
     inputSchema: {
       type: 'object',
       properties: {
+        operation_id: OPERATION_ID_PROPERTY,
+        async: {
+          type: 'boolean',
+          description: 'Return job status before generation ends.'
+        },
         prompt: {
           type: 'string',
           description: 'Generation prompt; required without an image.'
@@ -1434,7 +1439,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
           minimum: 1,
           maximum: 300000,
           default: 120000,
-          description: 'Bridge timeout in ms.'
+          description: 'Bridge deadline in ms; never cancels generation.'
         },
         instance_id: {
           type: 'string',
