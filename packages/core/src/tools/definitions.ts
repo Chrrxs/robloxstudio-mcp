@@ -1615,13 +1615,13 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
   {
     name: 'simulate_mouse_input',
     category: 'write',
-    description: 'Use to click the live playtest viewport at known pixel coordinates.',
+    description: 'Use to click, move, or scroll a live playtest viewport.',
     inputSchema: {
       type: 'object',
       properties: {
         action: {
           type: 'string',
-          enum: ['click', 'mouseDown', 'mouseUp'],
+          enum: ['click', 'mouseDown', 'mouseUp', 'move', 'scroll'],
           description: 'Mouse action; click performs down, then up.'
         },
         x: {
@@ -1632,10 +1632,14 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
           type: 'number',
           description: 'Viewport pixel Y coordinate.'
         },
+        wheel: {
+          type: 'number',
+          description: 'For scroll; negative is down.'
+        },
         button: {
           type: 'string',
           enum: ['Left', 'Right', 'Middle'],
-          description: 'Mouse button; defaults to Left.'
+          description: 'Defaults to Left.'
         },
         target: {
           type: 'string',

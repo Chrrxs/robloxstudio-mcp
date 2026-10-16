@@ -4894,9 +4894,12 @@ export class RobloxStudioTools {
     };
   }
 
-  async simulateMouseInput(action: string, x: number, y: number, button?: string, scrollDirection?: string, target?: string, instance_id?: string) {
+  async simulateMouseInput(action: string, x: number, y: number, button?: string, wheel?: number, target?: string, instance_id?: string) {
     if (!action) {
       throw new Error('action is required for simulate_mouse_input');
+    }
+    if (action === 'scroll' && (typeof wheel !== 'number' || !Number.isFinite(wheel) || wheel === 0)) {
+      throw new Error('wheel must be a non-zero number when action is scroll');
     }
     // Default to the running playtest client (where the input pipeline lives)
     // when the caller didn't pick a target; fall back to edit otherwise.
@@ -4905,7 +4908,7 @@ export class RobloxStudioTools {
     const { instanceId, clientRole } = this._resolveRuntime(instance_id);
     const role = this._targetForInstanceId(instance_id, { requested: target, fallback: clientRole ?? 'edit', accepts: isClientRole });
     const response = await this._callSingle('/api/simulate-mouse-input', {
-      action, x, y, button
+      action, x, y, button, wheel
     }, role, instanceId);
     return {
       content: [{

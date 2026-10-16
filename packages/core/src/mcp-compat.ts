@@ -59,6 +59,9 @@ Read output with get_runtime_logs. Reuse nextCursor as cursor for one Instance, 
 - Inspect built-in device IDs with get_device_simulator_state, then apply one with set_device_simulator or compare several with capture_device_matrix.
 - Clear temporary network and device settings with reset_simulation_state after a scenario.
 - Capture the viewport with capture_screenshot before simulate_mouse_input so the pixel coordinates match. Keyboard input should target a live client when game input is under test.
+- Mouse movement needs a client with a mouse; stop touch device emulation with set_device_simulator stopSimulation=true first.
+- To chain inputs in one call or target a GUI element by path, run execute_luau on that client and call UserInputService:CreateVirtualInput() (SendMouseButton, SendMousePosition, SendPointerAction, SendKey, SendTextInput). Convert a GuiObject's AbsolutePosition to viewport pixels by adding GuiService:GetGuiInset() unless its ScreenGui ignores the inset. Wrap the steps in pcall and release held keys and buttons in the same script; its VirtualInput is separate from the one simulate_mouse_input and simulate_keyboard_input use.
+- Do not lock the cursor (MouseBehavior.LockCenter, first-person camera) or call SendMouseDelta: Studio pins and hides the user's real OS cursor while it is locked.
 
 ## Debugging and profiling
 

@@ -47,6 +47,7 @@ const FULL_TESTS = [
   'proxy-mode-peer-fanout.mjs',
   'execute-luau-output-capture.mjs',
   'simulation-state-lifecycle.mjs',
+  'virtual-input.mjs',
   'multiplayer-add-player-end-regression.mjs',
   'multiplayer-test-lifecycle.mjs',
   'studio-websocket-transport.mjs',
