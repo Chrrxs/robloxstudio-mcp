@@ -24,6 +24,7 @@ import ClientBroker from "./ClientBroker";
 import ServerUrlSettings from "./ServerUrlSettings";
 import PluginSession from "./PluginSession";
 import StudioWebSocket from "./StudioWebSocket";
+import PathGuard from "./PathGuard";
 import type {
 	RequestPayload,
 	ReadyResponse,
@@ -101,13 +102,15 @@ const routeMap: Record<string, Handler> = {
 	"/api/get-scene-analysis": SceneAnalysisHandlers.getSceneAnalysis,
 };
 
+const pathGuard = PathGuard.createPathGuard((path) => Utils.resolveInstancePath(path).ambiguity);
+
 function processRequest(request: RequestPayload, context: StudioRequestContext): unknown {
 	const endpoint = request.endpoint;
-	const data = request.data ?? {};
+	const data = (request.data ?? {}) as Record<string, unknown>;
 
 	const handler = routeMap[endpoint];
 	if (handler) {
-		return handler(data as Record<string, unknown>, context);
+		return pathGuard.run(endpoint, data, () => handler(data, context));
 	} else {
 		return { error: `Unknown endpoint: ${endpoint}` };
 	}

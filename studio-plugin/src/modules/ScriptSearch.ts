@@ -8,6 +8,8 @@ interface ScriptSnapshot {
 
 interface ScriptCorpus {
 	resolveRoot(path: string): Instance | undefined;
+	/** Optional per-search predicate: true when a script's emitted path names several instances. */
+	createAmbiguityChecker?(): (instance: Instance) => boolean;
 	getChildren(instance: Instance): Instance[];
 	readScript(instance: Instance, classFilter?: string): ScriptSnapshot | undefined;
 }
@@ -29,6 +31,7 @@ interface ScriptResult {
 	name: string;
 	className: string;
 	enabled?: boolean;
+	ambiguous?: true;
 	matches: LineMatch[];
 }
 
@@ -212,6 +215,7 @@ function createScriptSearch(corpus: ScriptCorpus) {
 		const searchPath = (requestData.path as string) ?? "";
 		const root = corpus.resolveRoot(searchPath);
 		if (root === undefined) return { error: `Path not found: ${searchPath}` };
+		const isAmbiguous = corpus.createAmbiguityChecker?.() ?? (() => false);
 
 		const searchPattern = caseSensitive ? pattern : pattern.lower();
 		const patternAlternatives = usePattern ? splitLuaAlternation(searchPattern) : undefined;
@@ -309,6 +313,7 @@ function createScriptSearch(corpus: ScriptCorpus) {
 						matches: scriptMatches,
 					};
 					if (snapshot.enabled !== undefined) scriptResult.enabled = snapshot.enabled;
+					if (isAmbiguous(instance)) scriptResult.ambiguous = true;
 					results.push(scriptResult);
 				}
 			}

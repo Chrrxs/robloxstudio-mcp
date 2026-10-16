@@ -207,6 +207,180 @@ return true
     });
     assertContains(legacySource.source, 'legacy path works', 'canonical path reads source written through legacy path');
 
+    // Duplicate sibling names: searches and structure must flag the shared
+    // path, and writes through it must be refused instead of picking one.
+    const dupesPath = childPath(rootPath, 'Dupes');
+    const twinScriptPath = childPath(childPath(dupesPath, 'Twin'), 'Worker');
+    const dupesSetup = await client.callTool('execute_luau', {
+      target: 'edit',
+      instance_id: instanceId,
+      code: `
+local root = game:GetService("ServerScriptService"):FindFirstChild(${JSON.stringify(rootName)})
+local dupes = Instance.new("Folder")
+dupes.Name = "Dupes"
+dupes.Parent = root
+for index = 1, 2 do
+    local twin = Instance.new("Folder")
+    twin.Name = "Twin"
+    twin.Parent = dupes
+    local worker = Instance.new("Script")
+    worker.Name = "Worker"
+    worker.Enabled = false
+    worker.Source = "return " .. index
+    worker.Parent = twin
+end
+for index = 1, 3 do
+    local value = Instance.new("IntValue")
+    value.Name = "Counter" .. index
+    value.Parent = dupes
+end
+return true
+`,
+    });
+    assert(dupesSetup.success === true, 'execute_luau creates duplicate-name fixtures');
+
+    const scoped = await client.callTool('search_objects', {
+      path: dupesPath,
+      className: 'IntValue',
+      maxResults: 2,
+      instance_id: instanceId,
+    });
+    assertNoError(scoped, 'search_objects accepts path, className and maxResults');
+    assert(scoped.count === 2 && scoped.truncated === true, `search_objects truncates at maxResults (${JSON.stringify(scoped)})`);
+    assert(scoped.results.every((entry) => entry.className === 'IntValue' && entry.path.startsWith(`${dupesPath}.`)),
+      'search_objects stays inside the requested subtree and class');
+
+    const complete = await client.callTool('search_objects', {
+      path: dupesPath,
+      className: 'IntValue',
+      maxResults: 3,
+      instance_id: instanceId,
+    });
+    assert(complete.count === 3 && complete.truncated === false, 'search_objects does not flag an exact fit as truncated');
+
+    const workers = await client.callTool('search_objects', {
+      query: 'worker',
+      path: dupesPath,
+      className: 'Script',
+      instance_id: instanceId,
+    });
+    assert(workers.count === 2, `search_objects finds both duplicate scripts (${JSON.stringify(workers)})`);
+    assert(workers.results.every((entry) => entry.path === twinScriptPath && entry.ambiguous === true),
+      'search_objects marks duplicate-name paths as ambiguous');
+    const counter = await client.callTool('search_objects', {
+      query: 'Counter1',
+      path: dupesPath,
+      instance_id: instanceId,
+    });
+    assert(counter.count === 1 && counter.results[0].ambiguous === undefined, 'search_objects leaves unique paths unmarked');
+
+    const dupesStructure = await client.callTool('get_project_structure', {
+      path: dupesPath,
+      maxDepth: 2,
+      instance_id: instanceId,
+    });
+    assertNoError(dupesStructure, 'get_project_structure reads duplicate-name fixtures');
+    const twins = (dupesStructure.children ?? []).filter((child) => child.name === 'Twin');
+    assert(twins.length === 2 && twins.every((child) => child.ambiguous === true),
+      'get_project_structure marks duplicate-name children as ambiguous');
+
+    const refusedSource = await client.callToolError('set_script_source', {
+      instancePath: twinScriptPath,
+      source: 'return "overwritten"',
+      instance_id: instanceId,
+    });
+    assert(JSON.stringify(refusedSource).includes('Ambiguous path'),
+      `set_script_source refuses an ambiguous path (${JSON.stringify(refusedSource)})`);
+    const refusedProps = await client.callToolError('set_properties', {
+      instancePath: twinScriptPath,
+      properties: { Name: 'Renamed' },
+      instance_id: instanceId,
+    });
+    assert(JSON.stringify(refusedProps).includes('Ambiguous path'),
+      `set_properties refuses an ambiguous path (${JSON.stringify(refusedProps)})`);
+    const counterPath = childPath(dupesPath, 'Counter1');
+    const refusedParent = await client.callToolError('set_properties', {
+      instancePath: counterPath,
+      properties: { Parent: childPath(dupesPath, 'Twin') },
+      instance_id: instanceId,
+    });
+    assert(JSON.stringify(refusedParent).includes('properties.Parent'),
+      `set_properties refuses an ambiguous Parent reference (${JSON.stringify(refusedParent)})`);
+    const counterStill = await client.callTool('get_instance_properties', {
+      instancePath: counterPath,
+      instance_id: instanceId,
+    });
+    assert(counterStill.properties?.Parent === dupesPath, 'refused Parent write leaves the instance in place');
+    assert(counterStill.pathWarning === undefined && counterStill.ambiguousPaths === undefined,
+      'unique read paths carry no ambiguity notice');
+
+    const untouched = await client.callTool('execute_luau', {
+      target: 'edit',
+      instance_id: instanceId,
+      code: `
+local dupes = game:GetService("ServerScriptService"):FindFirstChild(${JSON.stringify(rootName)}).Dupes
+local sources = {}
+for _, twin in ipairs(dupes:GetChildren()) do
+    local worker = twin:FindFirstChild("Worker")
+    if worker then table.insert(sources, worker.Name .. "=" .. worker.Source) end
+end
+table.sort(sources)
+return table.concat(sources, ",")
+`,
+    });
+    assert(untouched.returnValue === 'Worker=return 1,Worker=return 2',
+      `refused writes leave both duplicates unchanged (${JSON.stringify(untouched.returnValue)})`);
+
+    const ambiguousProps = await client.callTool('get_instance_properties', {
+      instancePath: twinScriptPath,
+      excludeSource: true,
+      instance_id: instanceId,
+    });
+    assert(ambiguousProps.properties?.Name === 'Worker', 'get_instance_properties still reads the first match');
+    assert(typeof ambiguousProps.pathWarning === 'string'
+      && ambiguousProps.ambiguousPaths?.[0]?.field === 'instancePath'
+      && ambiguousProps.ambiguousPaths?.[0]?.matchCount === 2,
+      `get_instance_properties reports the ambiguous path (${JSON.stringify(ambiguousProps)})`);
+
+    const ambiguousSource = await client.callTool('get_script_source', {
+      instancePath: twinScriptPath,
+      instance_id: instanceId,
+    });
+    assertContains(ambiguousSource.source, 'return 1', 'get_script_source reads the first duplicate');
+    assert(typeof ambiguousSource.pathWarning === 'string' && Array.isArray(ambiguousSource.ambiguousPaths),
+      `get_script_source reports the ambiguous path (${JSON.stringify(ambiguousSource)})`);
+
+    const ambiguousAttributes = await client.callTool('get_attributes', {
+      instancePath: twinScriptPath,
+      instance_id: instanceId,
+    });
+    assert(typeof ambiguousAttributes.pathWarning === 'string', 'get_attributes reports the ambiguous path');
+
+    const ambiguousRoot = await client.callTool('search_objects', {
+      path: childPath(dupesPath, 'Twin'),
+      className: 'Script',
+      instance_id: instanceId,
+    });
+    assert(ambiguousRoot.count === 1 && typeof ambiguousRoot.pathWarning === 'string',
+      `search_objects reports an ambiguous search root (${JSON.stringify(ambiguousRoot)})`);
+
+    const grepped = await client.callTool('grep_scripts', {
+      pattern: 'return',
+      path: dupesPath,
+      instance_id: instanceId,
+    });
+    assert(grepped.results?.length === 2 && grepped.results.every((entry) => entry.ambiguous === true),
+      `grep_scripts marks duplicate-name script paths (${JSON.stringify(grepped)})`);
+
+    const dryRun = await client.callTool('find_and_replace_in_scripts', {
+      pattern: 'return',
+      replacement: 'return',
+      path: childPath(dupesPath, 'Twin'),
+      dryRun: true,
+      instance_id: instanceId,
+    });
+    assert(typeof dryRun.pathWarning === 'string', `find_and_replace dry run reports instead of refusing (${JSON.stringify(dryRun)})`);
+
     const breakpoint = await client.callTool('breakpoints', {
       action: 'set',
       target: 'edit',
