@@ -203,10 +203,16 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
   {
     name: 'edit_script_lines',
     category: 'write',
-    description: 'Use for an exact, localized replacement in one script.',
+    description: 'Use for exact replacements in one script; batched edits apply all or none.',
     inputSchema: {
       type: 'object',
       properties: {
+        operation_id: {
+          type: 'string',
+          minLength: 1,
+          maxLength: 128,
+          description: 'Unique recovery ID; reuse only for identical arguments.'
+        },
         instancePath: {
           type: 'string',
           description: 'Canonical path of the script.'
@@ -223,12 +229,34 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
           type: 'string',
           description: 'Start line; required when old_string is not unique.'
         },
+        edits: {
+          type: 'array',
+          maxItems: 100,
+          description: 'Batch instead of old_string; all or none, one undo step.',
+          items: {
+            type: 'object',
+            properties: {
+              old_string: { type: 'string', description: 'Exact text; unique unless line_range is set.' },
+              new_string: { type: 'string', description: 'Replacement text.' },
+              line_range: { type: 'string', description: 'Start line in the source as read.' }
+            },
+            required: ['old_string', 'new_string']
+          }
+        },
+        expected_revision: {
+          type: 'string',
+          description: 'Revision from the last read; rejects stale edits.'
+        },
+        dry_run: {
+          type: 'boolean',
+          description: 'Preview the diff without editing.'
+        },
         instance_id: {
           type: 'string',
           description: 'Studio process ID when ambiguous.'
         }
       },
-      required: ['instancePath', 'old_string', 'new_string']
+      required: ['instancePath']
     }
   },
   {

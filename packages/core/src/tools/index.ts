@@ -41,6 +41,15 @@ import type { HostCaptureResult, HostWindowIdentity, ViewportRect } from '../hos
 import * as fs from 'fs';
 import * as path from 'path';
 
+/** One exact replacement for edit_script_lines; startLine anchors old_string to a line start. */
+export interface ScriptEdit {
+  oldString: string;
+  newString: string;
+  startLine?: number;
+}
+
+export const MAX_SCRIPT_EDITS = 100;
+
 type RawImageCaptureResponse = {
   success?: boolean;
   error?: string;
@@ -1847,6 +1856,7 @@ export class RobloxStudioTools {
       path: pathStr,
       className: response.className,
       lineCount: response.lineCount,
+      ...(typeof response.revision === 'string' ? { revision: response.revision } : {}),
       ...(showRange ? { startLine: response.startLine, endLine: response.endLine } : {}),
       ...(response.enabled === false ? { enabled: false } : {}),
       ...(response.truncated ? { truncated: true } : {}),
@@ -1872,21 +1882,54 @@ export class RobloxStudioTools {
   }
 
 
-  async editScriptLines(instancePath: string, oldString: string, newString: string, startLine?: number, instance_id?: string) {
-    if (!instancePath || typeof oldString !== 'string' || typeof newString !== 'string') {
-      throw new Error('Instance path, old_string, and new_string are required for edit_script_lines');
+  async editScriptLines(
+    instancePath: string,
+    edits: ScriptEdit[],
+    options: { expectedRevision?: string; dryRun?: boolean } = {},
+    instance_id?: string,
+    operation_id?: string,
+  ) {
+    if (!instancePath || !Array.isArray(edits) || edits.length === 0) {
+      throw new Error('Instance path and old_string/new_string or edits are required for edit_script_lines');
     }
-    const payload: Record<string, unknown> = { instancePath, old_string: oldString, new_string: newString };
-    if (startLine !== undefined) payload.startLine = startLine;
-    const response = await this._callSingle('/api/edit-script-lines', payload, undefined, instance_id);
-    return {
-      content: [
-        {
-          type: 'text',
-          text: JSON.stringify(response)
-        }
-      ]
-    };
+    if (edits.length > MAX_SCRIPT_EDITS) {
+      throw new Error(`edit_script_lines accepts at most ${MAX_SCRIPT_EDITS} edits`);
+    }
+    edits.forEach((edit, index) => {
+      if (typeof edit.oldString !== 'string' || typeof edit.newString !== 'string') {
+        throw new Error(edits.length === 1
+          ? 'Instance path, old_string, and new_string are required for edit_script_lines'
+          : `edit_script_lines edits[${index}] requires old_string and new_string`);
+      }
+    });
+    const { expectedRevision, dryRun } = options;
+    if (expectedRevision !== undefined && (typeof expectedRevision !== 'string' || expectedRevision.length === 0)) {
+      throw new Error('edit_script_lines expected_revision must be a nonempty string');
+    }
+    if (dryRun !== undefined && typeof dryRun !== 'boolean') {
+      throw new Error('edit_script_lines dry_run must be a boolean');
+    }
+
+    const payload: Record<string, unknown> = { instancePath };
+    if (edits.length === 1 && expectedRevision === undefined && !dryRun) {
+      // A plain single edit keeps the legacy shape. Batches, revisions, and
+      // previews only use `edits`, so a plugin that predates them rejects the
+      // request for missing old_string instead of applying it unchecked.
+      const [edit] = edits;
+      payload.old_string = edit.oldString;
+      payload.new_string = edit.newString;
+      if (edit.startLine !== undefined) payload.startLine = edit.startLine;
+    } else {
+      payload.edits = edits.map((edit) => ({
+        old_string: edit.oldString,
+        new_string: edit.newString,
+        ...(edit.startLine !== undefined ? { startLine: edit.startLine } : {}),
+      }));
+      if (expectedRevision !== undefined) payload.expectedRevision = expectedRevision;
+      if (dryRun) payload.dryRun = true;
+    }
+    const response = await this._callSingle('/api/edit-script-lines', payload, undefined, instance_id, undefined, undefined, operation_id);
+    return this._textResult(response);
   }
 
   async insertScriptLines(instancePath: string, afterLine: number, newContent: string, instance_id?: string) {

@@ -192,7 +192,13 @@ describe('HTTP Server', () => {
         line_range: '42',
         instance_id: 'place:test',
       });
-      expect(editScriptLines).toHaveBeenLastCalledWith('game.ServerScriptService.Main', 'old', 'new', 42, 'place:test');
+      expect(editScriptLines).toHaveBeenLastCalledWith(
+        'game.ServerScriptService.Main',
+        [{ oldString: 'old', newString: 'new', startLine: 42 }],
+        { expectedRevision: undefined, dryRun: undefined },
+        'place:test',
+        undefined,
+      );
 
       await TOOL_HANDLERS.delete_script_lines(fakeTools, {
         instancePath: 'game.ServerScriptService.Main',
@@ -208,7 +214,64 @@ describe('HTTP Server', () => {
         startLine: 99,
         instance_id: 'place:test',
       });
-      expect(editScriptLines).toHaveBeenLastCalledWith('game.ServerScriptService.Main', 'old', 'new', undefined, 'place:test');
+      expect(editScriptLines).toHaveBeenLastCalledWith(
+        'game.ServerScriptService.Main',
+        [{ oldString: 'old', newString: 'new', startLine: undefined }],
+        { expectedRevision: undefined, dryRun: undefined },
+        'place:test',
+        undefined,
+      );
+    });
+
+    test('edit_script_lines maps batched edits, revision, preview, and operation identity', async () => {
+      const editScriptLines = jest.fn(async () => ({ content: [] }));
+      const fakeTools = { editScriptLines } as unknown as RobloxStudioTools;
+
+      await TOOL_HANDLERS.edit_script_lines(fakeTools, {
+        instancePath: 'game.ServerScriptService.Main',
+        edits: [
+          { old_string: 'local a = 1', new_string: 'local a = 2' },
+          { old_string: 'end', new_string: 'end -- done', line_range: '7' },
+        ],
+        expected_revision: '120:12345',
+        dry_run: true,
+        operation_id: 'op-edit',
+        instance_id: 'place:test',
+      });
+      expect(editScriptLines).toHaveBeenLastCalledWith(
+        'game.ServerScriptService.Main',
+        [
+          { oldString: 'local a = 1', newString: 'local a = 2', startLine: undefined },
+          { oldString: 'end', newString: 'end -- done', startLine: 7 },
+        ],
+        { expectedRevision: '120:12345', dryRun: true },
+        'place:test',
+        'op-edit',
+      );
+    });
+
+    test('edit_script_lines rejects ambiguous or malformed edit batches before dispatch', async () => {
+      const editScriptLines = jest.fn(async () => ({ content: [] }));
+      const fakeTools = { editScriptLines } as unknown as RobloxStudioTools;
+      const invoke = (body: Record<string, unknown>) => Promise.resolve().then(() => TOOL_HANDLERS.edit_script_lines(fakeTools, {
+        instancePath: 'game.ServerScriptService.Main',
+        ...body,
+      }));
+
+      await expect(invoke({
+        old_string: 'a', new_string: 'b', edits: [{ old_string: 'c', new_string: 'd' }],
+      })).rejects.toThrow(/either edits or old_string/);
+      await expect(invoke({ edits: [] })).rejects.toThrow(/nonempty array/);
+      await expect(invoke({ edits: 'a' })).rejects.toThrow(/nonempty array/);
+      await expect(invoke({ edits: [{ old_string: 'a' }] })).rejects.toThrow(/edits\[0\] requires old_string and new_string/);
+      await expect(invoke({
+        edits: [{ old_string: 'a', new_string: 'b' }, { old_string: 'c', new_string: 'd', line_range: '3-4' }],
+      })).rejects.toThrow(/edits\[1\] line_range must be a single line/);
+      await expect(invoke({
+        edits: Array.from({ length: 101 }, () => ({ old_string: 'a', new_string: 'b' })),
+      })).rejects.toThrow(/at most 100 edits/);
+      await expect(invoke({ new_string: 'b' })).rejects.toThrow(/old_string, and new_string are required/);
+      expect(editScriptLines).not.toHaveBeenCalled();
     });
 
     test('script line tools reject unsupported line_range shapes', async () => {

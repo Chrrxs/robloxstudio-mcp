@@ -540,6 +540,63 @@ return document:GetText()
     assert(replacedDraft.success === true && replacedDraft.scriptsModified === 1 && replacedDraft.scriptsFailed === 0,
       `find_and_replace_in_scripts verifies its open-document write (${JSON.stringify(replacedDraft)})`);
 
+    const beforeBatch = await client.callTool('get_script_source', {
+      instancePath: scriptPath,
+      instance_id: instanceId,
+    });
+    assert(typeof beforeBatch.revision === 'string', `get_script_source returns a revision (${JSON.stringify(beforeBatch)})`);
+    const batchEdits = [
+      { old_string: 'local value = 41', new_string: 'local value = 42' },
+      { old_string: 'return value + 1', new_string: 'return value + 1 -- batched', line_range: '2' },
+    ];
+    const batchPreview = await client.callTool('edit_script_lines', {
+      instancePath: scriptPath,
+      edits: batchEdits,
+      expected_revision: beforeBatch.revision,
+      dry_run: true,
+      instance_id: instanceId,
+    });
+    assert(batchPreview.success === true && batchPreview.revision === beforeBatch.revision
+      && batchPreview.diff.includes('+local value = 42') && batchPreview.diff.includes('+return value + 1 -- batched'),
+    `edit_script_lines dry_run previews the batch (${JSON.stringify(batchPreview)})`);
+
+    const failedBatch = await client.callToolError('edit_script_lines', {
+      instancePath: scriptPath,
+      edits: [batchEdits[0], { old_string: 'not in the script', new_string: 'x' }],
+      instance_id: instanceId,
+    });
+    const afterFailedBatch = await client.callTool('get_script_source', {
+      instancePath: scriptPath,
+      instance_id: instanceId,
+    });
+    assert(typeof failedBatch.error === 'string' && failedBatch.error.includes('edits[1]')
+      && afterFailedBatch.revision === beforeBatch.revision,
+    `edit_script_lines leaves the live draft untouched when one edit fails (${JSON.stringify(failedBatch)})`);
+
+    const appliedBatch = await client.callTool('edit_script_lines', {
+      instancePath: scriptPath,
+      edits: batchEdits,
+      expected_revision: beforeBatch.revision,
+      instance_id: instanceId,
+    });
+    const afterBatch = await client.callTool('get_script_source', {
+      instancePath: scriptPath,
+      instance_id: instanceId,
+    });
+    assert(appliedBatch.success === true && appliedBatch.method === 'UpdateSourceAsync'
+      && appliedBatch.revision === batchPreview.resultRevision && afterBatch.revision === appliedBatch.revision,
+    `edit_script_lines applies the previewed batch to the live draft (${JSON.stringify(appliedBatch)})`);
+    assertContains(afterBatch.source, 'return value + 1 -- batched', 'batched edits land in the live draft');
+
+    const staleBatch = await client.callToolError('edit_script_lines', {
+      instancePath: scriptPath,
+      edits: batchEdits,
+      expected_revision: beforeBatch.revision,
+      instance_id: instanceId,
+    });
+    assert(staleBatch.code === 'revision_mismatch' && staleBatch.revision === appliedBatch.revision,
+      `edit_script_lines rejects a retried batch with a stale revision (${JSON.stringify(staleBatch)})`);
+
     const replacedNested = await client.callTool('find_and_replace_in_scripts', {
       pattern: 'NESTED_OLD',
       replacement: 'NESTED_NEW',
