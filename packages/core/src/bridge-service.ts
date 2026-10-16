@@ -261,6 +261,17 @@ export function parseFailureDetails(
   };
 }
 
+export const MAX_OPERATION_ID_LENGTH = 128;
+/** Finished operation records stay queryable this long after their last lifecycle transition. */
+const OPERATION_RETENTION_MS = 5 * 60_000;
+/** Upper bound for one wait on a retained operation's settlement. */
+export const MAX_OPERATION_WAIT_MS = 300_000;
+
+/** Shared by every boundary that accepts a caller-supplied operation ID. */
+export function isValidOperationId(value: unknown): value is string {
+  return typeof value === 'string' && value.trim().length > 0 && value.length <= MAX_OPERATION_ID_LENGTH;
+}
+
 interface OperationRecord {
   status: RequestStatus;
   fingerprint: string;
@@ -287,6 +298,11 @@ interface PendingRequest {
   abortSignal?: AbortSignal;
   abortListener?: () => void;
 }
+
+type RequestAdmission =
+  | { kind: 'rejected'; failure: RequestFailure }
+  | { kind: 'pending'; requestId: string; request: PendingRequest }
+  | { kind: 'retained'; requestId: string; status: RequestStatus };
 
 interface PendingCancellation extends StudioRequestCancellation {
   transportPeerId: string;
@@ -362,7 +378,6 @@ export function toPublicPeer(peer: StudioPeer): PublicStudioPeer {
 }
 
 const STALE_PEER_MS = 30_000;
-const OPERATION_RETENTION_MS = 5 * 60_000;
 const MAX_OPERATION_RECORDS = 32768;
 const MAX_RETAINED_RESULTS = 1024;
 const MAX_RETAINED_RESULT_BYTES = 64 * 1024 * 1024;
@@ -418,6 +433,8 @@ export class BridgeService implements StudioTransportQueue {
   private retainedResultBytes = 0;
   private pendingRequestBytes = 0;
   private readonly pendingCancellations = new Map<string, PendingCancellation>();
+  // Status waits end on settlement; they never own or cancel the operation.
+  private readonly settlementWaiters = new Map<string, Set<() => void>>();
   private readonly peersById = new Map<string, StudioPeer>();
   private readonly multiplayerGroupsById = new Map<string, MultiplayerGroup>();
   private readonly peerRegisteredListeners = new Set<PeerRegisteredListener>();
@@ -1088,72 +1105,100 @@ export class BridgeService implements StudioTransportQueue {
     timeoutMs = this.requestTimeout,
     signal?: AbortSignal,
     operationId?: string,
+    identity?: unknown,
   ): Promise<unknown> {
+    const admission = this.admitRequest(endpoint, data, targetPeerId, timeoutMs, signal, operationId, identity);
+    if (admission.kind === 'rejected') return Promise.reject(admission.failure);
+    if (admission.kind === 'pending') return admission.request.promise;
+    return this.replayRetained(admission.status, targetPeerId);
+  }
+
+  /**
+   * Admits an operation, or rejoins the identical retained one, without tying it
+   * to the caller: no caller signal can end it, and the bridge keeps it open for
+   * timeoutMs. Observe it with getRequestStatusEverywhere; ending that wait never
+   * cancels the operation.
+   */
+  submitRequest(
+    endpoint: string,
+    data: unknown,
+    targetPeerId: string,
+    timeoutMs = this.requestTimeout,
+    operationId?: string,
+    identity?: unknown,
+  ): Promise<RequestStatus> {
+    const admission = this.admitRequest(endpoint, data, targetPeerId, timeoutMs, undefined, operationId, identity);
+    if (admission.kind === 'rejected') return Promise.reject(admission.failure);
+    if (admission.kind === 'retained') return Promise.resolve(admission.status);
+    // The outcome is retained in the operation record; nobody awaits this waiter.
+    admission.request.promise.catch(() => undefined);
+    return Promise.resolve(this.getRequestStatus(admission.requestId)!);
+  }
+
+  // An operation's identity defaults to its payload. Callers whose dispatched
+  // payload is not reproducible on retry (for example, a freshly uploaded asset
+  // ID) supply the identity of their arguments instead.
+  private admitRequest(
+    endpoint: string,
+    data: unknown,
+    targetPeerId: string,
+    timeoutMs: number,
+    signal: AbortSignal | undefined,
+    operationId: string | undefined,
+    identity: unknown,
+  ): RequestAdmission {
     const requestId = operationId ?? randomUUID();
     const effectiveTimeoutMs = Math.max(1, timeoutMs);
     const details: RequestFailureDetails = { requestId, targetPeerId, stage: 'queued', outcome: 'not_executed', executionOutcome: 'not_executed' };
-    if (typeof requestId !== 'string' || requestId.trim().length === 0 || requestId.length > 128) {
-      return Promise.reject(new RequestFailure('operationId must be a nonempty string of at most 128 characters', 'invalid_operation_id', details));
+    const reject = (failure: RequestFailure): RequestAdmission => ({ kind: 'rejected', failure });
+    if (!isValidOperationId(requestId)) {
+      return reject(new RequestFailure('operationId must be a nonempty string of at most 128 characters', 'invalid_operation_id', details));
     }
     if (signal?.aborted) {
-      return Promise.reject(new RequestFailure(`Request aborted: ${requestId}; queued; not_executed`, 'request_aborted', details));
+      return reject(new RequestFailure(`Request aborted: ${requestId}; queued; not_executed`, 'request_aborted', details));
     }
     let requestBytes: number;
     let fingerprint: string;
     try {
       const target = this.getPeerById(targetPeerId);
-      fingerprint = createHash('sha256').update(JSON.stringify({ targetPeerId, endpoint, data })).digest('hex');
+      fingerprint = createHash('sha256').update(JSON.stringify(
+        identity === undefined ? { targetPeerId, endpoint, data } : { targetPeerId, endpoint, identity },
+      )).digest('hex');
       requestBytes = Buffer.byteLength(JSON.stringify({
         kind: 'request', requestId, peerId: targetPeerId, target: target?.role,
         endpoint, data: data ?? null, remainingMs: effectiveTimeoutMs,
       }));
     } catch {
-      return Promise.reject(new RequestFailure(`Request ${requestId} cannot be serialized; queued; not_executed`, 'request_serialization_failed', details));
+      return reject(new RequestFailure(`Request ${requestId} cannot be serialized; queued; not_executed`, 'request_serialization_failed', details));
     }
     this.pruneOperations(Date.now());
     const existing = this.operations.get(requestId);
     if (existing) {
       if (existing.fingerprint !== fingerprint) {
-        return Promise.reject(new RequestFailure(
+        return reject(new RequestFailure(
           `Request ${requestId} already identifies a different operation; existing operation ${existing.status.stage}; not replayed`,
           'operation_id_collision',
           { requestId, targetPeerId: existing.status.targetPeerId, stage: existing.status.stage, outcome: 'unknown', ...observations(existing.status) },
         ));
       }
       const pending = this.pendingRequests.get(requestId);
-      if (pending) return pending.promise;
-      const status = this.getRequestStatus(requestId)!;
-      if (status.state === 'settled' && !status.resultUnavailable) {
-        const error = status.error;
-        if (error && typeof error === 'object'
-          && 'name' in error && error.name === 'RequestFailure'
-          && 'code' in error && typeof error.code === 'string'
-          && 'message' in error && typeof error.message === 'string' && 'details' in error) {
-          const failureDetails = parseFailureDetails(error.details, { requestId, targetPeerId });
-          if (failureDetails) return Promise.reject(new RequestFailure(error.message, error.code, failureDetails));
-        }
-        return Object.hasOwn(status, 'error') ? Promise.reject(status.error) : Promise.resolve(status.response);
-      }
-      return Promise.reject(new RequestFailure(
-        `Request ${requestId} already exists: ${status.state}; ${status.stage}; ${status.outcome}; use get_request_status; not replayed`,
-        'operation_not_replayed',
-        { requestId, targetPeerId, stage: status.stage, outcome: status.executionOutcome === 'not_executed' ? 'not_executed' : 'unknown', ...observations(status) },
-      ));
+      if (pending) return { kind: 'pending', requestId, request: pending };
+      return { kind: 'retained', requestId, status: this.getRequestStatus(requestId)! };
     }
     if (requestBytes > MAX_REQUEST_BYTES) {
-      return Promise.reject(new RequestFailure(
+      return reject(new RequestFailure(
         `Request ${requestId} is ${requestBytes} bytes at server_send; limit ${MAX_REQUEST_BYTES} bytes; queued; not_executed`,
         'request_too_large', { ...details, bytes: requestBytes, limitBytes: MAX_REQUEST_BYTES, transportStage: 'server_send' },
       ));
     }
     if (this.pendingRequests.size >= MAX_PENDING_REQUESTS || this.pendingRequestBytes + requestBytes > MAX_PENDING_REQUEST_BYTES) {
-      return Promise.reject(new RequestFailure(
+      return reject(new RequestFailure(
         `Request ${requestId} rejected at admission: pending capacity exceeded (${this.pendingRequests.size}/${MAX_PENDING_REQUESTS} requests, ${this.pendingRequestBytes + requestBytes}/${MAX_PENDING_REQUEST_BYTES} bytes); queued; not_executed`,
         'request_capacity_exceeded', { ...details, bytes: this.pendingRequestBytes + requestBytes, limitBytes: MAX_PENDING_REQUEST_BYTES },
       ));
     }
 
-    const { promise, resolve, reject } = Promise.withResolvers<unknown>();
+    const { promise, resolve, reject: rejectWaiter } = Promise.withResolvers<unknown>();
     const abortListener = () => {
       const pending = this.pendingRequests.get(requestId);
       if (pending) this.endRequestWaiter(pending, 'aborted', 'Request aborted');
@@ -1165,7 +1210,7 @@ export class BridgeService implements StudioTransportQueue {
     const now = Date.now();
     const request: PendingRequest = {
       id: requestId, endpoint, data, targetPeerId, timestamp: now,
-      resolve, reject, promise, timeoutId, timeoutMs: effectiveTimeoutMs, requestBytes,
+      resolve, reject: rejectWaiter, promise, timeoutId, timeoutMs: effectiveTimeoutMs, requestBytes,
       abortSignal: signal, abortListener,
     };
     this.pendingRequests.set(requestId, request);
@@ -1179,7 +1224,29 @@ export class BridgeService implements StudioTransportQueue {
     if (signal?.aborted) abortListener();
     const target = this.getPeerById(targetPeerId);
     if (this.pendingRequests.has(requestId) && target) this.notifyRequestAvailable(target.transportPeerId);
-    return promise;
+    return { kind: 'pending', requestId, request };
+  }
+
+  // Identical retries of a finished operation recover its retained outcome and
+  // never dispatch again.
+  private replayRetained(status: RequestStatus, targetPeerId: string): Promise<unknown> {
+    const { requestId } = status;
+    if (status.state === 'settled' && !status.resultUnavailable) {
+      const error = status.error;
+      if (error && typeof error === 'object'
+        && 'name' in error && error.name === 'RequestFailure'
+        && 'code' in error && typeof error.code === 'string'
+        && 'message' in error && typeof error.message === 'string' && 'details' in error) {
+        const failureDetails = parseFailureDetails(error.details, { requestId, targetPeerId });
+        if (failureDetails) return Promise.reject(new RequestFailure(error.message, error.code, failureDetails));
+      }
+      return Object.hasOwn(status, 'error') ? Promise.reject(status.error) : Promise.resolve(status.response);
+    }
+    return Promise.reject(new RequestFailure(
+      `Request ${requestId} already exists: ${status.state}; ${status.stage}; ${status.outcome}; use get_request_status; not replayed`,
+      'operation_not_replayed',
+      { requestId, targetPeerId, stage: status.stage, outcome: status.executionOutcome === 'not_executed' ? 'not_executed' : 'unknown', ...observations(status) },
+    ));
   }
 
   private endRequestWaiter(
@@ -1401,6 +1468,7 @@ export class BridgeService implements StudioTransportQueue {
       else request.resolve(response);
     }
     this.pendingCancellations.delete(requestId);
+    for (const notify of this.settlementWaiters.get(requestId) ?? []) notify();
     this.pruneOperations(now);
     if (operation.transportPeerId) this.notifyRequestAvailable(operation.transportPeerId);
     return 'accepted';
@@ -1422,8 +1490,36 @@ export class BridgeService implements StudioTransportQueue {
     return status;
   }
 
-  async getRequestStatusEverywhere(requestId: string): Promise<RequestStatus | undefined> {
+  /**
+   * Returns the retained status, first waiting up to waitMs for a pending,
+   * timed-out, aborted, or disconnected operation to settle. A late Studio
+   * response can still settle those. The wait ends on settlement, deadline, or
+   * signal; ending it never cancels or rolls back the operation.
+   */
+  async waitForRequestStatus(requestId: string, waitMs = 0, signal?: AbortSignal): Promise<RequestStatus | undefined> {
+    const status = this.getRequestStatus(requestId);
+    const boundedWaitMs = Math.min(Math.max(0, waitMs), MAX_OPERATION_WAIT_MS);
+    if (!status || status.state === 'settled' || boundedWaitMs === 0 || signal?.aborted) return status;
+    const { promise, resolve } = Promise.withResolvers<void>();
+    const notify = () => resolve();
+    let waiters = this.settlementWaiters.get(requestId);
+    if (!waiters) this.settlementWaiters.set(requestId, waiters = new Set());
+    waiters.add(notify);
+    const timeoutId = setTimeout(notify, boundedWaitMs);
+    signal?.addEventListener('abort', notify, { once: true });
+    try {
+      await promise;
+    } finally {
+      clearTimeout(timeoutId);
+      signal?.removeEventListener('abort', notify);
+      waiters.delete(notify);
+      if (waiters.size === 0) this.settlementWaiters.delete(requestId);
+    }
     return this.getRequestStatus(requestId);
+  }
+
+  async getRequestStatusEverywhere(requestId: string, waitMs = 0, signal?: AbortSignal): Promise<RequestStatus | undefined> {
+    return this.waitForRequestStatus(requestId, waitMs, signal);
   }
 
   private pruneOperations(now: number): void {

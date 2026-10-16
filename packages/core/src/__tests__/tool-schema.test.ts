@@ -576,6 +576,7 @@ describe('Tool schema compatibility', () => {
     const props = schema.properties ?? {};
     expect(tool!.category).toBe('write');
     expect(Object.keys(props).sort()).toEqual([
+      'async',
       'generate_textures',
       'image_asset_id',
       'image_base64',
@@ -584,6 +585,7 @@ describe('Tool schema compatibility', () => {
       'instance_id',
       'max_triangles',
       'name',
+      'operation_id',
       'prompt',
       'schema',
       'schema_groups',

@@ -96,7 +96,7 @@ describe('HTTP security', () => {
           expect(response.status).toBe(200);
           expect(response.body).toEqual({ response: result });
           expect(dispatch).toHaveBeenCalledWith(endpoint, { instancePath: 'game.Workspace' },
-            'studio-peer', 1000, expect.any(AbortSignal), 'read-operation');
+            'studio-peer', 1000, expect.any(AbortSignal), 'read-operation', undefined);
         } finally {
           dispatch.mockRestore();
           await app.cleanup();
@@ -119,7 +119,7 @@ describe('HTTP security', () => {
         expect(response.status).toBe(200);
         expect(response.body).toEqual({ response: capture });
         expect(dispatch).toHaveBeenCalledWith('/api/capture-studio', { encoding: 'png' },
-          'studio-peer', 1000, expect.any(AbortSignal), 'capture-operation');
+          'studio-peer', 1000, expect.any(AbortSignal), 'capture-operation', undefined);
       } finally {
         dispatch.mockRestore();
         await app.cleanup();

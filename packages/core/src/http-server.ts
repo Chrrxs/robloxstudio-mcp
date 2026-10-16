@@ -7,7 +7,7 @@ import { WebSocketServer } from 'ws';
 import { toNodeHandler } from '@modelcontextprotocol/node';
 import { MAX_SCRIPT_EDITS, RobloxStudioTools } from './tools/index.js';
 import type { ScriptEdit } from './tools/index.js';
-import { BridgeService, MultiplayerGroupInUseError, RequestFailure, RoutingFailure } from './bridge-service.js';
+import { BridgeService, isValidOperationId, MAX_OPERATION_WAIT_MS, MultiplayerGroupInUseError, RequestFailure, RoutingFailure } from './bridge-service.js';
 import type { PublicStudioInstance, PublicStudioPeer, RegisterPeerResult } from './bridge-service.js';
 import type { ToolDefinition } from './tools/definitions.js';
 import { createToolHttpHandler, normalizeToolResult, publicToolErrorBody } from './mcp-runtime.js';
@@ -220,7 +220,7 @@ function scriptEditsFromBody(body: Record<string, unknown>): ScriptEdit[] {
 }
 
 export const TOOL_HANDLERS: Record<string, ToolHandler> = {
-  get_request_status: (tools, body) => tools.getRequestStatus(body.request_id),
+  get_request_status: (tools, body, context) => tools.getRequestStatus(body.request_id, body.wait_ms, context?.signal),
   get_roblox_skills: (tools, body) => tools.getRobloxSkills(body.action, body.name),
   get_roblox_docs: (tools, body) => tools.getRobloxDocs(body.name, body.doc_type, body.section),
   get_place_info: (tools, body) => tools.getPlaceInfo(body.instance_id),
@@ -902,18 +902,32 @@ export function createHttpServer(tools: RobloxStudioTools, bridge: BridgeService
     res.status(426).json({ error: 'studio_websocket_required', protocolVersion: STUDIO_PROTOCOL_VERSION });
   });
 
-  app.get('/request-status', (req, res) => {
+  app.get('/request-status', async (req, res) => {
     const requestId = req.query.requestId;
     if (typeof requestId !== 'string' || requestId.length === 0 || requestId.length > 1024) {
       res.status(400).json({ error: 'invalid_request_id' });
       return;
     }
-    res.json({ status: bridge.getRequestStatus(requestId) ?? null });
+    const waitMs = req.query.waitMs === undefined ? 0 : Number(req.query.waitMs);
+    if (!Number.isInteger(waitMs) || waitMs < 0 || waitMs > MAX_OPERATION_WAIT_MS) {
+      res.status(400).json({ error: `waitMs must be an integer between 0 and ${MAX_OPERATION_WAIT_MS}` });
+      return;
+    }
+    // A disconnected caller ends only its own wait, never the operation.
+    const controller = new AbortController();
+    const abort = () => controller.abort();
+    res.once('close', abort);
+    try {
+      const status = await bridge.waitForRequestStatus(requestId, waitMs, controller.signal);
+      if (!res.destroyed) res.json({ status: status ?? null });
+    } finally {
+      res.removeListener('close', abort);
+    }
   });
 
 
   app.post('/proxy', async (req, res) => {
-    const { endpoint, data, targetPeerId, proxyInstanceId, timeoutMs, operationId } = req.body;
+    const { endpoint, data, targetPeerId, proxyInstanceId, timeoutMs, operationId, identity, submit } = req.body;
 
     if (!endpoint || !targetPeerId) {
       res.status(400).json({ error: 'endpoint and targetPeerId are required' });
@@ -936,8 +950,12 @@ export function createHttpServer(tools: RobloxStudioTools, bridge: BridgeService
     if (proxyInstanceId) {
       proxyInstances.add(proxyInstanceId);
     }
-    if (operationId !== undefined && (typeof operationId !== 'string' || operationId.trim().length === 0 || operationId.length > 128)) {
+    if (operationId !== undefined && !isValidOperationId(operationId)) {
       res.status(400).json({ error: 'operationId must be a non-empty string of at most 128 characters' });
+      return;
+    }
+    if (submit !== undefined && typeof submit !== 'boolean') {
+      res.status(400).json({ error: 'submit must be a boolean' });
       return;
     }
 
@@ -946,14 +964,11 @@ export function createHttpServer(tools: RobloxStudioTools, bridge: BridgeService
     req.once('aborted', abort);
     res.once('close', abort);
     try {
-      const response = await bridge.sendRequest(
-        endpoint,
-        data,
-        targetPeerId,
-        timeoutMs,
-        controller.signal,
-        operationId,
-      );
+      // A submission is answered at admission and outlives this HTTP exchange;
+      // only a waiting request is tied to it.
+      const response = submit
+        ? await bridge.submitRequest(endpoint, data, targetPeerId, timeoutMs, operationId, identity)
+        : await bridge.sendRequest(endpoint, data, targetPeerId, timeoutMs, controller.signal, operationId, identity);
       res.json({ response });
     } catch (error) {
       if (!res.headersSent && !res.destroyed) {
