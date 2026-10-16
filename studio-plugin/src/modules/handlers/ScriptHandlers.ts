@@ -1,5 +1,6 @@
 import Utils from "../Utils";
 import Recording from "../Recording";
+import { planScriptEdits, sourceRevision, ScriptEditRequest } from "../ScriptEdits";
 
 const { getInstancePath, getInstanceByPath, readScriptSource, applyScriptSource, splitLines, joinLines } = Utils;
 const { beginRecording, finishRecording } = Recording;
@@ -71,6 +72,7 @@ function getScriptSource(requestData: Record<string, unknown>) {
 			numberedSource: numberLines(selectedLines, returnedStartLine),
 			sourceLength: fullSource.size(),
 			lineCount: totalLineCount,
+			revision: sourceRevision(fullSource),
 			startLine: returnedStartLine,
 			endLine: returnedEndLine,
 			isPartial: explicitRange,
@@ -137,14 +139,48 @@ function setScriptSource(requestData: Record<string, unknown>) {
 	};
 }
 
+// Accepts the batched `edits` array or the single top-level old_string form.
+function readScriptEdits(requestData: Record<string, unknown>): ScriptEditRequest[] | string {
+	const rawEdits = requestData.edits;
+	if (rawEdits === undefined) {
+		const oldString = requestData.old_string;
+		const newString = requestData.new_string;
+		const startLine = requestData.startLine;
+		if (!typeIs(oldString, "string") || !typeIs(newString, "string")) {
+			return "Instance path, old_string, and new_string are required";
+		}
+		if (startLine !== undefined && !typeIs(startLine, "number")) return "startLine must be a number";
+		return [{ oldString, newString, startLine }];
+	}
+	if (!typeIs(rawEdits, "table")) return "edits must be an array";
+	const edits: ScriptEditRequest[] = [];
+	for (const rawEdit of rawEdits as unknown[]) {
+		const index = edits.size();
+		if (!typeIs(rawEdit, "table")) return `edits[${index}] must be an object`;
+		const fields = rawEdit as Record<string, unknown>;
+		const oldString = fields.old_string;
+		const newString = fields.new_string;
+		const startLine = fields.startLine;
+		if (!typeIs(oldString, "string") || !typeIs(newString, "string")) {
+			return `edits[${index}] requires old_string and new_string`;
+		}
+		if (startLine !== undefined && !typeIs(startLine, "number")) return `edits[${index}].startLine must be a number`;
+		edits.push({ oldString, newString, startLine });
+	}
+	if (edits.size() === 0) return "edits must contain at least one edit";
+	return edits;
+}
+
 function editScriptLines(requestData: Record<string, unknown>) {
 	const instancePath = requestData.instancePath as string;
-	const oldString = requestData.old_string as string;
-	const newString = requestData.new_string as string;
-	const startLine = requestData.startLine as number | undefined;
+	const expectedRevision = requestData.expectedRevision;
+	const dryRun = requestData.dryRun === true;
 
-	if (!instancePath || oldString === undefined || newString === undefined) {
-		return { error: "Instance path, old_string, and new_string are required" };
+	if (!instancePath) return { error: "Instance path is required" };
+	const edits = readScriptEdits(requestData);
+	if (typeIs(edits, "string")) return { error: edits };
+	if (expectedRevision !== undefined && !typeIs(expectedRevision, "string")) {
+		return { error: "expectedRevision must be a string" };
 	}
 
 	const instance = getInstanceByPath(instancePath);
@@ -153,69 +189,55 @@ function editScriptLines(requestData: Record<string, unknown>) {
 		return { error: `Instance is not a script-like object: ${instance.ClassName}` };
 	}
 
-	const recordingId = beginRecording(`Edit script: ${instance.Name}`);
-
-	const [success, result] = pcall(() => {
-		const source = readScriptSource(instance);
-		const searchLen = oldString.size();
-		let matchStart: number;
-
-		if (startLine !== undefined) {
-			if (startLine < 1) error(`startLine must be >= 1 (got ${startLine})`);
-
-			let lineStartByte = 1;
-			let currentLine = 1;
-			while (currentLine < startLine) {
-				const [nlPos] = string.find(source, "\n", lineStartByte, true);
-				if (nlPos === undefined) {
-					error(`startLine ${startLine} is past end of script (${currentLine} lines)`);
-				}
-				lineStartByte = (nlPos as number) + 1;
-				currentLine++;
-			}
-
-			const candidate = string.sub(source, lineStartByte, lineStartByte + searchLen - 1);
-			if (candidate !== oldString) {
-				error(`old_string does not match at line ${startLine}. Use get_script_source to verify the exact text at that line.`);
-			}
-			matchStart = lineStartByte;
-		} else {
-			let count = 0;
-			let searchPos = 1;
-			let firstMatch: number | undefined;
-			while (true) {
-				const [foundStart] = string.find(source, oldString, searchPos, true);
-				if (foundStart === undefined) break;
-				if (firstMatch === undefined) firstMatch = foundStart;
-				count++;
-				if (count > 1) break;
-				searchPos = foundStart + searchLen;
-			}
-			if (count === 0) error("old_string not found in script. If old_string contains repeated patterns (e.g. closing braces), pass startLine to anchor the edit.");
-			if (count > 1) error("old_string matches multiple locations. Provide more surrounding context, or pass startLine to anchor the edit to a specific line.");
-			matchStart = firstMatch as number;
-		}
-
-		// Byte-slice replacement avoids Lua pattern escaping (safe for multi-byte chars like em dashes).
-		const newSource = string.sub(source, 1, matchStart - 1) + newString + string.sub(source, matchStart + searchLen);
-
-		const applyResult = applyScriptSource(instance, newSource, source);
-		if (!applyResult.success) error(applyResult.error);
-
+	const [readSuccess, readResult] = pcall(() => readScriptSource(instance));
+	if (!readSuccess) return { error: `Failed to edit script: ${readResult}` };
+	const source = readResult as string;
+	const revision = sourceRevision(source);
+	if (expectedRevision !== undefined && expectedRevision !== revision) {
 		return {
-			success: true,
+			error: "Script changed since expected_revision; read it again with get_script_source and retry.",
+			code: "revision_mismatch",
 			instancePath,
-			method: applyResult.method,
-			message: "Script edited successfully",
+			expectedRevision,
+			revision,
 		};
-	});
-
-	if (success) {
-		finishRecording(recordingId, true);
-		return result;
 	}
-	finishRecording(recordingId, false);
-	return { error: `Failed to edit script: ${result}` };
+
+	const plan = planScriptEdits(source, edits, dryRun);
+	if (!plan.ok) return { error: `Failed to edit script: ${plan.error}` };
+
+	if (dryRun) {
+		const preview: Record<string, unknown> = {
+			success: true,
+			dryRun: true,
+			instancePath,
+			editCount: edits.size(),
+			revision,
+			resultRevision: sourceRevision(plan.newSource),
+			diff: plan.diff,
+		};
+		if (plan.diffTruncated) preview.diffTruncated = true;
+		return preview;
+	}
+
+	const recordingId = beginRecording(edits.size() > 1
+		? `Edit script (${edits.size()} edits): ${instance.Name}`
+		: `Edit script: ${instance.Name}`);
+	// One compare-and-set write: a draft typed since the read rejects the whole batch.
+	const applyResult = applyScriptSource(instance, plan.newSource, source);
+	if (!applyResult.success) {
+		finishRecording(recordingId, false);
+		return { error: `Failed to edit script: ${applyResult.error}` };
+	}
+	finishRecording(recordingId, true);
+	return {
+		success: true,
+		instancePath,
+		editCount: edits.size(),
+		revision: sourceRevision(plan.newSource),
+		method: applyResult.method,
+		message: "Script edited successfully",
+	};
 }
 
 function insertScriptLines(requestData: Record<string, unknown>) {

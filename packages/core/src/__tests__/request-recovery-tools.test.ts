@@ -24,11 +24,18 @@ describe('mutation recovery tools', () => {
     jest.useRealTimers();
   });
 
-  test.each(['execute_luau', 'set_properties'])('%s recovers a late result using caller operation identity', async tool => {
+  test.each(['execute_luau', 'set_properties', 'edit_script_lines'])('%s recovers a late result using caller operation identity', async tool => {
     const operationId = `recovery-${tool}`;
-    const invoke = () => tool === 'execute_luau'
-      ? tools.executeLuau('return 42', 'edit', 'instance:recovery', operationId)
-      : tools.setProperties('game.Workspace.Text', { Value: 'recipe' }, 'instance:recovery', operationId);
+    const invoke = () => {
+      if (tool === 'execute_luau') return tools.executeLuau('return 42', 'edit', 'instance:recovery', operationId);
+      if (tool === 'set_properties') {
+        return tools.setProperties('game.Workspace.Text', { Value: 'recipe' }, 'instance:recovery', operationId);
+      }
+      return tools.editScriptLines('game.ServerScriptService.Main', [
+        { oldString: 'local a = 1', newString: 'local a = 1\nlocal b = 2' },
+        { oldString: 'return a', newString: 'return a + b' },
+      ], { expectedRevision: '24:1' }, 'instance:recovery', operationId);
+    };
     const original = invoke();
     const timedOut = expect(original).rejects.toThrow(operationId);
     const delivery = bridge.claimNextRequestForTransport('edit', 'socket');
