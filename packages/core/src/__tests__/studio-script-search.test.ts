@@ -18,6 +18,7 @@ interface ScriptCorpus {
   resolveRoot(path: string): TestNode | undefined;
   getChildren(node: TestNode): TestNode[];
   readScript(node: TestNode, classFilter?: string): ScriptSnapshot | undefined;
+  createAmbiguityChecker?(): (node: TestNode) => boolean;
 }
 
 interface SearchControl {
@@ -149,6 +150,40 @@ describe('Studio script search', () => {
         maxResultsPerScript: 0,
       },
     });
+  });
+
+  test('marks matching scripts whose paths name several instances', async () => {
+    const root = { id: 'root' };
+    const first = { id: 'first' };
+    const second = { id: 'second' };
+    const unique = { id: 'unique' };
+    const unmatched = { id: 'unmatched' };
+    const snapshot = (instancePath: string, source = 'Needle') => ({
+      instancePath, name: 'Worker', className: 'Script', source,
+    });
+    const checked: string[] = [];
+    const corpus: ScriptCorpus = {
+      resolveRoot: () => root,
+      getChildren: (node) => node === root ? [first, second, unique, unmatched] : [],
+      readScript: (node) => {
+        if (node === root) return undefined;
+        if (node === unmatched) return snapshot('game.ServerScriptService.Worker', 'nothing here');
+        return snapshot(node === unique ? 'game.ServerScriptService.Unique' : 'game.ServerScriptService.Worker');
+      },
+      createAmbiguityChecker: () => (node) => {
+        checked.push(node.id);
+        return node !== unique;
+      },
+    };
+    const module = await loadScriptSearch();
+
+    const result = JSON.parse(JSON.stringify(module.createScriptSearch(corpus).search({
+      pattern: 'Needle',
+    }, { checkpoint: () => undefined })));
+
+    expect(result.results.map((entry: { ambiguous?: boolean }) => entry.ambiguous)).toEqual([true, true, undefined]);
+    // Only scripts that matched are checked.
+    expect(checked).toEqual(['first', 'second', 'unique']);
   });
 
   test('supports top-level alternation in Lua-pattern mode', async () => {

@@ -38,7 +38,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
       properties: {
         query: {
           type: 'string',
-          description: 'Text, class, or property value to match.'
+          description: 'Substring; optional with className.'
         },
         searchType: {
           type: 'string',
@@ -49,12 +49,25 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
           type: 'string',
           description: 'Property to search when searchType is property.'
         },
+        path: {
+          type: 'string',
+          description: 'Subtree root; defaults to game.'
+        },
+        className: {
+          type: 'string',
+          description: 'IsA filter, e.g. BasePart.'
+        },
+        maxResults: {
+          type: 'integer',
+          minimum: 1,
+          maximum: 10000,
+          description: 'Default 100.'
+        },
         instance_id: {
           type: 'string',
           description: 'Studio process ID when ambiguous.'
         }
-      },
-      required: ['query']
+      }
     }
   },
 

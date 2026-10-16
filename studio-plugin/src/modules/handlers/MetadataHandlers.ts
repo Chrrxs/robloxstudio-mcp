@@ -3,7 +3,7 @@ import LuauExec from "../LuauExec";
 
 const Selection = game.GetService("Selection");
 
-const { getInstancePath, getInstanceByPath } = Utils;
+const { getInstancePath, getInstanceByPath, createPathAmbiguityChecker } = Utils;
 
 function serializeValue(value: unknown): unknown {
 	const vType = typeOf(value);
@@ -66,12 +66,17 @@ function getSelection(_requestData: Record<string, unknown>) {
 		return { success: true, selection: [], count: 0, message: "No objects selected" };
 	}
 
-	const selectedObjects = selection.map((instance: Instance) => ({
-		name: instance.Name,
-		className: instance.ClassName,
-		path: getInstancePath(instance),
-		parent: instance.Parent ? getInstancePath(instance.Parent) : undefined,
-	}));
+	const isAmbiguous = createPathAmbiguityChecker();
+	const selectedObjects = selection.map((instance: Instance) => {
+		const entry: Record<string, unknown> = {
+			name: instance.Name,
+			className: instance.ClassName,
+			path: getInstancePath(instance),
+			parent: instance.Parent ? getInstancePath(instance.Parent) : undefined,
+		};
+		if (isAmbiguous(instance)) entry.ambiguous = true;
+		return entry;
+	});
 
 	return {
 		success: true,

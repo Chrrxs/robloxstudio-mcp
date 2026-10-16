@@ -26,6 +26,7 @@ import { findBuiltInStudioSkill, loadBuiltInStudioSkills } from '../studio-skill
 import { runManageMonetization } from './monetization.js';
 import { rgbaToJpeg } from '../jpeg-encoder.js';
 import { rgbaToPng } from '../png-encoder.js';
+import { pathNotice } from '../path-notice.js';
 import {
   captureStudioWindow,
   cropToViewport,
@@ -1729,11 +1730,20 @@ export class RobloxStudioTools {
     return typeof info.gameId === 'number' ? info.gameId : 0;
   }
 
-  async searchObjects(query: string, searchType: string = 'name', propertyName?: string, instance_id?: string) {
+  async searchObjects(query: string | undefined, options: {
+    searchType?: string;
+    propertyName?: string;
+    path?: string;
+    className?: string;
+    maxResults?: number;
+  } = {}, instance_id?: string) {
     const response = await this._callSingle('/api/search-objects', {
       query,
-      searchType,
-      propertyName
+      searchType: options.searchType ?? 'name',
+      propertyName: options.propertyName,
+      path: options.path,
+      className: options.className,
+      maxResults: options.maxResults,
     }, undefined, instance_id);
     return {
       content: [
@@ -1827,7 +1837,7 @@ export class RobloxStudioTools {
     const response = await this._callSingle('/api/get-script-source', { instancePath, startLine, endLine }, undefined, instance_id);
 
     if (response.error) {
-      return this._textResult({ error: response.error });
+      return this._textResult({ error: response.error, ...pathNotice(response) });
     }
     const pathStr = (response.instancePath as string) || instancePath;
     const showRange = Boolean(response.isPartial || response.truncated)
@@ -1841,6 +1851,7 @@ export class RobloxStudioTools {
       ...(response.enabled === false ? { enabled: false } : {}),
       ...(response.truncated ? { truncated: true } : {}),
       ...(typeof response.note === 'string' && response.note.length > 0 ? { note: response.note } : {}),
+      ...pathNotice(response),
       source: response.numberedSource || response.source,
     });
   }
@@ -5008,11 +5019,12 @@ export class RobloxStudioTools {
       instance_id,
     ) as { error?: string; base64?: string; instance_count?: number };
 
+    const notice = pathNotice(response);
     if (response.error) {
-      return { content: [{ type: 'text', text: JSON.stringify({ error: response.error }) }] };
+      return { content: [{ type: 'text', text: JSON.stringify({ error: response.error, ...notice }) }] };
     }
     if (!response.base64) {
-      return { content: [{ type: 'text', text: JSON.stringify({ error: 'plugin returned no base64 payload' }) }] };
+      return { content: [{ type: 'text', text: JSON.stringify({ error: 'plugin returned no base64 payload', ...notice }) }] };
     }
 
     const bytes = Buffer.from(response.base64, 'base64');
@@ -5021,7 +5033,7 @@ export class RobloxStudioTools {
       fs.mkdirSync(path.dirname(resolved), { recursive: true });
       fs.writeFileSync(resolved, bytes);
     } catch (err) {
-      return { content: [{ type: 'text', text: JSON.stringify({ error: `failed to write ${resolved}: ${(err as Error).message}` }) }] };
+      return { content: [{ type: 'text', text: JSON.stringify({ error: `failed to write ${resolved}: ${(err as Error).message}`, ...notice }) }] };
     }
 
     return {
@@ -5031,6 +5043,7 @@ export class RobloxStudioTools {
           bytes_written: bytes.length,
           instance_count: response.instance_count ?? instancePaths.length,
           output_path: resolved,
+          ...notice,
         }),
       }],
     };

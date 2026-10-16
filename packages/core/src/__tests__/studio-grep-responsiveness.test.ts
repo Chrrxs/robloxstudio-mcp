@@ -132,6 +132,7 @@ async function loadQueryHandlers(
   const utils = {
     getInstancePath: (instance: TestInstance) => `game.${instance.Name}`,
     getInstanceByPath: () => root,
+    createPathAmbiguityChecker: () => () => false,
     readScriptSource: (instance: TestInstance) => {
       if (shouldThrowOnRead) {
         shouldThrowOnRead = false;

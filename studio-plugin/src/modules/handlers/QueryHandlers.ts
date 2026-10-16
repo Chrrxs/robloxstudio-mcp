@@ -1,9 +1,10 @@
 import Utils from "../Utils";
 import CooperativeJobRunner from "../CooperativeJobRunner";
 import ScriptSearch from "../ScriptSearch";
+import InstanceSearch from "../InstanceSearch";
 import type { StudioRequestContext } from "../../types";
 
-const { getInstancePath, getInstanceByPath, readScriptSource } = Utils;
+const { getInstancePath, getInstanceByPath, createPathAmbiguityChecker, readScriptSource } = Utils;
 
 interface TreeNode {
 	name: string;
@@ -126,45 +127,35 @@ function getPlaceInfo(_requestData: Record<string, unknown>) {
 	};
 }
 
-function searchObjects(requestData: Record<string, unknown>) {
-	const query = requestData.query as string;
-	const searchType = (requestData.searchType as string) ?? "name";
-	const propertyName = requestData.propertyName as string | undefined;
+const instanceSearch = InstanceSearch.createInstanceSearch<Instance>({
+	resolveRoot: getInstanceByPath,
+	getChildren: (instance) => instance.GetChildren(),
+	getName: (instance) => instance.Name,
+	getClassName: (instance) => instance.ClassName,
+	isA: (instance, className) => instance.IsA(className as keyof Instances),
+	readPropertyText: (instance, propertyName) => {
+		const [success, value] = pcall(() => tostring((instance as unknown as Record<string, unknown>)[propertyName]));
+		return success ? (value as string) : undefined;
+	},
+	getPath: getInstancePath,
+	createAmbiguityChecker: createPathAmbiguityChecker,
+});
 
-	if (!query) return { error: "Query is required" };
-
-	const results: { name: string; className: string; path: string }[] = [];
-
-	function searchRecursive(instance: Instance) {
-		let match = false;
-
-		if (searchType === "name") {
-			match = instance.Name.lower().find(query.lower())[0] !== undefined;
-		} else if (searchType === "class") {
-			match = instance.ClassName.lower().find(query.lower())[0] !== undefined;
-		} else if (searchType === "property" && propertyName) {
-			const [success, value] = pcall(() => tostring((instance as unknown as Record<string, unknown>)[propertyName]));
-			if (success) {
-				match = (value as string).lower().find(query.lower())[0] !== undefined;
-			}
-		}
-
-		if (match) {
-			results.push({
-				name: instance.Name,
-				className: instance.ClassName,
-				path: getInstancePath(instance),
-			});
-		}
-
-		for (const child of instance.GetChildren()) {
-			searchRecursive(child);
-		}
+function searchObjects(requestData: Record<string, unknown>, execution: StudioRequestContext): unknown {
+	// Keyed per request: concurrent searches are independent reads, so the
+	// runner is used only for yielding, deadlines and cancellation.
+	const result = CooperativeJobRunner.runExclusive(
+		`instance-search:${execution.requestId}`,
+		execution,
+		(control) => instanceSearch.search(requestData, control),
+	);
+	if (result.error === "deadline_exceeded") {
+		return {
+			...result,
+			message: "search_objects exceeded its bridge deadline before the scan completed. Narrow it with path or className.",
+		};
 	}
-
-	searchRecursive(game);
-
-	return { results, query, searchType, count: results.size() };
+	return result;
 }
 
 function getInstanceProperties(requestData: Record<string, unknown>) {
@@ -401,10 +392,11 @@ function getProjectStructure(requestData: Record<string, unknown>) {
 
 	const startInstance = getInstanceByPath(startPath);
 	if (!startInstance) return { error: `Path not found: ${startPath}` };
+	const isAmbiguous = createPathAmbiguityChecker();
 
 	function getStructure(instance: Instance, depth: number): Record<string, unknown> {
 		if (depth > maxDepth) {
-			return {
+			const truncatedNode: Record<string, unknown> = {
 				name: instance.Name,
 				className: instance.ClassName,
 				path: getInstancePath(instance),
@@ -412,6 +404,8 @@ function getProjectStructure(requestData: Record<string, unknown>) {
 				hasMore: true,
 				note: "Max depth reached - use this path to explore further",
 			};
+			if (isAmbiguous(instance)) truncatedNode.ambiguous = true;
+			return truncatedNode;
 		}
 
 		const node: Record<string, unknown> = {
@@ -419,6 +413,7 @@ function getProjectStructure(requestData: Record<string, unknown>) {
 			className: instance.ClassName,
 			path: getInstancePath(instance),
 		};
+		if (isAmbiguous(instance)) node.ambiguous = true;
 
 		if (instance.IsA("LuaSourceContainer")) {
 			node.hasSource = true;
@@ -514,6 +509,9 @@ interface ScriptSnapshot {
 const scriptSearch = ScriptSearch.createScriptSearch({
 	resolveRoot(path: string): Instance | undefined {
 		return getInstanceByPath(path);
+	},
+	createAmbiguityChecker(): (instance: Instance) => boolean {
+		return createPathAmbiguityChecker();
 	},
 	getChildren(instance: Instance): Instance[] {
 		return instance.GetChildren();

@@ -23,7 +23,13 @@ function loadPluginModule(file: string, globals: Record<string, unknown> = {}) {
   return module.exports;
 }
 
-const utils = loadPluginModule('Utils.ts') as {
+// Utils imports PathAmbiguity, a pure module, so load it the same way.
+const utils = loadPluginModule('Utils.ts', {
+  require: (name: string) => {
+    if (name === './PathAmbiguity') return { default: loadPluginModule('PathAmbiguity.ts') };
+    throw new Error(`Unexpected import ${name}`);
+  },
+}) as {
   convertPropertyValue(instance: object, name: string, value: unknown): unknown;
 };
 

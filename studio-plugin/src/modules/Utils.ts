@@ -1,3 +1,6 @@
+import PathAmbiguity from "./PathAmbiguity";
+import type { PathResolution, PathTree } from "../types";
+
 const ScriptEditorService = game.GetService("ScriptEditorService");
 
 const LUAU_KEYWORDS = new Set<string>([
@@ -125,14 +128,17 @@ function parseInstancePath(path: string): string[] | undefined {
 	return parts;
 }
 
+function getService(segment: string): Instance | undefined {
+	const [ok, service] = pcall(() => game.GetService(segment as keyof Services));
+	return ok && service ? (service as Instance) : undefined;
+}
+
+function isRootService(instance: Instance): boolean {
+	return instance.Parent === game && getService(instance.ClassName) === instance;
+}
+
 function getRootSegment(instance: Instance): string {
-	if (instance.Parent === game) {
-		const [ok, service] = pcall(() => game.GetService(instance.ClassName as keyof Services));
-		if (ok && service === instance) {
-			return instance.ClassName;
-		}
-	}
-	return instance.Name;
+	return isRootService(instance) ? instance.ClassName : instance.Name;
 }
 
 function getInstancePath(instance: Instance): string {
@@ -160,9 +166,7 @@ function getInstancePath(instance: Instance): string {
 }
 
 function getRootInstance(segment: string): Instance | undefined {
-	const [ok, service] = pcall(() => game.GetService(segment as keyof Services));
-	if (ok && service) return service as Instance;
-	return game.FindFirstChild(segment);
+	return getService(segment) ?? game.FindFirstChild(segment);
 }
 
 function getInstanceByPath(path: string): Instance | undefined {
@@ -178,6 +182,31 @@ function getInstanceByPath(path: string): Instance | undefined {
 	}
 
 	return current;
+}
+
+const instancePathTree: PathTree<Instance> = {
+	root: game,
+	getParent: (instance) => instance.Parent,
+	getChildren: (instance) => instance.GetChildren(),
+	getName: (instance) => instance.Name,
+	getService,
+	isRootService,
+	getPath: getInstancePath,
+};
+
+// Like getInstanceByPath, but also reports the first segment that names more
+// than one sibling. Costs one child scan per segment. PathGuard applies it to
+// every declared request path before the handler runs.
+function resolveInstancePath(path: string): PathResolution<Instance> {
+	const parts = parseInstancePath(path);
+	if (parts === undefined) return {};
+	return PathAmbiguity.resolvePath(instancePathTree, parts);
+}
+
+// Returns a per-request predicate that is true when getInstancePath(instance)
+// does not identify exactly that instance.
+function createPathAmbiguityChecker(): (instance: Instance) => boolean {
+	return PathAmbiguity.createAmbiguityChecker(instancePathTree);
 }
 
 function splitLines(source: string): LuaTuple<[string[], boolean]> {
@@ -510,6 +539,8 @@ export = {
 	safeCall,
 	getInstancePath,
 	getInstanceByPath,
+	resolveInstancePath,
+	createPathAmbiguityChecker,
 	splitLines,
 	joinLines,
 	readScriptSource,

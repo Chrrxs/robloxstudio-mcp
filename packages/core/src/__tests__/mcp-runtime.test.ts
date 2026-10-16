@@ -294,11 +294,11 @@ describe('MCP v2 tool runtime', () => {
     const inspectorCatalog = getReadOnlyTools().map(publicToolDefinition);
 
     expect(catalog).toHaveLength(49);
-    expect(serialized.length).toBeLessThanOrEqual(45_000);
+    expect(serialized.length).toBeLessThanOrEqual(46_000);
     expect(catalog.filter((tool) => tool.outputSchema)).toHaveLength(48);
     expect(catalog.every((tool) => tool.description.length <= 120)).toBe(true);
     expect(inspectorCatalog).toHaveLength(25);
-    expect(JSON.stringify(inspectorCatalog).length).toBeLessThanOrEqual(20_000);
+    expect(JSON.stringify(inspectorCatalog).length).toBeLessThanOrEqual(21_000);
     expect(byName.get('selection')?.outputSchema).toEqual({
       type: 'object',
       additionalProperties: true,
@@ -570,6 +570,32 @@ describe('MCP v2 tool runtime', () => {
       },
       'instance:test',
       controller.signal,
+    );
+  });
+
+  test('forwards scope and limit options through the search_objects adapter', async () => {
+    const searchObjects = jest.fn(async () => ({ content: [] }));
+    const tools = { searchObjects } as unknown as RobloxStudioTools;
+
+    await TOOL_HANDLERS.search_objects(tools, {
+      query: 'door',
+      searchType: 'name',
+      path: 'game.Workspace.Map',
+      className: 'BasePart',
+      maxResults: 25,
+      instance_id: 'instance:test',
+    });
+
+    expect(searchObjects).toHaveBeenCalledWith(
+      'door',
+      {
+        searchType: 'name',
+        propertyName: undefined,
+        path: 'game.Workspace.Map',
+        className: 'BasePart',
+        maxResults: 25,
+      },
+      'instance:test',
     );
   });
 
