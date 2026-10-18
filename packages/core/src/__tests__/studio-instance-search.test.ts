@@ -406,14 +406,17 @@ describe('Studio path guard', () => {
     expect(result.ambiguousPaths).toEqual([expect.objectContaining({ field, access: 'write', segment: 'Twin' })]);
   });
 
-  test('treats find-and-replace dry runs as reads', async () => {
+  test.each([
+    ['/api/find-and-replace-in-scripts', { path: 'game.Workspace.Twin', dryRun: true }, 'path'],
+    ['/api/edit-script-lines', { instancePath: 'game.Workspace.Twin', edits: [], dryRun: true }, 'instancePath'],
+  ])('treats %s dry runs as reads (case %#)', async (endpoint, data, field) => {
     const { guard } = await loadGuard();
-    const handler = jest.fn(() => ({ dryRun: true, changes: [] }));
+    const handler = jest.fn(() => ({ dryRun: true }));
 
-    const result = plain(guard.run('/api/find-and-replace-in-scripts', { path: 'game.Workspace.Twin', dryRun: true }, handler));
+    const result = plain(guard.run(endpoint, data, handler));
 
     expect(handler).toHaveBeenCalledTimes(1);
-    expect(result.ambiguousPaths).toEqual([expect.objectContaining({ field: 'path', access: 'read' })]);
+    expect(result.ambiguousPaths).toEqual([expect.objectContaining({ field, access: 'read' })]);
   });
 
   test('ignores empty and non-string path values', async () => {

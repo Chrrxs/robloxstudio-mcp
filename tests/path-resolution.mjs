@@ -381,6 +381,15 @@ return table.concat(sources, ",")
     });
     assert(typeof dryRun.pathWarning === 'string', `find_and_replace dry run reports instead of refusing (${JSON.stringify(dryRun)})`);
 
+    const editPreview = await client.callTool('edit_script_lines', {
+      instancePath: twinScriptPath,
+      edits: [{ old_string: 'return 1', new_string: 'return 3' }],
+      dry_run: true,
+      instance_id: instanceId,
+    });
+    assert(editPreview.dryRun === true && typeof editPreview.pathWarning === 'string',
+      `edit_script_lines dry run reports instead of refusing (${JSON.stringify(editPreview)})`);
+
     const breakpoint = await client.callTool('breakpoints', {
       action: 'set',
       target: 'edit',

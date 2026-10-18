@@ -82,7 +82,7 @@ const ENDPOINT_PATHS: Record<string, PathExtractor[]> = {
 
 	"/api/set-properties": [pathField("instancePath", "write"), referencePropertyPaths],
 	"/api/set-script-source": [pathField("instancePath", "write")],
-	"/api/edit-script-lines": [pathField("instancePath", "write")],
+	"/api/edit-script-lines": [pathField("instancePath", dryRunIsRead)],
 	"/api/insert-script-lines": [pathField("instancePath", "write")],
 	"/api/delete-script-lines": [pathField("instancePath", "write")],
 	"/api/find-and-replace-in-scripts": [pathField("path", dryRunIsRead)],

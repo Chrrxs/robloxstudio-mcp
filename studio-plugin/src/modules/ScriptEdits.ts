@@ -128,11 +128,35 @@ function applyWithin(
 	return parts.join("");
 }
 
-function textLines(text: string): string[] {
-	if (text === "") return [];
+const NO_FINAL_NEWLINE = "\\ No newline at end of file";
+
+// Lines of a diff region. A last line without its newline only occurs at the
+// end of the file; it is flagged so that adding or removing that newline still
+// differs, as in a unified diff.
+interface TextLines {
+	lines: string[];
+	missingFinalNewline: boolean;
+}
+
+function textLines(text: string): TextLines {
+	if (text === "") return { lines: [], missingFinalNewline: false };
 	const lines = text.split("\n");
-	if (string.sub(text, -1) === "\n") lines.pop();
-	return lines;
+	const missingFinalNewline = string.sub(text, -1) !== "\n";
+	if (!missingFinalNewline) lines.pop();
+	return { lines, missingFinalNewline };
+}
+
+function sameLine(a: TextLines, aIndex: number, b: TextLines, bIndex: number): boolean {
+	return a.lines[aIndex] === b.lines[bIndex]
+		&& (a.missingFinalNewline && aIndex === a.lines.size() - 1)
+			=== (b.missingFinalNewline && bIndex === b.lines.size() - 1);
+}
+
+function pushHunkLines(hunk: string[], text: TextLines, from: number, count: number, prefix: string): void {
+	for (let index = from; index < from + count; index++) {
+		hunk.push(`${prefix}${text.lines[index]}`);
+		if (text.missingFinalNewline && index === text.lines.size() - 1) hunk.push(NO_FINAL_NEWLINE);
+	}
 }
 
 function hunkStart(line: number, count: number): number {
@@ -180,18 +204,20 @@ function buildDiff(source: string, starts: number[], resolved: ResolvedEdit[]): 
 			break;
 		}
 
-		const oldLines = textLines(oldText);
-		const newLines = textLines(newText);
+		const oldRegion = textLines(oldText);
+		const newRegion = textLines(newText);
+		const oldSize = oldRegion.lines.size();
+		const newSize = newRegion.lines.size();
 		let prefix = 0;
-		while (prefix < oldLines.size() && prefix < newLines.size() && oldLines[prefix] === newLines[prefix]) prefix++;
+		while (prefix < oldSize && prefix < newSize && sameLine(oldRegion, prefix, newRegion, prefix)) prefix++;
 		let suffix = 0;
 		while (
-			suffix < oldLines.size() - prefix
-			&& suffix < newLines.size() - prefix
-			&& oldLines[oldLines.size() - 1 - suffix] === newLines[newLines.size() - 1 - suffix]
+			suffix < oldSize - prefix
+			&& suffix < newSize - prefix
+			&& sameLine(oldRegion, oldSize - 1 - suffix, newRegion, newSize - 1 - suffix)
 		) suffix++;
-		const oldCount = oldLines.size() - prefix - suffix;
-		const newCount = newLines.size() - prefix - suffix;
+		const oldCount = oldSize - prefix - suffix;
+		const newCount = newSize - prefix - suffix;
 
 		if (oldCount > 0 || newCount > 0) {
 			const oldStart = firstLine + prefix;
@@ -199,8 +225,8 @@ function buildDiff(source: string, starts: number[], resolved: ResolvedEdit[]): 
 			const hunk: string[] = [
 				`@@ -${hunkStart(oldStart, oldCount)},${oldCount} +${hunkStart(newStart, newCount)},${newCount} @@`,
 			];
-			for (let index = prefix; index < prefix + oldCount; index++) hunk.push(`-${oldLines[index]}`);
-			for (let index = prefix; index < prefix + newCount; index++) hunk.push(`+${newLines[index]}`);
+			pushHunkLines(hunk, oldRegion, prefix, oldCount, "-");
+			pushHunkLines(hunk, newRegion, prefix, newCount, "+");
 			for (const line of hunk) {
 				if (outputSize + line.size() + 1 > DIFF_CHAR_BUDGET) {
 					truncated = true;
@@ -210,7 +236,7 @@ function buildDiff(source: string, starts: number[], resolved: ResolvedEdit[]): 
 				outputSize += line.size() + 1;
 			}
 		}
-		lineDelta += newLines.size() - oldLines.size();
+		lineDelta += newSize - oldSize;
 		groupStart = groupEnd;
 	}
 	return { diff: output.join("\n"), truncated };

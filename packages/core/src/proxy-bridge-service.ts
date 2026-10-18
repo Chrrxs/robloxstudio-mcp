@@ -1,8 +1,9 @@
-import { BridgeService, isRequestStage, isValidOperationId, MultiplayerGroupInUseError, parseFailureDetails, parseObservations, RequestFailure, toPublicPeer } from './bridge-service.js';
+import { BridgeService, isRequestStage, isValidOperationId, MultiplayerGroupInUseError, parseFailureDetails, parseObservations, PRIMARY_PROXY_FEATURES, RequestFailure, toPublicPeer } from './bridge-service.js';
 import type {
   MultiplayerGroup,
   PublicStudioPeer,
   RequestFailureDetails,
+  PrimaryProxyFeature,
   RequestStatus,
   StudioInstance,
   StudioPeer,
@@ -63,6 +64,15 @@ function peerPublicationChanged(previous: StudioPeer | undefined, current: Studi
     || previous.serverVersion !== current.serverVersion;
 }
 
+function parsePrimaryFeatures(value: unknown): Set<PrimaryProxyFeature> {
+  const features = new Set<PrimaryProxyFeature>();
+  if (!Array.isArray(value)) return features;
+  for (const feature of PRIMARY_PROXY_FEATURES) {
+    if (value.includes(feature)) features.add(feature);
+  }
+  return features;
+}
+
 
 export class ProxyBridgeService extends BridgeService {
   private primaryBaseUrl: string;
@@ -78,6 +88,10 @@ export class ProxyBridgeService extends BridgeService {
   private static TOPOLOGY_TIMEOUT_MS = 2_000;
   private topologyGeneration = 0;
   private appliedTopologyGeneration = 0;
+  // Features of the primary's proxy protocol, from its latest topology. A
+  // primary that predates them advertises none and ignores their fields.
+  private primaryFeatures = new Set<PrimaryProxyFeature>();
+  private primaryVersion?: string;
 
   constructor(primaryBaseUrl: string, authToken?: string) {
     super();
@@ -142,6 +156,8 @@ export class ProxyBridgeService extends BridgeService {
       this.cachedPeers = body.peers;
       this.cachedInstances = body.instances;
       this.cachedMultiplayerGroups = body.multiplayerGroups;
+      this.primaryFeatures = parsePrimaryFeatures('proxyFeatures' in body ? body.proxyFeatures : undefined);
+      this.primaryVersion = 'serverVersion' in body && typeof body.serverVersion === 'string' ? body.serverVersion : undefined;
       for (const peer of body.peers) {
         if (peerPublicationChanged(previousPeers.get(peer.peerId), peer)) {
           this.notifyPeerRegistered(toPublicPeer(peer));
@@ -308,9 +324,20 @@ export class ProxyBridgeService extends BridgeService {
     this.refreshTimer = undefined;
   }
 
+  // Names the primary in errors for proxy features it predates.
+  private primaryDescription(): string {
+    return `The primary MCP server at ${this.primaryBaseUrl}${this.primaryVersion ? ` (v${this.primaryVersion})` : ''}`;
+  }
+
   override async getRequestStatusEverywhere(requestId: string, waitMs = 0, signal?: AbortSignal): Promise<RequestStatus | undefined> {
     const query = new URLSearchParams({ requestId });
-    if (waitMs > 0) query.set('waitMs', String(waitMs));
+    if (waitMs > 0) {
+      await this.initialRefresh;
+      if (!this.primaryFeatures.has('status_wait')) {
+        throw new Error(`${this.primaryDescription()} cannot wait for an operation; call get_request_status without wait_ms, or restart that server on this version.`);
+      }
+      query.set('waitMs', String(waitMs));
+    }
     // The primary owns the wait; leave room for its answer to travel back.
     const timeout = AbortSignal.timeout(Math.max(0, waitMs) + PROXY_RESPONSE_GRACE_MS);
     const response = await fetch(`${this.primaryBaseUrl}/request-status?${query}`, {
@@ -363,13 +390,31 @@ export class ProxyBridgeService extends BridgeService {
     },
     signal?: AbortSignal,
   ): Promise<unknown> {
-    const { endpoint, data, targetPeerId, identity, submit } = request;
+    const { endpoint, data, targetPeerId, submit } = request;
+    let { identity } = request;
     const requestId = request.operationId ?? randomUUID();
     const details: RequestFailureDetails = { requestId, targetPeerId, stage: 'queued', outcome: 'not_executed', executionOutcome: 'not_executed' };
     if (!isValidOperationId(requestId)) {
       throw new RequestFailure('operationId must be a nonempty string of at most 128 characters', 'invalid_operation_id', details);
     }
     if (signal?.aborted) throw new RequestFailure(`Request aborted: ${requestId}; queued; not_executed`, 'request_aborted', details);
+    if (submit && !this.primaryFeatures.has('submit')) {
+      throw new RequestFailure(
+        `${this.primaryDescription()} cannot start a job that outlives the call; call without async, or restart that server on this version; queued; not_executed`,
+        'primary_unsupported', details,
+      );
+    }
+    if (identity !== undefined && !this.primaryFeatures.has('identity')) {
+      // That primary identifies an operation by its payload. Without a caller
+      // operation ID nothing is retried by identity, so the payload suffices.
+      if (request.operationId !== undefined) {
+        throw new RequestFailure(
+          `${this.primaryDescription()} cannot match a retry of operation ${requestId} to its first attempt; call without operation_id, or restart that server on this version; queued; not_executed`,
+          'primary_unsupported', details,
+        );
+      }
+      identity = undefined;
+    }
     const controller = new AbortController();
     const effectiveTimeoutMs = Math.max(1, request.timeoutMs);
     let requestBody: string;
