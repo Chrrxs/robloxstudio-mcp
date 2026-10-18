@@ -362,6 +362,27 @@ describe('edit_script_lines batched edits in the plugin', () => {
     expect(preview.diff).toBe('@@ -1,1 +1,1 @@\n-local a, b = 1, 2\n+local x, y = 3, 4');
   });
 
+  test.each([
+    ['removing the final newline', 'a\nb\n', 'b\n', 'b', '@@ -2,1 +2,1 @@\n-b\n+b\n\\ No newline at end of file'],
+    ['adding a final newline', 'a\nb', 'b', 'b\n', '@@ -2,1 +2,1 @@\n-b\n\\ No newline at end of file\n+b'],
+    ['extending a file that lacks a final newline', 'a\nb', 'b', 'b\nc', '@@ -2,1 +2,2 @@\n-b\n\\ No newline at end of file\n+b\n+c\n\\ No newline at end of file'],
+  ])('a preview shows %s', async (_name, source, oldString, newString, diff) => {
+    const { edit } = await loadHandlers(source);
+
+    const preview = edit({ edits: [{ old_string: oldString, new_string: newString }], dryRun: true });
+
+    expect(preview.revision).not.toBe(preview.resultRevision);
+    expect(preview.diff).toBe(diff);
+  });
+
+  test('a preview of an unchanged final line without a newline stays out of the hunk', async () => {
+    const { edit } = await loadHandlers('a\nb');
+
+    const preview = edit({ edits: [{ old_string: 'a', new_string: 'x' }], dryRun: true });
+
+    expect(preview.diff).toBe('@@ -1,1 +1,1 @@\n-a\n+x');
+  });
+
   test('the legacy single-edit request keeps working', async () => {
     const { state, edit, beginRecording } = await loadHandlers('if a then\nend\nif b then\nend\n');
 

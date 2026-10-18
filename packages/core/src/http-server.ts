@@ -7,7 +7,7 @@ import { WebSocketServer } from 'ws';
 import { toNodeHandler } from '@modelcontextprotocol/node';
 import { MAX_SCRIPT_EDITS, RobloxStudioTools } from './tools/index.js';
 import type { ScriptEdit } from './tools/index.js';
-import { BridgeService, isValidOperationId, MAX_OPERATION_WAIT_MS, MultiplayerGroupInUseError, RequestFailure, RoutingFailure } from './bridge-service.js';
+import { BridgeService, isValidOperationId, MAX_OPERATION_WAIT_MS, MultiplayerGroupInUseError, PRIMARY_PROXY_FEATURES, RequestFailure, RoutingFailure } from './bridge-service.js';
 import type { PublicStudioInstance, PublicStudioPeer, RegisterPeerResult } from './bridge-service.js';
 import type { ToolDefinition } from './tools/definitions.js';
 import { createToolHttpHandler, normalizeToolResult, publicToolErrorBody } from './mcp-runtime.js';
@@ -886,6 +886,7 @@ export function createHttpServer(tools: RobloxStudioTools, bridge: BridgeService
     res.json({
       ...bridge.getTopologySnapshot(),
       serverVersion: serverConfig?.version,
+      proxyFeatures: PRIMARY_PROXY_FEATURES,
     });
   });
 

@@ -272,6 +272,17 @@ export function isValidOperationId(value: unknown): value is string {
   return typeof value === 'string' && value.trim().length > 0 && value.length <= MAX_OPERATION_ID_LENGTH;
 }
 
+/**
+ * Proxy-protocol features this server honours as a primary, advertised in
+ * /topology. An older primary silently ignores the fields behind them, so a
+ * proxy must not use one its primary does not list.
+ *   submit: /proxy answers `submit: true` at admission instead of on completion.
+ *   identity: /proxy fingerprints operations by `identity` instead of payload.
+ *   status_wait: /request-status honours `waitMs`.
+ */
+export const PRIMARY_PROXY_FEATURES = ['submit', 'identity', 'status_wait'] as const;
+export type PrimaryProxyFeature = typeof PRIMARY_PROXY_FEATURES[number];
+
 interface OperationRecord {
   status: RequestStatus;
   fingerprint: string;
@@ -433,8 +444,9 @@ export class BridgeService implements StudioTransportQueue {
   private retainedResultBytes = 0;
   private pendingRequestBytes = 0;
   private readonly pendingCancellations = new Map<string, PendingCancellation>();
-  // Status waits end on settlement; they never own or cancel the operation.
-  private readonly settlementWaiters = new Map<string, Set<() => void>>();
+  // Status waits wake on every lifecycle transition and re-check; they never
+  // own or cancel the operation.
+  private readonly lifecycleWaiters = new Map<string, Set<() => void>>();
   private readonly peersById = new Map<string, StudioPeer>();
   private readonly multiplayerGroupsById = new Map<string, MultiplayerGroup>();
   private readonly peerRegisteredListeners = new Set<PeerRegisteredListener>();
@@ -1266,6 +1278,7 @@ export class BridgeService implements StudioTransportQueue {
       operation.updatedAt = Date.now();
       this.operations.delete(request.id);
       this.operations.set(request.id, operation);
+      this.notifyLifecycleWaiters(request.id);
     }
     if (state !== 'disconnected') {
       this.notifyRequestCancelled(request, state === 'timed_out' ? 'timeout' : 'aborted');
@@ -1468,7 +1481,7 @@ export class BridgeService implements StudioTransportQueue {
       else request.resolve(response);
     }
     this.pendingCancellations.delete(requestId);
-    for (const notify of this.settlementWaiters.get(requestId) ?? []) notify();
+    this.notifyLifecycleWaiters(requestId);
     this.pruneOperations(now);
     if (operation.transportPeerId) this.notifyRequestAvailable(operation.transportPeerId);
     return 'accepted';
@@ -1490,30 +1503,51 @@ export class BridgeService implements StudioTransportQueue {
     return status;
   }
 
+  private notifyLifecycleWaiters(requestId: string): void {
+    for (const notify of this.lifecycleWaiters.get(requestId) ?? []) notify();
+  }
+
+  // A late Studio response can settle only an operation Studio picked up; one
+  // whose waiter ended while it was still queued was never sent and never will be.
+  private canStillSettle(requestId: string): boolean {
+    this.pruneOperations(Date.now());
+    const operation = this.operations.get(requestId);
+    if (!operation || operation.status.state === 'settled') return false;
+    return operation.status.state === 'pending' || operation.transportPeerId !== undefined;
+  }
+
   /**
-   * Returns the retained status, first waiting up to waitMs for a pending,
-   * timed-out, aborted, or disconnected operation to settle. A late Studio
-   * response can still settle those. The wait ends on settlement, deadline, or
-   * signal; ending it never cancels or rolls back the operation.
+   * Returns the retained status, first waiting up to waitMs while the operation
+   * can still settle: while it is pending, or after a timeout, abort, or
+   * disconnect once Studio had picked it up, since a late Studio response can
+   * still settle it. An operation that can no longer settle returns at once, or
+   * as soon as it gets there. The wait also ends on its deadline or signal;
+   * ending it never cancels or rolls back the operation.
    */
   async waitForRequestStatus(requestId: string, waitMs = 0, signal?: AbortSignal): Promise<RequestStatus | undefined> {
-    const status = this.getRequestStatus(requestId);
     const boundedWaitMs = Math.min(Math.max(0, waitMs), MAX_OPERATION_WAIT_MS);
-    if (!status || status.state === 'settled' || boundedWaitMs === 0 || signal?.aborted) return status;
-    const { promise, resolve } = Promise.withResolvers<void>();
-    const notify = () => resolve();
-    let waiters = this.settlementWaiters.get(requestId);
-    if (!waiters) this.settlementWaiters.set(requestId, waiters = new Set());
-    waiters.add(notify);
-    const timeoutId = setTimeout(notify, boundedWaitMs);
-    signal?.addEventListener('abort', notify, { once: true });
+    if (boundedWaitMs === 0 || signal?.aborted || !this.canStillSettle(requestId)) return this.getRequestStatus(requestId);
+    const { promise: deadline, resolve: endWait } = Promise.withResolvers<'deadline'>();
+    const reachDeadline = () => endWait('deadline');
+    const timeoutId = setTimeout(reachDeadline, boundedWaitMs);
+    signal?.addEventListener('abort', reachDeadline, { once: true });
+    let waiters = this.lifecycleWaiters.get(requestId);
+    if (!waiters) this.lifecycleWaiters.set(requestId, waiters = new Set());
     try {
-      await promise;
+      while (this.canStillSettle(requestId)) {
+        const { promise: transition, resolve: wake } = Promise.withResolvers<'transition'>();
+        const notify = () => wake('transition');
+        waiters.add(notify);
+        try {
+          if (await Promise.race([transition, deadline]) === 'deadline') break;
+        } finally {
+          waiters.delete(notify);
+        }
+      }
     } finally {
       clearTimeout(timeoutId);
-      signal?.removeEventListener('abort', notify);
-      waiters.delete(notify);
-      if (waiters.size === 0) this.settlementWaiters.delete(requestId);
+      signal?.removeEventListener('abort', reachDeadline);
+      if (waiters.size === 0) this.lifecycleWaiters.delete(requestId);
     }
     return this.getRequestStatus(requestId);
   }
@@ -1529,6 +1563,7 @@ export class BridgeService implements StudioTransportQueue {
       this.operations.delete(requestId);
       this.retainedResults.delete(requestId);
       this.retainedResultBytes -= operation.resultBytes;
+      this.notifyLifecycleWaiters(requestId);
     }
     while (this.operations.size > MAX_OPERATION_RECORDS) {
       let removed = false;
@@ -1537,6 +1572,7 @@ export class BridgeService implements StudioTransportQueue {
         this.operations.delete(requestId);
         this.retainedResults.delete(requestId);
         this.retainedResultBytes -= operation.resultBytes;
+        this.notifyLifecycleWaiters(requestId);
         removed = true;
         break;
       }

@@ -120,6 +120,39 @@ describe('generate_model jobs', () => {
     expect(bridge.settleTransportResponse('edit', 'kept-job', MODEL)).toBe('accepted');
   });
 
+  test('a status wait returns at once for a job that ended before Studio picked it up', async () => {
+    await tools.generateModel({ prompt: 'crate', async: true, operation_id: 'never-sent', timeout_ms: 1000 }, 'instance:jobs');
+    await jest.advanceTimersByTimeAsync(1000);
+
+    let settled = false;
+    const waited = tools.getRequestStatus('never-sent', 300_000).finally(() => { settled = true; });
+    await jest.advanceTimersByTimeAsync(0);
+    expect(settled).toBe(true);
+    expect(parse(await waited)).toMatchObject({ state: 'timed_out', stage: 'queued', outcome: 'not_executed' });
+  });
+
+  test('a status wait ends when a queued job reaches its deadline without being picked up', async () => {
+    await tools.generateModel({ prompt: 'crate', async: true, operation_id: 'stuck-in-queue', timeout_ms: 1000 }, 'instance:jobs');
+
+    let settled = false;
+    const waited = tools.getRequestStatus('stuck-in-queue', 300_000).finally(() => { settled = true; });
+    await jest.advanceTimersByTimeAsync(1000);
+    expect(settled).toBe(true);
+    expect(parse(await waited)).toMatchObject({ state: 'timed_out', stage: 'queued', outcome: 'not_executed' });
+  });
+
+  test('a status wait keeps waiting through the deadline of a job Studio already picked up', async () => {
+    await tools.generateModel({ prompt: 'crate', async: true, operation_id: 'running', timeout_ms: 1000 }, 'instance:jobs');
+    bridge.claimNextRequestForTransport('edit', 'socket');
+
+    let settled = false;
+    const waited = tools.getRequestStatus('running', 60_000).finally(() => { settled = true; });
+    await jest.advanceTimersByTimeAsync(5_000);
+    expect(settled).toBe(false);
+    expect(bridge.settleTransportResponse('edit', 'running', MODEL)).toBe('accepted');
+    expect(parse(await waited)).toMatchObject({ state: 'settled', response: MODEL });
+  });
+
   test('a job stays tied to the Studio instance that started it', async () => {
     registerEdit(bridge, 'other-edit', 'instance:other');
     await tools.generateModel({ prompt: 'crate', async: true, operation_id: 'bound-job' }, 'instance:jobs');
@@ -142,22 +175,58 @@ describe('generate_model jobs', () => {
 });
 
 describe('generate_model jobs through a proxy', () => {
-  test('the primary admits the job at once and answers a proxied wait with its result', async () => {
+  // An older primary predates the job features: its /topology lists none, and
+  // its /proxy and /request-status ignore submit, identity, and waitMs.
+  async function withProxy(
+    options: { olderPrimary?: boolean },
+    run: (context: { primary: BridgeService; proxyTools: RobloxStudioTools; proxyBodies: Record<string, unknown>[] }) => Promise<void>,
+  ): Promise<void> {
     const primary = new JobTestBridge();
     registerEdit(primary, 'edit', 'instance:jobs');
     const app = createHttpServer(new RobloxStudioTools(primary), primary);
+    const proxyBodies: Record<string, unknown>[] = [];
     const fetchMock = jest.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
       const url = new URL(String(input));
       const path = `${url.pathname}${url.search}`;
+      if (init?.method === 'POST') proxyBodies.push(JSON.parse(String(init.body)));
       const response = init?.method === 'POST'
         ? await request(app).post(path).set('Content-Type', 'application/json').send(String(init.body))
         : await request(app).get(path);
-      return new Response(response.text, { status: response.status, headers: { 'Content-Type': 'application/json' } });
+      let text = response.text;
+      if (options.olderPrimary && url.pathname === '/topology') {
+        const topology = JSON.parse(text);
+        delete topology.proxyFeatures;
+        text = JSON.stringify(topology);
+      }
+      return new Response(text, { status: response.status, headers: { 'Content-Type': 'application/json' } });
     });
     const proxy = new ProxyBridgeService('http://primary');
     try {
       await proxy.waitForInitialRefresh();
       const proxyTools = new RobloxStudioTools(proxy);
+      Object.assign(proxyTools, { uploadGenerateModelReferenceImage: async () => 2000 + proxyBodies.length });
+      await run({ primary, proxyTools, proxyBodies });
+    } finally {
+      proxy.stop();
+      fetchMock.mockRestore();
+      primary.clearAllPendingRequests();
+      await app.cleanup();
+    }
+  }
+
+  // Answers each request the primary admits, as Studio would.
+  function answerAdmittedRequests(primary: BridgeService): void {
+    const send = primary.sendRequest.bind(primary);
+    jest.spyOn(primary, 'sendRequest').mockImplementation((...args) => {
+      const response = send(...args);
+      const claimed = primary.claimNextRequestForTransport('edit', 'socket');
+      if (claimed) primary.settleTransportResponse('edit', claimed.requestId, MODEL);
+      return response;
+    });
+  }
+
+  test('the primary admits the job at once and answers a proxied wait with its result', async () => {
+    await withProxy({}, async ({ primary, proxyTools }) => {
       const started = parse(await proxyTools.generateModel({ prompt: 'crate', async: true, operation_id: 'proxy-job' }, 'instance:jobs'));
       expect(started).toMatchObject({ requestId: 'proxy-job', targetPeerId: 'edit', state: 'pending' });
       expect(primary.claimNextRequestForTransport('edit', 'socket')).toMatchObject({ requestId: 'proxy-job' });
@@ -174,11 +243,53 @@ describe('generate_model jobs through a proxy', () => {
       });
       expect(parse(await proxyTools.generateModel({ prompt: 'crate', operation_id: 'proxy-job' }, 'instance:jobs'))).toEqual(MODEL);
       expect(primary.claimNextRequestForTransport('edit', 'socket')).toBeNull();
-    } finally {
-      proxy.stop();
-      fetchMock.mockRestore();
-      primary.clearAllPendingRequests();
-      await app.cleanup();
-    }
+    });
+  });
+
+  test('an older primary refuses async jobs before anything reaches it', async () => {
+    await withProxy({ olderPrimary: true }, async ({ primary, proxyTools, proxyBodies }) => {
+      const result = parse(await proxyTools.generateModel({ prompt: 'crate', async: true, operation_id: 'old-job' }, 'instance:jobs'));
+      expect(result).toMatchObject({ success: false, error: expect.stringContaining('cannot start a job that outlives the call') });
+      expect(proxyBodies).toEqual([]);
+      expect(primary.claimNextRequestForTransport('edit', 'socket')).toBeNull();
+    });
+  });
+
+  test('an older primary refuses status waits and still answers plain status reads', async () => {
+    await withProxy({ olderPrimary: true }, async ({ primary, proxyTools }) => {
+      answerAdmittedRequests(primary);
+      expect(parse(await proxyTools.generateModel({ prompt: 'crate', operation_id: 'old-sync' }, 'instance:jobs'))).toEqual(MODEL);
+
+      await expect(proxyTools.getRequestStatus('old-sync', 10_000)).rejects.toThrow('cannot wait for an operation');
+      expect(parse(await proxyTools.getRequestStatus('old-sync'))).toMatchObject({ requestId: 'old-sync', state: 'settled' });
+    });
+  });
+
+  test('an older primary still generates from an image, but refuses image retries keyed by operation ID', async () => {
+    await withProxy({ olderPrimary: true }, async ({ primary, proxyTools, proxyBodies }) => {
+      answerAdmittedRequests(primary);
+      const image = { image_base64: referencePngBase64(), image_mime_type: 'image/png' };
+
+      expect(parse(await proxyTools.generateModel({ prompt: 'crate', ...image }, 'instance:jobs'))).toEqual(MODEL);
+      expect(proxyBodies).toHaveLength(1);
+      expect(proxyBodies[0]).not.toHaveProperty('identity');
+
+      const keyed = parse(await proxyTools.generateModel({ prompt: 'crate', ...image, operation_id: 'old-image' }, 'instance:jobs'));
+      expect(keyed).toMatchObject({ success: false, error: expect.stringContaining('cannot match a retry of operation old-image') });
+      expect(proxyBodies).toHaveLength(1);
+    });
+  });
+
+  test('a current primary matches an image retry to its first attempt by content', async () => {
+    await withProxy({}, async ({ primary, proxyTools, proxyBodies }) => {
+      answerAdmittedRequests(primary);
+      const args = { prompt: 'crate', image_base64: referencePngBase64(), image_mime_type: 'image/png', operation_id: 'new-image' };
+
+      expect(parse(await proxyTools.generateModel(args, 'instance:jobs'))).toEqual(MODEL);
+      expect(parse(await proxyTools.generateModel(args, 'instance:jobs'))).toEqual(MODEL);
+      expect(proxyBodies).toHaveLength(2);
+      expect(proxyBodies[1]).toHaveProperty('identity');
+      expect(primary.claimNextRequestForTransport('edit', 'socket')).toBeNull();
+    });
   });
 });
