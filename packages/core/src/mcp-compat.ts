@@ -46,6 +46,8 @@ Start solo_playtest or multiplayer_playtest before targeting a live server or cl
 
 execute_luau runs through the Studio plugin. eval_server_runtime and eval_client_runtime run inside a live game VM and share that VM's require cache with game scripts. Use the eval tools when module state or the runtime Script or LocalScript environment matters.
 
+Requests to a client Peer go through the server Peer's broker. client_broker_timeout and client_bridge_unresponsive describe that channel, not the game: the client can keep running while its bridge is stalled. Their message says whether the request reached the client, is still running there, or is held up between server and client. Do not treat them as a client hang. Check the game through eval_server_runtime, and restart the playtest if the bridge does not recover.
+
 Read output with get_runtime_logs. Reuse nextCursor as cursor for one Instance, or nextCursorByInstance as cursor_by_instance for a Multiplayer Group, instead of requesting the full process streams again.
 
 - Each Peer VM retains approximately 64 KiB of message text, rather than a fixed message count. Reads do not consume or clear the buffer; incoming messages evict old entries.

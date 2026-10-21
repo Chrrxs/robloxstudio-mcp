@@ -204,6 +204,25 @@ describe('runtime log responsiveness', () => {
     expect(bridge.getPendingRequestCount()).toBe(0);
   });
 
+  test('a client broker failure keeps its diagnosis in peerErrors', async () => {
+    const { bridge, register, peerId, query, claim, answer } = fixture();
+    register('client-1');
+    const pending = query();
+    answer('edit', 1);
+    const request = claim('client-1');
+    expect(bridge.resolveRequest(request.requestId, {
+      success: false,
+      error: 'client_bridge_unresponsive',
+      message: 'The MCP bridge to client-1 is unresponsive. The client has not sent a heartbeat for 12.0 s.',
+    })).toBe('accepted');
+    await jest.advanceTimersByTimeAsync(0);
+    expect(result(pending).peerErrors).toEqual([{
+      peerId: peerId('client-1'),
+      role: 'client-1',
+      error: 'client_bridge_unresponsive: The MCP bridge to client-1 is unresponsive. The client has not sent a heartbeat for 12.0 s.',
+    }]);
+  });
+
   test('all peers timing out still reject a single-Instance read', async () => {
     const { bridge, register, query } = fixture();
     register('server');

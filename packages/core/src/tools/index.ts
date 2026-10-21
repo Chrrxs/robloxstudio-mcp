@@ -2862,7 +2862,10 @@ export class RobloxStudioTools {
           }
           const response = responseValue as Record<string, unknown>;
           if (typeof response.error === 'string') {
-            return { peerId: peer.peerId, role: peer.role, error: response.error };
+            // Broker failures carry a code in `error` and the diagnosis in `message`.
+            const error = typeof response.message === 'string' && response.message !== ''
+              ? `${response.error}: ${response.message}` : response.error;
+            return { peerId: peer.peerId, role: peer.role, error };
           }
           if (
             !Array.isArray(response.entries) ||

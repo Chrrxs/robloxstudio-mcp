@@ -33,6 +33,7 @@ const FULL_TESTS = [
   'luau-payload-transfers.mjs',
   'capture-broker-transfers.mjs',
   'client-profiler-broker-deadline.mjs',
+  'client-broker-liveness.mjs',
   'large-input-workflow.mjs',
   'studio-tooling-smoke.mjs',
   'eval-bridge-error-preservation.mjs',
@@ -58,7 +59,7 @@ const FEATURE_TESTS = [
   'micro-profiler-responsiveness.mjs',
 ];
 // Long-running/inherently failing investigation scenarios are explicit opt-ins.
-const DIAGNOSTIC_TESTS = ['luau-recipe-stress.mjs', 'luau-http-budget-repro.mjs', 'studio-websocket-quota.mjs', 'play-server-shutdown-disconnect-repro.mjs', 'studio-http-concurrency-repro.mjs'];
+const DIAGNOSTIC_TESTS = ['client-broker-backlog-repro.mjs', 'luau-recipe-stress.mjs', 'luau-http-budget-repro.mjs', 'studio-websocket-quota.mjs', 'play-server-shutdown-disconnect-repro.mjs', 'studio-http-concurrency-repro.mjs'];
 // These require explicit environment setup and are not part of the default suite.
 const CONFIGURED_TESTS = ['capture-regressions.mjs'];
 const featureSmoke = process.argv.includes('--smoke');

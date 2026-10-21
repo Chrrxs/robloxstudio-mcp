@@ -78,7 +78,10 @@ function release(data: Record<string, unknown>): unknown {
 	return { success: true, chunkBytes: CHUNK_BYTES };
 }
 
-function begin(data: Record<string, unknown>, capture: () => unknown): unknown {
+// ttlSeconds bounds how long the transfer may hold its slot. The broker passes
+// the request's remaining budget: once the server stopped waiting, nobody will
+// read the pixels, so the slot must not stay reserved for the full TTL.
+function begin(data: Record<string, unknown>, capture: () => unknown, ttlSeconds = TRANSFER_TTL_SECONDS): unknown {
 	prune();
 	const id = data.transferId;
 	// An older server cannot consume chunk descriptors. Let it use legacy
@@ -88,11 +91,16 @@ function begin(data: Record<string, unknown>, capture: () => unknown): unknown {
 	if (transfers.has(id)) return fail("duplicate transfer ID");
 	// Reserve before capture yields: concurrent captures cannot over-admit or
 	// evict each other's data. Retained strings are capped at 2 * 64 MiB.
-	if (transfers.size() >= MAX_TRANSFERS) return fail("two captures are already in flight; release or await them first");
-	const transfer: Transfer = { offset: 0, expiresAt: os.clock() + TRANSFER_TTL_SECONDS };
+	if (transfers.size() >= MAX_TRANSFERS) {
+		let soonest = math.huge;
+		for (const [, held] of transfers) soonest = math.min(soonest, held.expiresAt - os.clock());
+		return fail(`two earlier captures still hold this client's transfer slots; the first frees itself in ${string.format("%.1f", math.max(0, soonest))} s, when its request deadline has passed. Retry after that.`);
+	}
+	const ttl = math.clamp(ttlSeconds, 1, TRANSFER_TTL_SECONDS);
+	const transfer: Transfer = { offset: 0, expiresAt: os.clock() + ttl };
 	transfers.set(id, transfer);
 	// Capture only the ID, not the large payload, in the expiry closure.
-	transfer.expiryThread = task.delay(TRANSFER_TTL_SECONDS, () => {
+	transfer.expiryThread = task.delay(ttl, () => {
 		const current = transfers.get(id);
 		if (current !== undefined && os.clock() >= current.expiresAt) {
 			current.expiryThread = undefined;
