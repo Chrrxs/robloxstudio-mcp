@@ -95,6 +95,16 @@ manage_monetization lists, reads, creates, and updates developer products and ga
 - update changes only the arguments supplied, then reads the item back.
 - image_path uploads a local PNG, JPEG, or BMP icon. Roblox shows icons at 512x512 inside a circle, so keep details away from the corners.
 
+## Experience settings
+
+manage_experience reads and changes experience and place settings through Roblox Open Cloud. universe_id defaults to the connected Studio place, and place_id defaults to the root place, whose name and description are the experience title and description.
+
+- update changes only the arguments supplied, then reads the experience back. name, description, and server_size need universe.place:write; voice_chat_enabled, private_server_price, disable_private_servers, devices, social_links, and remove_social_links need universe:write.
+- Roblox refuses place edits while the place is open in an active Team Create session.
+- set_visibility makes the experience public or private and needs legacy-universe:manage.
+- Going private removes every player from running servers, and changing or disabling the private server price cancels every private server subscription, so these need confirm=true.
+- Genre, avatar, playtester, and other settings that Open Cloud does not expose, and the age rating, cannot be changed.
+
 ## RBXM files
 
 - export_rbxm writes selected instances to an explicit local path. It can read the edit DataModel or a live server DataModel.

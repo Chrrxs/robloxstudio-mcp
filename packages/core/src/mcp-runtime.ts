@@ -84,6 +84,7 @@ const NON_DESTRUCTIVE_SIDE_EFFECT_TOOLS = new Set([
 const IDEMPOTENT_WRITE_TOOLS = new Set([
   'capture_device_matrix',
   'export_rbxm',
+  'manage_experience',
   'reset_simulation_state',
   'set_device_simulator',
   'set_network_profile',
@@ -100,6 +101,7 @@ const OPEN_WORLD_TOOLS = new Set([
   'get_asset_thumbnail',
   'get_roblox_docs',
   'insert_asset',
+  'manage_experience',
   'manage_monetization',
   'preview_asset',
   'search_assets',

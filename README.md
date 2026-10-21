@@ -42,6 +42,10 @@ screenshots, memory reports, and profiler captures from each peer.
 
 - List, create, and update developer products and game passes with `manage_monetization`. New items stay off sale unless you ask, and a name that already exists is refused because Roblox cannot delete these items. Requires an Open Cloud API key; see [Configuration](docs/configuration.md#environment-variables).
 
+### Manage experience settings
+
+- Read and change the experience title, description, server size, public or private visibility, devices, voice chat, private server price, and social links with `manage_experience`. Going private and private server price changes need `confirm`. Requires an Open Cloud API key; see [Configuration](docs/configuration.md#environment-variables).
+
 ### Look up Roblox APIs
 
 - Fetch official engine API documentation as Markdown with `get_roblox_docs`.

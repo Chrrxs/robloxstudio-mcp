@@ -246,6 +246,172 @@ function normalizeMonetizationItem(
   };
 }
 
+export const EXPERIENCE_DEVICES = ['desktop', 'mobile', 'tablet', 'console', 'vr'] as const;
+export type ExperienceDevice = (typeof EXPERIENCE_DEVICES)[number];
+
+export const SOCIAL_LINK_KINDS = [
+  'facebook', 'twitter', 'youtube', 'twitch', 'discord', 'roblox_group', 'guilded',
+] as const;
+export type SocialLinkKind = (typeof SOCIAL_LINK_KINDS)[number];
+
+export interface SocialLink {
+  title: string;
+  uri: string;
+}
+
+/** A universe (experience) as Open Cloud v2 reports it. */
+export interface ExperienceUniverse {
+  id: number;
+  displayName: string;
+  description: string;
+  /** PUBLIC or PRIVATE. */
+  visibility: string;
+  ownerUserId: number | null;
+  ownerGroupId: number | null;
+  ageRating: string;
+  voiceChatEnabled: boolean;
+  /** Null when private servers are off. */
+  privateServerPriceRobux: number | null;
+  devices: Record<ExperienceDevice, boolean>;
+  socialLinks: Partial<Record<SocialLinkKind, SocialLink>>;
+  rootPlaceId: number | null;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+/** Universe fields sent to Roblox; null clears a private server price or social link. */
+export interface ExperienceUniverseChanges {
+  voiceChatEnabled?: boolean;
+  privateServerPriceRobux?: number | null;
+  devices?: Partial<Record<ExperienceDevice, boolean>>;
+  socialLinks?: Partial<Record<SocialLinkKind, SocialLink | null>>;
+}
+
+export interface ExperiencePlace {
+  id: number;
+  universeId: number;
+  displayName: string;
+  description: string;
+  serverSize: number | null;
+  root: boolean;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+export interface ExperiencePlaceChanges {
+  displayName?: string;
+  description?: string;
+  serverSize?: number;
+}
+
+const DEVICE_FIELDS: Record<ExperienceDevice, string> = {
+  desktop: 'desktopEnabled',
+  mobile: 'mobileEnabled',
+  tablet: 'tabletEnabled',
+  console: 'consoleEnabled',
+  vr: 'vrEnabled',
+};
+
+const SOCIAL_LINK_FIELDS: Record<SocialLinkKind, string> = {
+  facebook: 'facebookSocialLink',
+  twitter: 'twitterSocialLink',
+  youtube: 'youtubeSocialLink',
+  twitch: 'twitchSocialLink',
+  discord: 'discordSocialLink',
+  roblox_group: 'robloxGroupSocialLink',
+  guilded: 'guildedSocialLink',
+};
+
+// Open Cloud v2 names resources by path, such as users/123 or universes/1/places/2.
+function trailingId(path: unknown): number | null {
+  return typeof path === 'string' ? positiveSafeInteger(path.split('/').pop()) ?? null : null;
+}
+
+function optionalText(value: unknown): string {
+  return typeof value === 'string' ? value : '';
+}
+
+function timestamps(value: unknown): { createdAt?: string; updatedAt?: string } {
+  const createdAt = readField(value, 'createTime');
+  const updatedAt = readField(value, 'updateTime');
+  return {
+    ...(typeof createdAt === 'string' ? { createdAt } : {}),
+    ...(typeof updatedAt === 'string' ? { updatedAt } : {}),
+  };
+}
+
+function normalizeUniverse(universeId: number, value: unknown): ExperienceUniverse {
+  const price = readField(value, 'privateServerPriceRobux');
+  const devices = Object.fromEntries(
+    EXPERIENCE_DEVICES.map((device) => [device, readField(value, DEVICE_FIELDS[device]) === true]),
+  ) as Record<ExperienceDevice, boolean>;
+  const socialLinks: Partial<Record<SocialLinkKind, SocialLink>> = {};
+  for (const kind of SOCIAL_LINK_KINDS) {
+    const link = readField(value, SOCIAL_LINK_FIELDS[kind]);
+    const uri = readField(link, 'uri');
+    if (typeof uri === 'string' && uri) socialLinks[kind] = { title: optionalText(readField(link, 'title')), uri };
+  }
+  return {
+    id: trailingId(readField(value, 'path')) ?? universeId,
+    displayName: optionalText(readField(value, 'displayName')),
+    description: optionalText(readField(value, 'description')),
+    visibility: optionalText(readField(value, 'visibility')),
+    ownerUserId: trailingId(readField(value, 'user')),
+    ownerGroupId: trailingId(readField(value, 'group')),
+    ageRating: optionalText(readField(value, 'ageRating')),
+    voiceChatEnabled: readField(value, 'voiceChatEnabled') === true,
+    privateServerPriceRobux: typeof price === 'number' && Number.isSafeInteger(price) && price >= 0 ? price : null,
+    devices,
+    socialLinks,
+    rootPlaceId: trailingId(readField(value, 'rootPlace')),
+    ...timestamps(value),
+  };
+}
+
+function normalizePlace(universeId: number, placeId: number, value: unknown): ExperiencePlace {
+  const serverSize = positiveSafeInteger(readField(value, 'serverSize'));
+  return {
+    id: trailingId(readField(value, 'path')) ?? placeId,
+    universeId,
+    displayName: optionalText(readField(value, 'displayName')),
+    description: optionalText(readField(value, 'description')),
+    serverSize: serverSize ?? null,
+    root: readField(value, 'root') === true,
+    ...timestamps(value),
+  };
+}
+
+// A field named in updateMask but absent from the body is cleared, which is
+// the only way Open Cloud lets a caller remove a price or social link.
+function universePatch(changes: ExperienceUniverseChanges): { body: Record<string, unknown>; updateMask: string[] } {
+  const body: Record<string, unknown> = {};
+  const updateMask: string[] = [];
+  const set = (field: string, value: unknown) => {
+    updateMask.push(field);
+    if (value !== null) body[field] = value;
+  };
+  if (changes.voiceChatEnabled !== undefined) set('voiceChatEnabled', changes.voiceChatEnabled);
+  if (changes.privateServerPriceRobux !== undefined) set('privateServerPriceRobux', changes.privateServerPriceRobux);
+  for (const device of EXPERIENCE_DEVICES) {
+    const enabled = changes.devices?.[device];
+    if (enabled !== undefined) set(DEVICE_FIELDS[device], enabled);
+  }
+  for (const kind of SOCIAL_LINK_KINDS) {
+    const link = changes.socialLinks?.[kind];
+    if (link !== undefined) set(SOCIAL_LINK_FIELDS[kind], link);
+  }
+  return { body, updateMask };
+}
+
+function placePatch(changes: ExperiencePlaceChanges): { body: Record<string, unknown>; updateMask: string[] } {
+  const body: Record<string, unknown> = {
+    ...(changes.displayName !== undefined ? { displayName: changes.displayName } : {}),
+    ...(changes.description !== undefined ? { description: changes.description } : {}),
+    ...(changes.serverSize !== undefined ? { serverSize: changes.serverSize } : {}),
+  };
+  return { body, updateMask: Object.keys(body) };
+}
+
 type AssetDeliveryResponse = {
   location?: string;
   errors?: Array<{
@@ -520,6 +686,39 @@ export class OpenCloudClient {
     await this.sendMultipart(path, monetizationForm(changes), 'PATCH', async (response) => {
       await response.arrayBuffer();
     });
+  }
+
+  async getUniverse(universeId: number): Promise<ExperienceUniverse> {
+    return normalizeUniverse(universeId, await this.request<unknown>(`/cloud/v2/universes/${universeId}`));
+  }
+
+  async updateUniverse(universeId: number, changes: ExperienceUniverseChanges): Promise<void> {
+    const { body, updateMask } = universePatch(changes);
+    await this.request<unknown>(`/cloud/v2/universes/${universeId}`, {
+      method: 'PATCH',
+      params: { updateMask: updateMask.join(',') },
+      body,
+    });
+  }
+
+  async getPlace(universeId: number, placeId: number): Promise<ExperiencePlace> {
+    const path = `/cloud/v2/universes/${universeId}/places/${placeId}`;
+    return normalizePlace(universeId, placeId, await this.request<unknown>(path));
+  }
+
+  async updatePlace(universeId: number, placeId: number, changes: ExperiencePlaceChanges): Promise<void> {
+    const { body, updateMask } = placePatch(changes);
+    await this.request<unknown>(`/cloud/v2/universes/${universeId}/places/${placeId}`, {
+      method: 'PATCH',
+      params: { updateMask: updateMask.join(',') },
+      body,
+    });
+  }
+
+  /** Makes a universe public (activate) or private (deactivate). */
+  async setUniverseActive(universeId: number, active: boolean): Promise<void> {
+    const action = active ? 'activate' : 'deactivate';
+    await this.request<unknown>(`/legacy-develop/v1/universes/${universeId}/${action}`, { method: 'POST' });
   }
 
   async getAssetThumbnail(

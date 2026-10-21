@@ -23,6 +23,7 @@ import {
 } from '../image-decode.js';
 import { DOC_CATEGORIES, getRobloxDoc, isDocCategory } from '../roblox-docs.js';
 import { findBuiltInStudioSkill, loadBuiltInStudioSkills } from '../studio-skills.js';
+import { runManageExperience } from './experience.js';
 import { runManageMonetization } from './monetization.js';
 import { rgbaToJpeg } from '../jpeg-encoder.js';
 import { rgbaToPng } from '../png-encoder.js';
@@ -1728,7 +1729,14 @@ export class RobloxStudioTools {
     }));
   }
 
-  // Monetization APIs address a universe, which Studio reports as game.GameId.
+  async manageExperience(request: Record<string, unknown>, instance_id?: string) {
+    return this._textResult(await runManageExperience(request, {
+      client: this.openCloudClient,
+      connectedUniverseId: () => this._connectedUniverseId(instance_id),
+    }));
+  }
+
+  // Open Cloud universe APIs address a universe, which Studio reports as game.GameId.
   private async _connectedUniverseId(instance_id?: string): Promise<number> {
     let info: StudioToolResponse;
     try {
