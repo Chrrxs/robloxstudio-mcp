@@ -181,7 +181,7 @@ function receive(invoke: Invoke, data: Record<string, unknown>): unknown {
 		if (capability.success !== true || capability.chunkBytes !== CHUNK_BYTES) {
 			return { unavailable: "Client capture lacks bounded transfer support" };
 		}
-		const response = invoke("/api/capture-studio", { encoding: data.encoding, transferId: id });
+		const response = invoke("/api/capture-studio", { encoding: data.encoding, transferId: id, maxPx: data.maxPx }); // fork: maxPx
 		if (!typeIs(response, "table")) error("invalid transfer response");
 		const fields = response as Record<string, unknown>;
 		if (typeIs(fields.unavailable, "string")) return { unavailable: fields.unavailable.sub(1, 4096) };

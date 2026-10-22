@@ -1,5 +1,5 @@
 // fork: profiles replace the fixed tool list; BridgeBusyError prints as one line
-import { BridgeBusyError, RobloxStudioMCPServer, resolveToolset, ToolsetError } from '@chrrxs/robloxstudio-mcp-core';
+import { BridgeBusyError, forkLimits, RobloxStudioMCPServer, resolveToolset, ToolsetError } from '@chrrxs/robloxstudio-mcp-core';
 // end fork
 import { createRequire } from 'module';
 import { installBundledPlugin, installPlugin } from './install-plugin.js';
@@ -20,10 +20,11 @@ if (installBundledOnly || installWithFallback) {
     process.exitCode = 1;
   });
 } else {
-  // fork: resolve --profile / --tools before anything else so mistakes fail fast
+  // fork: resolve --profile / --tools and output limits before anything else so mistakes fail fast
   let toolset: ReturnType<typeof resolveToolset> | undefined;
   try {
     toolset = resolveToolset('inspector');
+    forkLimits();
   } catch (err) {
     if (!(err instanceof ToolsetError)) throw err;
     console.error(err.message);

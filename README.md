@@ -31,6 +31,7 @@ screenshots, memory reports, and profiler captures from each peer.
 - For large generated Luau, use the [verified chunk-staging workflow](docs/large-inputs.md): explicit instance routing, UTF-8 byte/hash readback, ownership-checked cleanup, and bounded recovery without blindly replaying mutations.
 - Use `selection` to inspect or update Studio selection and frame a part or model before capturing the viewport.
 - Capture the viewport with `capture_screenshot`, then send mouse or keyboard input. See [Configuration](docs/configuration.md#host-window-capture).
+- Keep agent sessions small: register only the tools a job needs with `--profile` or `--tools`, cap result and image sizes, and log per-call sizes. See [Tool profiles and output limits](docs/configuration.md#tool-profiles-and-output-limits).
 
 ### Inspect Creator Store assets
 

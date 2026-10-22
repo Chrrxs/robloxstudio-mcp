@@ -1,4 +1,5 @@
 import * as RenderMonitor from "../RenderMonitor";
+import ImageFit from "../fork/ImageFit"; // fork
 
 const CaptureService = game.GetService("CaptureService");
 const AssetService = game.GetService("AssetService");
@@ -171,7 +172,7 @@ function captureScreenshotFrame(): { contentId: string } | { error: string } {
 // the privilege to create an EditableImage from a temporary texture id (errors
 // "cannot currently create editable image from temporary texture id"), while
 // the edit DM can — even for an id captured in the play client DM.
-function readContentToBase64(contentId: string): unknown {
+function readContentToBase64(contentId: string, maxPx?: unknown): unknown { // fork: maxPx
 	const [editableOk, editableResult] = pcall(() => {
 		return AssetService.CreateEditableImageAsync(Content.fromUri(contentId));
 	});
@@ -195,10 +196,12 @@ function readContentToBase64(contentId: string): unknown {
 	let w = nativeW;
 	let h = nativeH;
 
-	if (nativeW * nativeH * 4 > MAX_RAW_PIXEL_BYTES) {
+	const fitted = ImageFit.fitFrame(nativeW, nativeH, maxPx); // fork
+	if (nativeW * nativeH * 4 > MAX_RAW_PIXEL_BYTES || fitted.w < nativeW) { // fork: || fitted.w < nativeW
 		const scale = math.min(
 			math.sqrt(MAX_RAW_PIXEL_BYTES / (nativeW * nativeH * 4)),
 			MAX_CREATED_IMAGE_DIM / math.max(nativeW, nativeH),
+			fitted.w / nativeW, // fork
 		);
 		w = math.max(1, math.floor(nativeW * scale));
 		h = math.max(1, math.floor(nativeH * scale));
@@ -252,11 +255,11 @@ function getStudioCaptureService(): StudioCaptureServiceLike | undefined {
 // cannot capture right now (missing FFlag, permission not granted, or this
 // DataModel is not the active one) so the caller can fall back to the
 // CaptureService + EditableImage path.
-function doStudioCapture(wantPng: boolean): unknown | undefined {
-	return withViewportRead(() => captureStudioFrame(wantPng));
+function doStudioCapture(wantPng: boolean, maxPx?: unknown): unknown | undefined { // fork: maxPx
+	return withViewportRead(() => captureStudioFrame(wantPng, maxPx));
 }
 
-function captureStudioFrame(wantPng: boolean): unknown | undefined {
+function captureStudioFrame(wantPng: boolean, maxPx?: unknown): unknown | undefined { // fork: maxPx
 	if (STUDIO_CAPTURE_FORMATS === undefined) return undefined;
 
 	const service = getStudioCaptureService();
@@ -281,6 +284,9 @@ function captureStudioFrame(wantPng: boolean): unknown | undefined {
 		w = math.max(1, math.floor(nativeW * scale));
 		h = math.max(1, math.floor(nativeH * scale));
 	}
+	const fitted = ImageFit.fitFrame(w, h, maxPx); // fork: engine downscale to the server's maxPx
+	w = fitted.w; // fork
+	h = fitted.h; // fork
 
 	// CaptureSize is a framebuffer crop, not the logical viewport size. At
 	// fractional display scaling it cuts off the right/bottom of the frame.
@@ -327,7 +333,7 @@ function captureStudioFrame(wantPng: boolean): unknown | undefined {
 // the server can fall back to the legacy CaptureService path.
 function captureStudio(requestData: Record<string, unknown>): unknown {
 	const wantPng = requestData.encoding === "png";
-	const result = doStudioCapture(wantPng);
+	const result = doStudioCapture(wantPng, requestData.maxPx); // fork: maxPx
 	if (result === undefined) {
 		return { unavailable: "StudioCaptureService cannot capture this DataModel right now" };
 	}
@@ -335,14 +341,14 @@ function captureStudio(requestData: Record<string, unknown>): unknown {
 }
 
 // Edit-mode single shot: capture and read back in the same (edit) context.
-function captureScreenshotData(): unknown {
+function captureScreenshotData(maxPx?: unknown): unknown { // fork: maxPx
 	const cap = doCaptureScreenshot();
 	if ("error" in cap) return cap;
-	return readContentToBase64(cap.contentId);
+	return readContentToBase64(cap.contentId, maxPx);
 }
 
-function captureScreenshot(): unknown {
-	return captureScreenshotData();
+function captureScreenshot(requestData: Record<string, unknown> = {}): unknown { // fork: requestData
+	return captureScreenshotData(requestData.maxPx);
 }
 
 // Play-mode step 1 (run on the CLIENT): capture only, return the temp id.
@@ -354,7 +360,7 @@ function captureBegin(): unknown {
 function captureRead(requestData: Record<string, unknown>): unknown {
 	const contentId = requestData.contentId as string | undefined;
 	if (!contentId) return { error: "contentId is required" };
-	return readContentToBase64(contentId);
+	return readContentToBase64(contentId, requestData.maxPx); // fork: maxPx
 }
 
 // Viewport corner markers for the host-side window capture fallback.

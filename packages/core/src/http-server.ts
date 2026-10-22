@@ -13,6 +13,10 @@ import type { ToolDefinition } from './tools/definitions.js';
 import { createToolHttpHandler, normalizeToolResult, publicToolErrorBody } from './mcp-runtime.js';
 import type { ToolInvocationContext } from './mcp-runtime.js';
 import { tokensMatch } from './auth.js';
+// fork: fork handlers, proxy endpoints, caps and metrics
+import { FORK_TOOL_HANDLERS, withForkProxyEndpoints } from './fork/handlers.js';
+import { finishToolResult } from './fork/finish-result.js';
+// end fork
 import { StudioLaunchPreDispatchError } from './studio-instance-manager.js';
 import { HTTP_BODY_LIMIT_BYTES } from './http-body-limits.js';
 import {
@@ -335,6 +339,7 @@ export const TOOL_HANDLERS: Record<string, ToolHandler> = {
     dryRun: body.dryRun,
     maxReplacements: body.maxReplacements,
   }, body.instance_id),
+  ...FORK_TOOL_HANDLERS, // fork: replaces upstream entries of the same name
 };
 
 const MAX_STUDIO_SESSIONS = 256;
@@ -352,7 +357,7 @@ export function createHttpServer(tools: RobloxStudioTools, bridge: BridgeService
   // Express cannot know about the lifecycle controls attached below.
   const app = express() as unknown as RobloxStudioHttpApp;
   const allowedProxyEndpoints = allowedTools
-    ? new Set(Object.entries(TOOL_PROXY_ENDPOINTS)
+    ? new Set(Object.entries(withForkProxyEndpoints(TOOL_PROXY_ENDPOINTS)) // fork: withForkProxyEndpoints
       .filter(([toolName]) => allowedTools.has(toolName))
       .flatMap(([, endpoints]) => endpoints))
     : undefined;
@@ -1020,7 +1025,8 @@ export function createHttpServer(tools: RobloxStudioTools, bridge: BridgeService
 
     app.post(`/mcp/${toolName}`, async (req, res) => {
       try {
-        const result = normalizeToolResult(await handler(tools, req.body), 'modern');
+        const startedAt = Date.now(); // fork: caps and metrics, as over MCP
+        const result = finishToolResult(toolName, normalizeToolResult(await handler(tools, req.body), 'modern'), 'modern', startedAt);
         if (result.structuredContent && result.content.length === 0) {
           res.json(result.structuredContent);
         } else {

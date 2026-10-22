@@ -207,6 +207,56 @@ stepped. `close` sends SIGTERM to that exact process, then SIGKILL if it is stil
 running. Sign-in settling before close and host window capture are not available
 under Wine.
 
+## Tool profiles and output limits
+
+These options cut the tokens an agent spends per session. Flags win over
+environment variables.
+
+**Profiles.** `--profile <name>` (or `MCP_PROFILE`) limits which tools the
+server registers. Tools outside the profile are absent from the tool list.
+
+| Profile | Tools |
+| --- | --- |
+| `full` | Everything (default). |
+| `inspect` | Read-only tools. |
+| `playtest` | Connection status, playtest control, runtime eval, input, screenshots, and the playtest helpers. |
+
+`--tools a,b,c` (or `MCP_TOOLS`) is a custom allowlist that replaces the profile.
+Unknown names stop the server with one error line. The inspector edition never
+registers write tools, whatever the allowlist says.
+
+**Response cap.** Every tool result is limited to `--response-cap` bytes of text
+(or `MCP_RESPONSE_CAP`, default `4096`, `0` = off). `get_script_source`,
+`get_roblox_docs` and `get_roblox_skills` get 16 KB and `execute_luau` 8 KB.
+Change any tool with `MCP_RESPONSE_CAP_OVERRIDES="grep_scripts=8192,get_script_source=0"`.
+When a result is cut:
+
+- JSON results keep their shape: the largest arrays lose their tail and long
+  strings end in `…`, and a `truncated` field says what was dropped.
+- Text results are cut at a line break and end with one line.
+
+Either way the note names the arguments that narrow the output, for example
+`[truncated 9.2 KB of 13.3 KB (matches: 25 of 200); narrow with maxResults, maxResultsPerScript, filesOnly or path]`.
+
+**Images.** Every image a tool returns is at most `MCP_IMAGE_MAX_PX` on its
+longest side (default `512`, `0` = off). Viewport captures are downscaled by
+Studio before transfer, and JPEGs default to quality `MCP_IMAGE_QUALITY`
+(`70`). `capture_screenshot` also takes:
+
+- `crop`: an instance path (a GuiObject, BasePart or Model) or viewport pixels
+  `"x,y,w,h"`.
+- `max_px`: a per-call size limit.
+
+Its result reports `scale` and `origin`. To get `simulate_mouse_input`
+coordinates, use viewport x = origin x + image x / scale (the same for y).
+
+**Metrics.** With `MCP_METRICS_FILE` set, each tool call appends one JSON line
+to that file. Nothing is written to stdout.
+
+```json
+{"ts":"2026-10-22T12:00:00.000Z","tool":"grep_scripts","profile":"full","bytes":4011,"images":[],"ms":41,"truncated":true,"error":false}
+```
+
 ## Environment variables
 
 | Variable | Default | Purpose |
@@ -218,6 +268,13 @@ under Wine.
 | `ROBLOX_STUDIO_ALLOWED_ORIGINS` | None | Comma-separated browser origins allowed to call the HTTP API cross-origin. |
 | `ROBLOX_STUDIO_HOST_CAPTURE` | Unset | Set to `0`, `false`, or `off` to disable the host window capture fallback for `capture_screenshot`. |
 | `ROBLOX_OPEN_CLOUD_API_KEY` | None | Roblox Open Cloud key used by features such as audio preview, place version access, and monetization. Required permissions depend on the tool. |
+| `MCP_PROFILE` | `full` | Tool profile: `full`, `inspect` or `playtest`. `--profile` wins. See [Tool profiles and output limits](#tool-profiles-and-output-limits). |
+| `MCP_TOOLS` | Unset | Comma-separated tool allowlist; replaces the profile. `--tools` wins. |
+| `MCP_RESPONSE_CAP` | `4096` | Bytes of text per tool result; `0` = off. `--response-cap` wins. |
+| `MCP_RESPONSE_CAP_OVERRIDES` | Built-in content-tool overrides | Per-tool caps, `tool=bytes,…`; `0` turns the cap off for that tool. |
+| `MCP_IMAGE_MAX_PX` | `512` | Longest side of returned images; `0` = off. |
+| `MCP_IMAGE_QUALITY` | `70` | Default JPEG quality for viewport captures. |
+| `MCP_METRICS_FILE` | Unset | Append one JSON line per tool call to this file. |
 | `MCP_PLUGINS_DIR` | Platform Studio Plugins folder | Override the destination used by plugin installation. |
 | `ROBLOX_STUDIO_EXE` | Auto-discovered on Windows, WSL, and macOS | Studio executable to launch. Required on native Linux with a Wine launcher, where it must be an existing `RobloxStudioBeta.exe` in the Wine prefix. |
 | `ROBLOX_STUDIO_WINE_LAUNCHER` | Unset | Native Linux only: executable that `exec`s Wine on Studio. See [Native Linux with Wine](#native-linux-with-wine). |

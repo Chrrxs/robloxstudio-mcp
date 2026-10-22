@@ -6,3 +6,11 @@ const suite = createHash('sha256').update(expect.getState().testPath).digest('he
 process.env.ROBLOXSTUDIO_MCP_MANAGED_INSTANCE_REGISTRY_DIR = join(
   process.env.RSMCP_JEST_REGISTRY_ROOT, suite,
 );
+
+// fork: upstream suites check upstream output, so the fork's response and image
+// caps are off unless a test sets them (fork tests pass explicit limits).
+process.env.MCP_RESPONSE_CAP ??= '0';
+process.env.MCP_IMAGE_MAX_PX ??= '0';
+process.env.MCP_IMAGE_QUALITY ??= '92';
+process.env.MCP_RESPONSE_CAP_OVERRIDES ??= 'get_script_source=0,get_roblox_docs=0,get_roblox_skills=0,execute_luau=0';
+// end fork

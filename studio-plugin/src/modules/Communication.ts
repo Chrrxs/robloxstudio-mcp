@@ -25,6 +25,7 @@ import ServerUrlSettings from "./ServerUrlSettings";
 import PluginSession from "./PluginSession";
 import StudioWebSocket from "./StudioWebSocket";
 import PathGuard from "./PathGuard";
+import ForkRoutes from "./fork/ForkRoutes"; // fork
 import type {
 	RequestPayload,
 	ReadyResponse,
@@ -100,6 +101,7 @@ const routeMap: Record<string, Handler> = {
 
 	"/api/get-memory-breakdown": MemoryHandlers.getMemoryBreakdown,
 	"/api/get-scene-analysis": SceneAnalysisHandlers.getSceneAnalysis,
+	...ForkRoutes.routes, // fork
 };
 
 const pathGuard = PathGuard.createPathGuard((path) => Utils.resolveInstancePath(path).ambiguity);

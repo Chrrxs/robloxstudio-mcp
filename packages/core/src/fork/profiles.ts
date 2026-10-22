@@ -1,7 +1,10 @@
 // Tool profiles: limit which tools a server registers, so agents only pay
 // catalog tokens for the tools their job needs.
 import { getAllTools, getReadOnlyTools, type ToolDefinition } from '../tools/definitions.js';
-import { FORK_TOOL_DEFINITIONS } from './definitions.js';
+import { flagValue, nonEmpty, ToolsetError } from './cli.js';
+import { FORK_TOOL_DEFINITIONS, withForkSchemaExtensions } from './definitions.js';
+
+export { ToolsetError };
 
 export type Edition = 'main' | 'inspector';
 
@@ -29,10 +32,6 @@ export const PLAYTEST_PROFILE_TOOLS: readonly string[] = [
   'frame_strip',
 ];
 
-export class ToolsetError extends Error {
-  override name = 'ToolsetError';
-}
-
 export interface ResolvedToolset {
   /** Profile name, or "custom" for an explicit --tools allowlist. */
   profile: ProfileName | 'custom';
@@ -41,23 +40,17 @@ export interface ResolvedToolset {
 
 /** Every tool this edition can serve, upstream first. */
 export function editionCatalog(edition: Edition): ToolDefinition[] {
+  const upstream = (edition === 'inspector' ? getReadOnlyTools() : getAllTools()).map(withForkSchemaExtensions);
   return edition === 'inspector'
-    ? [...getReadOnlyTools(), ...FORK_TOOL_DEFINITIONS.filter((tool) => tool.category === 'read')]
-    : [...getAllTools(), ...FORK_TOOL_DEFINITIONS];
+    ? [...upstream, ...FORK_TOOL_DEFINITIONS.filter((tool) => tool.category === 'read')]
+    : [...upstream, ...FORK_TOOL_DEFINITIONS];
 }
 
-function flagValue(argv: readonly string[], flag: string): string | undefined {
-  for (let i = 0; i < argv.length; i++) {
-    const arg = argv[i];
-    if (arg === flag) return i + 1 < argv.length ? argv[i + 1] : '';
-    if (arg.startsWith(`${flag}=`)) return arg.slice(flag.length + 1);
-  }
-  return undefined;
-}
-
-function nonEmpty(value: string | undefined): string | undefined {
-  const trimmed = value?.trim();
-  return trimmed ? trimmed : undefined;
+/** Profile label for metrics, read the same way resolveToolset reads it (no validation). */
+export function activeProfileName(argv: readonly string[] = process.argv, env: NodeJS.ProcessEnv = process.env): string {
+  const profileFlag = nonEmpty(flagValue(argv, '--profile'));
+  if (nonEmpty(flagValue(argv, '--tools')) || (!profileFlag && nonEmpty(env.MCP_TOOLS))) return 'custom';
+  return profileFlag ?? nonEmpty(env.MCP_PROFILE) ?? 'full';
 }
 
 /**

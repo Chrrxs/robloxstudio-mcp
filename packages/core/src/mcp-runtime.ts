@@ -12,6 +12,10 @@ import { registerResourceHandlers } from './mcp-compat.js';
 import { StudioLaunchPreDispatchError } from './studio-instance-manager.js';
 import type { RobloxStudioTools } from './tools/index.js';
 import type { ToolDefinition } from './tools/definitions.js';
+// fork: response/image caps, metrics, and text-result fork tools
+import { FORK_TEXT_TOOLS } from './fork/definitions.js';
+import { finishToolResult } from './fork/finish-result.js';
+// end fork
 
 export type ProtocolEra = McpRequestContext['era'];
 
@@ -63,7 +67,7 @@ const INTERNAL_ENVELOPE_KEYS: Record<string, true> = {
   serverVersion: true,
 };
 
-const TEXT_RESULT_TOOLS = new Set(['get_roblox_docs']);
+const TEXT_RESULT_TOOLS = new Set(['get_roblox_docs', ...FORK_TEXT_TOOLS]); // fork: FORK_TEXT_TOOLS
 // These remain in the inspector catalog because they do not mutate the
 // DataModel, but they can write caller-selected files on the MCP host.
 const SIDE_EFFECTING_READ_TOOLS = new Set([
@@ -351,6 +355,7 @@ export function createToolServer(options: McpRuntimeOptions): McpServer {
         annotations: publicDefinition.annotations,
       },
       async (args, context) => {
+        const startedAt = Date.now(); // fork: metrics duration
         try {
           const raw = await options.invoke(
             options.getTools(),
@@ -358,12 +363,13 @@ export function createToolServer(options: McpRuntimeOptions): McpServer {
             args as Record<string, unknown>,
             { signal: context.mcpReq.signal },
           );
-          return normalizeToolResult(raw, options.era);
+          // fork: finishToolResult caps text and images and records metrics
+          return finishToolResult(definition.name, normalizeToolResult(raw, options.era), options.era, startedAt);
         } catch (error) {
-          return normalizeToolResult({
+          return finishToolResult(definition.name, normalizeToolResult({
             content: [{ type: 'text', text: JSON.stringify(publicToolErrorBody(definition.name, error)) }],
             isError: true,
-          }, options.era);
+          }, options.era), options.era, startedAt);
         }
       },
     );

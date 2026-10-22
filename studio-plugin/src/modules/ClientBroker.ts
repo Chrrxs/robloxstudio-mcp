@@ -15,6 +15,7 @@ import HttpDiagnostics from "./HttpDiagnostics";
 import PluginSession from "./PluginSession";
 import TopologyId from "./TopologyId";
 import PeerRole from "./PeerRole";
+import ForkRoutes from "./fork/ForkRoutes"; // fork
 import type { StudioRequestContext } from "../types";
 
 interface StudioTestServiceMultiplayer extends StudioTestService {
@@ -149,6 +150,7 @@ const CLIENT_BROKER_ALLOWED_ENDPOINTS = new Set<string>([
 	// Viewport framing must target the same live client captured by screenshots.
 	"/api/focus-viewport",
 ]);
+for (const endpoint of ForkRoutes.clientEndpoints) CLIENT_BROKER_ALLOWED_ENDPOINTS.add(endpoint); // fork
 
 
 function forkRole(): "edit" | "server" | "client" {
@@ -319,6 +321,8 @@ function routeClientRequest(payload: BrokerEnvelope): unknown {
 	if (payload.endpoint === "/api/eval-runtime") {
 		return EvalRuntimeHandlers.evalRuntime(payload.data ?? {});
 	}
+	const forkHandler = ForkRoutes.routes[payload.endpoint]; // fork
+	if (forkHandler !== undefined) return forkHandler(payload.data ?? {}); // fork
 	return { error: `Unsupported client broker endpoint: ${payload.endpoint}` };
 }
 

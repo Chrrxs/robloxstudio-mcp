@@ -84,6 +84,17 @@ describe('fork tool profiles', () => {
     expect(await listedToolNames(resolved.tools)).toEqual(names(resolved.tools).sort());
   });
 
+  test('capture_screenshot gains crop and max_px within upstream description limits', () => {
+    for (const edition of ['main', 'inspector'] as const) {
+      const capture = editionCatalog(edition).find((tool) => tool.name === 'capture_screenshot')!;
+      const props = (capture.inputSchema as { properties: Record<string, { description: string }> }).properties;
+      expect(Object.keys(props)).toEqual(expect.arrayContaining(['format', 'quality', 'instance_id', 'crop', 'max_px']));
+      for (const prop of Object.values(props)) expect(prop.description.length).toBeLessThanOrEqual(64);
+    }
+    const upstream = getAllTools().find((tool) => tool.name === 'capture_screenshot')!;
+    expect(Object.keys((upstream.inputSchema as { properties: object }).properties)).not.toContain('crop');
+  });
+
   test('profiles shrink the advertised catalog', () => {
     const full = catalogChars(resolveToolset('main', [], {}).tools);
     const playtest = catalogChars(resolveToolset('main', ['--profile', 'playtest'], {}).tools);

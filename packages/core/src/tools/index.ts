@@ -27,6 +27,10 @@ import { runManageMonetization } from './monetization.js';
 import { rgbaToJpeg } from '../jpeg-encoder.js';
 import { rgbaToPng } from '../png-encoder.js';
 import { pathNotice } from '../path-notice.js';
+// fork: image caps on every viewport capture
+import { applyCaptureBudget, type CaptureBudget, type Rect } from '../fork/image-budget.js';
+import { defaultCaptureBudget, defaultCaptureQuality, pluginCaptureFields } from '../fork/capture.js';
+// end fork
 import {
   captureStudioWindow,
   cropToViewport,
@@ -122,6 +126,8 @@ type EncodedViewportCapture = {
   message: string;
   source?: string;
   studioFastPathUnavailable?: string;
+  crop?: Rect; // fork: kept region in viewport px
+  viewport?: { width: number; height: number }; // fork
 } | {
   success: false;
   error: string;
@@ -5173,9 +5179,10 @@ export class RobloxStudioTools {
     format?: string,
     quality?: number,
     maxBytes: number = MAX_INLINE_IMAGE_BYTES,
+    budget?: CaptureBudget, // fork: crop and max size
   ): Promise<EncodedViewportCapture> {
     const previous = this.viewportCaptureQueues.get(instanceId) ?? Promise.resolve();
-    const capture = previous.then(() => this._captureViewportImageNow(instanceId, targetRole, format, quality, maxBytes));
+    const capture = previous.then(() => this._captureViewportImageNow(instanceId, targetRole, format, quality, maxBytes, budget));
     const settled = capture.then(() => undefined, () => undefined);
     this.viewportCaptureQueues.set(instanceId, settled);
     try {
@@ -5191,9 +5198,11 @@ export class RobloxStudioTools {
     format?: string,
     quality?: number,
     maxBytes: number = MAX_INLINE_IMAGE_BYTES,
+    budget: CaptureBudget = defaultCaptureBudget(), // fork: crop and max size
   ): Promise<EncodedViewportCapture> {
     const fmt: 'jpeg' | 'png' = format === 'png' ? 'png' : 'jpeg';
-    const q = quality === undefined ? 92 : Math.max(1, Math.min(100, Math.floor(quality)));
+    const q = quality === undefined ? defaultCaptureQuality() : Math.max(1, Math.min(100, Math.floor(quality))); // fork: default from MCP_IMAGE_QUALITY
+    const forkFields = pluginCaptureFields(budget); // fork: plugin downscales before transfer
 
     // Fast path: StudioCaptureService (Studio-only, FFlag-gated) reads the
     // framebuffer directly — no CaptureService callback, no EditableImage
@@ -5209,7 +5218,7 @@ export class RobloxStudioTools {
     // rendering peer: 'edit' when idle, 'client-N' during a playtest.
     let response = await this._callSingle(
       '/api/capture-studio',
-      { encoding: fmt === 'png' ? 'png' : 'rgba8' },
+      { encoding: fmt === 'png' ? 'png' : 'rgba8', ...forkFields }, // fork: ...forkFields
       targetRole,
       instanceId,
     ) as RawImageCaptureResponse;
@@ -5236,11 +5245,11 @@ export class RobloxStudioTools {
         } else if (!begin.contentId) {
           response = { error: 'Screenshot capture failed: no content id returned from client.' };
         } else {
-          response = await this._callSingle('/api/capture-read', { contentId: begin.contentId }, 'edit', instanceId) as RawImageCaptureResponse;
+          response = await this._callSingle('/api/capture-read', { contentId: begin.contentId, ...forkFields }, 'edit', instanceId) as RawImageCaptureResponse; // fork: ...forkFields
         }
       } else {
         // Edit mode: capture and read back in the same (edit) context.
-        response = await this._callSingle('/api/capture-screenshot', {}, 'edit', instanceId) as RawImageCaptureResponse;
+        response = await this._callSingle('/api/capture-screenshot', { ...forkFields }, 'edit', instanceId) as RawImageCaptureResponse; // fork: ...forkFields
       }
       response.source ??= 'CaptureService';
     }
@@ -5274,6 +5283,8 @@ export class RobloxStudioTools {
         hostNote = ` Warning: ${hostReason} and host window capture also failed (${host.error}), so this image may be blank.`;
       }
     }
+
+    response = applyCaptureBudget(response, budget); // fork: crop and downscale before encoding
 
     if (response.error) {
       let text = response.error;
@@ -5375,6 +5386,8 @@ export class RobloxStudioTools {
       message,
       source: response.source,
       studioFastPathUnavailable,
+      crop: (response as { crop?: Rect }).crop, // fork
+      viewport: { width: nativeW, height: nativeH }, // fork
     };
   }
 
@@ -5573,6 +5586,17 @@ export class RobloxStudioTools {
       data: cropped.rgba.toString('base64'),
     };
   }
+
+  // fork: entry points for fork/ handlers, which live outside this class
+  forkBridge() {
+    return {
+      resolveRuntime: (instance_id?: string) => this._resolveRuntime(instance_id),
+      refreshTopology: () => this.bridge.refreshTopologyForRouting(),
+      callSingle: this._callSingle.bind(this),
+      captureViewportImage: this._captureViewportImage.bind(this),
+    };
+  }
+  // end fork
 
   async captureScreenshot(instance_id?: string, format?: string, quality?: number) {
     const refresh = this.bridge.refreshTopologyForRouting();
