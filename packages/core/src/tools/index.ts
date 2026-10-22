@@ -30,6 +30,7 @@ import { pathNotice } from '../path-notice.js';
 // fork: image caps on every viewport capture
 import { applyCaptureBudget, type CaptureBudget, type Rect } from '../fork/image-budget.js';
 import { defaultCaptureBudget, defaultCaptureQuality, pluginCaptureFields } from '../fork/capture.js';
+import { tagRole } from '../fork/log-lines.js';
 // end fork
 import {
   captureStudioWindow,
@@ -2653,6 +2654,7 @@ export class RobloxStudioTools {
     tail?: number,
     filter?: string,
     signal?: AbortSignal,
+    withRoles = false, // fork: logs_since needs each entry's peer role
   ) {
     if (instance_id !== undefined && multiplayer_group_id !== undefined) {
       throw new Error('get_runtime_logs accepts only one of instance_id or multiplayer_group_id.');
@@ -2920,7 +2922,7 @@ export class RobloxStudioTools {
       let insertionOrder = 0;
       const merged = successful.flatMap((read) =>
         read.entries.map((entry) => ({
-          entry: publicEntry(entry),
+          entry: withRoles ? tagRole(publicEntry(entry), read.role) : publicEntry(entry), // fork: withRoles
           timestamp: entryTimestamp(entry),
           insertionOrder: insertionOrder++,
         }))
@@ -5594,6 +5596,7 @@ export class RobloxStudioTools {
       refreshTopology: () => this.bridge.refreshTopologyForRouting(),
       callSingle: this._callSingle.bind(this),
       captureViewportImage: this._captureViewportImage.bind(this),
+      hasRole: (instance_id: string | undefined, role: string) => this.bridge.resolveTarget({ instance_id, target: role }).ok,
     };
   }
   // end fork

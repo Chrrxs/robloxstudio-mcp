@@ -29,6 +29,9 @@ guide only when needed, and the guide is not part of the tool catalog.
 
 ## Response contract
 
+The fork's `wait_for`, `logs_since` and `query_tree` tools return plain text
+lines instead of JSON, so they have no output schema, like `get_roblox_docs`.
+
 - Modern 2026-07-28 clients receive JSON once, in `structuredContent`.
 - Legacy 2025 clients receive one JSON text projection for compatibility.
 - Human-readable Markdown and image/audio content remain content blocks.

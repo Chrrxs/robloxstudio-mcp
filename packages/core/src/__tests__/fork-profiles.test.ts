@@ -39,7 +39,8 @@ describe('fork tool profiles', () => {
   test('inspect keeps only read tools', () => {
     const resolved = resolveToolset('main', ['--profile', 'inspect'], {});
     expect(resolved.tools.every((tool) => tool.category === 'read')).toBe(true);
-    expect(names(resolved.tools)).toEqual(names(getReadOnlyTools()));
+    expect(names(resolved.tools)).toEqual([...names(getReadOnlyTools()), 'logs_since', 'query_tree']);
+    expect(names(resolved.tools)).not.toContain('wait_for');
   });
 
   test('playtest keeps only its listed tools that exist', () => {

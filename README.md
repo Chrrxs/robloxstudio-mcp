@@ -13,6 +13,9 @@ screenshots, memory reports, and profiler captures from each peer.
 - Run Luau with `eval_server_runtime` or `eval_client_runtime`. Both tools execute in a live server or client context and use the same `require` cache as your game scripts.
 - Instrument live code with `breakpoints`. It records each hit without pausing the playtest.
 - Read output from edit mode, the server, or a specific client with `get_runtime_logs`, including messages logged during startup.
+- Read only what is new with `logs_since`: one line per message, warnings and up by default, identical repeats collapsed as `(xN)`, and a `cursor=` to pass next time.
+- Wait for game state with `wait_for`: Studio polls a Luau expression until it is truthy or the timeout passes, then returns the value and the time taken, in one call.
+- List instances with `query_tree`: one line per match under a path, optionally filtered by class, with only the properties or `@Attribute`s you name and the total count when the list is capped.
 
 ### Automate playtests
 
