@@ -54,6 +54,21 @@ export const FORK_TOOL_DEFINITIONS: ToolDefinition[] = [
       required: ['path'],
     },
   },
+  {
+    name: 'run_scenario',
+    category: 'write',
+    description: 'Use to run a scripted playtest scenario and get one line per step plus PASS or FAIL.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        name: { type: 'string', description: 'Scenario ModuleScript name in the scenario container.' },
+        source: { type: 'string', description: 'Inline scenario module source, instead of name.' },
+        params: { type: 'object', description: 'Passed to a scenario module that returns a function.' },
+        timeout: { type: 'number', description: 'Whole-run limit in seconds, up to 600; default 120.' },
+        instance_id: INSTANCE_ID,
+      },
+    },
+  },
 ];
 
 /** Fork tools that return plain text lines instead of structured JSON. */

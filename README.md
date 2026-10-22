@@ -20,6 +20,7 @@ screenshots, memory reports, and profiler captures from each peer.
 ### Automate playtests
 
 - Start, inspect, and stop solo or multi-client sessions with `solo_playtest` and `multiplayer_playtest`.
+- Run a scripted playtest in one call with `run_scenario`: spawn players, press keys, walk, wait for and assert game state, and take screenshots, with one line per step and PASS or FAIL. See [Scenarios](docs/scenarios.md).
 - Open or close Studio windows with `manage_instance`. It can launch a baseplate, a local place file, a published place, or an older place revision.
 
 ### Find performance problems

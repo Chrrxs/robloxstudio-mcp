@@ -275,6 +275,7 @@ to that file. Nothing is written to stdout.
 | `MCP_IMAGE_MAX_PX` | `512` | Longest side of returned images; `0` = off. |
 | `MCP_IMAGE_QUALITY` | `70` | Default JPEG quality for viewport captures. |
 | `MCP_METRICS_FILE` | Unset | Append one JSON line per tool call to this file. |
+| `MCP_SCENARIO_CONTAINER` | `ServerStorage.Scenarios` | Where `run_scenario` looks up scenarios by name. See [Scenarios](scenarios.md). |
 | `MCP_PLUGINS_DIR` | Platform Studio Plugins folder | Override the destination used by plugin installation. |
 | `ROBLOX_STUDIO_EXE` | Auto-discovered on Windows, WSL, and macOS | Studio executable to launch. Required on native Linux with a Wine launcher, where it must be an existing `RobloxStudioBeta.exe` in the Wine prefix. |
 | `ROBLOX_STUDIO_WINE_LAUNCHER` | Unset | Native Linux only: executable that `exec`s Wine on Studio. See [Native Linux with Wine](#native-linux-with-wine). |

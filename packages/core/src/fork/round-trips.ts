@@ -6,7 +6,7 @@ import { formatLogLines, LOG_LEVELS, type LogEntry, type LogLevelName } from './
 export const WAIT_FOR_ENDPOINT = '/api/fork/wait-for';
 export const QUERY_TREE_ENDPOINT = '/api/fork/query-tree';
 
-const MAX_WAIT_SECONDS = 120;
+export const MAX_WAIT_SECONDS = 120;
 const WAIT_REQUEST_MARGIN_MS = 15_000;
 const MAX_FIELDS = 20;
 
@@ -42,7 +42,7 @@ export interface WaitForArgs {
   instance_id?: string;
 }
 
-interface WaitForResponse {
+export interface WaitForResponse {
   error?: string;
   ok?: boolean;
   elapsed?: number;
@@ -65,15 +65,25 @@ export async function waitFor(tools: RobloxStudioTools, args: WaitForArgs): Prom
   if (typeof timeout !== 'number' || !(timeout >= 0) || timeout > MAX_WAIT_SECONDS) {
     return text(`ERROR timeout must be 0-${MAX_WAIT_SECONDS} seconds.`, true);
   }
-  const { bridge, choice } = await routeTarget(tools, args.target, args.instance_id);
-  const response = await bridge.callSingle(
+  return formatWaitFor(await requestWaitFor(tools, args.expr, timeout, args.target, args.instance_id));
+}
+
+/** One wait_for round trip; also used by run_scenario's wait_for and assert steps. */
+export async function requestWaitFor(
+  tools: RobloxStudioTools,
+  expr: string,
+  timeout: number,
+  target: string | undefined,
+  instance_id: string | undefined,
+): Promise<WaitForResponse> {
+  const { bridge, choice } = await routeTarget(tools, target, instance_id);
+  return await bridge.callSingle(
     WAIT_FOR_ENDPOINT,
-    { expr: args.expr, timeout },
+    { expr, timeout },
     choice,
-    args.instance_id,
+    instance_id,
     timeout * 1000 + WAIT_REQUEST_MARGIN_MS,
   ) as WaitForResponse;
-  return formatWaitFor(response);
 }
 
 export interface LogsSinceArgs {

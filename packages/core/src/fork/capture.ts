@@ -53,8 +53,12 @@ export async function captureScreenshotWithBudget(tools: RobloxStudioTools, inst
   const refresh = bridge.refreshTopology();
   if (refresh) await refresh;
   const { instanceId, clientRole } = bridge.resolveRuntime(instance_id);
-  const role = clientRole ?? 'edit';
+  return captureWithBudget(tools, instanceId, clientRole ?? 'edit', body);
+}
 
+/** Captures the viewport rendered by `role` (edit or client-N) in Studio process `instanceId`. */
+export async function captureWithBudget(tools: RobloxStudioTools, instanceId: string, role: string, body: CaptureArgs) {
+  const bridge = tools.forkBridge();
   let maxPx = forkLimits().imageMaxPx;
   if (body.max_px !== undefined) {
     if (!Number.isInteger(body.max_px) || body.max_px < MIN_MAX_PX || body.max_px > MAX_MAX_PX) {

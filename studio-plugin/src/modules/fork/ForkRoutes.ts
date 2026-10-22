@@ -3,6 +3,7 @@
 // through `routes` there (without a request context).
 import CaptureRect from "./CaptureRect";
 import QueryTree from "./QueryTree";
+import ScenarioLoader from "./ScenarioLoader";
 import WaitFor from "./WaitFor";
 import type { StudioRequestContext } from "../../types";
 
@@ -12,6 +13,7 @@ const routes: Record<string, Handler> = {
 	"/api/fork/capture-rect": CaptureRect.resolve,
 	"/api/fork/wait-for": WaitFor.waitFor,
 	"/api/fork/query-tree": QueryTree.query,
+	"/api/fork/load-scenario": ScenarioLoader.load,
 };
 
 // Endpoints that read a client's own viewport, VM or DataModel, so they must run in the client peer.

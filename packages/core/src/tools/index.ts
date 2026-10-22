@@ -5597,6 +5597,10 @@ export class RobloxStudioTools {
       callSingle: this._callSingle.bind(this),
       captureViewportImage: this._captureViewportImage.bind(this),
       hasRole: (instance_id: string | undefined, role: string) => this.bridge.resolveTarget({ instance_id, target: role }).ok,
+      peerInstance: (instance_id: string | undefined, role: string) => {
+        const resolved = this.bridge.resolveTarget({ instance_id, target: role });
+        return resolved.ok && resolved.mode === 'single' ? resolved.targetInstanceId : undefined;
+      },
     };
   }
   // end fork

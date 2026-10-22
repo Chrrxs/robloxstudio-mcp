@@ -29,7 +29,7 @@ guide only when needed, and the guide is not part of the tool catalog.
 
 ## Response contract
 
-The fork's `wait_for`, `logs_since` and `query_tree` tools return plain text
+The fork's `wait_for`, `logs_since`, `query_tree` and `run_scenario` tools return plain text
 lines instead of JSON, so they have no output schema, like `get_roblox_docs`.
 
 - Modern 2026-07-28 clients receive JSON once, in `structuredContent`.
