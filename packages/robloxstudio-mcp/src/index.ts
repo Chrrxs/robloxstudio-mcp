@@ -1,4 +1,6 @@
-import { RobloxStudioMCPServer, getAllTools } from '@chrrxs/robloxstudio-mcp-core';
+// fork: profiles replace the fixed tool list; BridgeBusyError prints as one line
+import { BridgeBusyError, RobloxStudioMCPServer, resolveToolset, ToolsetError } from '@chrrxs/robloxstudio-mcp-core';
+// end fork
 import { createRequire } from 'module';
 import { installBundledPlugin, installPlugin } from './install-plugin.js';
 
@@ -19,6 +21,16 @@ if (installBundledOnly || installWithFallback) {
     process.exitCode = 1;
   });
 } else {
+  // fork: resolve --profile / --tools before anything else so mistakes fail fast
+  let toolset: ReturnType<typeof resolveToolset> | undefined;
+  try {
+    toolset = resolveToolset('main');
+  } catch (err) {
+    if (!(err instanceof ToolsetError)) throw err;
+    console.error(err.message);
+    process.exit(1);
+  }
+  // end fork
   if (process.argv.includes('--auto-install-plugin')) {
     await installBundledPlugin({
       sourcePath: flagValue('--plugin-path'),
@@ -45,10 +57,16 @@ if (installBundledOnly || installWithFallback) {
   const server = new RobloxStudioMCPServer({
     name: 'robloxstudio-mcp',
     version: VERSION,
-    tools: getAllTools(),
+    tools: toolset.tools, // fork: profile-filtered
   });
 
   server.run().catch((error) => {
+    // fork: one clear line when the bridge port is held by something unusable
+    if (error instanceof BridgeBusyError) {
+      console.error(error.message);
+      process.exit(1);
+    }
+    // end fork
     console.error('Server failed to start:', error);
     process.exit(1);
   });

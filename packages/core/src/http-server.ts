@@ -586,6 +586,7 @@ export function createHttpServer(tools: RobloxStudioTools, bridge: BridgeService
       serverName: serverConfig?.name ?? 'robloxstudio-mcp',
       version: serverConfig?.version,
       serverVersion: serverConfig?.version,
+      pid: process.pid, // fork: lets a second server name the port holder
       capabilities: studioLifecycleCallable ? {
         studioLifecycle: {
           protocolVersion: 3,

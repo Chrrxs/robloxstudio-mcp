@@ -57,3 +57,8 @@ export type {
 } from './opencloud-client.js';
 export { createPluginInstaller } from './plugin-installer.js';
 export type { PluginInstallOptions } from './plugin-installer.js';
+// fork: tool profiles and bridge-port holder check
+export { resolveToolset, editionCatalog, ToolsetError, PROFILE_NAMES, PLAYTEST_PROFILE_TOOLS } from './fork/profiles.js';
+export type { Edition, ProfileName, ResolvedToolset } from './fork/profiles.js';
+export { BridgeBusyError } from './fork/port-holder.js';
+// end fork

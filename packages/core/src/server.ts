@@ -9,6 +9,9 @@ import { ProxyBridgeService } from './proxy-bridge-service.js';
 import type { ToolDefinition } from './tools/definitions.js';
 import { createToolServer } from './mcp-runtime.js';
 import { BoundedStdioTransport } from './stdio-transport.js';
+// fork: bridge-port holder check
+import { assertBridgeHolderUsable } from './fork/port-holder.js';
+// end fork
 
 export interface ServerConfig {
   name: string;
@@ -90,6 +93,9 @@ export class RobloxStudioMCPServer {
         );
         throw error;
       }
+      // fork: only proxy to a live robloxstudio-mcp; otherwise fail fast naming the holder's pid
+      await assertBridgeHolderUsable(host, basePort, this.config.version);
+      // end fork
       // basePort taken — another MCP subprocess owns the plugin connection.
       // Fall back to proxy mode and forward all bridge calls through it.
       bridgeMode = 'proxy';
