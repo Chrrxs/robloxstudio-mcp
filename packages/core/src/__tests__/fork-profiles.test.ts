@@ -1,5 +1,6 @@
 import { Client, InMemoryTransport } from '@modelcontextprotocol/client';
 import { createToolServer, publicToolDefinition } from '../mcp-runtime.js';
+import { FORK_TOOL_DEFINITIONS } from '../fork/definitions.js';
 import { editionCatalog, PLAYTEST_PROFILE_TOOLS, resolveToolset, ToolsetError } from '../fork/profiles.js';
 import { getAllTools, getReadOnlyTools, type ToolDefinition } from '../tools/definitions.js';
 import type { RobloxStudioTools } from '../tools/index.js';
@@ -39,7 +40,7 @@ describe('fork tool profiles', () => {
   test('inspect keeps only read tools', () => {
     const resolved = resolveToolset('main', ['--profile', 'inspect'], {});
     expect(resolved.tools.every((tool) => tool.category === 'read')).toBe(true);
-    expect(names(resolved.tools)).toEqual([...names(getReadOnlyTools()), 'logs_since', 'query_tree']);
+    expect(names(resolved.tools)).toEqual([...names(getReadOnlyTools()), 'logs_since', 'query_tree', 'ui_layout', 'snapshot', 'diff_state', 'frame_strip']);
     expect(names(resolved.tools)).not.toContain('wait_for');
   });
 
@@ -94,6 +95,17 @@ describe('fork tool profiles', () => {
     }
     const upstream = getAllTools().find((tool) => tool.name === 'capture_screenshot')!;
     expect(Object.keys((upstream.inputSchema as { properties: object }).properties)).not.toContain('crop');
+  });
+
+  test('fork tools follow upstream description rules', () => {
+    for (const tool of FORK_TOOL_DEFINITIONS) {
+      expect(tool.description).toMatch(/^Use [^.]+\.$/);
+      expect(tool.description.length).toBeLessThanOrEqual(120);
+      const props = (tool.inputSchema as { properties: Record<string, { description: string }> }).properties;
+      for (const [name, prop] of Object.entries(props)) {
+        expect([name, prop.description.length <= 64]).toEqual([name, true]);
+      }
+    }
   });
 
   test('profiles shrink the advertised catalog', () => {

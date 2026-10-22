@@ -16,11 +16,15 @@ function clampToViewport(minX: number, minY: number, maxX: number, maxY: number,
 	return { x: x0, y: y0, w: x1 - x0, h: y1 - y0, viewportWidth: vw, viewportHeight: vh };
 }
 
-function guiRect(gui: GuiObject, vw: number, vh: number): RectResult | undefined {
-	let offset = new Vector2(0, 0);
+/** Offset from a GUI object's AbsolutePosition to viewport pixels (the top-bar inset, unless ignored). */
+function guiOffset(gui: GuiObject): Vector2 {
 	const screenGui = gui.FindFirstAncestorWhichIsA("ScreenGui");
-	if (screenGui !== undefined && !screenGui.IgnoreGuiInset) offset = GuiService.GetGuiInset()[0];
-	const pos = gui.AbsolutePosition.add(offset);
+	if (screenGui !== undefined && !screenGui.IgnoreGuiInset) return GuiService.GetGuiInset()[0];
+	return new Vector2(0, 0);
+}
+
+function guiRect(gui: GuiObject, vw: number, vh: number): RectResult | undefined {
+	const pos = gui.AbsolutePosition.add(guiOffset(gui));
 	const size = gui.AbsoluteSize;
 	return clampToViewport(pos.X, pos.Y, pos.X + size.X, pos.Y + size.Y, vw, vh);
 }
@@ -83,4 +87,4 @@ function resolve(data: Record<string, unknown>): unknown {
 	return result ?? { error: `${path} is not on screen` };
 }
 
-export = { resolve };
+export = { resolve, guiOffset };

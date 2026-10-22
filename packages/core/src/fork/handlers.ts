@@ -4,6 +4,7 @@ import type { ToolHandler } from '../http-server.js';
 import { CAPTURE_RECT_ENDPOINT, captureScreenshotWithBudget } from './capture.js';
 import { logsSince, QUERY_TREE_ENDPOINT, queryTree, WAIT_FOR_ENDPOINT, waitFor } from './round-trips.js';
 import { LOAD_SCENARIO_ENDPOINT, runScenarioTool } from './scenario.js';
+import { diffState, frameStrip, READ_STATE_ENDPOINT, snapshot, UI_LAYOUT_ENDPOINT, uiLayout } from './evidence.js';
 
 export const FORK_TOOL_HANDLERS: Record<string, ToolHandler> = {
   capture_screenshot: (tools, body) => captureScreenshotWithBudget(tools, body.instance_id, {
@@ -25,6 +26,16 @@ export const FORK_TOOL_HANDLERS: Record<string, ToolHandler> = {
   run_scenario: (tools, body, context) => runScenarioTool(tools, {
     name: body.name, source: body.source, params: body.params, timeout: body.timeout, instance_id: body.instance_id,
   }, context?.signal),
+  ui_layout: (tools, body) => uiLayout(tools, {
+    gui_path: body.gui_path, target: body.target, limit: body.limit, instance_id: body.instance_id,
+  }),
+  snapshot: (tools, body) => snapshot(tools, {
+    paths: body.paths, fields: body.fields, target: body.target, instance_id: body.instance_id,
+  }),
+  diff_state: (tools, body) => diffState(tools, { snapshot_id: body.snapshot_id }),
+  frame_strip: (tools, body) => frameStrip(tools, {
+    target: body.target, crop: body.crop, frames: body.frames, interval: body.interval, instance_id: body.instance_id,
+  }),
 };
 
 /** Plugin endpoints fork handlers call, per tool (added to upstream's proxy allowlist). */
@@ -42,6 +53,10 @@ function forkProxyEndpoints(upstream: Record<string, readonly string[]>): Record
       CAPTURE_RECT_ENDPOINT,
       ...of('solo_playtest', 'multiplayer_playtest', 'eval_server_runtime', 'simulate_keyboard_input', 'capture_screenshot', 'get_runtime_logs'),
     ],
+    ui_layout: [UI_LAYOUT_ENDPOINT],
+    snapshot: [READ_STATE_ENDPOINT],
+    diff_state: [READ_STATE_ENDPOINT],
+    frame_strip: [CAPTURE_RECT_ENDPOINT, ...of('capture_screenshot')],
   };
 }
 

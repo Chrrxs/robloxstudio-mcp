@@ -35,6 +35,9 @@ screenshots, memory reports, and profiler captures from each peer.
 - For large generated Luau, use the [verified chunk-staging workflow](docs/large-inputs.md): explicit instance routing, UTF-8 byte/hash readback, ownership-checked cleanup, and bounded recovery without blindly replaying mutations.
 - Use `selection` to inspect or update Studio selection and frame a part or model before capturing the viewport.
 - Capture the viewport with `capture_screenshot`, then send mouse or keyboard input. See [Configuration](docs/configuration.md#host-window-capture).
+- Check a GUI without a screenshot with `ui_layout`: one line per element with its viewport position, size and ZIndex, plus partly overlapping siblings, elements outside their parent, and clipped or truncated text. `PlayerGui.X` names the local player's GUI in a playtest and `StarterGui.X` in edit mode.
+- Save properties and attributes with `snapshot`, then get only what changed with `diff_state`.
+- Check an animation or transition with `frame_strip`: 2-12 frames at a set interval, returned as one grid image with the time of each frame.
 - Keep agent sessions small: register only the tools a job needs with `--profile` or `--tools`, cap result and image sizes, and log per-call sizes. See [Tool profiles and output limits](docs/configuration.md#tool-profiles-and-output-limits).
 
 ### Inspect Creator Store assets

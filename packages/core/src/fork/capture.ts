@@ -56,6 +56,42 @@ export async function captureScreenshotWithBudget(tools: RobloxStudioTools, inst
   return captureWithBudget(tools, instanceId, clientRole ?? 'edit', body);
 }
 
+/** A capture budget with `crop` (instance path or "x,y,w,h") resolved to viewport px in the rendering peer. */
+export async function resolveCropBudget(
+  tools: RobloxStudioTools,
+  instanceId: string,
+  role: string,
+  crop: string | undefined,
+  maxPx: number,
+): Promise<CaptureBudget | { error: string }> {
+  const budget: CaptureBudget = { maxPx };
+  if (typeof crop !== 'string' || !crop.trim()) return budget;
+  const literal = parseRect(crop);
+  const resolved = await tools.forkBridge().callSingle(
+    CAPTURE_RECT_ENDPOINT,
+    literal ? { rect: literal } : { path: crop.trim() },
+    role,
+    instanceId,
+  ) as RectResponse;
+  const pluginLacksEndpoint = typeof resolved.error === 'string' && resolved.error.includes(CAPTURE_RECT_ENDPOINT);
+  if (resolved.error && !(literal && pluginLacksEndpoint)) {
+    return {
+      error: pluginLacksEndpoint
+        ? `crop by instance path needs the fork's Studio plugin; pass crop as "x,y,w,h" instead. (${resolved.error})`
+        : `crop: ${resolved.error}`,
+    };
+  }
+  if (resolved.error) {
+    budget.crop = literal;
+  } else {
+    budget.crop = { x: resolved.x ?? 0, y: resolved.y ?? 0, w: resolved.w ?? 0, h: resolved.h ?? 0 };
+    if (resolved.viewportWidth && resolved.viewportHeight) {
+      budget.viewport = { width: resolved.viewportWidth, height: resolved.viewportHeight };
+    }
+  }
+  return budget;
+}
+
 /** Captures the viewport rendered by `role` (edit or client-N) in Studio process `instanceId`. */
 export async function captureWithBudget(tools: RobloxStudioTools, instanceId: string, role: string, body: CaptureArgs) {
   const bridge = tools.forkBridge();
@@ -66,31 +102,8 @@ export async function captureWithBudget(tools: RobloxStudioTools, instanceId: st
     }
     maxPx = body.max_px;
   }
-  const budget: CaptureBudget = { maxPx };
-
-  if (typeof body.crop === 'string' && body.crop.trim()) {
-    const literal = parseRect(body.crop);
-    const resolved = await bridge.callSingle(
-      CAPTURE_RECT_ENDPOINT,
-      literal ? { rect: literal } : { path: body.crop.trim() },
-      role,
-      instanceId,
-    ) as RectResponse;
-    const pluginLacksEndpoint = typeof resolved.error === 'string' && resolved.error.includes(CAPTURE_RECT_ENDPOINT);
-    if (resolved.error && !(literal && pluginLacksEndpoint)) {
-      return errorResult(pluginLacksEndpoint
-        ? `crop by instance path needs the fork's Studio plugin; pass crop as "x,y,w,h" instead. (${resolved.error})`
-        : `crop: ${resolved.error}`);
-    }
-    if (resolved.error) {
-      budget.crop = literal;
-    } else {
-      budget.crop = { x: resolved.x ?? 0, y: resolved.y ?? 0, w: resolved.w ?? 0, h: resolved.h ?? 0 };
-      if (resolved.viewportWidth && resolved.viewportHeight) {
-        budget.viewport = { width: resolved.viewportWidth, height: resolved.viewportHeight };
-      }
-    }
-  }
+  const budget = await resolveCropBudget(tools, instanceId, role, body.crop, maxPx);
+  if ('error' in budget) return errorResult(budget.error);
 
   const capture = await bridge.captureViewportImage(instanceId, role, body.format, body.quality, undefined, budget);
   if (!capture.success) {

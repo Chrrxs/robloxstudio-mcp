@@ -9,7 +9,7 @@ export const FORK_TOOL_DEFINITIONS: ToolDefinition[] = [
   {
     name: 'wait_for',
     category: 'write',
-    description: 'Use to wait in Studio until a Luau expression is truthy, instead of polling with repeated calls.',
+    description: 'Use to wait in Studio until a Luau expression is truthy, in one call.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -57,7 +57,7 @@ export const FORK_TOOL_DEFINITIONS: ToolDefinition[] = [
   {
     name: 'run_scenario',
     category: 'write',
-    description: 'Use to run a scripted playtest scenario and get one line per step plus PASS or FAIL.',
+    description: 'Use to run a scripted playtest scenario; returns one line per step and PASS or FAIL.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -65,6 +65,63 @@ export const FORK_TOOL_DEFINITIONS: ToolDefinition[] = [
         source: { type: 'string', description: 'Inline scenario module source, instead of name.' },
         params: { type: 'object', description: 'Passed to a scenario module that returns a function.' },
         timeout: { type: 'number', description: 'Whole-run limit in seconds, up to 600; default 120.' },
+        instance_id: INSTANCE_ID,
+      },
+    },
+  },
+  {
+    name: 'ui_layout',
+    category: 'read',
+    description: 'Use to check GUI layout as text (overlaps, overflow, clipped text) instead of a screenshot.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        gui_path: { type: 'string', description: 'GUI path; PlayerGui.X = local player GUI (StarterGui in edit).' },
+        target: { type: 'string', description: 'edit, server or client-N; default client-1 in a playtest.' },
+        limit: { type: 'integer', description: 'Element lines to return, 1-200; default 40.' },
+        instance_id: INSTANCE_ID,
+      },
+      required: ['gui_path'],
+    },
+  },
+  {
+    name: 'snapshot',
+    category: 'read',
+    description: 'Use to save instance properties and attributes for a later diff_state.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        paths: { type: 'array', items: { type: 'string' }, description: 'Instance paths, up to 50.' },
+        fields: { type: 'array', items: { type: 'string' }, description: 'Properties to save; attributes are always saved.' },
+        target: PEER_TARGET,
+        instance_id: INSTANCE_ID,
+      },
+      required: ['paths'],
+    },
+  },
+  {
+    name: 'diff_state',
+    category: 'read',
+    description: 'Use to see only what changed since a snapshot.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        snapshot_id: { type: 'string', description: 'ID printed by snapshot, such as s3.' },
+      },
+      required: ['snapshot_id'],
+    },
+  },
+  {
+    name: 'frame_strip',
+    category: 'read',
+    description: 'Use to check an animation or transition as several frames in one grid image.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        target: { type: 'string', description: 'edit or client-N; default the viewport screenshots use.' },
+        crop: { type: 'string', description: 'Instance path, or viewport px "x,y,w,h"; default whole view.' },
+        frames: { type: 'integer', description: 'Frames to capture, 2-12; default 4.' },
+        interval: { type: 'number', description: 'Seconds between frames, 0-2; default 0.25.' },
         instance_id: INSTANCE_ID,
       },
     },

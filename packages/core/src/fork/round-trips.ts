@@ -27,7 +27,12 @@ function pluginError(error: string, endpoint: string, tool: string): TextResult 
 }
 
 /** server while a playtest is running, edit otherwise; an explicit target always wins. */
-async function routeTarget(tools: RobloxStudioTools, target: string | undefined, instance_id: string | undefined) {
+export interface RoutedTarget {
+  bridge: ReturnType<RobloxStudioTools['forkBridge']>;
+  choice: { requested: string | undefined; fallback: string; accepts: (role: string) => boolean };
+}
+
+export async function routeTarget(tools: RobloxStudioTools, target: string | undefined, instance_id: string | undefined): Promise<RoutedTarget> {
   const bridge = tools.forkBridge();
   const refresh = bridge.refreshTopology();
   if (refresh) await refresh;
