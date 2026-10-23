@@ -292,6 +292,7 @@ describe('Tool schema compatibility', () => {
       capture_device_matrix: 'captureDeviceMatrix',
       manage_instance: 'manageInstance',
       manage_monetization: 'manageMonetization',
+      manage_experience: 'manageExperience',
       solo_playtest: 'soloPlaytest',
       multiplayer_playtest: 'multiplayerPlaytest',
       get_runtime_logs: 'getRuntimeLogs',
@@ -443,6 +444,47 @@ describe('Tool schema compatibility', () => {
     expect(getReadOnlyTools().map((t) => t.name)).not.toContain('manage_monetization');
     expect(TOOL_GUIDE_MARKDOWN).toContain('Roblox cannot delete developer products or game passes');
     expect(TOOL_GUIDE_MARKDOWN).toContain('create refuses a name that already exists');
+  });
+
+  test('manage_experience exposes guarded experience and place settings', () => {
+    const tool = TOOL_DEFINITIONS.find((t) => t.name === 'manage_experience');
+    expect(tool?.category).toBe('write');
+    const schema = tool?.inputSchema ?? {};
+    expect(schema).toMatchObject({
+      required: ['action'],
+      properties: {
+        action: { type: 'string', enum: ['get', 'update'] },
+        universe_id: { type: 'integer', minimum: 1 },
+        place_id: { type: 'integer', minimum: 1 },
+        server_size: { type: 'integer', minimum: 1 },
+        private_server_price: { type: 'integer', minimum: 0, maximum: 1_000_000_000 },
+        confirm: { type: 'boolean' },
+        remove_social_links: {
+          type: 'array',
+          items: { enum: ['facebook', 'twitter', 'youtube', 'twitch', 'discord', 'roblox_group', 'guilded'] },
+        },
+      },
+    });
+    const properties: unknown = Reflect.get(schema, 'properties');
+    expect(Object.keys(properties ?? {}).sort()).toEqual([
+      'action',
+      'confirm',
+      'description',
+      'devices',
+      'disable_private_servers',
+      'instance_id',
+      'name',
+      'place_id',
+      'private_server_price',
+      'remove_social_links',
+      'server_size',
+      'social_links',
+      'universe_id',
+      'voice_chat_enabled',
+    ]);
+    expect(getReadOnlyTools().map((t) => t.name)).not.toContain('manage_experience');
+    expect(TOOL_GUIDE_MARKDOWN).toContain('Roblox refuses place edits while the place is open in an active Team Create session');
+    expect(TOOL_GUIDE_MARKDOWN).toContain('manage_experience cannot make an experience public or private');
   });
 
   test('breakpoints schema exposes lifecycle actions and log fields', () => {

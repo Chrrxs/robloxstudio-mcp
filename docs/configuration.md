@@ -217,7 +217,7 @@ under Wine.
 | `ROBLOX_STUDIO_NO_AUTH` | Unset | Set to `1` or `true` to disable HTTP tool authentication. This is not recommended. |
 | `ROBLOX_STUDIO_ALLOWED_ORIGINS` | None | Comma-separated browser origins allowed to call the HTTP API cross-origin. |
 | `ROBLOX_STUDIO_HOST_CAPTURE` | Unset | Set to `0`, `false`, or `off` to disable the host window capture fallback for `capture_screenshot`. |
-| `ROBLOX_OPEN_CLOUD_API_KEY` | None | Roblox Open Cloud key used by features such as audio preview, place version access, and monetization. Required permissions depend on the tool. |
+| `ROBLOX_OPEN_CLOUD_API_KEY` | None | Roblox Open Cloud key used by features such as audio preview, place version access, monetization, and experience settings. Required permissions depend on the tool. |
 | `MCP_PLUGINS_DIR` | Platform Studio Plugins folder | Override the destination used by plugin installation. |
 | `ROBLOX_STUDIO_EXE` | Auto-discovered on Windows, WSL, and macOS | Studio executable to launch. Required on native Linux with a Wine launcher, where it must be an existing `RobloxStudioBeta.exe` in the Wine prefix. |
 | `ROBLOX_STUDIO_WINE_LAUNCHER` | Unset | Native Linux only: executable that `exec`s Wine on Studio. See [Native Linux with Wine](#native-linux-with-wine). |
@@ -233,3 +233,8 @@ for developer products, or `game-pass:read` and `game-pass:write` for game passe
 with the experience added to the key. Listing and reading need only the read
 scope. Create and update need both: create first checks for an existing name,
 and update reads the item back.
+
+`manage_experience` needs the experience added to the key. Changing the title,
+description, or server size needs `universe.place:write`. Changing voice chat,
+private servers, devices, or social links needs `universe:write`. It cannot make
+an experience public or private; change visibility in Creator Hub.

@@ -1,6 +1,7 @@
 import type { ToolAnnotations } from '@modelcontextprotocol/server';
 import { MAX_PNG_BASE64_CHARACTERS } from '../image-decode.js';
 import { MAX_OPERATION_ID_LENGTH, MAX_OPERATION_WAIT_MS } from '../bridge-service.js';
+import { SOCIAL_LINK_KINDS } from '../opencloud-client.js';
 
 export type ToolCategory = 'read' | 'write';
 
@@ -1613,6 +1614,103 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
         }
       },
       required: ['action', 'kind']
+    }
+  },
+
+  // === Experience Settings ===
+  {
+    name: 'manage_experience',
+    category: 'write',
+    description: 'Use to read or change experience settings such as title, devices, and private servers.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        action: {
+          type: 'string',
+          enum: ['get', 'update'],
+          description: 'Operation; update changes the live game.'
+        },
+        universe_id: {
+          type: 'integer',
+          minimum: 1,
+          description: 'Universe ID; defaults to the connected Studio place.'
+        },
+        place_id: {
+          type: 'integer',
+          minimum: 1,
+          description: 'Place to read or edit; defaults to the root place.'
+        },
+        name: {
+          type: 'string',
+          description: 'Place name; the experience title on the root place.'
+        },
+        description: {
+          type: 'string',
+          description: 'Place description; the experience description on the root.'
+        },
+        server_size: {
+          type: 'integer',
+          minimum: 1,
+          description: 'Maximum players per server.'
+        },
+        voice_chat_enabled: {
+          type: 'boolean',
+          description: 'Allow voice chat; running servers keep their setting.'
+        },
+        private_server_price: {
+          type: 'integer',
+          minimum: 0,
+          maximum: 1000000000,
+          description: 'Robux price; cancels subscriptions; needs confirm.'
+        },
+        disable_private_servers: {
+          type: 'boolean',
+          description: 'true turns private servers off; needs confirm.'
+        },
+        devices: {
+          type: 'object',
+          additionalProperties: false,
+          description: 'Devices players may join from.',
+          properties: {
+            desktop: { type: 'boolean', description: 'Desktop.' },
+            mobile: { type: 'boolean', description: 'Phone.' },
+            tablet: { type: 'boolean', description: 'Tablet.' },
+            console: { type: 'boolean', description: 'Console.' },
+            vr: { type: 'boolean', description: 'VR headset.' }
+          }
+        },
+        social_links: {
+          type: 'array',
+          description: 'Social links to add or replace.',
+          items: {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              kind: { type: 'string', enum: [...SOCIAL_LINK_KINDS], description: 'Link kind.' },
+              title: { type: 'string', description: 'Link title.' },
+              uri: { type: 'string', description: 'Link URL.' }
+            },
+            required: ['kind', 'uri']
+          }
+        },
+        remove_social_links: {
+          type: 'array',
+          items: {
+            type: 'string',
+            enum: [...SOCIAL_LINK_KINDS]
+          },
+          description: 'Social link kinds to remove.'
+        },
+        confirm: {
+          type: 'boolean',
+          description: 'Required for private server price changes.'
+        },
+        instance_id: {
+          type: 'string',
+          description: 'Studio process ID when ambiguous.'
+        }
+      },
+      required: ['action']
     }
   },
 
