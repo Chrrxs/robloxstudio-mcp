@@ -72,6 +72,7 @@ Read output with get_runtime_logs. Reuse nextCursor as cursor for one Instance, 
 - capture_script_profiler ranks Luau functions by CPU time. Use output_path when the raw capture is needed.
 - capture_micro_profiler attributes frame time across engine and game work. Its rows are inclusive or cumulative views, so do not sum them as disjoint totals.
 - MicroProfiler records frames only while Studio renders. Studio stops rendering when the display turns off or Studio is minimized, and the capture then fails with micro_profiler_no_frames.
+- MicroProfiler keeps a limited number of frames. When data_quality.history_truncated is true, it dropped the start of a long capture and analysis_window.coverage_pct shows how much was analyzed; use a shorter duration_ms to cover all of it.
 - Use baseline_path or baseline for before-and-after MicroProfiler comparisons.
 - Use get_memory_breakdown for memory categories and get_scene_analysis for instance, script, triangle, animation, or audio cost.
 

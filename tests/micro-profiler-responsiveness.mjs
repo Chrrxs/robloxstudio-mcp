@@ -71,8 +71,8 @@ await runTest('high-volume MicroProfiler capture remains cooperative', async ({ 
       target: 'edit',
       code: microProfilerCaptureFixtureCode,
     });
-    assert(fixture.success === true && fixture.returnValue === 'MICRO_PROFILER_CACHE_REGRESSION_OK',
-      `actual handler refreshes empty and stale profiler caches (${JSON.stringify(fixture)})`);
+    assert(fixture.success === true && fixture.returnValue === 'MICRO_PROFILER_CAPTURE_FIXTURE_OK',
+      `actual handler converts ticks with the snapshot clock, analyzes only fresh frames, and restores capture state (${JSON.stringify(fixture)})`);
     playtestStarted = true;
     await startPlaytestAndWait(client, { timeoutSec: 60 });
 
