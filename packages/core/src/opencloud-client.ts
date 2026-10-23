@@ -715,12 +715,6 @@ export class OpenCloudClient {
     });
   }
 
-  /** Makes a universe public (activate) or private (deactivate). */
-  async setUniverseActive(universeId: number, active: boolean): Promise<void> {
-    const action = active ? 'activate' : 'deactivate';
-    await this.request<unknown>(`/legacy-develop/v1/universes/${universeId}/${action}`, { method: 'POST' });
-  }
-
   async getAssetThumbnail(
     assetId: number,
     size: '150x150' | '420x420' | '768x432' = '420x420'

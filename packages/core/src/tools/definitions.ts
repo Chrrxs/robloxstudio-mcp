@@ -1621,14 +1621,14 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
   {
     name: 'manage_experience',
     category: 'write',
-    description: 'Use to read or change experience settings such as title, visibility, and devices.',
+    description: 'Use to read or change experience settings such as title, devices, and private servers.',
     inputSchema: {
       type: 'object',
       properties: {
         action: {
           type: 'string',
-          enum: ['get', 'update', 'set_visibility'],
-          description: 'Operation; update and set_visibility change the live game.'
+          enum: ['get', 'update'],
+          description: 'Operation; update changes the live game.'
         },
         universe_id: {
           type: 'integer',
@@ -1701,14 +1701,9 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
           },
           description: 'Social link kinds to remove.'
         },
-        visibility: {
-          type: 'string',
-          enum: ['public', 'private'],
-          description: 'Private removes every player and needs confirm.'
-        },
         confirm: {
           type: 'boolean',
-          description: 'Required for going private and private server changes.'
+          description: 'Required for private server price changes.'
         },
         instance_id: {
           type: 'string',

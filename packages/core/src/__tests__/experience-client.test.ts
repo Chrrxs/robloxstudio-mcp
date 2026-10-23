@@ -123,17 +123,4 @@ describe('Open Cloud experience client', () => {
     expect(url.searchParams.get('updateMask')).toBe('displayName,serverSize');
     expect(jsonBody(init)).toEqual({ displayName: 'Mega Obby', serverSize: 30 });
   });
-
-  test.each([
-    [true, '/legacy-develop/v1/universes/42/activate'],
-    [false, '/legacy-develop/v1/universes/42/deactivate'],
-  ])('setUniverseActive(%s) posts to %s', async (active, path) => {
-    const fetchSpy = jest.spyOn(globalThis, 'fetch').mockResolvedValue(jsonResponse({}));
-
-    await testClient().setUniverseActive(42, active);
-
-    const { url, init } = requestAt(fetchSpy, 0);
-    expect(init.method).toBe('POST');
-    expect(url.pathname).toBe(path);
-  });
 });

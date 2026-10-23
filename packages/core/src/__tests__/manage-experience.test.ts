@@ -1,4 +1,4 @@
-import { BridgeService } from '../bridge-service.js';
+import { BridgeService, RoutingFailure } from '../bridge-service.js';
 import { OpenCloudRequestError } from '../opencloud-client.js';
 import type {
   ExperiencePlace,
@@ -50,7 +50,6 @@ type FakeClient = {
   updateUniverse: jest.Mock<Promise<void>, [number, ExperienceUniverseChanges]>;
   getPlace: jest.Mock<Promise<ExperiencePlace>, [number, number]>;
   updatePlace: jest.Mock<Promise<void>, [number, number, ExperiencePlaceChanges]>;
-  setUniverseActive: jest.Mock<Promise<void>, [number, boolean]>;
 };
 
 function fakeClient(): FakeClient {
@@ -60,7 +59,6 @@ function fakeClient(): FakeClient {
     updateUniverse: jest.fn<Promise<void>, [number, ExperienceUniverseChanges]>(async () => undefined),
     getPlace: jest.fn<Promise<ExperiencePlace>, [number, number]>(async () => place()),
     updatePlace: jest.fn<Promise<void>, [number, number, ExperiencePlaceChanges]>(async () => undefined),
-    setUniverseActive: jest.fn<Promise<void>, [number, boolean]>(async () => undefined),
   };
 }
 
@@ -153,6 +151,14 @@ describe('manage_experience', () => {
     expect(client.getUniverse).not.toHaveBeenCalled();
   });
 
+  test('suggests universe_id when no Studio is connected', async () => {
+    const failure = await tools.manageExperience({ action: 'get' }).then(() => undefined, (error: unknown) => error);
+
+    expect(failure).toBeInstanceOf(RoutingFailure);
+    expect(failure).toMatchObject({ routingError: { message: expect.stringContaining('Pass universe_id') } });
+    expect(client.getUniverse).not.toHaveBeenCalled();
+  });
+
   test('changes the experience title through the root place and reads it back', async () => {
     const result = body(await tools.manageExperience({
       action: 'update', universe_id: 42, name: '  Mega Obby ', description: '',
@@ -191,31 +197,78 @@ describe('manage_experience', () => {
     expect(client.updatePlace).not.toHaveBeenCalled();
   });
 
+  test('reports no warnings when the read-back shows every requested change', async () => {
+    client.getUniverse.mockResolvedValue(universe({
+      voiceChatEnabled: true,
+      privateServerPriceRobux: 50,
+      devices: { desktop: true, mobile: true, tablet: true, console: true, vr: false },
+      socialLinks: { discord: { title: 'Server', uri: 'https://discord.gg/x' } },
+    }));
+    client.getPlace.mockResolvedValue(place({ displayName: 'Mega Obby', serverSize: 30 }));
+
+    const result = body(await tools.manageExperience({
+      action: 'update', universe_id: 42, name: 'Mega Obby', server_size: 30, voice_chat_enabled: true,
+      private_server_price: 50, devices: { console: true }, confirm: true,
+      social_links: [{ kind: 'discord', title: 'Server', uri: 'https://discord.gg/x' }], remove_social_links: ['twitter'],
+    }));
+
+    expect(result).toMatchObject({ updated: true });
+    expect(result).not.toHaveProperty('warnings');
+  });
+
+  test('warns when the read-back still shows old values, naming each field', async () => {
+    client.getUniverse.mockResolvedValue(universe({
+      socialLinks: { twitter: { title: 'Old', uri: 'https://twitter.com/x' } },
+    }));
+
+    const result = body(await tools.manageExperience({
+      action: 'update', universe_id: 42, name: 'Mega Obby', private_server_price: 50, devices: { vr: true },
+      remove_social_links: ['twitter'], confirm: true,
+    }));
+
+    expect(result).toMatchObject({ updated: true, universe: { private_server_price: null } });
+    expect(result.warnings).toEqual([expect.stringContaining(
+      'name, private_server_price, devices.vr, social_links.twitter',
+    )]);
+    expect(result.warnings).toEqual([expect.stringContaining('action=get')]);
+  });
+
+  test('accepts the social link URL as Roblox normalizes it', async () => {
+    client.getUniverse.mockResolvedValue(universe({
+      socialLinks: { youtube: { title: 'Videos', uri: 'https://youtube.com/@Roblox' } },
+    }));
+
+    const result = body(await tools.manageExperience({
+      action: 'update', universe_id: 42,
+      social_links: [{ kind: 'youtube', title: 'Videos', uri: 'https://www.YouTube.com/@Roblox/' }],
+    }));
+
+    expect(result).toMatchObject({ updated: true });
+    expect(result).not.toHaveProperty('warnings');
+  });
+
   test.each([
-    [{ action: 'set_visibility', visibility: 'private' }, 'removes every player'],
-    [{ action: 'update', private_server_price: 50 }, 'cancels every private server subscription'],
+    [{ action: 'update', private_server_price: 50 }, 'cancels every existing private server subscription'],
     [{ action: 'update', disable_private_servers: true }, 'shuts down every active private server'],
   ])('requires confirm for irreversible changes: %j', async (request, reason) => {
     const result = body(await tools.manageExperience({ ...request, universe_id: 42 }));
 
     expect(result).toMatchObject({ error: 'confirmation_required', message: expect.stringContaining(reason) });
     expect(client.updateUniverse).not.toHaveBeenCalled();
-    expect(client.setUniverseActive).not.toHaveBeenCalled();
   });
 
-  test('makes the experience public without confirm and reports the new visibility', async () => {
-    client.getUniverse.mockResolvedValue(universe({ visibility: 'PUBLIC' }));
+  test.each([
+    [{ action: 'set_visibility', visibility: 'public' }],
+    [{ action: 'update', name: 'New', visibility: 'private' }],
+  ])('explains that visibility cannot be changed: %j', async (request) => {
+    const result = body(await tools.manageExperience({ universe_id: 42, ...request }));
 
-    const result = body(await tools.manageExperience({ action: 'set_visibility', universe_id: 42, visibility: 'public' }));
-
-    expect(client.setUniverseActive).toHaveBeenCalledWith(42, true);
-    expect(result).toMatchObject({ updated: true, universe: { visibility: 'public' } });
-  });
-
-  test('makes the experience private when confirmed', async () => {
-    await tools.manageExperience({ action: 'set_visibility', universe_id: 42, visibility: 'private', confirm: true });
-
-    expect(client.setUniverseActive).toHaveBeenCalledWith(42, false);
+    expect(result).toMatchObject({
+      error: 'visibility_not_supported',
+      message: expect.stringContaining('Creator Hub'),
+    });
+    expect(client.getUniverse).not.toHaveBeenCalled();
+    expect(client.updatePlace).not.toHaveBeenCalled();
   });
 
   test('still reports success when the follow-up read fails', async () => {
@@ -229,18 +282,30 @@ describe('manage_experience', () => {
     });
   });
 
-  test('reports what was already applied when a later step fails', async () => {
+  test('a refused place edit leaves the universe unchanged', async () => {
     client.updatePlace.mockRejectedValue(new OpenCloudRequestError('Open Cloud API error (409): busy', 409));
+
+    const result = body(await tools.manageExperience({
+      action: 'update', universe_id: 42, name: 'New', private_server_price: 50, confirm: true,
+    }));
+
+    expect(client.updateUniverse).not.toHaveBeenCalled();
+    expect(result).toEqual({
+      error: 'conflict',
+      message: 'Open Cloud API error (409): busy',
+      hint: expect.stringContaining('connected Studio'),
+    });
+  });
+
+  test('reports what was already applied and the scope the failed step needs', async () => {
+    client.updateUniverse.mockRejectedValue(new OpenCloudRequestError('API key lacks required permissions: no', 403));
 
     const result = body(await tools.manageExperience({
       action: 'update', universe_id: 42, name: 'New', voice_chat_enabled: true,
     }));
 
-    expect(result).toMatchObject({
-      error: 'conflict',
-      applied: ['universe'],
-      hint: expect.stringContaining('Team Create'),
-    });
+    expect(client.updatePlace).toHaveBeenCalledWith(42, 100, { displayName: 'New' });
+    expect(result).toMatchObject({ error: 'forbidden', required_scopes: ['universe:write'], applied: ['place'] });
   });
 
   test('names the scopes a forbidden update needs', async () => {
@@ -251,22 +316,31 @@ describe('manage_experience', () => {
     expect(result).toMatchObject({ error: 'forbidden', required_scopes: ['universe.place:write'] });
   });
 
+  test('does not blame scopes when reading the experience is forbidden', async () => {
+    client.getUniverse.mockRejectedValue(new OpenCloudRequestError('API key lacks required permissions: no', 403));
+
+    const result = body(await tools.manageExperience({ action: 'update', universe_id: 42, name: 'New' }));
+
+    expect(result).toEqual({
+      error: 'forbidden',
+      message: 'API key lacks required permissions: no',
+      hint: 'Add this experience to the API key.',
+    });
+  });
+
   test('requires an Open Cloud API key and names the scopes it needs', async () => {
     client.hasApiKey.mockReturnValue(false);
 
-    const result = body(await tools.manageExperience({ action: 'set_visibility', universe_id: 42, visibility: 'public' }));
+    const result = body(await tools.manageExperience({ action: 'update', universe_id: 42, voice_chat_enabled: true }));
 
-    expect(result).toMatchObject({ error: 'missing_api_key', required_scopes: ['legacy-universe:manage'] });
-    expect(client.setUniverseActive).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ error: 'missing_api_key', required_scopes: ['universe:write'] });
+    expect(client.updateUniverse).not.toHaveBeenCalled();
   });
 
   test.each([
     [{ action: 'delete' }, 'action'],
     [{ action: 'get', universe_id: 0 }, 'universe_id'],
     [{ action: 'get', name: 'x' }, 'name'],
-    [{ action: 'set_visibility', name: 'x', visibility: 'public' }, 'name'],
-    [{ action: 'set_visibility' }, 'visibility'],
-    [{ action: 'set_visibility', visibility: 'friends' }, 'visibility'],
     [{ action: 'update' }, 'update needs'],
     [{ action: 'update', name: '   ' }, 'name'],
     [{ action: 'update', server_size: 0 }, 'server_size'],
@@ -288,6 +362,5 @@ describe('manage_experience', () => {
     expect(client.getUniverse).not.toHaveBeenCalled();
     expect(client.updateUniverse).not.toHaveBeenCalled();
     expect(client.updatePlace).not.toHaveBeenCalled();
-    expect(client.setUniverseActive).not.toHaveBeenCalled();
   });
 });

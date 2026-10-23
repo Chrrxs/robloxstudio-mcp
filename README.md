@@ -44,7 +44,7 @@ screenshots, memory reports, and profiler captures from each peer.
 
 ### Manage experience settings
 
-- Read and change the experience title, description, server size, public or private visibility, devices, voice chat, private server price, and social links with `manage_experience`. Going private and private server price changes need `confirm`. Requires an Open Cloud API key; see [Configuration](docs/configuration.md#environment-variables).
+- Read and change the experience title, description, server size, devices, voice chat, private server price, and social links with `manage_experience`. Private server price changes need `confirm`, which the agent sets itself, so it is not a human approval step. It cannot make an experience public or private: Open Cloud ignores visibility changes, and Roblox can refuse to make an experience public through an API key, so change visibility in Creator Hub. The agent can use every permission the key grants, so give the key only the scopes you want an agent to use. Requires an Open Cloud API key; see [Configuration](docs/configuration.md#environment-variables).
 
 ### Look up Roblox APIs
 

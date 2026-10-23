@@ -372,6 +372,12 @@ describe('MCP v2 tool runtime', () => {
       idempotentHint: false,
       openWorldHint: true,
     });
+    expect(byName.get('manage_experience')?.annotations).toMatchObject({
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: false,
+      openWorldHint: true,
+    });
     expect(byName.get('export_rbxm')?.annotations).toMatchObject({
       readOnlyHint: false,
       destructiveHint: true,

@@ -453,12 +453,11 @@ describe('Tool schema compatibility', () => {
     expect(schema).toMatchObject({
       required: ['action'],
       properties: {
-        action: { type: 'string', enum: ['get', 'update', 'set_visibility'] },
+        action: { type: 'string', enum: ['get', 'update'] },
         universe_id: { type: 'integer', minimum: 1 },
         place_id: { type: 'integer', minimum: 1 },
         server_size: { type: 'integer', minimum: 1 },
         private_server_price: { type: 'integer', minimum: 0, maximum: 1_000_000_000 },
-        visibility: { type: 'string', enum: ['public', 'private'] },
         confirm: { type: 'boolean' },
         remove_social_links: {
           type: 'array',
@@ -481,11 +480,11 @@ describe('Tool schema compatibility', () => {
       'server_size',
       'social_links',
       'universe_id',
-      'visibility',
       'voice_chat_enabled',
     ]);
     expect(getReadOnlyTools().map((t) => t.name)).not.toContain('manage_experience');
     expect(TOOL_GUIDE_MARKDOWN).toContain('Roblox refuses place edits while the place is open in an active Team Create session');
+    expect(TOOL_GUIDE_MARKDOWN).toContain('manage_experience cannot make an experience public or private');
   });
 
   test('breakpoints schema exposes lifecycle actions and log fields', () => {

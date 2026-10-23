@@ -18,7 +18,6 @@ export interface ExperienceClient {
   updateUniverse(universeId: number, changes: ExperienceUniverseChanges): Promise<void>;
   getPlace(universeId: number, placeId: number): Promise<ExperiencePlace>;
   updatePlace(universeId: number, placeId: number, changes: ExperiencePlaceChanges): Promise<void>;
-  setUniverseActive(universeId: number, active: boolean): Promise<void>;
 }
 
 export interface ExperienceContext {
@@ -27,8 +26,7 @@ export interface ExperienceContext {
   connectedUniverseId(): Promise<number>;
 }
 
-type ExperienceAction = 'get' | 'update' | 'set_visibility';
-type Visibility = 'public' | 'private';
+type ExperienceAction = 'get' | 'update';
 
 interface ExperienceRequest {
   action: ExperienceAction;
@@ -36,7 +34,6 @@ interface ExperienceRequest {
   placeId?: number;
   universe: ExperienceUniverseChanges;
   place: ExperiencePlaceChanges;
-  visibility?: Visibility;
   confirm: boolean;
 }
 
@@ -50,7 +47,6 @@ const ACTION_FIELDS: Record<ExperienceAction, readonly string[]> = {
     'place_id', 'name', 'description', 'server_size', 'voice_chat_enabled', 'private_server_price',
     'disable_private_servers', 'devices', 'social_links', 'remove_social_links', 'confirm',
   ],
-  set_visibility: ['visibility', 'confirm'],
 };
 const ACTION_SCOPED_FIELDS = [...new Set(Object.values(ACTION_FIELDS).flat())];
 
@@ -71,15 +67,11 @@ function invalidArgument(message: string): ExperienceError {
 }
 
 function isAction(value: unknown): value is ExperienceAction {
-  return value === 'get' || value === 'update' || value === 'set_visibility';
+  return value === 'get' || value === 'update';
 }
 
 function isPresent(value: unknown): boolean {
   return value !== undefined && value !== null;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 function optionalId(value: unknown, name: string): number | undefined {
@@ -116,12 +108,6 @@ function optionalBoolean(value: unknown, name: string): boolean | undefined {
   return value;
 }
 
-function optionalVisibility(value: unknown): Visibility | undefined {
-  if (!isPresent(value)) return undefined;
-  if (value !== 'public' && value !== 'private') throw invalidArgument('visibility must be public or private.');
-  return value;
-}
-
 function isDevice(value: string): value is ExperienceDevice {
   return (EXPERIENCE_DEVICES as readonly string[]).includes(value);
 }
@@ -132,9 +118,12 @@ function isSocialLinkKind(value: unknown): value is SocialLinkKind {
 
 function parseDevices(value: unknown): Partial<Record<ExperienceDevice, boolean>> | undefined {
   if (!isPresent(value)) return undefined;
-  if (!isRecord(value)) throw invalidArgument('devices must be an object of device names to true or false.');
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw invalidArgument('devices must be an object of device names to true or false.');
+  }
   const devices: Partial<Record<ExperienceDevice, boolean>> = {};
-  for (const [device, enabled] of Object.entries(value)) {
+  const entries: Array<[string, unknown]> = Object.entries(value);
+  for (const [device, enabled] of entries) {
     if (!isDevice(device)) throw invalidArgument(`devices.${device} is not one of ${EXPERIENCE_DEVICES.join(', ')}.`);
     const parsed = optionalBoolean(enabled, `devices.${device}`);
     if (parsed !== undefined) devices[device] = parsed;
@@ -142,19 +131,28 @@ function parseDevices(value: unknown): Partial<Record<ExperienceDevice, boolean>
   return devices;
 }
 
+function parseSocialLink(entry: unknown): { kind: SocialLinkKind; link: SocialLink } {
+  if (
+    typeof entry !== 'object' || entry === null || Array.isArray(entry)
+    || !('kind' in entry) || !isSocialLinkKind(entry.kind)
+  ) {
+    throw invalidArgument(`social_links entries need a kind from ${SOCIAL_LINK_KINDS.join(', ')}.`);
+  }
+  const kind = entry.kind;
+  const uri = optionalNonBlankString('uri' in entry ? entry.uri : undefined, `social_links ${kind} uri`);
+  if (uri === undefined) throw invalidArgument(`social_links ${kind} uri is required.`);
+  const title = optionalString('title' in entry ? entry.title : undefined, `social_links ${kind} title`) ?? '';
+  return { kind, link: { title, uri: uri.trim() } };
+}
+
 function parseSocialLinks(value: unknown, removals: unknown): Partial<Record<SocialLinkKind, SocialLink | null>> {
   const links: Partial<Record<SocialLinkKind, SocialLink | null>> = {};
   if (isPresent(value)) {
     if (!Array.isArray(value)) throw invalidArgument('social_links must be an array of { kind, title, uri }.');
-    for (const link of value) {
-      if (!isRecord(link) || !isSocialLinkKind(link.kind)) {
-        throw invalidArgument(`social_links entries need a kind from ${SOCIAL_LINK_KINDS.join(', ')}.`);
-      }
-      const { kind } = link;
+    for (const entry of value) {
+      const { kind, link } = parseSocialLink(entry);
       if (links[kind]) throw invalidArgument(`social_links lists ${kind} more than once.`);
-      const uri = optionalNonBlankString(link.uri, `social_links ${kind} uri`);
-      if (uri === undefined) throw invalidArgument(`social_links ${kind} uri is required.`);
-      links[kind] = { title: optionalString(link.title, `social_links ${kind} title`) ?? '', uri: uri.trim() };
+      links[kind] = link;
     }
   }
   if (isPresent(removals)) {
@@ -206,24 +204,31 @@ function hasChanges(changes: object): boolean {
   return Object.keys(changes).length > 0;
 }
 
-// Going private removes every player from running servers, and any private
-// server price change cancels every subscription; neither can be undone.
+// Setting any private server price cancels existing subscriptions, and
+// disabling private servers shuts down running ones; neither can be undone.
 function confirmationReason(request: ExperienceRequest): string | undefined {
-  if (request.visibility === 'private') {
-    return 'Making the experience private immediately removes every player from its running servers.';
-  }
   if (request.universe.privateServerPriceRobux === null) {
     return 'Disabling private servers shuts down every active private server.';
   }
   if (request.universe.privateServerPriceRobux !== undefined) {
-    return 'Changing the private server price cancels every private server subscription.';
+    return 'Setting the private server price cancels every existing private server subscription.';
   }
   return undefined;
 }
 
 function parseRequest(request: Record<string, unknown>): ExperienceRequest {
   const { action } = request;
-  if (!isAction(action)) throw invalidArgument('action must be get, update, or set_visibility.');
+  // Open Cloud ignores visibility in universe updates, and in live testing the
+  // legacy endpoint made an experience private but refused to make it public
+  // again. A tool that can only go private could take a game down for good.
+  if (action === 'set_visibility' || isPresent(request.visibility)) {
+    throw new ExperienceError(
+      'visibility_not_supported',
+      'manage_experience cannot make an experience public or private. Open Cloud ignores visibility changes, and '
+        + "Roblox can refuse to make an experience public through an API key. Use Creator Hub or Studio's Game Settings.",
+    );
+  }
+  if (!isAction(action)) throw invalidArgument('action must be get or update.');
   for (const field of ACTION_SCOPED_FIELDS) {
     if (isPresent(request[field]) && !ACTION_FIELDS[action].includes(field)) {
       throw invalidArgument(`${field} is not used by action=${action}.`);
@@ -236,7 +241,6 @@ function parseRequest(request: Record<string, unknown>): ExperienceRequest {
     placeId: optionalId(request.place_id, 'place_id'),
     universe: parseUniverseChanges(request),
     place: parsePlaceChanges(request),
-    visibility: optionalVisibility(request.visibility),
     confirm: optionalBoolean(request.confirm, 'confirm') === true,
   };
   if (action === 'update' && !hasChanges(parsed.universe) && !hasChanges(parsed.place)) {
@@ -244,9 +248,6 @@ function parseRequest(request: Record<string, unknown>): ExperienceRequest {
       'update needs at least one of name, description, server_size, voice_chat_enabled, private_server_price, '
       + 'disable_private_servers, devices, social_links, or remove_social_links.',
     );
-  }
-  if (action === 'set_visibility' && parsed.visibility === undefined) {
-    throw invalidArgument('visibility is required for action=set_visibility.');
   }
   const reason = confirmationReason(parsed);
   if (reason && !parsed.confirm) {
@@ -264,8 +265,6 @@ function requiredScopes(request: ExperienceRequest): string[] {
         ...(hasChanges(request.universe) ? ['universe:write'] : []),
         ...(hasChanges(request.place) ? ['universe.place:write'] : []),
       ];
-    case 'set_visibility':
-      return ['legacy-universe:manage'];
   }
 }
 
@@ -319,69 +318,143 @@ function rootPlaceId(universe: ExperienceUniverse): number {
   return universe.rootPlaceId;
 }
 
+interface ExperienceSnapshot {
+  universe: ExperienceUniverse;
+  place: ExperiencePlace;
+}
+
 // Title and description live on the root place, so place_id defaults to it.
 async function readExperience(
   client: ExperienceClient,
   universeId: number,
   placeId: number | undefined,
-): Promise<Record<string, unknown>> {
+): Promise<ExperienceSnapshot> {
   const universe = await client.getUniverse(universeId);
   const place = await client.getPlace(universeId, placeId ?? rootPlaceId(universe));
+  return { universe, place };
+}
+
+function publicExperience({ universe, place }: ExperienceSnapshot): Record<string, unknown> {
   return { universe: publicUniverse(universe), place: publicPlace(place) };
+}
+
+// Roblox stores social link URLs in a canonical form, for example without www.
+function linkTarget(uri: string): string {
+  try {
+    const url = new URL(uri);
+    return `${url.hostname.toLowerCase().replace(/^www\./, '')}${url.pathname.replace(/\/+$/, '')}${url.search}`;
+  } catch {
+    return uri;
+  }
+}
+
+/** Requested changes that the read-back does not show, by argument name. */
+function unconfirmedFields({ universe, place }: ExperienceSnapshot, request: ExperienceRequest): string[] {
+  const fields: string[] = [];
+  const check = (field: string, confirmed: boolean) => {
+    if (!confirmed) fields.push(field);
+  };
+  const { place: placeChanges, universe: universeChanges } = request;
+  if (placeChanges.displayName !== undefined) check('name', place.displayName === placeChanges.displayName);
+  if (placeChanges.description !== undefined) check('description', place.description === placeChanges.description);
+  if (placeChanges.serverSize !== undefined) check('server_size', place.serverSize === placeChanges.serverSize);
+  if (universeChanges.voiceChatEnabled !== undefined) {
+    check('voice_chat_enabled', universe.voiceChatEnabled === universeChanges.voiceChatEnabled);
+  }
+  if (universeChanges.privateServerPriceRobux !== undefined) {
+    check('private_server_price', universe.privateServerPriceRobux === universeChanges.privateServerPriceRobux);
+  }
+  for (const device of EXPERIENCE_DEVICES) {
+    const enabled = universeChanges.devices?.[device];
+    if (enabled !== undefined) check(`devices.${device}`, universe.devices[device] === enabled);
+  }
+  for (const kind of SOCIAL_LINK_KINDS) {
+    const link = universeChanges.socialLinks?.[kind];
+    if (link === undefined) continue;
+    const current = universe.socialLinks[kind];
+    check(`social_links.${kind}`, link === null
+      ? current === undefined
+      : current !== undefined && linkTarget(current.uri) === linkTarget(link.uri) && current.title === link.title);
+  }
+  return fields;
 }
 
 async function readBack(
   client: ExperienceClient,
   universeId: number,
   placeId: number | undefined,
+  request: ExperienceRequest,
 ): Promise<Record<string, unknown>> {
+  let snapshot: ExperienceSnapshot;
   try {
-    return { updated: true, ...(await readExperience(client, universeId, placeId)) };
+    snapshot = await readExperience(client, universeId, placeId);
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error);
     return { updated: true, warnings: [`The update succeeded, but reading the experience back failed: ${reason}`] };
   }
+  // Open Cloud reads can briefly return values from before a write. Saying so
+  // keeps a caller from retrying a change, such as a price, that already applied.
+  const unconfirmed = unconfirmedFields(snapshot, request);
+  const warnings = unconfirmed.length > 0
+    ? [`Roblox accepted the update, but reading it back still shows different values for ${unconfirmed.join(', ')}. `
+      + 'Reads can lag a few seconds behind writes; check with action=get before retrying.']
+    : [];
+  return { updated: true, ...publicExperience(snapshot), ...(warnings.length > 0 ? { warnings } : {}) };
 }
+
+type ExperienceStep = 'read' | 'place' | 'universe';
+
+/** How far a call got, so a failure can name the step that failed and what already changed. */
+interface ExperienceProgress {
+  step: ExperienceStep;
+  applied: string[];
+}
+
+const STEP_SCOPES: Record<ExperienceStep, readonly string[]> = {
+  read: [],
+  place: ['universe.place:write'],
+  universe: ['universe:write'],
+};
 
 async function runAction(
   request: ExperienceRequest,
   universeId: number,
   client: ExperienceClient,
-  applied: string[],
+  progress: ExperienceProgress,
 ): Promise<Record<string, unknown>> {
   switch (request.action) {
     case 'get':
-      return readExperience(client, universeId, request.placeId);
+      return publicExperience(await readExperience(client, universeId, request.placeId));
     case 'update': {
       // Resolve the root place before changing anything, so a failed lookup leaves nothing half-applied.
       const placeId = hasChanges(request.place)
         ? request.placeId ?? rootPlaceId(await client.getUniverse(universeId))
         : request.placeId;
-      if (hasChanges(request.universe)) {
-        await client.updateUniverse(universeId, request.universe);
-        applied.push('universe');
-      }
+      // The place goes first: Roblox refuses it during Team Create, and the
+      // universe step can cancel private server subscriptions for good.
       if (placeId !== undefined && hasChanges(request.place)) {
+        progress.step = 'place';
         await client.updatePlace(universeId, placeId, request.place);
-        applied.push('place');
+        progress.applied.push('place');
       }
-      return readBack(client, universeId, placeId);
+      if (hasChanges(request.universe)) {
+        progress.step = 'universe';
+        await client.updateUniverse(universeId, request.universe);
+        progress.applied.push('universe');
+      }
+      return readBack(client, universeId, placeId, request);
     }
-    case 'set_visibility':
-      await client.setUniverseActive(universeId, request.visibility === 'public');
-      applied.push('visibility');
-      return readBack(client, universeId, undefined);
   }
 }
 
 /** Maps an Open Cloud HTTP failure to a stable error code with recovery hints. */
-function openCloudFailure(error: OpenCloudRequestError, request: ExperienceRequest): Record<string, unknown> {
+function openCloudFailure(error: OpenCloudRequestError, step: ExperienceStep): Record<string, unknown> {
   const { message, status } = error;
   switch (status) {
     case 401:
       return { error: 'unauthorized', message, hint: 'Check ROBLOX_OPEN_CLOUD_API_KEY.' };
     case 403: {
-      const scopes = requiredScopes(request);
+      const scopes = STEP_SCOPES[step];
       return {
         error: 'forbidden',
         message,
@@ -394,11 +467,14 @@ function openCloudFailure(error: OpenCloudRequestError, request: ExperienceReque
     case 404:
       return { error: 'not_found', message, hint: 'Check universe_id and place_id.' };
     case 409:
-      return {
-        error: 'conflict',
-        message,
-        hint: 'Roblox refuses place edits while the place is open in an active Team Create session.',
-      };
+      return step === 'place'
+        ? {
+          error: 'conflict',
+          message,
+          hint: 'Roblox refuses place edits while the place is open in an active Team Create session, '
+            + 'including one in the connected Studio. Close the place in every Studio that has it open, then retry.',
+        }
+        : { error: 'conflict', message };
     case 429:
       return { error: 'rate_limited', message, hint: 'Wait before retrying.' };
     default: {
@@ -416,10 +492,9 @@ export async function runManageExperience(
   request: Record<string, unknown>,
   context: ExperienceContext,
 ): Promise<Record<string, unknown>> {
-  let parsed: ExperienceRequest | undefined;
-  const applied: string[] = [];
+  const progress: ExperienceProgress = { step: 'read', applied: [] };
   try {
-    parsed = parseRequest(request);
+    const parsed = parseRequest(request);
     if (!context.client.hasApiKey()) {
       const scopes = requiredScopes(parsed);
       throw new ExperienceError(
@@ -431,13 +506,13 @@ export async function runManageExperience(
       );
     }
     const universeId = await resolveUniverse(parsed, context);
-    return await runAction(parsed, universeId, context.client, applied);
+    return await runAction(parsed, universeId, context.client, progress);
   } catch (error) {
-    const partial = applied.length > 0 ? { applied } : {};
+    const partial = progress.applied.length > 0 ? { applied: progress.applied } : {};
     if (error instanceof ExperienceError) {
       return { error: error.code, message: error.message, ...error.details, ...partial };
     }
-    if (error instanceof OpenCloudRequestError && parsed) return { ...openCloudFailure(error, parsed), ...partial };
+    if (error instanceof OpenCloudRequestError) return { ...openCloudFailure(error, progress.step), ...partial };
     throw error;
   }
 }

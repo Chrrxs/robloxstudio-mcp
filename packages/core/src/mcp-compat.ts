@@ -100,9 +100,9 @@ manage_monetization lists, reads, creates, and updates developer products and ga
 manage_experience reads and changes experience and place settings through Roblox Open Cloud. universe_id defaults to the connected Studio place, and place_id defaults to the root place, whose name and description are the experience title and description.
 
 - update changes only the arguments supplied, then reads the experience back. name, description, and server_size need universe.place:write; voice_chat_enabled, private_server_price, disable_private_servers, devices, social_links, and remove_social_links need universe:write.
-- Roblox refuses place edits while the place is open in an active Team Create session.
-- set_visibility makes the experience public or private and needs legacy-universe:manage.
-- Going private removes every player from running servers, and changing or disabling the private server price cancels every private server subscription, so these need confirm=true.
+- Roblox refuses place edits while the place is open in an active Team Create session, including one in the connected Studio. update edits the place before the universe, so a refused place edit changes nothing.
+- Setting a private server price cancels existing subscriptions, and disabling private servers shuts down active ones, so these need confirm=true.
+- manage_experience cannot make an experience public or private. Open Cloud ignores visibility changes, and Roblox can refuse to make an experience public through an API key. get still reports visibility; change it in Creator Hub or Studio's Game Settings.
 - Genre, avatar, playtester, and other settings that Open Cloud does not expose, and the age rating, cannot be changed.
 
 ## RBXM files

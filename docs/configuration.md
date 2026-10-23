@@ -236,5 +236,5 @@ and update reads the item back.
 
 `manage_experience` needs the experience added to the key. Changing the title,
 description, or server size needs `universe.place:write`. Changing voice chat,
-private servers, devices, or social links needs `universe:write`. Making the
-experience public or private needs `legacy-universe:manage`.
+private servers, devices, or social links needs `universe:write`. It cannot make
+an experience public or private; change visibility in Creator Hub.
