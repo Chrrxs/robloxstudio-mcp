@@ -2512,6 +2512,101 @@ describe('Smoke', () => {
     fs.rmSync(summaryOutputPath, { force: true });
   });
 
+  test('capture_micro_profiler omits absolute deltas against a pre-clock (schema 1) baseline', async () => {
+    const bridge = new BridgeService();
+    const tools = new RobloxStudioTools(bridge);
+    bridge.registerPeer(READY);
+    bridge.registerPeer({
+      peerId: 'server-1',
+      transportPeerId: 'server-1',
+      instanceId: 'instance:test',
+      role: 'server',
+      placeId: 0,
+      placeName: 'TestPlace',
+      dataModelName: 'Game',
+      isRunning: true,
+    });
+
+    // Schema 1 assumed nanosecond ticks: on a 4.7 GHz timer it reported every
+    // time 4.7x too long, including analysis_duration_us.
+    const resultPromise = tools.captureMicroProfiler('server', {
+      duration_ms: 1000,
+      baseline: {
+        duration_ms: 1000,
+        analysis_window: { analysis_duration_us: 4_700_000 },
+        top_groups: [{ group: 'Script', inclusive_us: 470_000, exclusive_us: 94_000, count: 60 }],
+      },
+    }, 'instance:test');
+
+    const pending = claimQueuedRequest(bridge, 'server-1');
+    bridge.resolveRequest(pending!.requestId, {
+      schema_version: 2,
+      ok: true,
+      duration_ms: 1000,
+      analysis_window: { analysis_duration_us: 1_000_000 },
+      top_groups: [{ group: 'Script', inclusive_us: 150_000, exclusive_us: 30_000, count: 60 }],
+      counts: { events_sampled: 0 },
+    });
+
+    const body = JSON.parse((await resultPromise).content[0].text);
+    const comparison = body.baseline_comparison;
+    expect(comparison.warnings).toEqual([expect.stringContaining('The baseline summary predates schema_version 2')]);
+    const [group] = comparison.groups;
+    // Rates are ratios of equally scaled values: 470000/4.7 s = 100000 us/s.
+    expect(group).toMatchObject({
+      group: 'Script',
+      current_inclusive_us: 150_000,
+      current_inclusive_us_per_s: 150_000,
+      baseline_inclusive_us_per_s: 100_000,
+      delta_inclusive_us_per_s: 50_000,
+      delta_pct: 50,
+      current_count_per_s: 60,
+    });
+    for (const field of [
+      'baseline_inclusive_us', 'baseline_exclusive_us', 'baseline_count_per_s',
+      'delta_inclusive_us', 'delta_exclusive_us', 'delta_count_per_s',
+    ]) {
+      expect(group).not.toHaveProperty(field);
+    }
+  });
+
+  test('capture_micro_profiler does not call a failed capture a pre-clock summary', async () => {
+    const bridge = new BridgeService();
+    const tools = new RobloxStudioTools(bridge);
+    bridge.registerPeer(READY);
+    bridge.registerPeer({
+      peerId: 'server-1',
+      transportPeerId: 'server-1',
+      instanceId: 'instance:test',
+      role: 'server',
+      placeId: 0,
+      placeName: 'TestPlace',
+      dataModelName: 'Game',
+      isRunning: true,
+    });
+
+    const resultPromise = tools.captureMicroProfiler('server', {
+      duration_ms: 1000,
+      baseline: {
+        schema_version: 2,
+        duration_ms: 1000,
+        analysis_window: { analysis_duration_us: 1_000_000 },
+        top_groups: [{ group: 'Script', inclusive_us: 100_000, exclusive_us: 20_000, count: 60 }],
+      },
+    }, 'instance:test');
+
+    const pending = claimQueuedRequest(bridge, 'server-1');
+    bridge.resolveRequest(pending!.requestId, {
+      error: 'micro_profiler_no_frames',
+      message: 'Studio rendered no frames during the capture.',
+      duration_ms: 1000,
+    });
+
+    const body = JSON.parse((await resultPromise).content[0].text);
+    expect(body.error).toBe('micro_profiler_no_frames');
+    expect(body.baseline_comparison?.warnings).toBeUndefined();
+  });
+
   test('generate_model routes to edit context and returns brief model path response', async () => {
     const bridge = new BridgeService();
     const tools = new RobloxStudioTools(bridge);

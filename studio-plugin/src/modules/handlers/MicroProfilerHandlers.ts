@@ -35,6 +35,7 @@ interface LibMPSession {
 	FindGroupIds(this: LibMPSession, nameMask: string, caseSensitive?: boolean): number[];
 	FindTimerIds(this: LibMPSession, nameMask: string, caseSensitive?: boolean): number[];
 	CreateLogIterator(this: LibMPSession): LogIterator;
+	FetchGlobalDesc(this: LibMPSession): GlobalDesc | undefined;
 	Dispose(this: LibMPSession): void;
 }
 
@@ -58,8 +59,16 @@ interface ThreadDesc {
 	IsGpu?: boolean;
 }
 
+// Length of one MicroProfiler tick for this snapshot. CPU threads and frame
+// boundaries use TickToMsCpu; the GPU thread uses TickToMsGpu.
+interface GlobalDesc {
+	TickToMsCpu?: number;
+	TickToMsGpu?: number;
+}
+
 interface FrameDesc {
 	FrameId(this: FrameDesc): number;
+	FrameAbsoluteId(this: FrameDesc): number;
 	TickStartCpu(this: FrameDesc): number;
 	TickEndCpu(this: FrameDesc): number;
 	IsIncomplete(this: FrameDesc): boolean;
@@ -80,12 +89,13 @@ interface LogIteratorState {
 	Timestamp(this: LogIteratorState): number;
 	IsEnter(this: LogIteratorState): boolean;
 	IsExit(this: LogIteratorState): boolean;
+	IsGpuThread(this: LogIteratorState): boolean;
 }
 
 interface StackEntry {
 	timerId: number;
-	timestampRaw: number;
-	childRaw: number;
+	enterTick: number;
+	childUs: number;
 	frameId: number;
 }
 
@@ -99,25 +109,25 @@ interface TimerInfo {
 
 interface TimerAggregate {
 	timer_id: number;
-	inclusive_raw: number;
-	exclusive_raw: number;
+	inclusive_us: number;
+	exclusive_us: number;
 	count: number;
-	max_raw: number;
+	max_us: number;
 }
 
 interface GroupAggregate {
 	group: string;
-	inclusive_raw: number;
-	exclusive_raw: number;
+	inclusive_us: number;
+	exclusive_us: number;
 	count: number;
 }
 
 interface EdgeAggregate {
 	parent_timer_id: number;
 	child_timer_id: number;
-	inclusive_raw: number;
+	inclusive_us: number;
 	count: number;
-	max_raw: number;
+	max_us: number;
 }
 
 const DEFAULT_DURATION_MS = 1000;
@@ -132,6 +142,25 @@ const MAX_EVENTS = 1000000;
 const COOPERATIVE_CLOCK_CHECK_INTERVAL = 128;
 const MAX_COOPERATIVE_SLICE_SECONDS = 0.008;
 const DEFAULT_FRAME_WINDOW = 240;
+// The engine holds at most 256 frames, and fresh Studio peers already use 256.
+// SetFrameLimit only narrows the view of retained frames (lowering it hides
+// frames, raising it shows them again); the profiler's memory budget often holds
+// fewer. Changing the limit clears counter history; setting the same value does not.
+const HISTORY_FRAME_LIMIT = 256;
+// A recording peer shows a new frame after one task.wait() almost always;
+// Studio hitches of up to 12 frames (~0.2 s) were observed.
+const RECORDING_PROBE_SECONDS = 0.3;
+// Each probe copies the whole snapshot, so re-read at this interval after the
+// first one-frame check instead of every frame.
+const RECORDING_PROBE_INTERVAL_SECONDS = 0.1;
+// A capture's first frame with scope events can arrive several frames after
+// EnableCapture (on a fresh Studio peer the first frame took ~70 ms and frames
+// 1-5 had no events). Check every frame for the first FIRST_FRAME_FAST_POLLS
+// checks, then at the poll interval, for at most the timeout. Each check copies
+// the snapshot, so the count stays bounded.
+const FIRST_FRAME_TIMEOUT_SECONDS = 0.5;
+const FIRST_FRAME_FAST_POLLS = 12;
+const FIRST_FRAME_POLL_SECONDS = 0.05;
 const BASE64_CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 const PAD_BYTE = string.byte("=")[0];
 
@@ -260,8 +289,11 @@ function stringContains(haystack: string, needle: string): boolean {
 	return string.find(string.lower(haystack), string.lower(needle), 1, true)[0] !== undefined;
 }
 
-function rawToUs(raw: number): number {
-	return math.floor(raw / 1000 + 0.5);
+// Spans above this are corrupt (the old raw-tick bound, 1e12 ns, was 1000 s).
+const MAX_SPAN_US = 1e9;
+
+function roundUs(us: number): number {
+	return math.floor(us + 0.5);
 }
 
 function round2(value: number): number {
@@ -304,17 +336,17 @@ function pickFields(row: Record<string, unknown>, fields: string[]): Record<stri
 	return out;
 }
 
-function addFrameRaw(map: Map<number, number>, frameId: number, raw: number): void {
+function addFrameUs(map: Map<number, number>, frameId: number, us: number): void {
 	if (frameId <= 0) return;
-	map.set(frameId, (map.get(frameId) ?? 0) + raw);
+	map.set(frameId, (map.get(frameId) ?? 0) + us);
 }
 
 function summarizeFrameImpact(
-	frameRawById: Map<number, number> | undefined,
+	frameUsById: Map<number, number> | undefined,
 	analyzedFrames: number,
 	checkpoint: CooperativeCheckpoint,
 ): Record<string, unknown> {
-	if (frameRawById === undefined || frameRawById.size() === 0) {
+	if (frameUsById === undefined || frameUsById.size() === 0) {
 		return {
 			active_frame_count: 0,
 			active_frame_pct: 0,
@@ -328,9 +360,9 @@ function summarizeFrameImpact(
 	let totalUs = 0;
 	let maxUs = 0;
 	let maxFrameId = 0;
-	for (const [frameId, raw] of frameRawById) {
+	for (const [frameId, exactUs] of frameUsById) {
 		checkpoint();
-		const us = rawToUs(raw);
+		const us = roundUs(exactUs);
 		values.push(us);
 		totalUs += us;
 		if (us > maxUs) {
@@ -421,6 +453,84 @@ function safeCall<T>(fn: () => T): LuaTuple<[boolean, T | string]> {
 	return $tuple(false, tostring(value));
 }
 
+interface NewestFrame {
+	id: number;
+	absolute: number;
+	// Only set when requested: whether the newest frame holds any CPU scope event.
+	hasEvents: boolean;
+}
+
+function readNewestFrame(LibMP: LibMPLike, checkEvents = false): NewestFrame | undefined {
+	const [readOk, data] = safeCall(() => LibMP.Control.CaptureToBufferSync());
+	if (!readOk) return undefined;
+	const [openOk, opened] = safeCall(() => LibMP.Session.OpenFromBuffer(data as buffer));
+	if (!openOk || !opened) return undefined;
+	const session = opened as LibMPSession;
+	const [infoOk, info] = safeCall((): NewestFrame => {
+		const newest = session.GetFrameIdMax();
+		// A GetFrameDesc view is invalidated by the next Get/Fetch call on the
+		// session, so read it immediately.
+		const desc = newest > 0 ? session.GetFrameDesc(newest) : undefined;
+		const absolute = desc !== undefined ? desc.FrameAbsoluteId() : 0;
+		let hasEvents = false;
+		if (checkEvents && newest > 0) {
+			const iterator = session.CreateLogIterator();
+			const [configured] = safeCall(() => {
+				iterator.Configure({
+					StartFrameId: newest,
+					EndFrameId: newest,
+					SkipGpuThreads: true,
+					SkipEvents: true,
+					SkipPausedFrames: true,
+					SkipFrameBoundaries: true,
+				});
+				return true;
+			});
+			if (configured) {
+				const [stepped, steppedResult] = safeCall(() => iterator.Step());
+				hasEvents = stepped && steppedResult === true;
+			}
+			iterator.Dispose();
+		}
+		return { id: math.max(newest, 0), absolute, hasEvents };
+	});
+	session.Dispose();
+	return infoOk ? info as NewestFrame : undefined;
+}
+
+interface PriorCaptureState {
+	recording: boolean;
+	// Whether the pre-capture read succeeded, so the boundary below is known.
+	known: boolean;
+	// Absolute ID of the newest frame that predates this capture (0 if none).
+	boundaryAbsolute: number;
+	// Frame ID of that frame. Frame IDs run on without gaps within a session
+	// (from 1, across pauses), so the capture's first frame is boundaryFrameId + 1.
+	boundaryFrameId: number;
+}
+
+// LibMP cannot report whether capture is on. A paused peer serves the same
+// cached frames on every read, so only a recording peer's newest absolute frame
+// ID advances. Studio peers start with capture paused. This must run before the
+// tool calls EnableProfiler: on a fresh peer EnableProfiler alone starts frames
+// recording, which would read as a peer that was already recording.
+function detectRecording(LibMP: LibMPLike): PriorCaptureState {
+	const first = readNewestFrame(LibMP);
+	if (first === undefined) return { recording: false, known: false, boundaryAbsolute: 0, boundaryFrameId: 0 };
+	const deadline = os.clock() + RECORDING_PROBE_SECONDS;
+	let waitSeconds: number | undefined;
+	while (os.clock() < deadline) {
+		task.wait(waitSeconds);
+		waitSeconds = RECORDING_PROBE_INTERVAL_SECONDS;
+		const latest = readNewestFrame(LibMP);
+		if (latest === undefined) break;
+		if (latest.absolute !== first.absolute) {
+			return { recording: true, known: true, boundaryAbsolute: latest.absolute, boundaryFrameId: latest.id };
+		}
+	}
+	return { recording: false, known: true, boundaryAbsolute: first.absolute, boundaryFrameId: first.id };
+}
+
 function isIdleTimer(info: TimerInfo): boolean {
 	const name = string.lower(info.name);
 	if (name === "sleep" || name === "idle") return true;
@@ -459,6 +569,7 @@ function collectFrameSummary(
 	session: LibMPSession,
 	startFrame: number,
 	frameMax: number,
+	usPerTickCpu: number,
 	checkpoint: CooperativeCheckpoint,
 ): Record<string, unknown> {
 	const frameRows: Record<string, unknown>[] = [];
@@ -473,20 +584,25 @@ function collectFrameSummary(
 		const desc = descOrErr as FrameDesc;
 		const tickStart = desc.TickStartCpu();
 		const tickEnd = desc.TickEndCpu();
-		const durationRaw = tickEnd - tickStart;
+		const durationExactUs = (tickEnd - tickStart) * usPerTickCpu;
 		const isIncomplete = desc.IsIncomplete();
 		const isPaused = desc.IsPaused();
 		if (isIncomplete) incompleteFrames += 1;
-		if (isPaused) pausedFrames += 1;
-		if (durationRaw <= 0 || durationRaw > 1000000000000) continue;
-		const durationUs = rawToUs(durationRaw);
+		// Pausing capture leaves one frame spanning the whole pause (seconds long,
+		// IsPaused). It holds no captured work, so it is counted but not timed,
+		// matching the event iterator's SkipPausedFrames.
+		if (isPaused) {
+			pausedFrames += 1;
+			continue;
+		}
+		if (durationExactUs <= 0 || durationExactUs > MAX_SPAN_US) continue;
+		const durationUs = roundUs(durationExactUs);
 		durations.push(durationUs);
 		const row: Record<string, unknown> = {
 			frame_id: frameId,
 			duration_us: durationUs,
 		};
 		if (isIncomplete) row.incomplete = true;
-		if (isPaused) row.paused = true;
 		frameRows.push(row);
 	}
 
@@ -560,7 +676,14 @@ function captureMicroProfiler(requestData: Record<string, unknown>): unknown {
 		};
 	}
 
-	const [frameLimitOk, frameLimitResult] = safeCall(() => LibMP.Control.SetFrameLimit(math.min(frameWindow, 256)));
+	// Studio peers start with capture paused. Leave the peer as found: if
+	// something else is already recording, keep it recording; otherwise pause
+	// again after the export.
+	const prior = detectRecording(LibMP);
+
+	// Keep the engine default instead of narrowing history to frame_window:
+	// frame_window selects frames during analysis.
+	const [frameLimitOk, frameLimitResult] = safeCall(() => LibMP.Control.SetFrameLimit(HISTORY_FRAME_LIMIT));
 	if (!frameLimitOk) {
 		return {
 			error: "micro_profiler_frame_limit_failed",
@@ -569,6 +692,9 @@ function captureMicroProfiler(requestData: Record<string, unknown>): unknown {
 		};
 	}
 
+	// Profiling is on by default in Studio and the tool never turns it off. It
+	// must follow the recording check: on a fresh peer EnableProfiler alone
+	// starts frames recording.
 	const [profilerOk, profilerResult] = safeCall(() => LibMP.Control.EnableProfiler(true));
 	if (!profilerOk) {
 		return {
@@ -578,28 +704,64 @@ function captureMicroProfiler(requestData: Record<string, unknown>): unknown {
 		};
 	}
 
-	const [captureStartOk, captureStartResult] = safeCall(() => LibMP.Control.EnableCapture(true));
-	if (!captureStartOk) {
-		return {
-			error: "micro_profiler_capture_start_failed",
-			message: tostring(captureStartResult),
-			backend,
-		};
+	// Absolute ID of the capture's first analyzed frame. Frames before it predate
+	// the capture or are instrumentation warm-up without scope events.
+	let windowStartAbsolute = prior.boundaryAbsolute + 1;
+	// Frame ID of that frame. Frame IDs run on without gaps, so dropped frames
+	// from the window are counted exactly against it.
+	let windowStartFrameId = prior.boundaryFrameId + 1;
+	let firstFrameWaitMs = 0;
+	// When the first-frame wait times out, the window starts right after the
+	// pre-capture frame and so includes the frames recorded during the wait.
+	let windowStartsAtWait: number | undefined;
+	if (!prior.recording) {
+		const [captureStartOk, captureStartResult] = safeCall(() => LibMP.Control.EnableCapture(true));
+		if (!captureStartOk) {
+			return {
+				error: "micro_profiler_capture_start_failed",
+				message: tostring(captureStartResult),
+				backend,
+			};
+		}
+		// The first frames after capture starts can carry no scope events yet
+		// (frames 1-5 of a fresh peer's first capture), so start timing
+		// duration_ms at the first frame with events; the analysis starts there too.
+		const waitStartedAt = os.clock();
+		windowStartsAtWait = waitStartedAt;
+		let polls = 0;
+		while (os.clock() - waitStartedAt < FIRST_FRAME_TIMEOUT_SECONDS) {
+			task.wait(polls < FIRST_FRAME_FAST_POLLS ? undefined : FIRST_FRAME_POLL_SECONDS);
+			polls += 1;
+			const latest = readNewestFrame(LibMP, true);
+			if (latest !== undefined && latest.absolute > prior.boundaryAbsolute && latest.hasEvents) {
+				windowStartAbsolute = latest.absolute;
+				windowStartFrameId = latest.id;
+				windowStartsAtWait = undefined;
+				break;
+			}
+		}
+		firstFrameWaitMs = (os.clock() - waitStartedAt) * 1000;
 	}
 
+	const timerStartedAt = os.clock();
 	task.wait(durationMs / 1000);
+	// Wall time covered by the analysis window: from the first analyzed frame, or
+	// from the start of the wait when it timed out.
+	const captureWallMs = (os.clock() - (windowStartsAtWait ?? timerStartedAt)) * 1000;
 
 	// Active reads synchronize the engine's data; paused reads can return an
-	// empty or stale cache. Export first, then pause, including on export failure.
+	// empty or stale cache. Export first, then restore, including on export failure.
 	const [bufferOk, snapshotOrErr] = safeCall(() => LibMP.Control.CaptureToBufferSync());
 
-	const [captureStopOk, captureStopResult] = safeCall(() => LibMP.Control.EnableCapture(false));
-	if (!captureStopOk) {
-		return {
-			error: "micro_profiler_capture_stop_failed",
-			message: tostring(captureStopResult),
-			backend,
-		};
+	if (!prior.recording) {
+		const [captureStopOk, captureStopResult] = safeCall(() => LibMP.Control.EnableCapture(false));
+		if (!captureStopOk) {
+			return {
+				error: "micro_profiler_capture_stop_failed",
+				message: tostring(captureStopResult),
+				backend,
+			};
+		}
 	}
 
 	if (!bufferOk) {
@@ -630,13 +792,56 @@ function captureMicroProfiler(requestData: Record<string, unknown>): unknown {
 		};
 	}
 
+	// MicroProfiler ticks are not nanoseconds: their length comes from the
+	// snapshot's clock (for example 2.1e-7 ms on a 4.7 GHz CPU timer). GPU-thread
+	// timestamps use their own clock.
+	const [clockOk, clockOrErr] = safeCall(() => session.FetchGlobalDesc());
+	const clock = clockOk ? clockOrErr as GlobalDesc | undefined : undefined;
+	const tickToMsCpu = clock?.TickToMsCpu;
+	const tickToMsGpu = clock?.TickToMsGpu;
+	const validTickLength = (value: unknown): value is number => typeIs(value, "number") && value > 0 && value < math.huge;
+	if (!validTickLength(tickToMsCpu) || (includeGpu && !validTickLength(tickToMsGpu))) {
+		session.Dispose();
+		return {
+			error: "micro_profiler_clock_unavailable",
+			message: "The MicroProfiler snapshot did not report a valid tick length, so its times cannot be converted.",
+			tick_to_ms_cpu: tickToMsCpu,
+			tick_to_ms_gpu: tickToMsGpu,
+			buffer_bytes: buffer.len(snapshot),
+			backend,
+		};
+	}
+	const usPerTickCpu = tickToMsCpu * 1000;
+	const usPerTickGpu = validTickLength(tickToMsGpu) ? tickToMsGpu * 1000 : usPerTickCpu;
+
 	const timerIds = session.FetchTimerIds() ?? [];
 	const threadIds = session.FetchThreadIds() ?? [];
 	const frameMin = session.GetFrameIdMin();
 	const frameMax = session.GetFrameIdMax();
-	// Frame IDs start at 1. Studio cuts a frame only when it renders, so a capture
-	// without frames means nothing was drawn, not that the workload was idle.
-	if (frameMax <= 0) {
+	// Frame IDs start at 1. Studio cuts a frame only when it renders. Retained
+	// history can predate this capture (a recording peer, or frames kept from an
+	// earlier capture), so analyze only frames from the capture's first analyzed
+	// frame on. That also drops warm-up frames without scope events and the one
+	// IsPaused frame a resume adds.
+	let firstCaptureFrame = frameMax + 1;
+	let capturedFrames = 0;
+	// Paused frames inside the window (none normally) can never carry events.
+	const pausedFrameIds: number[] = [];
+	for (let frameId = frameMax; frameMax > 0 && frameId >= frameMin; frameId--) {
+		const [descOk, descOrErr] = safeCall(() => session.GetFrameDesc(frameId));
+		if (!descOk || !descOrErr) break;
+		const desc = descOrErr as FrameDesc;
+		if (desc.FrameAbsoluteId() < windowStartAbsolute) break;
+		if (desc.IsPaused()) {
+			pausedFrameIds.push(frameId);
+			continue;
+		}
+		capturedFrames += 1;
+		firstCaptureFrame = frameId;
+	}
+	// No frame recorded during the capture means nothing was drawn, not that the
+	// workload was idle.
+	if (capturedFrames === 0) {
 		session.Dispose();
 		return {
 			error: "micro_profiler_no_frames",
@@ -647,8 +852,18 @@ function captureMicroProfiler(requestData: Record<string, unknown>): unknown {
 			backend,
 		};
 	}
-	const startFrame = math.max(frameMin, frameMax - frameWindow + 1);
-	const framesConsidered = frameMax >= startFrame ? frameMax - startFrame + 1 : 0;
+	const startFrame = math.max(firstCaptureFrame, frameMax - frameWindow + 1);
+	const framesConsidered = frameMax - startFrame + 1;
+	// The engine drops its oldest frames once its memory budget fills, often well
+	// below the frame limit (about 70 frames on a loaded server peer). Frames from
+	// the window's first frame to the oldest retained one were recorded during
+	// this capture and are gone (warm-up frames and the IsPaused frame a resume
+	// adds come before the window and do not count, except after a first-frame
+	// wait timeout, when the window starts right after the pre-capture frame).
+	// That matters only if the analysis wanted them: frame_window may ask for
+	// fewer frames than were retained.
+	const framesEvicted = prior.known ? math.max(0, frameMin - windowStartFrameId) : 0;
+	const historyTruncated = framesEvicted > 0 && frameMax - firstCaptureFrame + 1 < frameWindow;
 
 	const groupCache = new Map<number, string>();
 	const timerCache = new Map<number, TimerInfo>();
@@ -697,16 +912,16 @@ function captureMicroProfiler(requestData: Record<string, unknown>): unknown {
 		return info;
 	}
 
-	function addTimerAggregate(map: Map<number, TimerAggregate>, timerId: number, inclusiveRaw: number, exclusiveRaw: number): void {
+	function addTimerAggregate(map: Map<number, TimerAggregate>, timerId: number, inclusiveUs: number, exclusiveUs: number): void {
 		let aggregate = map.get(timerId);
 		if (aggregate === undefined) {
-			aggregate = { timer_id: timerId, inclusive_raw: 0, exclusive_raw: 0, count: 0, max_raw: 0 };
+			aggregate = { timer_id: timerId, inclusive_us: 0, exclusive_us: 0, count: 0, max_us: 0 };
 			map.set(timerId, aggregate);
 		}
-		aggregate.inclusive_raw += inclusiveRaw;
-		aggregate.exclusive_raw += exclusiveRaw;
+		aggregate.inclusive_us += inclusiveUs;
+		aggregate.exclusive_us += exclusiveUs;
 		aggregate.count += 1;
-		if (inclusiveRaw > aggregate.max_raw) aggregate.max_raw = inclusiveRaw;
+		if (inclusiveUs > aggregate.max_us) aggregate.max_us = inclusiveUs;
 	}
 
 	const focusMasks = FOCUS_GROUP_MASKS[focus] ?? [];
@@ -748,6 +963,8 @@ function captureMicroProfiler(requestData: Record<string, unknown>): unknown {
 	const checkpoint = createCooperativeCheckpoint();
 
 	const stacks = new Map<number, StackEntry[]>();
+	// Microseconds per tick for each thread: the GPU thread has its own clock.
+	const threadUsPerTick = new Map<number, number>();
 	const aggregates = new Map<number, TimerAggregate>();
 	const timerThreadAggregates = new Map<number, Map<number, TimerAggregate>>();
 	const timerFrameAggregates = new Map<number, Map<number, number>>();
@@ -761,7 +978,7 @@ function captureMicroProfiler(requestData: Record<string, unknown>): unknown {
 	let sampledFrameMin: number | undefined;
 	let sampledFrameMax: number | undefined;
 	let lastProcessedFrameId: number | undefined;
-	let lastProcessedTimestampRaw: number | undefined;
+	let lastProcessedTimestampUs: number | undefined;
 
 	while (eventsSampled < maxEvents) {
 		checkpoint();
@@ -772,9 +989,14 @@ function captureMicroProfiler(requestData: Record<string, unknown>): unknown {
 		const frameId = state.FrameId();
 		const threadId = state.ThreadId();
 		const timerId = state.TimerId();
-		const timestampRaw = state.Timestamp();
+		const timestampTick = state.Timestamp();
+		let usPerTick = threadUsPerTick.get(threadId);
+		if (usPerTick === undefined) {
+			usPerTick = state.IsGpuThread() ? usPerTickGpu : usPerTickCpu;
+			threadUsPerTick.set(threadId, usPerTick);
+		}
 		lastProcessedFrameId = frameId;
-		lastProcessedTimestampRaw = timestampRaw;
+		lastProcessedTimestampUs = timestampTick * usPerTick;
 		if (frameId > 0) {
 			sampledFrames.add(frameId);
 			if (sampledFrameMin === undefined || frameId < sampledFrameMin) sampledFrameMin = frameId;
@@ -788,7 +1010,7 @@ function captureMicroProfiler(requestData: Record<string, unknown>): unknown {
 
 		if (state.IsEnter()) {
 			enterEvents += 1;
-			stack.push({ timerId, timestampRaw, childRaw: 0, frameId });
+			stack.push({ timerId, enterTick: timestampTick, childUs: 0, frameId });
 		} else if (state.IsExit()) {
 			exitEvents += 1;
 			let entry: StackEntry | undefined;
@@ -804,46 +1026,51 @@ function captureMicroProfiler(requestData: Record<string, unknown>): unknown {
 				unmatchedExits += 1;
 				continue;
 			}
-			const inclusiveRaw = timestampRaw - entry.timestampRaw;
-			if (inclusiveRaw < 0 || inclusiveRaw > 1000000000000) {
+			const inclusiveUs = (timestampTick - entry.enterTick) * usPerTick;
+			if (inclusiveUs < 0 || inclusiveUs > MAX_SPAN_US) {
 				droppedSpans += 1;
 				continue;
 			}
-			const exclusiveRaw = math.max(0, inclusiveRaw - entry.childRaw);
+			const exclusiveUs = math.max(0, inclusiveUs - entry.childUs);
 			const parent = stack[stack.size() - 1];
 			if (parent !== undefined) {
-				parent.childRaw += inclusiveRaw;
+				parent.childUs += inclusiveUs;
 				const edgeKey = `${parent.timerId}:${timerId}`;
 				let edge = edgeAggregates.get(edgeKey);
 				if (edge === undefined) {
-					edge = { parent_timer_id: parent.timerId, child_timer_id: timerId, inclusive_raw: 0, count: 0, max_raw: 0 };
+					edge = { parent_timer_id: parent.timerId, child_timer_id: timerId, inclusive_us: 0, count: 0, max_us: 0 };
 					edgeAggregates.set(edgeKey, edge);
 				}
-				edge.inclusive_raw += inclusiveRaw;
+				edge.inclusive_us += inclusiveUs;
 				edge.count += 1;
-				if (inclusiveRaw > edge.max_raw) edge.max_raw = inclusiveRaw;
+				if (inclusiveUs > edge.max_us) edge.max_us = inclusiveUs;
 			}
 
-			addTimerAggregate(aggregates, timerId, inclusiveRaw, exclusiveRaw);
+			addTimerAggregate(aggregates, timerId, inclusiveUs, exclusiveUs);
 			let frameMap = timerFrameAggregates.get(timerId);
 			if (frameMap === undefined) {
 				frameMap = new Map<number, number>();
 				timerFrameAggregates.set(timerId, frameMap);
 			}
-			addFrameRaw(frameMap, entry.frameId > 0 ? entry.frameId : frameId, inclusiveRaw);
+			addFrameUs(frameMap, entry.frameId > 0 ? entry.frameId : frameId, inclusiveUs);
 			let threadMap = timerThreadAggregates.get(timerId);
 			if (threadMap === undefined) {
 				threadMap = new Map<number, TimerAggregate>();
 				timerThreadAggregates.set(timerId, threadMap);
 			}
-			addTimerAggregate(threadMap, threadId, inclusiveRaw, exclusiveRaw);
+			addTimerAggregate(threadMap, threadId, inclusiveUs, exclusiveUs);
 		}
 	}
 
-	const sampledFrameCoveragePct = percent(sampledFrames.size(), framesConsidered);
+	// The iterator skips paused frames (SkipPausedFrames), so they cannot be sampled.
+	let selectedPausedFrames = 0;
+	for (const frameId of pausedFrameIds) {
+		if (frameId >= startFrame) selectedPausedFrames += 1;
+	}
+	const sampledFrameCoveragePct = percent(sampledFrames.size(), framesConsidered - selectedPausedFrames);
 	const analysisFrameMin = sampledFrameMin ?? startFrame;
 	const analysisFrameMax = sampledFrameMax ?? frameMax;
-	const frameSummary = collectFrameSummary(session, analysisFrameMin, analysisFrameMax, checkpoint);
+	const frameSummary = collectFrameSummary(session, analysisFrameMin, analysisFrameMax, usPerTickCpu, checkpoint);
 	const analysisFrameCount = typeIs(frameSummary.frames, "number") && (frameSummary.frames as number) > 0
 		? frameSummary.frames as number
 		: sampledFrames.size() > 0
@@ -868,7 +1095,7 @@ function captureMicroProfiler(requestData: Record<string, unknown>): unknown {
 	for (const [timerId, aggregate] of aggregates) {
 		checkpoint();
 		const info = getTimerInfo(timerId);
-		const totalUs = rawToUs(aggregate.inclusive_raw);
+		const totalUs = roundUs(aggregate.inclusive_us);
 		if (!includeIdle && isIdleTimer(info)) {
 			omittedIdle += 1;
 			continue;
@@ -886,17 +1113,17 @@ function captureMicroProfiler(requestData: Record<string, unknown>): unknown {
 		}
 
 		const group = info.group ?? "<unknown>";
-		const inclusiveUs = rawToUs(aggregate.inclusive_raw);
-		const exclusiveUs = rawToUs(aggregate.exclusive_raw);
+		const inclusiveUs = roundUs(aggregate.inclusive_us);
+		const exclusiveUs = roundUs(aggregate.exclusive_us);
 		const avgUs = aggregate.count > 0 ? round2(totalUs / aggregate.count) : 0;
-		const maxUs = rawToUs(aggregate.max_raw);
+		const maxUs = roundUs(aggregate.max_us);
 		let groupAgg = groupAggregates.get(group);
 		if (groupAgg === undefined) {
-			groupAgg = { group, inclusive_raw: 0, exclusive_raw: 0, count: 0 };
+			groupAgg = { group, inclusive_us: 0, exclusive_us: 0, count: 0 };
 			groupAggregates.set(group, groupAgg);
 		}
-		groupAgg.inclusive_raw += aggregate.inclusive_raw;
-		groupAgg.exclusive_raw += aggregate.exclusive_raw;
+		groupAgg.inclusive_us += aggregate.inclusive_us;
+		groupAgg.exclusive_us += aggregate.exclusive_us;
 		groupAgg.count += aggregate.count;
 
 		const row: Record<string, unknown> = {
@@ -936,8 +1163,8 @@ function captureMicroProfiler(requestData: Record<string, unknown>): unknown {
 				groupFrames = new Map<number, number>();
 				groupFrameAggregates.set(group, groupFrames);
 			}
-			for (const [frameId, raw] of timerFrames) {
-				addFrameRaw(groupFrames, frameId, raw);
+			for (const [frameId, us] of timerFrames) {
+				addFrameUs(groupFrames, frameId, us);
 				checkpoint();
 			}
 		}
@@ -949,21 +1176,21 @@ function captureMicroProfiler(requestData: Record<string, unknown>): unknown {
 				checkpoint();
 				let threadAggregateRow = threadAggregates.get(threadId);
 				if (threadAggregateRow === undefined) {
-					threadAggregateRow = { timer_id: threadId, inclusive_raw: 0, exclusive_raw: 0, count: 0, max_raw: 0 };
+					threadAggregateRow = { timer_id: threadId, inclusive_us: 0, exclusive_us: 0, count: 0, max_us: 0 };
 					threadAggregates.set(threadId, threadAggregateRow);
 				}
-				threadAggregateRow.inclusive_raw += threadAggregate.inclusive_raw;
-				threadAggregateRow.exclusive_raw += threadAggregate.exclusive_raw;
+				threadAggregateRow.inclusive_us += threadAggregate.inclusive_us;
+				threadAggregateRow.exclusive_us += threadAggregate.exclusive_us;
 				threadAggregateRow.count += threadAggregate.count;
-				if (threadAggregate.max_raw > threadAggregateRow.max_raw) threadAggregateRow.max_raw = threadAggregate.max_raw;
+				if (threadAggregate.max_us > threadAggregateRow.max_us) threadAggregateRow.max_us = threadAggregate.max_us;
 
 				let threadRows = threadTimerRows.get(threadId);
 				if (threadRows === undefined) {
 					threadRows = [];
 					threadTimerRows.set(threadId, threadRows);
 				}
-				const threadTotalUs = rawToUs(threadAggregate.inclusive_raw);
-				const threadExclusiveUs = rawToUs(threadAggregate.exclusive_raw);
+				const threadTotalUs = roundUs(threadAggregate.inclusive_us);
+				const threadExclusiveUs = roundUs(threadAggregate.exclusive_us);
 				const threadAvgUs = threadAggregate.count > 0 ? round2(threadTotalUs / threadAggregate.count) : 0;
 				const threadInfo = getThreadInfo(threadId);
 				const threadTimerRow: Record<string, unknown> = {
@@ -979,7 +1206,7 @@ function captureMicroProfiler(requestData: Record<string, unknown>): unknown {
 					count: threadAggregate.count,
 					count_per_s: perSecond(threadAggregate.count, analysisDurationMs),
 					avg_invocation_us: threadAvgUs,
-					max_invocation_us: rawToUs(threadAggregate.max_raw),
+					max_invocation_us: roundUs(threadAggregate.max_us),
 				};
 				const threadMaxToAvg = ratio(threadTimerRow.max_invocation_us as number, threadAvgUs);
 				if (threadMaxToAvg !== undefined) threadTimerRow.max_to_avg = threadMaxToAvg;
@@ -1012,8 +1239,8 @@ function captureMicroProfiler(requestData: Record<string, unknown>): unknown {
 		const parentRow = rowsByTimerId.get(edge.parent_timer_id);
 		const childRow = rowsByTimerId.get(edge.child_timer_id);
 		if (parentRow === undefined || childRow === undefined) continue;
-		const inclusiveUs = rawToUs(edge.inclusive_raw);
-		const maxUs = rawToUs(edge.max_raw);
+		const inclusiveUs = roundUs(edge.inclusive_us);
+		const maxUs = roundUs(edge.max_us);
 		const avgUs = edge.count > 0 ? round2(inclusiveUs / edge.count) : 0;
 		const edgeRow: Record<string, unknown> = {
 			parent: {
@@ -1124,8 +1351,8 @@ function captureMicroProfiler(requestData: Record<string, unknown>): unknown {
 	for (const [threadId, aggregate] of threadAggregates) {
 		checkpoint();
 		const info = getThreadInfo(threadId);
-		const inclusiveUs = rawToUs(aggregate.inclusive_raw);
-		const exclusiveUs = rawToUs(aggregate.exclusive_raw);
+		const inclusiveUs = roundUs(aggregate.inclusive_us);
+		const exclusiveUs = roundUs(aggregate.exclusive_us);
 		const row: Record<string, unknown> = {
 			thread_id: threadId,
 			thread_name: info.name,
@@ -1136,7 +1363,7 @@ function captureMicroProfiler(requestData: Record<string, unknown>): unknown {
 			exclusive_pct: percent(exclusiveUs, inclusiveUs),
 			count: aggregate.count,
 			count_per_s: perSecond(aggregate.count, analysisDurationMs),
-			max_invocation_us: rawToUs(aggregate.max_raw),
+			max_invocation_us: roundUs(aggregate.max_us),
 			pct_of_analyzed_wall: percent(inclusiveUs, analysisDurationUs),
 		};
 		const timerRows = threadTimerRows.get(threadId) ?? [];
@@ -1176,8 +1403,8 @@ function captureMicroProfiler(requestData: Record<string, unknown>): unknown {
 				max_frame_inclusive_us: timerRow.max_frame_inclusive_us,
 			});
 		}
-		const inclusiveUs = rawToUs(aggregate.inclusive_raw);
-		const exclusiveUs = rawToUs(aggregate.exclusive_raw);
+		const inclusiveUs = roundUs(aggregate.inclusive_us);
+		const exclusiveUs = roundUs(aggregate.exclusive_us);
 		const groupRow: Record<string, unknown> = {
 			group: aggregate.group,
 			inclusive_us: inclusiveUs,
@@ -1233,6 +1460,41 @@ function captureMicroProfiler(requestData: Record<string, unknown>): unknown {
 	if (eventsSampled >= maxEvents) partialReasons.push("event_limit_hit");
 	if (openStackEntriesAtEnd > 0) partialReasons.push("open_stack_entries_at_end");
 	if (sampledFrameCoveragePct < 100) partialReasons.push("selected_frame_event_coverage_below_100");
+	if (historyTruncated) partialReasons.push("capture_history_truncated");
+	// Safety net for any other shortfall. Whole frames make up to about two frames
+	// of slack normal, a frame_window smaller than the capture is intentional, and
+	// hitting max_events already has its own reason.
+	const eventLimitHit = eventsSampled >= maxEvents;
+	const avgFrameUs = typeIs(frameSummary.avg_us, "number") ? frameSummary.avg_us as number : 0;
+	// A frame_window the caller chose is intentional; the default (240 frames) is
+	// not, so a long capture it cuts short is flagged.
+	const frameWindowLimited = startFrame > firstCaptureFrame;
+	const frameWindowRequested = typeIs(requestData.frame_window, "number");
+	const coverageShort = !historyTruncated && !(frameWindowLimited && frameWindowRequested) && !eventLimitHit
+		&& captureWallMs - analysisDurationMs > math.max(captureWallMs * 0.1, (2 * avgFrameUs) / 1000);
+	if (coverageShort) partialReasons.push("capture_coverage_below_requested");
+	const qualityNotes: string[] = [];
+	if (focus !== "all") {
+		qualityNotes.push("focus filters events before stack aggregation; exclusive_us is exclusive within emitted focused events, not the full snapshot.");
+	}
+	if (historyTruncated) {
+		qualityNotes.push(
+			`MicroProfiler kept only the newest ${frameMax - firstCaptureFrame + 1} frames of this capture (its memory budget filled; ${framesEvicted} earlier frames were dropped), so the analysis covers ${roundUs(analysisDurationMs)} ms of the ${roundUs(captureWallMs)} ms capture. Times and rates are correct for that span; use a shorter duration_ms to analyze the whole capture.`,
+		);
+	}
+	if (eventLimitHit) {
+		qualityNotes.push(
+			`Analysis stopped at max_events (${maxEvents} events), so it covers ${roundUs(analysisDurationMs)} ms of the ${roundUs(captureWallMs)} ms capture. Raise max_events or shorten duration_ms to analyze all of it.`,
+		);
+	}
+	if (coverageShort) {
+		const cause = frameWindowLimited
+			? ` The default frame_window (${frameWindow} frames) kept only the newest ${framesConsidered} frames; pass a larger frame_window (the engine holds at most ${HISTORY_FRAME_LIMIT}) or a shorter duration_ms.`
+			: "";
+		qualityNotes.push(
+			`The analyzed frames cover ${roundUs(analysisDurationMs)} ms of the ${roundUs(captureWallMs)} ms capture. Times and rates are correct for that span.${cause}`,
+		);
+	}
 	let comparisonIndex: Record<string, unknown> | undefined;
 	if (includeComparisonIndex) {
 		const timerFields = [
@@ -1307,18 +1569,30 @@ function captureMicroProfiler(requestData: Record<string, unknown>): unknown {
 	}
 
 	const result: Record<string, unknown> = {
-		schema_version: 1,
+		// 2: times are converted with the snapshot's clock. Version 1 assumed
+		// nanosecond ticks, which inflated times by the CPU timer's GHz rate.
+		schema_version: 2,
 		ok: true,
 		duration_ms: durationMs,
 		target: targetRole,
 		scope: "micro_profiler",
 		time_unit: "microseconds",
-		time_basis: "LibMP MicroProfiler timestamps converted from nanosecond ticks. inclusive_us is cumulative nested timer time and can overlap across nested timers/threads; do not sum rows as total frame time.",
+		time_basis: "MicroProfiler ticks converted with the snapshot's clock (GlobalDesc TickToMsCpu; TickToMsGpu for the GPU thread). inclusive_us is cumulative nested timer time and can overlap across nested timers/threads; do not sum rows as total frame time.",
+		clock: {
+			tick_to_ms_cpu: tickToMsCpu,
+			tick_to_ms_gpu: tickToMsGpu,
+		},
+		// Capture is restored to what it was before the call: still recording
+		// when something else was recording, otherwise paused (Studio's default).
+		capture_state: {
+			was_recording: prior.recording,
+		},
 		analysis_window: {
 			requested_duration_ms: durationMs,
 			analysis_duration_us: analysisDurationUs,
 			snapshot_frame_min: frameMin,
 			snapshot_frame_max: frameMax,
+			capture_start_frame: firstCaptureFrame,
 			selected_frame_min: startFrame,
 			selected_frame_max: frameMax,
 			selected_frame_count: framesConsidered,
@@ -1330,6 +1604,12 @@ function captureMicroProfiler(requestData: Record<string, unknown>): unknown {
 			processed_frame_count: sampledFrames.size(),
 			selected_frame_event_coverage_pct: sampledFrameCoveragePct,
 			frame_window: frameWindow,
+			// Wall time the capture ran, how much of it the analyzed frames cover,
+			// and how many frames from the analysis window the engine dropped.
+			capture_wall_ms: round2(captureWallMs),
+			first_frame_wait_ms: round2(firstFrameWaitMs),
+			coverage_pct: percent(analysisDurationMs, captureWallMs),
+			frames_evicted: framesEvicted,
 		},
 		applied: {
 			focus,
@@ -1363,7 +1643,7 @@ function captureMicroProfiler(requestData: Record<string, unknown>): unknown {
 			open_stack_entries_at_end: openStackEntriesAtEnd,
 			iterator_finished: iteratorFinished,
 			last_processed_frame_id: lastProcessedFrameId,
-			last_processed_timestamp_us: lastProcessedTimestampRaw !== undefined ? rawToUs(lastProcessedTimestampRaw) : undefined,
+			last_processed_timestamp_us: lastProcessedTimestampUs !== undefined ? roundUs(lastProcessedTimestampUs) : undefined,
 			event_limit_hit: eventsSampled >= maxEvents,
 		},
 		frame_summary: frameSummary,
@@ -1380,11 +1660,10 @@ function captureMicroProfiler(requestData: Record<string, unknown>): unknown {
 			dropped_spans: droppedSpans,
 			open_stack_entries_at_end: openStackEntriesAtEnd,
 			selected_frame_event_coverage_pct: sampledFrameCoveragePct,
+			history_truncated: historyTruncated,
 			partial: partialReasons.size() > 0,
 			partial_reasons: partialReasons,
-			notes: focus !== "all"
-				? ["focus filters events before stack aggregation; exclusive_us is exclusive within emitted focused events, not the full snapshot."]
-				: undefined,
+			notes: qualityNotes.size() > 0 ? qualityNotes : undefined,
 		},
 		recommended_tools: recommendedToolsForGroups(topGroups, targetRole),
 	};

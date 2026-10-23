@@ -373,6 +373,8 @@ node scripts/studio-lifecycle.mjs wait-connected --variant main --version <expec
 | `execute-luau-output-capture.mjs` | `execute_luau target=server` captures user `print()` and `warn()` calls in the response `output` array, matching the `target=edit` baseline; live structured `LogService` context is returned as `get_runtime_logs` entry `data` |
 | `multiplayer-add-player-end-regression.mjs` | Starts one multiplayer client, adds a second client, and verifies `EndTest` disconnects both runtime peers |
 | `multiplayer-test-lifecycle.mjs` | `multiplayer_test_start`, add-player, client-leave, state, and end-test flow against real StudioTestService multiplayer peers |
+| `micro-profiler-units-and-state.mjs` | `capture_micro_profiler` converts MicroProfiler ticks with the snapshot clock (a measured 5 ms scope reports about 5 ms), analyzes only frames recorded during the capture, reports frames the engine's memory budget dropped from a long capture instead of silently analyzing less, and leaves capture paused or recording as it found it. Drives capture through a staged copy of LibMP (`lib/micro-profiler-libmp-probe.mjs`) |
+| `micro-profiler-state-verification.mjs` | Diagnostic, opt-in: records engine MicroProfiler behavior on a solo server and a multiplayer client (default capture state, what `EnableProfiler`/`EnableCapture` change, `SetFrameLimit` semantics, counter history, frame latency). Records facts and fails only if an experiment cannot run |
 
 ## Lifecycle and cleanup
 

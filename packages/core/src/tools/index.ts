@@ -464,6 +464,18 @@ function loadMicroProfilerBaseline(source: unknown, sourcePath: unknown): Record
   return undefined;
 }
 
+// Schema 2 summaries convert MicroProfiler ticks with the snapshot's clock.
+// Schema 1 assumed nanosecond ticks, inflating CPU absolute times (and deflating
+// count_per_s) by the CPU timer's GHz rate. CPU per-second rates are ratios of
+// two equally scaled values, so they stay comparable across versions. GPU ticks
+// were already nanoseconds, so schema-1 GPU rates were divided by an inflated
+// duration and are not comparable.
+function microProfilerSchema(body: Record<string, unknown>): 'snapshot_clock' | 'legacy' | undefined {
+  // A failed capture (error body) is not a summary of either kind.
+  if (typeof body.error === 'string') return undefined;
+  return numberField(body, 'schema_version') >= 2 ? 'snapshot_clock' : 'legacy';
+}
+
 function compareMicroProfilerRows(
   currentRows: Record<string, unknown>[],
   baselineRows: Record<string, unknown>[],
@@ -472,6 +484,7 @@ function compareMicroProfilerRows(
   keyForRow: (row: Record<string, unknown>) => string,
   labelForRow: (row: Record<string, unknown>, fallbackKey: string) => Record<string, unknown>,
   maxRows: number,
+  legacySide?: 'current' | 'baseline',
 ): Record<string, unknown>[] {
   const currentByKey = new Map<string, Record<string, unknown>>();
   const baselineByKey = new Map<string, Record<string, unknown>>();
@@ -526,6 +539,14 @@ function compareMicroProfilerRows(
       delta_count_per_s: roundNumber(currentCountPerS - baselineCountPerS),
     };
     if (!usesFullIndex) row.match_scope = 'returned_rows';
+    if (legacySide !== undefined) {
+      for (const field of [
+        `${legacySide}_inclusive_us`, `${legacySide}_exclusive_us`, `${legacySide}_count_per_s`,
+        'delta_inclusive_us', 'delta_exclusive_us', 'delta_count_per_s',
+      ]) {
+        delete row[field];
+      }
+    }
     const pct = percentDelta(currentUsPerS, baselineUsPerS);
     if (pct !== undefined) row.delta_pct = pct;
     deltas.push(row);
@@ -543,6 +564,11 @@ function compareMicroProfilerCaptures(
   const currentDurationMs = microProfilerDurationMs(current);
   const baselineDurationMs = microProfilerDurationMs(baseline);
   const maxRows = Math.max(1, Math.min(100, Math.trunc(options.maxRows ?? 20)));
+  const currentSchema = microProfilerSchema(current);
+  const baselineSchema = microProfilerSchema(baseline);
+  const legacySide = currentSchema === 'snapshot_clock' && baselineSchema === 'legacy'
+    ? 'baseline'
+    : baselineSchema === 'snapshot_clock' && currentSchema === 'legacy' ? 'current' : undefined;
 
   const groupDeltas = compareMicroProfilerRows(
     rowSet(current, 'groups', 'top_groups'),
@@ -552,6 +578,7 @@ function compareMicroProfilerCaptures(
     (row) => stringField(row, 'group'),
     (row, key) => ({ group: stringField(row, 'group') || key }),
     maxRows,
+    legacySide,
   );
 
   const timerDeltas = compareMicroProfilerRows(
@@ -566,6 +593,7 @@ function compareMicroProfilerCaptures(
       timer_id: row.timer_id,
     }),
     maxRows,
+    legacySide,
   );
 
   const threadDeltas = compareMicroProfilerRows(
@@ -580,6 +608,7 @@ function compareMicroProfilerCaptures(
       is_gpu: row.is_gpu,
     }),
     maxRows,
+    legacySide,
   );
 
   const edgeDeltas = compareMicroProfilerRows(
@@ -603,11 +632,12 @@ function compareMicroProfilerCaptures(
       child: nestedRecord(row, 'child') ?? { label: key },
     }),
     maxRows,
+    legacySide,
   );
 
   const currentHasIndex = asRecord(current.comparison_index) !== undefined;
   const baselineHasIndex = asRecord(baseline.comparison_index) !== undefined;
-  return {
+  const comparison: Record<string, unknown> = {
     baseline_label: options.baselineLabel ?? 'baseline',
     current_label: options.currentLabel ?? 'current',
     basis: 'inclusive_us_per_second normalized by each capture analysis duration; deltas use current minus baseline.',
@@ -624,6 +654,12 @@ function compareMicroProfilerCaptures(
     threads: threadDeltas,
     call_edges: edgeDeltas,
   };
+  if (legacySide !== undefined) {
+    comparison.warnings = [
+      `The ${legacySide} summary predates schema_version 2 and assumed nanosecond MicroProfiler ticks, so its CPU absolute times and count_per_s are scaled by the CPU timer rate. Absolute and count-rate deltas are omitted; *_us_per_s deltas and delta_pct remain comparable for CPU work, but not for GPU-thread rows (include_gpu). Recapture it for full comparisons.`,
+    ];
+  }
+  return comparison;
 }
 
 const NETWORK_PROFILE_KEYS = [
