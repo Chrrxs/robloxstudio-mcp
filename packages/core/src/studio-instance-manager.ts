@@ -1678,7 +1678,10 @@ export class StudioInstanceManager {
       this.armLaunchCompletionTimer(record);
       await control.authorize();
       record.processAuthorizationState = "authorized";
-      await this.persist(record);
+      // authorize() has just verified the exact PID, creation time and Studio
+      // executable. Record that as the newest observation, so a snapshot taken
+      // while the launch was gated cannot report the process as not running.
+      await this.applyProcessObservation(record, { status: "running", observedAt: Date.now() });
       this.armLaunchCompletionTimer(record);
       return record;
     } catch (error) {
@@ -2530,6 +2533,18 @@ export class StudioInstanceManager {
     if (!processId) return { status: 'running', observedAt: snapshot.observedAt };
     const studioProcess = snapshot.processes.find((candidate) => candidate.Id === processId);
     if (!studioProcess) {
+      // Until authorization execs Studio in it, a Wine launch is a gate shell
+      // that Studio enumeration never lists, so its absence there is no
+      // evidence of an exit. The gate is this broker's own child, whose exit
+      // marks the record.
+      if (
+        record.processAuthorizationState === 'pending' &&
+        record.recordId !== undefined &&
+        this.launchControls.has(record.recordId) &&
+        this.getLifecycleCapabilities().processIdentity.launcher === 'wine-retained'
+      ) {
+        return { status: 'running', observedAt: snapshot.observedAt };
+      }
       if (process.platform === 'darwin' &&
           !this.processAdapter.observeStudioProcesses && !this.processAdapter.listStudioProcesses) {
         const observation = observePosixProcess(processId);

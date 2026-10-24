@@ -3,12 +3,14 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSyn
 import { randomUUID } from 'crypto';
 import * as os from 'os';
 import * as path from 'path';
+import { BridgeService } from '../bridge-service.js';
 import {
   listStudioProcesses,
   observeStudioProcesses,
   resolveStudioExe,
   StudioInstanceManager,
 } from '../studio-instance-manager.js';
+import { RobloxStudioTools } from '../tools/index.js';
 import * as studioPlatform from '../studio-platform.js';
 import { fileTimeToUnixMs } from '../studio-sign-in.js';
 import { defaultManagedInstanceRegistryDir, ManagedInstanceRegistry } from '../managed-instance-registry.js';
@@ -526,6 +528,119 @@ describe('Wine host managed Studio lifecycle', () => {
     await expect(studio.closeByLaunchId(record.recordId!)).resolves.toMatchObject({ status: 'closed' });
     await waitUntil(() => hasExited(pid));
     await expect(studio.closeByLaunchId(record.recordId!)).resolves.toMatchObject({ status: 'already_closed' });
+  });
+
+  // The broker's coordinator refreshes its records every 5 s from Studio
+  // enumeration, which lists only RobloxStudioBeta.exe processes. Until
+  // authorization execs Studio in it, a launch is a gate shell that enumeration
+  // cannot see, so a refresh in that window must not record it as not running.
+  // list() runs the same snapshot, sweep and refresh as a coordinator tick.
+  linuxTest('a refresh while the launch is gated leaves it running, and authorization reports it running', async () => {
+    const studio = manager();
+    const tools = new RobloxStudioTools(new BridgeService());
+    Object.defineProperty(tools, 'instanceManager', { value: studio });
+    const result = async (request: Record<string, unknown>) =>
+      JSON.parse((await tools.manageInstance(request)).content[0].text) as Record<string, unknown>;
+
+    const launched = await result({
+      action: 'launch',
+      source: 'local_file',
+      local_place_file: placeFile,
+      studio_executable: exe,
+      require_process_identity: true,
+    });
+    const launchId = launched.launch_id as string;
+    expect(launched).toMatchObject({ process_authorized: false, process_running: true });
+    expect(procState(launched.pid as number)).toBe('T');
+
+    await studio.list();
+    const observedWhileGated = studio.peekByLaunchId(launchId);
+    expect(observedWhileGated).toBeDefined();
+    const statusWhileGated = observedWhileGated!.processObservationStatus;
+
+    await expect(result({ action: 'authorize', launch_id: launchId })).resolves.toMatchObject({
+      launch_id: launchId,
+      pid: launched.pid,
+      process_started_at_file_time: launched.process_started_at_file_time,
+      process_authorized: true,
+      process_running: true,
+    });
+    expect(statusWhileGated).toBe('running');
+    await expect(result({ action: 'complete', launch_id: launchId })).resolves.toMatchObject({
+      process_ownership_released: true,
+      process_running: true,
+    });
+  });
+
+  // Wine can take many seconds to exec Studio after the gate is resumed. Misses
+  // recorded meanwhile would confirm an exit and abort the launch mid-start.
+  linuxTest('refreshes during a slow Studio start do not abort the launch being authorized', async () => {
+    // The launcher holds the resumed gate, as a starting Wine does, until the
+    // test releases it.
+    const startStudio = path.join(fixture, 'start-studio');
+    const slowLauncher = path.join(fixture, 'slow-launcher.sh');
+    writeFileSync(slowLauncher, [
+      '#!/usr/bin/env bash',
+      `until [ -e ${JSON.stringify(startStudio)} ]; do sleep 0.05; done`,
+      `exec -a "$1" ${JSON.stringify(process.execPath)} -e 'setTimeout(() => {}, 60000)'`,
+      '',
+    ].join('\n'));
+    chmodSync(slowLauncher, 0o755);
+    useCapabilities(studioPlatform.detectStudioPlatform({
+      platform: 'linux',
+      kernelVersion: NATIVE_LINUX_KERNEL,
+      wineLauncher: slowLauncher,
+      wineLauncherExecutable: true,
+    }));
+    // No grace period: two misses alone confirm an exit.
+    const studio = new StudioInstanceManager({
+      registryDir: path.join(fixture, 'registry'),
+      processAdapter: { currentBootId: () => 'wine-boot' },
+      confirmedExitGraceMs: 0,
+    });
+    managers.push(studio);
+
+    const record = await studio.launch({
+      source: 'local_file',
+      localPlaceFile: placeFile,
+      studioExecutable: exe,
+      requireProcessIdentity: true,
+    });
+    const authorizing = studio.authorizeByLaunchId(record.recordId!);
+    await studio.list();
+    await studio.list();
+    writeFileSync(startStudio, '');
+
+    await expect(authorizing).resolves.toMatchObject({
+      processAuthorizationState: 'authorized',
+      processObservationStatus: 'running',
+      consecutiveConfirmedMisses: 0,
+    });
+    expect(record.closedAt).toBeUndefined();
+    expect(hasExited(record.nativeProcessId!)).toBe(false);
+    await studio.completeByLaunchId(record.recordId!);
+  });
+
+  linuxTest('a snapshot taken while the launch was gated does not override its authorization', async () => {
+    const studio = manager();
+    const record = await studio.launch({
+      source: 'local_file',
+      localPlaceFile: placeFile,
+      studioExecutable: exe,
+      requireProcessIdentity: true,
+    });
+    const gated = await observeStudioProcesses();
+    expect(gated.status === 'ok' && gated.processes.some((candidate) => candidate.Id === record.nativeProcessId)).toBe(false);
+
+    await studio.authorizeByLaunchId(record.recordId!);
+    await studio.refresh(record, gated);
+
+    expect(record).toMatchObject({
+      processAuthorizationState: 'authorized',
+      processObservationStatus: 'running',
+      consecutiveConfirmedMisses: 0,
+    });
+    await studio.completeByLaunchId(record.recordId!);
   });
 
   linuxTest('a later broker kills the launch gate of a broker that died before authorizing', async () => {
