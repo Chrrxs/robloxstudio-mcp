@@ -1,4 +1,4 @@
-import { BridgeService, isRequestStage, isValidOperationId, MultiplayerGroupInUseError, parseFailureDetails, parseObservations, PRIMARY_PROXY_FEATURES, RequestFailure, toPublicPeer } from './bridge-service.js';
+import { BridgeService, isRequestStage, isValidOperationId, MultiplayerGroupInUseError, parseFailureDetails, parseObservations, PRIMARY_PROXY_FEATURES, RequestFailure, requiresScriptPreconditions, toPublicPeer } from './bridge-service.js';
 import type {
   MultiplayerGroup,
   PublicStudioPeer,
@@ -414,6 +414,13 @@ export class ProxyBridgeService extends BridgeService {
         );
       }
       identity = undefined;
+    }
+    if (requiresScriptPreconditions(endpoint, data) && !this.primaryFeatures.has('script_preconditions')) {
+      const argument = endpoint === '/api/find-and-replace-in-scripts' ? 'expected_revisions' : 'expected_revision';
+      throw new RequestFailure(
+        `${this.primaryDescription()} serves a Studio plugin that ignores ${argument} and would write unchecked; restart that server on this version, or call without ${argument}; queued; not_executed`,
+        'primary_unsupported', details,
+      );
     }
     const controller = new AbortController();
     const effectiveTimeoutMs = Math.max(1, request.timeoutMs);

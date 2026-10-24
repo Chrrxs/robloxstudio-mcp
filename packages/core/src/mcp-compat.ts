@@ -35,10 +35,10 @@ Tool descriptions explain selection. Input schemas explain arguments. This guide
 ## Script changes
 
 - Read the relevant source with get_script_source before changing it.
-- Use edit_script_lines, insert_script_lines, or delete_script_lines for focused changes with known line numbers.
+- Use edit_script_lines, insert_script_lines, or delete_script_lines for focused changes with known line numbers. Pass the revision from get_script_source as expected_revision to insert_script_lines or delete_script_lines: line numbers name different text once the script changes, and a retried call is refused instead of applied twice.
 - Put several related replacements in one script into one edit_script_lines call with edits. They match the source as read, apply as one undo step, and none apply if any fails. Pass the revision from get_script_source as expected_revision so a script changed since the read is rejected, and use dry_run to preview the diff.
-- Use set_script_source only when replacing the whole script.
-- Use find_and_replace_in_scripts with dryRun first when a replacement may affect several scripts.
+- Use set_script_source only when replacing the whole script, with expected_revision when an editor draft may have changed it.
+- Use find_and_replace_in_scripts with dryRun first when a replacement may affect several scripts. The preview lists each script with its replacement count, diff, and revision. Apply with its revisions as expected_revisions to change exactly the reviewed scripts: any script edited, added, or no longer matching since the preview refuses the whole apply, and maxReplacements is checked against the total before the first write. If a write fails partway, the scripts already written are restored unless they changed again; those keep their newer text and the result returns their original source.
 
 ## Playtests and runtime Luau
 

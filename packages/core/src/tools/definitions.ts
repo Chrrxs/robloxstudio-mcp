@@ -22,6 +22,14 @@ const OPERATION_ID_PROPERTY = {
   description: 'Unique recovery ID; reuse only for identical arguments.'
 } as const;
 
+/** Script classes a classFilter names exactly; "Script" excludes LocalScript and ModuleScript. */
+export const SCRIPT_CLASS_FILTERS = ['Script', 'LocalScript', 'ModuleScript'] as const;
+
+const EXPECTED_REVISION_PROPERTY = {
+  type: 'string',
+  description: 'Revision from the last read; rejects stale writes.'
+} as const;
+
 export const TOOL_DEFINITIONS: ToolDefinition[] = [
   // === File & Instance Browsing ===
   // === Place & Service Info ===
@@ -189,6 +197,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
     inputSchema: {
       type: 'object',
       properties: {
+        operation_id: OPERATION_ID_PROPERTY,
         instancePath: {
           type: 'string',
           description: 'Canonical path of the script.'
@@ -197,6 +206,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
           type: 'string',
           description: 'Complete replacement source.'
         },
+        expected_revision: EXPECTED_REVISION_PROPERTY,
         instance_id: {
           type: 'string',
           description: 'Studio process ID when ambiguous.'
@@ -266,6 +276,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
     inputSchema: {
       type: 'object',
       properties: {
+        operation_id: OPERATION_ID_PROPERTY,
         instancePath: {
           type: 'string',
           description: 'Canonical path of the script.'
@@ -278,6 +289,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
           type: 'string',
           description: 'Source text to insert.'
         },
+        expected_revision: EXPECTED_REVISION_PROPERTY,
         instance_id: {
           type: 'string',
           description: 'Studio process ID when ambiguous.'
@@ -293,6 +305,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
     inputSchema: {
       type: 'object',
       properties: {
+        operation_id: OPERATION_ID_PROPERTY,
         instancePath: {
           type: 'string',
           description: 'Canonical path of the script.'
@@ -301,6 +314,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
           type: 'string',
           description: 'Inclusive "N-M" or "N" range; open ends are invalid.'
         },
+        expected_revision: EXPECTED_REVISION_PROPERTY,
         instance_id: {
           type: 'string',
           description: 'Studio process ID when ambiguous.'
@@ -415,6 +429,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
     inputSchema: {
       type: 'object',
       properties: {
+        operation_id: OPERATION_ID_PROPERTY,
         code: {
           type: 'string',
           description: 'Luau code; return a value to include it in the result.'
@@ -434,6 +449,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
     inputSchema: {
       type: 'object',
       properties: {
+        operation_id: OPERATION_ID_PROPERTY,
         code: {
           type: 'string',
           description: 'Luau code; return a value to include it in the result.'
@@ -500,8 +516,8 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
         },
         classFilter: {
           type: 'string',
-          enum: ['Script', 'LocalScript', 'ModuleScript'],
-          description: 'Script class to include.'
+          enum: [...SCRIPT_CLASS_FILTERS],
+          description: 'Exact script class to include.'
         },
         instance_id: {
           type: 'string',
@@ -1343,6 +1359,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
     inputSchema: {
       type: 'object',
       properties: {
+        operation_id: OPERATION_ID_PROPERTY,
         assetId: {
           type: 'number',
           description: 'Roblox asset ID to insert.'
@@ -1887,6 +1904,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
     inputSchema: {
       type: 'object',
       properties: {
+        operation_id: OPERATION_ID_PROPERTY,
         source: {
           type: 'object',
           description: 'Exactly one path, URL, or base64 source. All inputs are capped below 37.5 MiB to fit base64 plus routing metadata within transport limits; URL downloads have a 30-second deadline.',
@@ -1927,6 +1945,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
     inputSchema: {
       type: 'object',
       properties: {
+        operation_id: OPERATION_ID_PROPERTY,
         pattern: {
           type: 'string',
           description: 'Literal text or Lua pattern.'
@@ -1949,16 +1968,22 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
         },
         classFilter: {
           type: 'string',
-          enum: ['Script', 'LocalScript', 'ModuleScript'],
-          description: 'Script class to include.'
+          enum: [...SCRIPT_CLASS_FILTERS],
+          description: 'Exact script class to include.'
         },
         dryRun: {
           type: 'boolean',
-          description: 'Preview without edits; defaults to false.'
+          description: 'Preview diffs and revisions without edits; defaults to false.'
         },
         maxReplacements: {
-          type: 'number',
-          description: 'Replacement safety cap; defaults to 1000.'
+          type: 'integer',
+          minimum: 1,
+          description: 'Total cap checked before any write; defaults to 1000.'
+        },
+        expected_revisions: {
+          type: 'object',
+          additionalProperties: { type: 'string' },
+          description: 'Script path to revision; pass the dryRun revisions.'
         },
         instance_id: {
           type: 'string',

@@ -279,9 +279,31 @@ export function isValidOperationId(value: unknown): value is string {
  *   submit: /proxy answers `submit: true` at admission instead of on completion.
  *   identity: /proxy fingerprints operations by `identity` instead of payload.
  *   status_wait: /request-status honours `waitMs`.
+ *   script_preconditions: Studio plugins must match their primary's version, so
+ *     this primary's plugins enforce expectedRevision(s) on script writes. An
+ *     older plugin ignores those fields and writes unchecked.
  */
-export const PRIMARY_PROXY_FEATURES = ['submit', 'identity', 'status_wait'] as const;
+export const PRIMARY_PROXY_FEATURES = ['submit', 'identity', 'status_wait', 'script_preconditions'] as const;
 export type PrimaryProxyFeature = typeof PRIMARY_PROXY_FEATURES[number];
+
+const REVISION_CHECKED_SCRIPT_ENDPOINTS = new Set([
+  '/api/set-script-source',
+  '/api/insert-script-lines',
+  '/api/delete-script-lines',
+]);
+
+/**
+ * True for a script write that carries a revision precondition, which only
+ * a script_preconditions primary's plugin enforces. Requests without one, and
+ * find-and-replace previews, behave as they did on older plugins.
+ */
+export function requiresScriptPreconditions(endpoint: string, data: unknown): boolean {
+  if (!data || typeof data !== 'object') return false;
+  if (endpoint === '/api/find-and-replace-in-scripts') {
+    return 'expectedRevisions' in data && !('dryRun' in data && data.dryRun === true);
+  }
+  return REVISION_CHECKED_SCRIPT_ENDPOINTS.has(endpoint) && 'expectedRevision' in data;
+}
 
 interface OperationRecord {
   status: RequestStatus;

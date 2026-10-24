@@ -3,6 +3,7 @@ import { StudioHttpClient } from './studio-client.js';
 import { BridgeService, isValidOperationId, MAX_OPERATION_ID_LENGTH, MAX_OPERATION_WAIT_MS, RoutingFailure } from '../bridge-service.js';
 import type { PublicStudioPeer, RequestStatus, StudioPeer } from '../bridge-service.js';
 import {
+  openCloudAssetUploadLimitBytes,
   OpenCloudClient,
   type AssetSearchParams,
   type CreatorStoreSearchCategory,
@@ -25,9 +26,11 @@ import { DOC_CATEGORIES, getRobloxDoc, isDocCategory } from '../roblox-docs.js';
 import { findBuiltInStudioSkill, loadBuiltInStudioSkills } from '../studio-skills.js';
 import { runManageExperience } from './experience.js';
 import { runManageMonetization } from './monetization.js';
+import { SCRIPT_CLASS_FILTERS } from './definitions.js';
 import { rgbaToJpeg } from '../jpeg-encoder.js';
 import { rgbaToPng } from '../png-encoder.js';
 import { pathNotice } from '../path-notice.js';
+import { readRegularFileWithinLimitAsync } from '../local-file.js';
 import {
   captureStudioWindow,
   cropToViewport,
@@ -180,6 +183,35 @@ const GREP_SCRIPTS_TIMEOUT_MS = 120_000;
 const MAX_GREP_PATTERN_UTF8_BYTES = 4096;
 const RUNTIME_LOG_PEER_TIMEOUT_MS = 5_000;
 const STUDIO_ASSISTANT_SOURCE_IMAGE_LABEL = 'Studio Assistant Source Image';
+
+/** Rejects a classFilter that is not one exact script class name. */
+function assertScriptClassFilter(tool: string, classFilter: unknown): void {
+  if (classFilter === undefined) return;
+  if (typeof classFilter !== 'string' || !SCRIPT_CLASS_FILTERS.some((className) => className === classFilter)) {
+    throw new Error(`${tool} classFilter must be one of ${SCRIPT_CLASS_FILTERS.join(', ')}`);
+  }
+}
+
+function optionalRevision(tool: string, value: unknown): string | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== 'string' || value.length === 0) {
+    throw new Error(`${tool} expected_revision must be a nonempty string`);
+  }
+  return value;
+}
+
+function optionalRevisionMap(tool: string, value: unknown): Record<string, string> | undefined {
+  if (value === undefined) return undefined;
+  const invalid = new Error(`${tool} expected_revisions must map script paths to nonempty revision strings`);
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) throw invalid;
+  const revisions: Record<string, string> = {};
+  for (const [scriptPath, revision] of Object.entries(value)) {
+    if (scriptPath.length === 0 || typeof revision !== 'string' || revision.length === 0) throw invalid;
+    revisions[scriptPath] = revision;
+  }
+  return revisions;
+}
+
 const CREATOR_STORE_SEARCH_TYPES = new Set<string>([
   'Audio',
   'Model',
@@ -1916,19 +1948,17 @@ export class RobloxStudioTools {
     });
   }
 
-  async setScriptSource(instancePath: string, source: string, instance_id?: string) {
+  async setScriptSource(instancePath: string, source: string, instance_id?: string, operation_id?: string, expected_revision?: string) {
     if (!instancePath || typeof source !== 'string') {
       throw new Error('Instance path and source code string are required for set_script_source');
     }
-    const response = await this._callSingle('/api/set-script-source', { instancePath, source }, undefined, instance_id);
-    return {
-      content: [
-        {
-          type: 'text',
-          text: JSON.stringify(response)
-        }
-      ]
-    };
+    const expectedRevision = optionalRevision('set_script_source', expected_revision);
+    const response = await this._callSingle('/api/set-script-source', {
+      instancePath,
+      source,
+      ...(expectedRevision === undefined ? {} : { expectedRevision }),
+    }, undefined, instance_id, undefined, undefined, operation_id);
+    return this._textResult(response);
   }
 
 
@@ -1982,34 +2012,46 @@ export class RobloxStudioTools {
     return this._textResult(response);
   }
 
-  async insertScriptLines(instancePath: string, afterLine: number, newContent: string, instance_id?: string) {
+  async insertScriptLines(
+    instancePath: string,
+    afterLine: number,
+    newContent: string,
+    instance_id?: string,
+    operation_id?: string,
+    expected_revision?: string,
+  ) {
     if (!instancePath || typeof newContent !== 'string') {
       throw new Error('Instance path and newContent are required for insert_script_lines');
     }
-    const response = await this._callSingle('/api/insert-script-lines', { instancePath, afterLine: afterLine || 0, newContent }, undefined, instance_id);
-    return {
-      content: [
-        {
-          type: 'text',
-          text: JSON.stringify(response)
-        }
-      ]
-    };
+    const expectedRevision = optionalRevision('insert_script_lines', expected_revision);
+    const response = await this._callSingle('/api/insert-script-lines', {
+      instancePath,
+      afterLine: afterLine || 0,
+      newContent,
+      ...(expectedRevision === undefined ? {} : { expectedRevision }),
+    }, undefined, instance_id, undefined, undefined, operation_id);
+    return this._textResult(response);
   }
 
-  async deleteScriptLines(instancePath: string, startLine: number, endLine: number, instance_id?: string) {
+  async deleteScriptLines(
+    instancePath: string,
+    startLine: number,
+    endLine: number,
+    instance_id?: string,
+    operation_id?: string,
+    expected_revision?: string,
+  ) {
     if (!instancePath || !startLine || !endLine) {
       throw new Error('Instance path, startLine, and endLine are required for delete_script_lines');
     }
-    const response = await this._callSingle('/api/delete-script-lines', { instancePath, startLine, endLine }, undefined, instance_id);
-    return {
-      content: [
-        {
-          type: 'text',
-          text: JSON.stringify(response)
-        }
-      ]
-    };
+    const expectedRevision = optionalRevision('delete_script_lines', expected_revision);
+    const response = await this._callSingle('/api/delete-script-lines', {
+      instancePath,
+      startLine,
+      endLine,
+      ...(expectedRevision === undefined ? {} : { expectedRevision }),
+    }, undefined, instance_id, undefined, undefined, operation_id);
+    return this._textResult(response);
   }
 
 
@@ -2034,6 +2076,7 @@ export class RobloxStudioTools {
     if (Buffer.byteLength(pattern, 'utf8') > MAX_GREP_PATTERN_UTF8_BYTES) {
       throw new Error(`Pattern must not exceed ${MAX_GREP_PATTERN_UTF8_BYTES} UTF-8 bytes`);
     }
+    assertScriptClassFilter('grep_scripts', options?.classFilter);
     const response = await this._callSingle('/api/grep-scripts', {
       pattern,
       ...(options ?? {}),
@@ -2180,11 +2223,11 @@ export class RobloxStudioTools {
     };
   }
 
-  async evalServerRuntime(code: string, instance_id?: string) {
+  async evalServerRuntime(code: string, instance_id?: string, operation_id?: string) {
     if (!code) {
       throw new Error('Code is required for eval_server_runtime');
     }
-    const response = await this._callSingle('/api/eval-runtime', { code }, 'server', instance_id);
+    const response = await this._callSingle('/api/eval-runtime', { code }, 'server', instance_id, undefined, undefined, operation_id);
     return {
       content: [
         {
@@ -2195,14 +2238,17 @@ export class RobloxStudioTools {
     };
   }
 
-  async evalClientRuntime(code: string, target?: string, instance_id?: string) {
+  async evalClientRuntime(code: string, target?: string, instance_id?: string, operation_id?: string) {
     if (!code) {
       throw new Error('Code is required for eval_client_runtime');
     }
     if (target && !target.startsWith('client-')) {
       throw new Error(`eval_client_runtime requires target=client-N (got: ${target})`);
     }
-    const response = await this._callSingle('/api/eval-runtime', { code }, { requested: target, fallback: 'client-1', accepts: isClientRole }, instance_id);
+    const response = await this._callSingle(
+      '/api/eval-runtime', { code }, { requested: target, fallback: 'client-1', accepts: isClientRole },
+      instance_id, undefined, undefined, operation_id,
+    );
     return {
       content: [
         {
@@ -4404,7 +4450,13 @@ export class RobloxStudioTools {
     };
   }
 
-  async insertAsset(assetId: number, parentPath?: string, position?: { x: number; y: number; z: number }, instance_id?: string) {
+  async insertAsset(
+    assetId: number,
+    parentPath?: string,
+    position?: { x: number; y: number; z: number },
+    instance_id?: string,
+    operation_id?: string,
+  ) {
     if (!assetId) {
       throw new Error('Asset ID is required for insert_asset');
     }
@@ -4412,7 +4464,7 @@ export class RobloxStudioTools {
       assetId,
       parentPath: parentPath || 'game.Workspace',
       position
-    }, undefined, instance_id);
+    }, undefined, instance_id, undefined, undefined, operation_id);
     return {
       content: [{
         type: 'text',
@@ -4870,11 +4922,15 @@ export class RobloxStudioTools {
     userId?: string,
     groupId?: string
   ) {
-    if (!fs.existsSync(filePath)) {
-      throw new Error(`File not found: ${filePath}`);
-    }
-
-    const fileContent = fs.readFileSync(filePath);
+    // Non-blocking and bounded: a FIFO cannot stall the server and an
+    // oversized file is rejected before it is read or uploaded.
+    const limitBytes = openCloudAssetUploadLimitBytes(assetType);
+    const fileContent = await readRegularFileWithinLimitAsync(filePath, 'File', (size) => {
+      if (size > limitBytes) {
+        const limit = assetType === 'Video' ? '3.75 GB' : '20 MB';
+        throw new Error(`File exceeds Roblox's ${limitBytes}-byte (${limit}) ${assetType} upload limit: ${filePath}`);
+      }
+    });
     const fileName = path.basename(filePath);
     const resolvedGroupId = groupId || process.env.ROBLOX_CREATOR_GROUP_ID;
     const resolvedUserId = userId || process.env.ROBLOX_CREATOR_USER_ID;
@@ -5015,8 +5071,10 @@ export class RobloxStudioTools {
       classFilter?: string;
       dryRun?: boolean;
       maxReplacements?: number;
+      expectedRevisions?: unknown;
     },
-    instance_id?: string
+    instance_id?: string,
+    operation_id?: string,
   ) {
     if (!pattern) {
       throw new Error('pattern is required for find_and_replace_in_scripts');
@@ -5024,17 +5082,20 @@ export class RobloxStudioTools {
     if (replacement === undefined || replacement === null) {
       throw new Error('replacement is required for find_and_replace_in_scripts');
     }
+    const { expectedRevisions: requestedRevisions, ...searchOptions } = options ?? {};
+    assertScriptClassFilter('find_and_replace_in_scripts', searchOptions.classFilter);
+    const { maxReplacements } = searchOptions;
+    if (maxReplacements !== undefined && (!Number.isInteger(maxReplacements) || maxReplacements < 1)) {
+      throw new Error('find_and_replace_in_scripts maxReplacements must be a positive integer');
+    }
+    const expectedRevisions = optionalRevisionMap('find_and_replace_in_scripts', requestedRevisions);
     const response = await this._callSingle('/api/find-and-replace-in-scripts', {
       pattern,
       replacement,
-      ...options
-    }, undefined, instance_id);
-    return {
-      content: [{
-        type: 'text',
-        text: JSON.stringify(response)
-      }]
-    };
+      ...searchOptions,
+      ...(expectedRevisions === undefined ? {} : { expectedRevisions }),
+    }, undefined, instance_id, undefined, undefined, operation_id);
+    return this._textResult(response);
   }
 
   async getMemoryBreakdown(target?: string, tags?: string[], instance_id?: string) {
@@ -5169,6 +5230,7 @@ export class RobloxStudioTools {
     target?: string,
     instance_id?: string,
     signal?: AbortSignal,
+    operation_id?: string,
   ) {
     if (!source || typeof source !== 'object') {
       throw new Error('source is required for import_rbxm');
@@ -5184,6 +5246,10 @@ export class RobloxStudioTools {
     if (modes.length !== 1) {
       throw new Error(`source must contain exactly one of { path, url, base64 } (got: ${modes.join(', ') || 'none'})`);
     }
+    // Checked before the input is read; the bridge would reject it only after.
+    if (operation_id !== undefined && !isValidOperationId(operation_id)) {
+      throw new Error(`operation_id must be a nonblank string of at most ${MAX_OPERATION_ID_LENGTH} characters.`);
+    }
 
     let input: Awaited<ReturnType<typeof readRbxmInput>>;
     try {
@@ -5192,7 +5258,8 @@ export class RobloxStudioTools {
       return this._textResult({ error: error instanceof Error ? error.message : String(error) });
     }
     const { bytes, sourceLabel } = input;
-
+    // The payload carries the bytes read, so a retry under the same operation_id
+    // recovers the first result only when the file or URL still holds them.
     const response = await this._callSingle(
       '/api/import-rbxm',
       {
@@ -5204,6 +5271,7 @@ export class RobloxStudioTools {
       instance_id,
       undefined,
       signal,
+      operation_id,
     );
 
     return { content: [{ type: 'text', text: JSON.stringify(response) }] };

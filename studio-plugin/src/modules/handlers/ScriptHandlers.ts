@@ -1,8 +1,17 @@
 import Utils from "../Utils";
 import Recording from "../Recording";
+import ScriptReplace from "../ScriptReplace";
 import { planScriptEdits, sourceRevision, ScriptEditRequest } from "../ScriptEdits";
 
-const { getInstancePath, getInstanceByPath, readScriptSource, applyScriptSource, splitLines, joinLines } = Utils;
+const {
+	getInstancePath,
+	getInstanceByPath,
+	createPathAmbiguityChecker,
+	readScriptSource,
+	applyScriptSource,
+	splitLines,
+	joinLines,
+} = Utils;
 const { beginRecording, finishRecording } = Recording;
 
 const SOURCE_TRUNCATE_CHAR_BUDGET = 25000;
@@ -99,11 +108,34 @@ function getScriptSource(requestData: Record<string, unknown>) {
 	}
 }
 
+// The revision_mismatch response shared by every revision-checked script
+// write, or undefined when no revision was expected or it still matches.
+function revisionMismatch(instancePath: string, source: string, expectedRevision: string | undefined) {
+	if (expectedRevision === undefined) return undefined;
+	const revision = sourceRevision(source);
+	if (revision === expectedRevision) return undefined;
+	return {
+		error: "Script changed since expected_revision; read it again with get_script_source and retry.",
+		code: "revision_mismatch",
+		instancePath,
+		expectedRevision,
+		revision,
+	};
+}
+
+function readExpectedRevision(requestData: Record<string, unknown>): string | undefined | false {
+	const expectedRevision = requestData.expectedRevision;
+	if (expectedRevision === undefined) return undefined;
+	return typeIs(expectedRevision, "string") && expectedRevision !== "" ? expectedRevision : false;
+}
+
 function setScriptSource(requestData: Record<string, unknown>) {
 	const instancePath = requestData.instancePath as string;
 	const newSource = requestData.source;
+	const expectedRevision = readExpectedRevision(requestData);
 
 	if (!instancePath || !typeIs(newSource, "string")) return { error: "Instance path and source are required" };
+	if (expectedRevision === false) return { error: "expectedRevision must be a nonempty string" };
 
 	const instance = getInstanceByPath(instancePath);
 	if (!instance) return { error: `Instance not found: ${instancePath}` };
@@ -113,21 +145,27 @@ function setScriptSource(requestData: Record<string, unknown>) {
 
 	// Communication has already JSON-decoded the transport payload; source text is exact at this boundary.
 	const sourceToSet = newSource;
-	const recordingId = beginRecording(`Set script source: ${instance.Name}`);
-
-	const [readSuccess, readResult] = pcall(() => readScriptSource(instance).size());
+	const [readSuccess, readResult] = pcall(() => readScriptSource(instance));
 	if (!readSuccess) {
-		finishRecording(recordingId, false);
 		return { error: `Failed to read script source before updating: ${readResult}` };
 	}
-	const oldSourceLength = readResult as number;
-	const applyResult = applyScriptSource(instance, sourceToSet);
+	const oldSource = readResult as string;
+	const mismatch = revisionMismatch(instancePath, oldSource, expectedRevision);
+	if (mismatch) return mismatch;
+
+	const recordingId = beginRecording(`Set script source: ${instance.Name}`);
+	// A revision-checked replacement is a compare-and-set against the checked text,
+	// so a draft typed while UpdateSourceAsync yields is not overwritten.
+	const applyResult = expectedRevision === undefined
+		? applyScriptSource(instance, sourceToSet)
+		: applyScriptSource(instance, sourceToSet, oldSource);
 
 	if (applyResult.success) {
 		finishRecording(recordingId, true);
 		return {
 			success: true, instancePath,
-			oldSourceLength, newSourceLength: sourceToSet.size(),
+			oldSourceLength: oldSource.size(), newSourceLength: sourceToSet.size(),
+			revision: sourceRevision(sourceToSet),
 			method: applyResult.method,
 			message: `Script source updated successfully (${applyResult.method === "UpdateSourceAsync" ? "editor-safe" : "direct assignment"})`,
 		};
@@ -193,15 +231,8 @@ function editScriptLines(requestData: Record<string, unknown>) {
 	if (!readSuccess) return { error: `Failed to edit script: ${readResult}` };
 	const source = readResult as string;
 	const revision = sourceRevision(source);
-	if (expectedRevision !== undefined && expectedRevision !== revision) {
-		return {
-			error: "Script changed since expected_revision; read it again with get_script_source and retry.",
-			code: "revision_mismatch",
-			instancePath,
-			expectedRevision,
-			revision,
-		};
-	}
+	const mismatch = revisionMismatch(instancePath, source, expectedRevision as string | undefined);
+	if (mismatch) return mismatch;
 
 	const plan = planScriptEdits(source, edits, dryRun);
 	if (!plan.ok) return { error: `Failed to edit script: ${plan.error}` };
@@ -244,8 +275,10 @@ function insertScriptLines(requestData: Record<string, unknown>) {
 	const instancePath = requestData.instancePath as string;
 	const afterLine = (requestData.afterLine as number) ?? 0;
 	const newContent = requestData.newContent as string;
+	const expectedRevision = readExpectedRevision(requestData);
 
 	if (!instancePath || !newContent) return { error: "Instance path and newContent are required" };
+	if (expectedRevision === false) return { error: "expectedRevision must be a nonempty string" };
 
 	const instance = getInstanceByPath(instancePath);
 	if (!instance) return { error: `Instance not found: ${instancePath}` };
@@ -253,10 +286,15 @@ function insertScriptLines(requestData: Record<string, unknown>) {
 		return { error: `Instance is not a script-like object: ${instance.ClassName}` };
 	}
 
+	const [readSuccess, readResult] = pcall(() => readScriptSource(instance));
+	if (!readSuccess) return { error: `Failed to insert script lines: ${readResult}` };
+	const source = readResult as string;
+	const mismatch = revisionMismatch(instancePath, source, expectedRevision);
+	if (mismatch) return mismatch;
+
 	const recordingId = beginRecording(`Insert script lines after line ${afterLine}: ${instance.Name}`);
 
 	const [success, result] = pcall(() => {
-		const source = readScriptSource(instance);
 		const [lines, hadTrailingNewline] = splitLines(source);
 		const totalLines = lines.size();
 
@@ -278,6 +316,7 @@ function insertScriptLines(requestData: Record<string, unknown>) {
 			insertedAfterLine: afterLine,
 			linesInserted: newLines.size(),
 			newLineCount: resultLines.size(),
+			revision: sourceRevision(newSource),
 			method: applyResult.method,
 			message: "Script lines inserted successfully",
 		};
@@ -295,10 +334,12 @@ function deleteScriptLines(requestData: Record<string, unknown>) {
 	const instancePath = requestData.instancePath as string;
 	const startLine = requestData.startLine as number;
 	const endLine = requestData.endLine as number;
+	const expectedRevision = readExpectedRevision(requestData);
 
 	if (!instancePath || !startLine || !endLine) {
 		return { error: "Instance path, startLine, and endLine are required" };
 	}
+	if (expectedRevision === false) return { error: "expectedRevision must be a nonempty string" };
 
 	const instance = getInstanceByPath(instancePath);
 	if (!instance) return { error: `Instance not found: ${instancePath}` };
@@ -306,10 +347,17 @@ function deleteScriptLines(requestData: Record<string, unknown>) {
 		return { error: `Instance is not a script-like object: ${instance.ClassName}` };
 	}
 
+	const [readSuccess, readResult] = pcall(() => readScriptSource(instance));
+	if (!readSuccess) return { error: `Failed to delete script lines: ${readResult}` };
+	const source = readResult as string;
+	// Line numbers name different text once the script changes; a revision
+	// keeps a retried delete from removing lines it never saw.
+	const mismatch = revisionMismatch(instancePath, source, expectedRevision);
+	if (mismatch) return mismatch;
+
 	const recordingId = beginRecording(`Delete script lines ${startLine}-${endLine}: ${instance.Name}`);
 
 	const [success, result] = pcall(() => {
-		const source = readScriptSource(instance);
 		const [lines, hadTrailingNewline] = splitLines(source);
 		const totalLines = lines.size();
 
@@ -329,6 +377,7 @@ function deleteScriptLines(requestData: Record<string, unknown>) {
 			deletedLines: { startLine, endLine },
 			linesDeleted: endLine - startLine + 1,
 			newLineCount: resultLines.size(),
+			revision: sourceRevision(newSource),
 			method: applyResult.method,
 			message: "Script lines deleted successfully",
 		};
@@ -342,154 +391,40 @@ function deleteScriptLines(requestData: Record<string, unknown>) {
 	return { error: `Failed to delete script lines: ${result}` };
 }
 
-function escapeLuaPattern(s: string): string {
-	return s.gsub("([%(%)%.%%%+%-%*%?%[%]%^%$])", "%%%1")[0];
-}
-
-function escapeLuaReplacement(s: string): string {
-	return s.gsub("%%", "%%%%")[0];
-}
-
-function caseInsensitiveLiteralReplace(src: string, searchStr: string, repl: string): [string, number] {
-	const lowerSrc = src.lower();
-	const lowerSearch = searchStr.lower();
-	const parts: string[] = [];
-	let lastEnd = 1;
-	const searchLen = lowerSearch.size();
-	let pos = 1;
-	let replCount = 0;
-
-	while (true) {
-		const [foundStart] = string.find(lowerSrc, lowerSearch, pos, true);
-		if (foundStart === undefined) break;
-		parts.push(string.sub(src, lastEnd, foundStart - 1));
-		parts.push(repl);
-		lastEnd = foundStart + searchLen;
-		pos = foundStart + searchLen;
-		replCount++;
-	}
-	parts.push(string.sub(src, lastEnd));
-	return [parts.join(""), replCount];
-}
+const scriptReplace = ScriptReplace.createScriptReplace<Instance>({
+	resolvePath(path: string): Instance | undefined {
+		return path === "" ? game : getInstanceByPath(path);
+	},
+	getChildren(instance: Instance): Instance[] {
+		return instance.GetChildren();
+	},
+	readScript(instance: Instance, classFilter?: string) {
+		if (!instance.IsA("LuaSourceContainer")) return undefined;
+		if (classFilter !== undefined && instance.ClassName !== classFilter) return undefined;
+		return {
+			instancePath: getInstancePath(instance),
+			name: instance.Name,
+			className: instance.ClassName,
+			source: readScriptSource(instance),
+		};
+	},
+	createAmbiguityChecker(): (instance: Instance) => boolean {
+		return createPathAmbiguityChecker();
+	},
+	writeScript(instance: Instance, newSource: string, expectedSource: string) {
+		// Only planned scripts are written, and planning admits LuaSourceContainers only.
+		return applyScriptSource(instance as LuaSourceContainer, newSource, expectedSource);
+	},
+	beginRecording(label: string): string | undefined {
+		return beginRecording(label);
+	},
+	finishRecording(recording: string | undefined, commit: boolean): void {
+		finishRecording(recording, commit);
+	},
+});
 
 function findAndReplaceInScripts(requestData: Record<string, unknown>) {
-	const searchPattern = requestData.pattern as string;
-	const replacement = requestData.replacement as string;
-
-	if (!searchPattern) return { error: "pattern is required" };
-	if (replacement === undefined) return { error: "replacement is required" };
-
-	const caseSensitive = (requestData.caseSensitive as boolean) ?? false;
-	const usePattern = (requestData.usePattern as boolean) ?? false;
-	const searchPath = (requestData.path as string) ?? "";
-	const classFilter = requestData.classFilter as string | undefined;
-	const dryRun = (requestData.dryRun as boolean) ?? false;
-	const maxReplacements = (requestData.maxReplacements as number) ?? 1000;
-
-	if (!caseSensitive && usePattern) {
-		return { error: "Case-insensitive Lua pattern replacement is not supported. Use caseSensitive: true with usePattern: true, or use literal matching." };
-	}
-
-	const startInstance = searchPath !== "" ? getInstanceByPath(searchPath) : game;
-	if (!startInstance) return { error: `Path not found: ${searchPath}` };
-
-	interface ScriptChange {
-		instancePath: string;
-		name: string;
-		className: string;
-		replacements: number;
-		error?: string;
-	}
-
-	const changes: ScriptChange[] = [];
-	let totalReplacements = 0;
-	let scriptsSearched = 0;
-	let hitLimit = false;
-
-	const recordingId = dryRun ? undefined : beginRecording("Find and replace in scripts");
-
-	function processInstance(instance: Instance) {
-		if (hitLimit) return;
-
-		const matchesClass = classFilter === undefined
-			|| instance.ClassName.lower().find(classFilter.lower())[0] !== undefined;
-		if (instance.IsA("LuaSourceContainer") && matchesClass) {
-			scriptsSearched++;
-			const source = readScriptSource(instance);
-
-			let newSource: string;
-			let replCount: number;
-
-			if (usePattern) {
-				const [result, count] = string.gsub(source, searchPattern, replacement);
-				newSource = result;
-				replCount = count;
-			} else if (caseSensitive) {
-				const escaped = escapeLuaPattern(searchPattern);
-				const escapedRepl = escapeLuaReplacement(replacement);
-				const [result, count] = string.gsub(source, escaped, escapedRepl);
-				newSource = result;
-				replCount = count;
-			} else {
-				[newSource, replCount] = caseInsensitiveLiteralReplace(source, searchPattern, replacement);
-			}
-
-			if (replCount > 0) {
-				if (totalReplacements + replCount > maxReplacements) {
-					hitLimit = true;
-					return;
-				}
-
-				const applyResult = dryRun
-					? undefined
-					: applyScriptSource(instance, newSource, source);
-				if (applyResult !== undefined && !applyResult.success) {
-					changes.push({
-						instancePath: getInstancePath(instance),
-						name: instance.Name,
-						className: instance.ClassName,
-						replacements: 0,
-						error: applyResult.error ?? "Script write failed verification",
-					});
-				} else {
-					totalReplacements += replCount;
-					changes.push({
-						instancePath: getInstancePath(instance),
-						name: instance.Name,
-						className: instance.ClassName,
-						replacements: replCount,
-					});
-				}
-			}
-		}
-
-		for (const child of instance.GetChildren()) {
-			if (hitLimit) return;
-			processInstance(child);
-		}
-	}
-
-	const [traversalSuccess, traversalResult] = pcall(() => processInstance(startInstance));
-
-	const failedScripts = changes.filter((change) => change.error !== undefined).size();
-	const scriptsModified = changes.size() - failedScripts;
-	if (recordingId !== undefined) {
-		finishRecording(recordingId, scriptsModified > 0);
-	}
-
-	return {
-		success: traversalSuccess && failedScripts === 0,
-		error: traversalSuccess ? undefined : `Script traversal failed: ${traversalResult}`,
-		dryRun,
-		pattern: searchPattern,
-		replacement,
-		totalReplacements,
-		scriptsSearched,
-		scriptsModified,
-		scriptsFailed: failedScripts,
-		changes,
-		truncated: hitLimit,
-	};
+	return scriptReplace.run(requestData);
 }
 
 export = {

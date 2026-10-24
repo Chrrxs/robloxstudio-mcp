@@ -1,3 +1,5 @@
+import ScriptClasses from "./ScriptClasses";
+
 interface ScriptSnapshot {
 	instancePath: string;
 	name: string;
@@ -211,6 +213,8 @@ function createScriptSearch(corpus: ScriptCorpus) {
 			};
 		}
 		const maxResultsPerScript = (requestedMaxResultsPerScript as number | undefined) ?? 0;
+		const classError = ScriptClasses.classFilterError(requestData.classFilter);
+		if (classError !== undefined) return { error: "invalid_request", message: classError };
 		const classFilter = requestData.classFilter as string | undefined;
 		const searchPath = (requestData.path as string) ?? "";
 		const root = corpus.resolveRoot(searchPath);
@@ -229,7 +233,7 @@ function createScriptSearch(corpus: ScriptCorpus) {
 			control.checkpoint();
 			const instance = stack.pop()!;
 			const snapshot = corpus.readScript(instance, classFilter);
-			if (snapshot !== undefined && (classFilter === undefined || snapshot.className === classFilter)) {
+			if (snapshot !== undefined && ScriptClasses.matchesClassFilter(snapshot.className, classFilter)) {
 				scriptsSearched++;
 				const scriptMatches: LineMatch[] = [];
 				const before: string[] = [];

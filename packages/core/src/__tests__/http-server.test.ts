@@ -205,7 +205,7 @@ describe('HTTP Server', () => {
         line_range: '10-12',
         instance_id: 'place:test',
       });
-      expect(deleteScriptLines).toHaveBeenLastCalledWith('game.ServerScriptService.Main', 10, 12, 'place:test');
+      expect(deleteScriptLines).toHaveBeenLastCalledWith('game.ServerScriptService.Main', 10, 12, 'place:test', undefined, undefined);
 
       await TOOL_HANDLERS.edit_script_lines(fakeTools, {
         instancePath: 'game.ServerScriptService.Main',

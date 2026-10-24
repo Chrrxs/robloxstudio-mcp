@@ -1,3 +1,14 @@
+/**
+ * Roblox's per-call Create Asset size limits: 20 MB, except Video at 3.75 GB.
+ * https://create.roblox.com/docs/en-us/cloud/guides/usage-assets.md
+ */
+export const OPEN_CLOUD_ASSET_UPLOAD_LIMIT_BYTES = 20 * 1024 * 1024;
+export const OPEN_CLOUD_VIDEO_UPLOAD_LIMIT_BYTES = 3.75 * 1024 * 1024 * 1024;
+
+export function openCloudAssetUploadLimitBytes(assetType: string): number {
+  return assetType === 'Video' ? OPEN_CLOUD_VIDEO_UPLOAD_LIMIT_BYTES : OPEN_CLOUD_ASSET_UPLOAD_LIMIT_BYTES;
+}
+
 export interface OpenCloudConfig {
   apiKey?: string;
   baseUrl?: string;
@@ -466,6 +477,49 @@ export class OpenCloudRequestError extends Error {
   }
 }
 
+/**
+ * A long-running Open Cloud asset operation that finished without an asset:
+ * either Roblox reported an operation error, or it completed with no asset ID.
+ */
+export class OpenCloudOperationError extends Error {
+  constructor(
+    readonly providerMessage: string,
+    readonly operationPath: string,
+    readonly providerCode?: number,
+  ) {
+    super(`Asset upload failed: ${providerMessage} (operation ${operationPath})`);
+    this.name = 'OpenCloudOperationError';
+  }
+}
+
+/**
+ * Returns the finished operation, undefined while it is still running, or
+ * throws when Roblox reports a terminal error. Errors are checked before done:
+ * a failed operation is also done.
+ */
+function finishedAssetOperation(
+  operation: AssetOperationResponse,
+  fallbackPath: string,
+): AssetOperationResponse | undefined {
+  const operationPath = typeof operation.path === 'string' && operation.path ? operation.path : fallbackPath;
+  const error: unknown = readField(operation, 'error');
+  if (error !== undefined && error !== null) {
+    const code = readField(error, 'code');
+    const message = readField(error, 'message');
+    throw new OpenCloudOperationError(
+      typeof message === 'string' && message ? message : 'Open Cloud reported an unspecified operation error.',
+      operationPath,
+      typeof code === 'number' ? code : undefined,
+    );
+  }
+  if (operation.done !== true) return undefined;
+  const assetId: unknown = readField(operation.response, 'assetId');
+  if ((typeof assetId !== 'string' || !assetId) && typeof assetId !== 'number') {
+    throw new OpenCloudOperationError('Open Cloud operation completed without an asset ID.', operationPath);
+  }
+  return operation;
+}
+
 async function openCloudResponseError(response: Response): Promise<OpenCloudRequestError> {
   const errorBody = await response.text();
   let parsed: unknown;
@@ -899,12 +953,18 @@ export class OpenCloudClient {
       fileName
     );
 
+    // The create request is never retried; only the status poll repeats.
     const operation = await this.requestMultipart<AssetOperationResponse>(
       '/assets/v1/assets',
       formData
     );
-    if (operation.done) return operation;
-    return this.pollOperation(operation.path);
+    const operationPath = typeof operation.path === 'string' ? operation.path : '';
+    const finished = finishedAssetOperation(operation, operationPath || '(unknown operation)');
+    if (finished) return finished;
+    if (!operationPath) {
+      throw new Error('Asset upload response did not include an operation path.');
+    }
+    return this.pollOperation(operationPath);
   }
 
   private getMimeType(fileName: string): string {
@@ -996,11 +1056,13 @@ export class OpenCloudClient {
       const result = await this.request<AssetOperationResponse>(
         `/assets/v1/operations/${operationId}`
       );
-      if (result.done) return result;
-      if (result.error) {
-        throw new Error(`Asset upload failed: ${result.error.message}`);
+      const finished = finishedAssetOperation(result, operationPath);
+      if (finished) return finished;
+      if (i < maxAttempts - 1) {
+        const { promise, resolve } = Promise.withResolvers<void>();
+        setTimeout(resolve, intervalMs);
+        await promise;
       }
-      await new Promise(resolve => setTimeout(resolve, intervalMs));
     }
     throw new Error(
       `Asset upload timed out after ${(maxAttempts * intervalMs) / 1000}s. Operation ID: ${operationId}`
