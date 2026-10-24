@@ -1,6 +1,6 @@
-import { open } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { HTTP_BODY_LIMIT_BYTES } from './http-body-limits.js';
+import { readRegularFileWithinLimitAsync } from './local-file.js';
 import { MAX_STUDIO_FRAME_BYTES } from './studio-transport.js';
 
 // Use the smaller proxy/Studio limit so the same import works in either mode.
@@ -63,27 +63,12 @@ export async function readRbxmInput(
   if (source.path !== undefined) {
     const sourceLabel = resolve(source.path);
     const limit = rbxmInputByteLimit(parentPath, sourceLabel);
-    const file = await open(sourceLabel, 'r');
-    try {
-      const stats = await file.stat();
-      if (!stats.isFile()) throw new Error('RBXM source must be a regular file.');
-      if (stats.size > limit) throw tooLarge(limit);
-      const chunks: Buffer[] = [];
-      let size = 0;
-      // Read through the opened descriptor; a growing file cannot escape the cap.
-      for (;;) {
-        signal?.throwIfAborted();
-        const chunk = Buffer.allocUnsafe(Math.min(64 * 1024, limit - size + 1));
-        const { bytesRead } = await file.read(chunk);
-        if (bytesRead === 0) break;
-        size += bytesRead;
-        if (size > limit) throw tooLarge(limit);
-        chunks.push(chunk.subarray(0, bytesRead));
-      }
-      return { bytes: Buffer.concat(chunks, size), sourceLabel };
-    } finally {
-      await file.close();
-    }
+    // Non-blocking open and descriptor-based reads: a FIFO cannot hang the
+    // import and a growing file cannot escape the cap.
+    const bytes = await readRegularFileWithinLimitAsync(sourceLabel, 'RBXM source', (size) => {
+      if (size > limit) throw tooLarge(limit);
+    }, signal);
+    return { bytes, sourceLabel };
   }
   if (source.url !== undefined) {
     const url = new URL(source.url);

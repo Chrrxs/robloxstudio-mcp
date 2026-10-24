@@ -100,9 +100,16 @@ function locateEdit(source: string, starts: number[], edit: ScriptEditRequest, l
 	if (first === undefined) {
 		return `${label}old_string not found in script. If old_string contains repeated patterns (e.g. closing braces), pass line_range to anchor the edit.`;
 	}
-	const [second] = string.find(source, edit.oldString, first + searchLength, true);
+	// Search again from the byte after the first match's start, not its end:
+	// "aa" occurs twice in "aaa", and "end\nend" twice in "end\nend\nend".
+	const [second] = string.find(source, edit.oldString, first + 1, true);
 	if (second !== undefined) {
-		return `${label}old_string matches multiple locations (lines ${lineAt(starts, first)} and ${lineAt(starts, second)}). Provide more surrounding context, or pass line_range to anchor the edit.`;
+		const firstLine = lineAt(starts, first);
+		const secondLine = lineAt(starts, second);
+		if (firstLine === secondLine) {
+			return `${label}old_string matches multiple locations on line ${firstLine}. Provide more surrounding context; line_range only anchors a match that starts the line.`;
+		}
+		return `${label}old_string matches multiple locations (lines ${firstLine} and ${secondLine}). Provide more surrounding context, or pass line_range to anchor the edit.`;
 	}
 	return first;
 }
@@ -173,7 +180,12 @@ function editLastLine(starts: number[], edit: ResolvedEdit): number {
 
 // Unified diff of whole changed lines, without context lines. Edits that share
 // a line become one hunk; lines the edit left unchanged are trimmed away.
-function buildDiff(source: string, starts: number[], resolved: ResolvedEdit[]): { diff: string; truncated: boolean } {
+function buildDiff(
+	source: string,
+	starts: number[],
+	resolved: ResolvedEdit[],
+	charBudget = DIFF_CHAR_BUDGET,
+): { diff: string; truncated: boolean } {
 	const output: string[] = [];
 	let outputSize = 0;
 	let truncated = false;
@@ -228,7 +240,7 @@ function buildDiff(source: string, starts: number[], resolved: ResolvedEdit[]): 
 			pushHunkLines(hunk, oldRegion, prefix, oldCount, "-");
 			pushHunkLines(hunk, newRegion, prefix, newCount, "+");
 			for (const line of hunk) {
-				if (outputSize + line.size() + 1 > DIFF_CHAR_BUDGET) {
+				if (outputSize + line.size() + 1 > charBudget) {
 					truncated = true;
 					break;
 				}
@@ -283,4 +295,62 @@ export function planScriptEdits(source: string, edits: ScriptEditRequest[], incl
 	if (!includeDiff) return { ok: true, newSource, diff: "", diffTruncated: false };
 	const built = buildDiff(source, starts, resolved);
 	return { ok: true, newSource, diff: built.diff, diffTruncated: built.truncated };
+}
+
+// Text of a line including its terminator, as lineStarts numbers lines.
+function lineText(source: string, starts: number[], line: number): string {
+	return string.sub(source, starts[line - 1], lineEnd(starts, source, line) - 1);
+}
+
+/**
+ * Unified diff from one whole source to another, for edits whose positions
+ * are not tracked (Lua pattern replacement). Unchanged leading and trailing
+ * lines are trimmed. When the changed window keeps its line count, lines pair
+ * one to one and each changed line is its own edit; otherwise the window is a
+ * single edit. charBudget bounds the returned diff's characters.
+ */
+export function diffSources(
+	oldSource: string,
+	newSource: string,
+	charBudget = DIFF_CHAR_BUDGET,
+): { diff: string; truncated: boolean } {
+	if (oldSource === newSource) return { diff: "", truncated: false };
+	const oldStarts = lineStarts(oldSource);
+	const newStarts = lineStarts(newSource);
+	const oldCount = oldStarts.size();
+	const newCount = newStarts.size();
+	let prefix = 0;
+	while (
+		prefix < oldCount && prefix < newCount
+		&& lineText(oldSource, oldStarts, prefix + 1) === lineText(newSource, newStarts, prefix + 1)
+	) prefix++;
+	let suffix = 0;
+	while (
+		suffix < oldCount - prefix && suffix < newCount - prefix
+		&& lineText(oldSource, oldStarts, oldCount - suffix) === lineText(newSource, newStarts, newCount - suffix)
+	) suffix++;
+
+	const resolved: ResolvedEdit[] = [];
+	if (oldCount === newCount) {
+		for (let line = prefix + 1; line <= oldCount - suffix; line++) {
+			const replacement = lineText(newSource, newStarts, line);
+			if (lineText(oldSource, oldStarts, line) !== replacement) {
+				resolved.push({
+					index: resolved.size(),
+					start: oldStarts[line - 1],
+					finish: lineEnd(oldStarts, oldSource, line),
+					newString: replacement,
+				});
+			}
+		}
+	} else {
+		const newWindowStart = newStarts[prefix] ?? newSource.size() + 1;
+		resolved.push({
+			index: 0,
+			start: oldStarts[prefix] ?? oldSource.size() + 1,
+			finish: lineEnd(oldStarts, oldSource, oldCount - suffix),
+			newString: string.sub(newSource, newWindowStart, lineEnd(newStarts, newSource, newCount - suffix) - 1),
+		});
+	}
+	return buildDiff(oldSource, oldStarts, resolved, charBudget);
 }

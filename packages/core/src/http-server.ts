@@ -249,21 +249,23 @@ export const TOOL_HANDLERS: Record<string, ToolHandler> = {
     const { startLine, endLine } = optionalLineRange(body, 'get_script_source');
     return tools.getScriptSource(body.instancePath, startLine, endLine, body.instance_id);
   },
-  set_script_source: (tools, body) => tools.setScriptSource(body.instancePath, body.source, body.instance_id),
+  set_script_source: (tools, body) => tools.setScriptSource(body.instancePath, body.source, body.instance_id, body.operation_id, body.expected_revision),
   edit_script_lines: (tools, body) => tools.editScriptLines(body.instancePath, scriptEditsFromBody(body), {
     expectedRevision: body.expected_revision,
     dryRun: body.dry_run,
   }, body.instance_id, body.operation_id),
-  insert_script_lines: (tools, body) => tools.insertScriptLines(body.instancePath, body.afterLine, body.newContent, body.instance_id),
+  insert_script_lines: (tools, body) => tools.insertScriptLines(
+    body.instancePath, body.afterLine, body.newContent, body.instance_id, body.operation_id, body.expected_revision,
+  ),
   delete_script_lines: (tools, body) => {
     const { startLine, endLine } = requiredClosedLineRange(body, 'delete_script_lines');
-    return tools.deleteScriptLines(body.instancePath, startLine, endLine, body.instance_id);
+    return tools.deleteScriptLines(body.instancePath, startLine, endLine, body.instance_id, body.operation_id, body.expected_revision);
   },
   get_attributes: (tools, body) => tools.getAttributes(body.instancePath, body.instance_id),
   selection: (tools, body) => tools.selection(body.action, body, body.instance_id),
   execute_luau: (tools, body) => tools.executeLuau(body.code, body.target, body.instance_id, body.operation_id),
-  eval_server_runtime: (tools, body) => tools.evalServerRuntime(body.code, body.instance_id),
-  eval_client_runtime: (tools, body) => tools.evalClientRuntime(body.code, body.target, body.instance_id),
+  eval_server_runtime: (tools, body) => tools.evalServerRuntime(body.code, body.instance_id, body.operation_id),
+  eval_client_runtime: (tools, body) => tools.evalClientRuntime(body.code, body.target, body.instance_id, body.operation_id),
   set_network_profile: (tools, body) => tools.setNetworkProfile(body.profile, body.target, body.overrides, body.instance_id),
   get_simulation_state: (tools, body) => tools.getSimulationState(body.include, body.target, body.instance_id),
   reset_simulation_state: (tools, body) => tools.resetSimulationState(body.target, body.network, body.deviceSimulator, body.instance_id),
@@ -311,7 +313,7 @@ export const TOOL_HANDLERS: Record<string, ToolHandler> = {
   search_assets: (tools, body) => tools.searchAssets(body.assetType, body.query, body.maxResults, body.sortBy, body.robloxCreatedOnly),
   get_asset_details: (tools, body) => tools.getAssetDetails(body.assetId),
   get_asset_thumbnail: (tools, body) => tools.getAssetThumbnail(body.assetId, body.size),
-  insert_asset: (tools, body) => tools.insertAsset(body.assetId, body.parentPath, body.position, body.instance_id),
+  insert_asset: (tools, body) => tools.insertAsset(body.assetId, body.parentPath, body.position, body.instance_id, body.operation_id),
   generate_model: (tools, body) => tools.generateModel(body, body.instance_id),
   preview_asset: (tools, body) => tools.previewAsset(
     body.assetId,
@@ -328,7 +330,9 @@ export const TOOL_HANDLERS: Record<string, ToolHandler> = {
   get_memory_breakdown: (tools, body) => tools.getMemoryBreakdown(body.target, body.tags, body.instance_id),
   get_scene_analysis: (tools, body) => tools.getSceneAnalysis(body.mode, body.target, body.topN, body.raw, body.instance_id),
   export_rbxm: (tools, body) => tools.exportRbxm(body.instance_paths, body.output_path, body.target, body.instance_id),
-  import_rbxm: (tools, body, context) => tools.importRbxm(body.source, body.parent_path, body.target, body.instance_id, context?.signal),
+  import_rbxm: (tools, body, context) => tools.importRbxm(
+    body.source, body.parent_path, body.target, body.instance_id, context?.signal, body.operation_id,
+  ),
   find_and_replace_in_scripts: (tools, body) => tools.findAndReplaceInScripts(body.pattern, body.replacement, {
     caseSensitive: body.caseSensitive,
     usePattern: body.usePattern,
@@ -336,7 +340,8 @@ export const TOOL_HANDLERS: Record<string, ToolHandler> = {
     classFilter: body.classFilter,
     dryRun: body.dryRun,
     maxReplacements: body.maxReplacements,
-  }, body.instance_id),
+    expectedRevisions: body.expected_revisions,
+  }, body.instance_id, body.operation_id),
 };
 
 const MAX_STUDIO_SESSIONS = 256;
