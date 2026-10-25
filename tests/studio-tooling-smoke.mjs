@@ -251,6 +251,9 @@ part.Anchored = true
 part.Size = Vector3.new(4, 1, 2)
 part.Position = Vector3.new(0, 5, 0)
 part:SetAttribute("SmokeAttr", "ok")
+part:SetAttribute("SmokeTurned", CFrame.new(1, 2, 3) * CFrame.Angles(math.rad(30), math.rad(90), math.rad(-45)))
+part:SetAttribute("SmokeIdentity", CFrame.identity)
+part:SetAttribute("SmokeMoved", CFrame.new(4, -5, 6))
 game:GetService("CollectionService"):AddTag(part, "RSMCPToolingSmoke")
 part.Parent = folder
 local script = Instance.new("Script")
@@ -328,6 +331,57 @@ return true
       instance_id: instanceId,
     });
     assert(attrs.attributes?.SmokeAttr?.value === 'ok', 'get_attributes returns smoke attribute');
+    // CFrame attributes must survive a round trip: rebuild each transform in
+    // Studio from the reported Components and compare with the stored value.
+    const CFRAME_TOLERANCE = 1e-5;
+    const cframeNames = ['SmokeTurned', 'SmokeIdentity', 'SmokeMoved'];
+    for (const name of cframeNames) {
+      const encoded = attrs.attributes?.[name];
+      assert(
+        encoded?.type === 'CFrame' && Array.isArray(encoded.value?.Components) && encoded.value.Components.length === 12,
+        `get_attributes reports all 12 CFrame components for ${name} (${JSON.stringify(encoded)})`,
+      );
+      const [x, y, z] = encoded.value.Components;
+      assert(
+        encoded.value.Position?.X === x && encoded.value.Position?.Y === y && encoded.value.Position?.Z === z,
+        `get_attributes keeps Position consistent with Components for ${name}`,
+      );
+    }
+    const rebuilt = await client.callTool('execute_luau', {
+      target: 'edit',
+      instance_id: instanceId,
+      code: `
+local part = workspace.__RSMCP_ToolingSmoke.SmokePart
+local encoded = game:GetService("HttpService"):JSONDecode(${JSON.stringify(JSON.stringify(Object.fromEntries(
+        cframeNames.map((name) => [name, attrs.attributes[name].value.Components]))))})
+local result = {}
+for name, components in pairs(encoded) do
+  local actual = { part:GetAttribute(name):GetComponents() }
+  local rebuiltComponents = { CFrame.new(table.unpack(components)):GetComponents() }
+  local matches = true
+  for i = 1, 12 do
+    if math.abs(rebuiltComponents[i] - actual[i]) > ${CFRAME_TOLERANCE} then matches = false end
+  end
+  result[name] = { actual = actual, matches = matches }
+end
+return result
+`,
+    });
+    assert(rebuilt.success === true, `execute_luau rebuilds CFrame attributes (${JSON.stringify(rebuilt)})`);
+    const reconstruction = JSON.parse(rebuilt.returnValue);
+    for (const name of cframeNames) {
+      assert(reconstruction[name]?.matches === true, `${name} reconstructs from reported Components in Studio`);
+      const reported = attrs.attributes[name].value.Components;
+      assert(
+        reconstruction[name].actual.every((component, index) => Math.abs(component - reported[index]) <= CFRAME_TOLERANCE),
+        `${name} Components match the stored transform within ${CFRAME_TOLERANCE}`,
+      );
+    }
+    const turned = attrs.attributes.SmokeTurned.value.Components;
+    assert(
+      turned.slice(3).some((component, index) => Math.abs(component - [1, 0, 0, 0, 1, 0, 0, 0, 1][index]) > 0.1),
+      'a rotated CFrame attribute reports a non-identity rotation',
+    );
 
     const emptyAttrs = await client.callTool('get_attributes', {
       instancePath: scriptPath,

@@ -326,7 +326,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
   {
     name: 'get_attributes',
     category: 'read',
-    description: 'Use to inspect every attribute on one instance.',
+    description: 'Use to inspect every attribute on one instance; CFrame values list all 12 CFrame.new Components.',
     inputSchema: {
       type: 'object',
       properties: {
