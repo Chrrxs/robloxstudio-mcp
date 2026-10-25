@@ -149,9 +149,11 @@ describe('explicit runtime viewport targeting', () => {
     function setupSolo(roles: string[]) {
       const bridge = new BridgeService();
       for (const role of roles) register(bridge, 'instance:solo', role);
+      // Two distinct pixels: a single-colour frame would send the capture to
+      // the real host-window fallback, which this routing test must not reach.
       const request = jest.spyOn(StudioHttpClient.prototype, 'request').mockImplementation(async () => ({
-        success: true, source: 'StudioCaptureService', encoding: 'rgba8', width: 1, height: 1,
-        data: Buffer.from([10, 20, 30, 255]).toString('base64'),
+        success: true, source: 'StudioCaptureService', encoding: 'rgba8', width: 2, height: 1,
+        data: Buffer.from([10, 20, 30, 255, 40, 50, 60, 255]).toString('base64'),
       }));
       lastTools = new RobloxStudioTools(bridge);
       return { request, tools: lastTools };
