@@ -34,6 +34,9 @@ const MAX_SPAN_US = 1e9;
 // Median frame times near 66.7 ms match Studio's unfocused 15 fps throttle.
 const UNFOCUSED_FRAME_US_MIN = 63_000;
 const UNFOCUSED_FRAME_US_MAX = 70_000;
+// A process that draws fewer than this share of its frames is throttled.
+const THROTTLED_PRESENT_RATIO = 0.75;
+const MIN_FRAMES_FOR_THROTTLE = 10;
 
 const FOCUS_GROUP_MASKS: Record<string, string[]> = {
   all: [],
@@ -340,6 +343,50 @@ function selectRange(session: LibMPSession, range: FrameRange): void {
   if (range.segment !== undefined) session.SelectSegment(range.segment);
 }
 
+// Render/Present runs once for each frame Studio draws to its window. The
+// MicroProfiler frame follows the task scheduler, which keeps its rate while
+// Studio draws less often, so counting frames with a Present shows how often
+// Studio actually drew. Undefined when the capture has no Present timer.
+function countPresentedFrames(session: LibMPSession, ranges: FrameRange[], frames: FrameInfo[], names: SessionNames): number | undefined {
+  const presentIds = new Set<number>();
+  for (const timerId of session.FetchTimerIds() ?? []) {
+    const info = names.timer(timerId);
+    if (info.name === 'Present' && info.group === 'Render') presentIds.add(timerId);
+  }
+  if (presentIds.size === 0 || frames.length === 0) return undefined;
+  const frameIds = new Set(frames.map((frame) => frame.id));
+  const presented = new Set<number>();
+  const iterator = session.CreateLogIterator();
+  try {
+    const config: LibMPLogIteratorConfig = {
+      SkipGpuThreads: true,
+      SkipEvents: true,
+      SkipPausedFrames: true,
+      SkipFrameBoundaries: true,
+    };
+    const renderGroups = session.FindGroupIds('Render', false) ?? [];
+    if (renderGroups.length > 0) config.GroupIds = renderGroups;
+    iterator.Configure(config);
+    const state = iterator.GetState();
+    const first = frames[0];
+    const last = frames[frames.length - 1];
+    for (let rangeIndex = first.range; rangeIndex <= last.range; rangeIndex++) {
+      const range = ranges[rangeIndex];
+      const begin = rangeIndex === first.range ? Math.max(range.begin, first.id) : range.begin;
+      const end = rangeIndex === last.range ? last.id : range.end;
+      if (end < begin) continue;
+      selectRange(session, range);
+      iterator.RewindTo(begin, end);
+      while (iterator.Step()) {
+        if (state.isEnter() && presentIds.has(state.timerId()) && frameIds.has(state.frameId())) presented.add(state.frameId());
+      }
+    }
+  } finally {
+    iterator.Dispose();
+  }
+  return presented.size;
+}
+
 function readFrames(session: LibMPSession, ranges: FrameRange[]): FrameInfo[] {
   const frames: FrameInfo[] = [];
   ranges.forEach((range, rangeIndex) => {
@@ -596,7 +643,8 @@ export function analyzeMicroProfilerSession(session: LibMPSession, options: Micr
   const maxGroups = clampInteger(options.maxGroups, DEFAULT_MAX_GROUPS, 1, 100);
   const maxTimersPerGroup = clampInteger(options.maxTimersPerGroup, DEFAULT_MAX_TIMERS_PER_GROUP, 0, 20);
   const maxRelatedTimers = clampInteger(options.maxRelatedTimers, DEFAULT_MAX_RELATED_TIMERS, 0, 10);
-  const spikeFrameCount = clampInteger(options.spikeFrames, DEFAULT_SPIKE_FRAMES, 0, MAX_SPIKE_FRAMES);
+  // A filtered query asks about a few timers; whole-frame breakdowns are opt-in there.
+  const spikeFrameCount = clampInteger(options.spikeFrames, filter !== undefined ? 0 : DEFAULT_SPIKE_FRAMES, 0, MAX_SPIKE_FRAMES);
   const minTotalUs = options.minTotalUs !== undefined && Number.isFinite(options.minTotalUs) ? Math.max(0, options.minTotalUs) : 0;
   const includeIdle = options.includeIdle === true;
   const includeGpu = options.includeGpu === true;
@@ -858,6 +906,13 @@ export function analyzeMicroProfilerSession(session: LibMPSession, options: Micr
   const analysisFrameCount = frameCount > 0 ? frameCount : analyzed.length;
   const analysisDurationUs = totalFrameUs > 0 ? totalFrameUs : (window.requestedDurationMs ?? 0) * 1000;
   const analysisDurationMs = analysisDurationUs / 1000;
+  const analysisSeconds = analysisDurationMs / 1000;
+  frameSummary.frames_per_second = analysisSeconds > 0 ? round2(frameCount / analysisSeconds) : 0;
+  const presentedFrames = countPresentedFrames(session, ranges, analyzed, names);
+  if (presentedFrames !== undefined) {
+    frameSummary.presented_frames = presentedFrames;
+    frameSummary.presented_fps = analysisSeconds > 0 ? round2(presentedFrames / analysisSeconds) : 0;
+  }
 
   // Timer, group, thread, and call-edge rows.
   const rows: Row[] = [];
@@ -1160,10 +1215,17 @@ export function analyzeMicroProfilerSession(session: LibMPSession, options: Micr
     notes.push(`The analyzed frames cover ${roundUs(analysisDurationMs)} ms of the ${roundUs(captureWallMs)} ms capture. Times and rates are correct for that span.`);
   }
   // Studio draws about 15 frames per second when its window is not focused, so
-  // frame times there say little about the game.
+  // frame times there say little about the game. The whole process can slow to
+  // that rate, or keep simulating at about 60 Hz while drawing every few frames.
   const medianFrameUs = percentile(durations, 0.5);
+  let renderThrottled = false;
   if (frameCount >= 5 && medianFrameUs >= UNFOCUSED_FRAME_US_MIN && medianFrameUs <= UNFOCUSED_FRAME_US_MAX) {
+    renderThrottled = true;
     notes.push(`The median frame took ${round2(medianFrameUs / 1000)} ms, about 15 frames per second: the rate Studio draws at when its window is not focused. If the game should run faster, bring Studio to the front and capture again.`);
+  } else if (presentedFrames !== undefined && presentedFrames > 0 && frameCount >= MIN_FRAMES_FOR_THROTTLE
+    && presentedFrames < frameCount * THROTTLED_PRESENT_RATIO) {
+    renderThrottled = true;
+    notes.push(`Studio drew ${frameSummary.presented_fps} frames per second while this Studio process ran ${frameSummary.frames_per_second}: it draws less often than it simulates, as it does while its window is in the background (about 15 fps). Rendering and per-frame costs reflect that reduced rate, not the game at full speed; bring Studio to the front and capture again.`);
   }
 
   let comparisonIndex: Row | undefined;
@@ -1254,6 +1316,7 @@ export function analyzeMicroProfilerSession(session: LibMPSession, options: Micr
       unmatched_exits: unmatchedExits,
       dropped_spans: droppedSpans,
       open_stack_entries_at_end: openStackEntriesAtEnd,
+      render_throttled: renderThrottled,
       partial: partialReasons.length > 0,
       partial_reasons: partialReasons,
       notes: notes.length > 0 ? notes : undefined,

@@ -40,8 +40,9 @@ const TIMERS: Record<number, { name: string; group: number }> = {
   3: { name: 'Layout', group: 3 },
   4: { name: 'Sleep', group: 4 },
   5: { name: 'Physics Step', group: 5 },
+  6: { name: 'Present', group: 6 },
 };
-const GROUPS: Record<number, string> = { 1: 'Jobs', 2: 'Script', 3: 'UI', 4: 'Runtime', 5: 'Physics' };
+const GROUPS: Record<number, string> = { 1: 'Jobs', 2: 'Script', 3: 'UI', 4: 'Runtime', 5: 'Physics', 6: 'Render' };
 const THREADS: Record<number, string> = { 1: ' RBX Main', 2: 'RBX Worker A' };
 
 function ticks(ms: number): bigint {
@@ -183,7 +184,44 @@ function captureSpec(): FakeSpec {
   return { frames, events };
 }
 
+// 20 frames at 60 Hz with Heartbeat work; Studio draws (Render/Present) on
+// every presentEvery-th frame.
+function drawingSpec(presentEvery: number | undefined): FakeSpec {
+  const frames: FakeFrame[] = [];
+  const events: FakeEvent[] = [];
+  for (let index = 0; index < 20; index++) {
+    const startMs = index * (1000 / 60);
+    frames.push({ id: index + 1, absolute: 100 + index, startMs, endMs: startMs + 1000 / 60 });
+    events.push(...scope(index + 1, 1, 1, startMs + 1, startMs + 4));
+    if (presentEvery !== undefined && index % presentEvery === 0) events.push(...scope(index + 1, 1, 6, startMs + 5, startMs + 7));
+  }
+  return { frames, events };
+}
+
 describe('MicroProfiler capture analysis', () => {
+  test('flags a process that draws every fourth frame as render-throttled', () => {
+    const result = analyzeMicroProfilerSession(new FakeSession(drawingSpec(4)), { focus: 'script' });
+    expect(result.frame_summary).toMatchObject({ frames: 20, frames_per_second: 60, presented_frames: 5, presented_fps: 15 });
+    const quality = result.data_quality as { render_throttled: boolean; notes?: string[] };
+    expect(quality.render_throttled).toBe(true);
+    expect(quality.notes?.join(' ')).toContain('Studio drew 15 frames per second while this Studio process ran 60');
+  });
+
+  test.each([
+    { presentEvery: 1, presented: 20 },
+    { presentEvery: undefined, presented: 0 },
+  ])('a process presenting $presented of its 20 frames is not flagged as throttled', ({ presentEvery, presented }) => {
+    const result = analyzeMicroProfilerSession(new FakeSession(drawingSpec(presentEvery)));
+    expect(result.frame_summary).toMatchObject({ frames: 20, presented_frames: presented });
+    expect((result.data_quality as { render_throttled: boolean }).render_throttled).toBe(false);
+  });
+
+  test('a filtered query breaks no frames down unless asked', () => {
+    expect(analyzeMicroProfilerSession(new FakeSession(captureSpec()), { filter: 'pets' }).spike_frames).toEqual([]);
+    expect(analyzeMicroProfilerSession(new FakeSession(captureSpec()), { filter: 'pets', spikeFrames: 1 }).spike_frames).toHaveLength(1);
+    expect(analyzeMicroProfilerSession(new FakeSession(captureSpec())).spike_frames).toHaveLength(3);
+  });
+
   test('converts ticks with the capture clock and analyzes only the capture window', () => {
     const result = analyzeMicroProfilerSession(new FakeSession(captureSpec()), {
       window: { startAbsoluteFrame: 41, captureWallMs: 96, requestedDurationMs: 100 },

@@ -186,7 +186,7 @@ describe('capture_micro_profiler', () => {
     expect(JSON.parse(fs.readFileSync(summaryPath, 'utf8')).capture.path).toBe(path.resolve(outputPath));
   });
 
-  test('pulls client captures in broker-sized chunks', async () => {
+  test('pulls a client capture in broker-sized chunks when no server shares its process', async () => {
     const bridge = new BridgeService();
     const tools = new RobloxStudioTools(bridge);
     bridge.registerPeer(EDIT);
@@ -199,6 +199,44 @@ describe('capture_micro_profiler', () => {
     const body = JSON.parse((await call).content[0].text);
     expect(body.ok).toBe(true);
     expect(seen.slice(1).map((request) => request.data.length)).toEqual([786_432, 213_568]);
+  });
+
+  test('records a solo client through the server Peer of its process and says the process is shared', async () => {
+    const bridge = new BridgeService();
+    const tools = new RobloxStudioTools(bridge);
+    bridge.registerPeer(EDIT);
+    bridge.registerPeer(runtimePeer('server'));
+    bridge.registerPeer(runtimePeer('client-1'));
+    const capture = Buffer.alloc(1_000_000, 7);
+    const call = tools.captureMicroProfiler('client-1', { output_path: path.join(tmpDir, 'solo.gprx') }, 'instance:test');
+    const seen = await servePlugin(bridge, 'server-peer', call, (request) => request.endpoint === '/api/capture-micro-profiler'
+      ? { ok: true, recording: { method: 'stream', start_absolute_frame: 1 }, transfer: { transfer_id: 't-solo', total_bytes: capture.length, max_chunk_bytes: 8 * 1024 * 1024 } }
+      : chunkAnswer(capture, 't-solo')(request));
+    const body = JSON.parse((await call).content[0].text);
+    // One direct read, not 768 KB broker chunks.
+    expect(seen.map((request) => [request.endpoint, request.data.length])).toEqual([
+      ['/api/capture-micro-profiler', undefined], ['/api/micro-profiler-read', 1_000_000],
+    ]);
+    expect(analyze.mock.calls[0][1]).toMatchObject({ targetRole: 'client-1' });
+    expect(body).toMatchObject({ ok: true, target: 'client-1', recorded_by: 'server', process_roles: ['edit', 'server', 'client-1'] });
+    expect(body.data_quality.notes.join(' ')).toContain('This Studio process runs edit, server, client-1, and MicroProfiler records the whole process');
+    expect(bridge.claimNextRequestForTransport('client-1-peer', CLAIM_OWNER)).toBeNull();
+  });
+
+  test('writes a capture failure to summary_output_path', async () => {
+    const bridge = new BridgeService();
+    const tools = new RobloxStudioTools(bridge);
+    bridge.registerPeer(EDIT);
+    bridge.registerPeer(runtimePeer('server'));
+    const summaryPath = path.join(tmpDir, 'failed', 'summary.json');
+    const call = tools.captureMicroProfiler('server', { summary_output_path: summaryPath }, 'instance:test');
+    await servePlugin(bridge, 'server-peer', call, () => ({
+      error: 'micro_profiler_backend_unavailable',
+      message: 'MicroProfilerService backend is not accessible, ready, and compatible in this runtime peer.',
+    }));
+    const body = JSON.parse((await call).content[0].text);
+    expect(body).toMatchObject({ error: 'micro_profiler_backend_unavailable', target: 'server', summary_output_path: path.resolve(summaryPath) });
+    expect(JSON.parse(fs.readFileSync(summaryPath, 'utf8'))).toMatchObject({ error: 'micro_profiler_backend_unavailable', target: 'server' });
   });
 
   test('reports a failed transfer and releases the staged capture', async () => {

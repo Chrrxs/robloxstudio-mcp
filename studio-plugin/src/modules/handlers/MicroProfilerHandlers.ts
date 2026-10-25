@@ -117,6 +117,10 @@ const FIRST_FRAME_POLL_SECONDS = 0.05;
 const MAX_CHUNK_BYTES = 8 * 1024 * 1024;
 const MAX_TRANSFERS = 2;
 const TRANSFER_TTL_SECONDS = 120;
+// How long a playtest peer that has only just started may take to report its
+// MicroProfiler backend ready.
+const BACKEND_READY_TIMEOUT_SECONDS = 2;
+const BACKEND_READY_POLL_SECONDS = 0.1;
 const NO_FRAMES_MESSAGE = "Studio rendered no frames during the capture, so MicroProfiler recorded no data. Studio draws frames only while its window can be displayed, which stops when the display turns off (for example after the power-saving timeout) or Studio is minimized. Wake the display or restore Studio, then retry.";
 
 type Method = "stream" | "snapshot";
@@ -297,7 +301,14 @@ function streamStatus(LibMP: LibMPLike): StreamStatus | undefined {
 }
 
 function beginRecording(LibMP: LibMPLike, requestedDurationMs?: number): Recording | Record<string, unknown> {
-	const backend = backendInfo(LibMP);
+	// A playtest DataModel that has only just started can report its backend
+	// unready for a moment; give it that moment before reporting it unavailable.
+	let backend = backendInfo(LibMP);
+	const readyDeadline = os.clock() + BACKEND_READY_TIMEOUT_SECONDS;
+	while (backend.accessible === true && backend.compatible === true && backend.ready !== true && os.clock() < readyDeadline) {
+		task.wait(BACKEND_READY_POLL_SECONDS);
+		backend = backendInfo(LibMP);
+	}
 	if (backend.accessible !== true || backend.ready !== true || backend.compatible !== true) {
 		return {
 			error: "micro_profiler_backend_unavailable",

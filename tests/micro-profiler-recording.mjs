@@ -5,7 +5,8 @@
 //    records a LibMP stream instead of reading the live history at the end.
 // 2. action=start / action=stop record around work triggered by other calls,
 //    and the saved capture can be re-analyzed with action=analyze.
-// 3. A client peer's capture crosses the client broker in bounded chunks.
+// 3. A solo client's capture is recorded through the server Peer of the same
+//    Studio process, labelled as such, and reports whether Studio drew every frame.
 
 import { randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, statSync } from 'node:fs';
@@ -128,11 +129,18 @@ await runTest('capture_micro_profiler records whole windows and reusable capture
     const noRecording = await client.callToolError('capture_micro_profiler', { action: 'stop', target: 'server' }, 60_000);
     assert(noRecording.error === 'micro_profiler_no_recording', `stop without a recording explains itself (${noRecording.error})`);
 
-    // 3. A client capture crosses the broker in chunks.
+    // 3. A solo client shares the Studio process with the server, so it is
+    //    recorded through the server Peer instead of copied through the broker.
     const clientCapture = await client.callTool('capture_micro_profiler', { target: 'client-1', duration_ms: 1000, max_timers: 5 }, 120_000);
-    console.log(`  client capture: ${clientCapture.capture?.bytes} bytes, ${clientCapture.analysis_window?.analyzed_frame_count} frames`);
-    assert(clientCapture.ok === true && clientCapture.target === 'client-1' && clientCapture.capture?.bytes > 768 * 1024,
-      `a client capture larger than one broker chunk arrives whole (${clientCapture.error ?? ''} ${clientCapture.message ?? ''})`);
+    console.log(`  client capture: ${clientCapture.capture?.bytes} bytes, ${clientCapture.analysis_window?.analyzed_frame_count} frames, presented ${clientCapture.frame_summary?.presented_fps} of ${clientCapture.frame_summary?.frames_per_second} fps`);
+    assert(clientCapture.ok === true && clientCapture.target === 'client-1' && clientCapture.recorded_by === 'server'
+      && clientCapture.capture?.bytes > 768 * 1024,
+    `a solo client capture is recorded whole through the server Peer (${clientCapture.error ?? ''} ${clientCapture.message ?? ''})`);
+    assert(clientCapture.process_roles?.includes('client-1') && clientCapture.process_roles?.includes('server')
+      && clientCapture.data_quality?.notes?.some((note) => note.includes('records the whole process')),
+    `a solo capture says its Studio process is shared (${JSON.stringify(clientCapture.process_roles)})`);
+    assert(clientCapture.frame_summary?.presented_frames > 0 && typeof clientCapture.data_quality?.render_throttled === 'boolean',
+      `a capture reports how many frames Studio drew (${JSON.stringify(clientCapture.frame_summary)})`);
   } finally {
     await Promise.allSettled(pending);
     if (playtestStarted) {

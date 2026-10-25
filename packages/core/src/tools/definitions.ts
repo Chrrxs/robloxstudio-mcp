@@ -1157,10 +1157,9 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
         },
         spike_frames: {
           type: 'number',
-          default: 3,
           minimum: 0,
           maximum: 10,
-          description: 'Slowest frames broken down by thread, timer, and hot path.'
+          description: 'Slowest frames to break down; 3, or 0 with filter.'
         },
         start_frame: {
           type: 'number',

@@ -430,6 +430,7 @@ node scripts/studio-lifecycle.mjs wait-connected --variant main --version <expec
 | `micro-profiler-recording.mjs` | Under a scope load that leaves Studio's live history about 13 frames, a 5 s `capture_micro_profiler` still analyzes about 5 s from a streamed recording; `action=start`/`stop` record around work triggered by other calls; `action=analyze` re-reads the saved capture; a client capture crosses the client broker in chunks |
 | `micro-profiler-state-verification.mjs` | Diagnostic, opt-in: records engine MicroProfiler behavior on a solo server and a multiplayer client (default capture state, what `EnableProfiler`/`EnableCapture` change, `SetFrameLimit` semantics, counter history, frame latency). Records facts and fails only if an experiment cannot run |
 | `micro-profiler-recording-verification.mjs` | Diagnostic, opt-in: records how much history a capture can reach on a solo server and client under a scope load: live-snapshot retention, `SetMemTargetMB`, and LibMP memory and file streams (frames, continuity, size). Records facts and fails only if an experiment cannot run |
+| `micro-profiler-friction-verification.mjs` | Diagnostic, opt-in: in a solo playtest, compares the client's measured RenderStepped rate with the frames a server capture shows Studio presenting (`Render/Present`), and copies a ~30 MB client capture back under a scope load to check the client Peer survives. Records facts and fails only if an experiment cannot run |
 
 ## Lifecycle and cleanup
 

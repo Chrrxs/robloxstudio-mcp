@@ -608,7 +608,9 @@ describe('Tool schema compatibility', () => {
     expect((props.max_related_timers as { default?: number; minimum?: number; maximum?: number }).default).toBe(3);
     expect((props.max_related_timers as { default?: number; minimum?: number; maximum?: number }).minimum).toBe(0);
     expect((props.max_related_timers as { default?: number; minimum?: number; maximum?: number }).maximum).toBe(10);
-    expect((props.spike_frames as { default?: number; minimum?: number; maximum?: number }).default).toBe(3);
+    // The default depends on filter (3 without, 0 with), so the schema states it in words.
+    expect((props.spike_frames as { default?: number; description?: string }).default).toBeUndefined();
+    expect((props.spike_frames as { description?: string }).description).toContain('0 with filter');
     expect((props.spike_frames as { default?: number; minimum?: number; maximum?: number }).maximum).toBe(10);
     expect((props.input_path as { description?: string }).description).toContain('.gprx');
     expect((props.output_path as { description?: string }).description).toContain('Capture file');

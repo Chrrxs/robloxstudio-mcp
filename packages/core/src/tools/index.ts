@@ -395,6 +395,14 @@ function generationPhase(status: RequestStatus): 'generating' | 'completed' | 'f
   return status.outcome === 'not_executed' || status.executionOutcome === 'not_executed' ? 'failed' : 'unknown';
 }
 
+// edit, server, then clients in numeric order.
+function roleOrder(role: string): number {
+  if (role === 'edit') return 0;
+  if (role === 'server') return 1;
+  const client = /^client-(\d+)$/.exec(role);
+  return client ? 2 + Number(client[1]) : Number.MAX_SAFE_INTEGER;
+}
+
 function asRecord(value: unknown): Record<string, unknown> | undefined {
   return value !== null && typeof value === 'object' && !Array.isArray(value)
     ? value as Record<string, unknown>
@@ -3307,7 +3315,20 @@ export class RobloxStudioTools {
     }
 
     const role = resolved.targetRole;
-    const peerId = resolved.targetPeerId;
+    // Every Peer of a solo playtest runs in one Studio process, and MicroProfiler
+    // records the whole process. A client there is recorded through the server
+    // Peer: the same capture, copied back directly instead of through the
+    // client broker, which a large capture can overwhelm.
+    const processPeers = this.bridge.getPeers().filter((peer) => peer.instanceId === resolved.targetInstanceId);
+    const recorder = isClientRole(role) ? processPeers.find((peer) => peer.role === 'server') : undefined;
+    const peerId = recorder?.peerId ?? resolved.targetPeerId;
+    const recordedBy = recorder?.role ?? role;
+    const processRoles = processPeers.map((peer) => peer.role).sort((a, b) => roleOrder(a) - roleOrder(b));
+    const placement: Record<string, unknown> = {
+      target: role,
+      ...(recordedBy !== role ? { recorded_by: recordedBy } : {}),
+      ...(processRoles.length > 1 ? { process_roles: processRoles } : {}),
+    };
     const durationMs = typeof request.duration_ms === 'number' && Number.isFinite(request.duration_ms)
       ? Math.min(MICRO_PROFILER_MAX_DURATION_MS, Math.max(MICRO_PROFILER_MIN_DURATION_MS, Math.floor(request.duration_ms)))
       : MICRO_PROFILER_DEFAULT_DURATION_MS;
@@ -3323,10 +3344,12 @@ export class RobloxStudioTools {
     if (response === null || typeof response !== 'object' || Array.isArray(response)) {
       return { content: [{ type: 'text', text: JSON.stringify(response) }] };
     }
-    const reply: Record<string, unknown> = { ...(response as Record<string, unknown>), target: role };
+    const reply: Record<string, unknown> = { ...(response as Record<string, unknown>), ...placement };
     if (action === 'start' || typeof reply.error === 'string') {
       delete reply.transfer;
-      return { content: [{ type: 'text', text: JSON.stringify(reply) }] };
+      return typeof reply.error === 'string'
+        ? this._microProfilerFailure(reply, summaryOutputPath)
+        : { content: [{ type: 'text', text: JSON.stringify(reply) }] };
     }
     const transfer = parseCaptureTransfer(reply.transfer);
     if (transfer === undefined) {
@@ -3334,18 +3357,13 @@ export class RobloxStudioTools {
       if (typeof staged === 'string') {
         await this._requestPeer('/api/micro-profiler-release', { transfer_id: staged }, peerId).catch(() => undefined);
       }
-      return {
-        content: [{
-          type: 'text',
-          text: JSON.stringify({
-            error: 'micro_profiler_transfer_invalid',
-            message: 'Studio finished the capture but did not stage readable capture data.',
-            target: role,
-            recording: reply.recording,
-            transfer: reply.transfer,
-          }),
-        }],
-      };
+      return this._microProfilerFailure({
+        error: 'micro_profiler_transfer_invalid',
+        message: 'Studio finished the capture but did not stage readable capture data.',
+        ...placement,
+        recording: reply.recording,
+        transfer: reply.transfer,
+      }, summaryOutputPath);
     }
 
     const recording = asRecord(reply.recording) ?? {};
@@ -3353,24 +3371,19 @@ export class RobloxStudioTools {
     try {
       bytes = await pullCapture(
         transfer,
-        role.startsWith('client-') ? CLIENT_CHUNK_BYTES : SERVER_CHUNK_BYTES,
+        isClientRole(recordedBy) ? CLIENT_CHUNK_BYTES : SERVER_CHUNK_BYTES,
         (chunk) => this._requestPeer('/api/micro-profiler-read', chunk, peerId, MICRO_PROFILER_REQUEST_MARGIN_MS),
       );
     } catch (error) {
       await this._requestPeer('/api/micro-profiler-release', { transfer_id: transfer.transferId }, peerId).catch(() => undefined);
       const detail = error instanceof CaptureTransferError ? error.detail : undefined;
-      return {
-        content: [{
-          type: 'text',
-          text: JSON.stringify({
-            error: 'micro_profiler_transfer_failed',
-            message: `The capture was recorded but could not be copied from Studio: ${error instanceof Error ? error.message : String(error)}`,
-            target: role,
-            recording,
-            detail,
-          }),
-        }],
-      };
+      return this._microProfilerFailure({
+        error: 'micro_profiler_transfer_failed',
+        message: `The capture was recorded but could not be copied from Studio: ${error instanceof Error ? error.message : String(error)}`,
+        ...placement,
+        recording,
+        detail,
+      }, summaryOutputPath);
     }
 
     // A capture that cannot be saved is still analyzed; the result says why.
@@ -3392,7 +3405,7 @@ export class RobloxStudioTools {
       window: windowFromRecording(recording),
     });
     summary.action = action;
-    summary.target = role;
+    Object.assign(summary, placement);
     summary.capture = {
       path: capturePath,
       save_error: saveError,
@@ -3413,12 +3426,27 @@ export class RobloxStudioTools {
       if (recording.stopped_by === 'max_duration') reasons.push('recording_time_limit_reached');
       quality.partial_reasons = reasons;
       quality.partial = reasons.length > 0;
+      if (processRoles.length > 1) {
+        recordingNotes.push(`This Studio process runs ${processRoles.join(', ')}, and MicroProfiler records the whole process, so this capture includes the timers of every role in it${recordedBy !== role ? ` (it was recorded through the ${recordedBy} Peer)` : ''}. Label your own work with debug.profilebegin to tell roles apart, or use multiplayer_playtest for a separate process per role.`);
+      }
       if (recordingNotes.length > 0) {
         const notes = Array.isArray(quality.notes) ? quality.notes as string[] : [];
         quality.notes = [...recordingNotes, ...notes];
       }
     }
     return this._finishMicroProfilerResult(summary, finish);
+  }
+
+  // A result without an analysis still reaches summary_output_path, so a
+  // harness that reads the file sees why there is no analysis.
+  private _microProfilerFailure(body: Record<string, unknown>, summaryOutputPath: string | undefined) {
+    if (typeof summaryOutputPath === 'string' && summaryOutputPath !== '') {
+      const resolvedSummaryPath = path.resolve(summaryOutputPath);
+      fs.mkdirSync(path.dirname(resolvedSummaryPath), { recursive: true });
+      fs.writeFileSync(resolvedSummaryPath, JSON.stringify(body, null, 2), 'utf8');
+      body.summary_output_path = resolvedSummaryPath;
+    }
+    return { content: [{ type: 'text', text: JSON.stringify(body) }] };
   }
 
   private _finishMicroProfilerResult(
