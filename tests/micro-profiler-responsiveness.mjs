@@ -17,7 +17,6 @@ import { microProfilerCaptureFixtureCode } from './lib/micro-profiler-capture-fi
 
 const MAX_CONCURRENT_RESPONSE_MS = 3000;
 const CAPTURE_DURATION_MS = 5000;
-const MAX_EVENTS = 1_000_000;
 
 function assertDescending(rows, field, label) {
   if (!Array.isArray(rows)) throw new Error(`${label}: expected an array`);
@@ -58,7 +57,7 @@ await runTest('high-volume MicroProfiler capture remains cooperative', async ({ 
   const artifactRoot = path.join(process.cwd(), 'tmp');
   mkdirSync(artifactRoot, { recursive: true });
   const outputDirectory = mkdtempSync(path.join(artifactRoot, 'profiler-responsive-'));
-  const rawOutputPath = path.join(outputDirectory, 'capture.mp');
+  const rawOutputPath = path.join(outputDirectory, 'capture.gprx');
   const cleanupErrors = [];
   let bodyError;
   let playtestStarted = false;
@@ -72,7 +71,7 @@ await runTest('high-volume MicroProfiler capture remains cooperative', async ({ 
       code: microProfilerCaptureFixtureCode,
     });
     assert(fixture.success === true && fixture.returnValue === 'MICRO_PROFILER_CAPTURE_FIXTURE_OK',
-      `actual handler converts ticks with the snapshot clock, analyzes only fresh frames, and restores capture state (${JSON.stringify(fixture)})`);
+      `actual handler records a stream, falls back to live history, transfers the capture, and restores capture state (${JSON.stringify(fixture)})`);
     playtestStarted = true;
     await startPlaytestAndWait(client, { timeoutSec: 60 });
 
@@ -112,8 +111,6 @@ await runTest('high-volume MicroProfiler capture remains cooperative', async ({ 
       max_groups: 100,
       max_timers_per_group: 20,
       max_related_timers: 10,
-      max_events: MAX_EVENTS,
-      frame_window: 2000,
       include_idle: true,
       include_gpu: true,
       output_path: rawOutputPath,
@@ -148,10 +145,10 @@ await runTest('high-volume MicroProfiler capture remains cooperative', async ({ 
     writeProfilerCaptureSummary(outputDirectory, { capture, captureElapsedMs, probes });
     assert(capture.ok === true && !capture.error,
       `high-volume capture_micro_profiler succeeds (${JSON.stringify({ error: capture.error, message: capture.message, counts: capture.counts })})`);
-    assert(capture.applied?.max_events === MAX_EVENTS && capture.applied?.frame_window === 2000,
-      'high-volume capture applies the requested event and frame limits');
-    assert(Number.isInteger(capture.counts?.events_sampled) && capture.counts.events_sampled > 0,
-      `high-volume capture samples events (${capture.counts?.events_sampled})`);
+    assert(Number.isInteger(capture.counts?.events) && capture.counts.events > 0,
+      `high-volume capture analyzes events (${capture.counts?.events})`);
+    assert(capture.analysis_window?.coverage_pct >= 90,
+      `high-volume capture analyzes its whole window (${JSON.stringify(capture.analysis_window)})`);
     assert(probes.length > 0, `at least one responsiveness probe overlaps the capture (${JSON.stringify(probes)})`);
     assert(probes.some((probe) => probe.offsetMs >= CAPTURE_DURATION_MS),
       `a responsiveness probe overlaps post-capture analysis (${JSON.stringify(probes)})`);
@@ -160,8 +157,8 @@ await runTest('high-volume MicroProfiler capture remains cooperative', async ({ 
       `concurrent server/plugin latency stays below ${MAX_CONCURRENT_RESPONSE_MS}ms (max=${maxProbeLatencyMs}ms)`);
     assert(captureElapsedMs < 30_000,
       `high-volume capture completes before the 30s plugin bridge timeout (${captureElapsedMs}ms)`);
-    assert(existsSync(rawOutputPath) && statSync(rawOutputPath).size > 0,
-      `raw profiler snapshot is written (${statSync(rawOutputPath).size} bytes)`);
+    assert(capture.capture?.path === path.resolve(rawOutputPath) && existsSync(rawOutputPath) && statSync(rawOutputPath).size === capture.capture.bytes,
+      `raw profiler capture is written (${capture.capture?.bytes} bytes)`);
 
     assertDescending(capture.top_timers, 'inclusive_us', 'cooperative timer sort');
     assertDescending(capture.top_timers_by_exclusive, 'exclusive_us', 'cooperative exclusive timer sort');
@@ -200,15 +197,13 @@ return {marker = marker, iterations = iterations, checksum = checksum}`,
     capturePromise = client.callTool('capture_micro_profiler', {
       target: 'server',
       duration_ms: 1000,
-      max_events: MAX_EVENTS,
-      frame_window: 4,
       filter: marker,
       min_total_us: 0,
       max_timers: 5,
       max_groups: 5,
       max_timers_per_group: 0,
       max_related_timers: 0,
-      output_path: path.join(adjacentDirectory, 'capture.mp'),
+      output_path: path.join(adjacentDirectory, 'capture.gprx'),
     }, 60_000).finally(() => {
       adjacentCompletedAt = Date.now();
     });
@@ -238,7 +233,7 @@ return {marker = marker, iterations = iterations, checksum = checksum}`,
       'the foreground workload completed profiled work for the unique marker');
     assert(workloadStartedAt <= adjacentStartedAt && workloadCompletedAt >= adjacentStartedAt + 1000,
       `the foreground workload overlaps the complete requested capture interval (${JSON.stringify(timings)})`);
-    assert(adjacentCapture.ok === true && adjacentCapture.counts?.events_sampled > 0,
+    assert(adjacentCapture.ok === true && adjacentCapture.counts?.events > 0,
       `a follow-up bounded profiler capture succeeds (${JSON.stringify(adjacentCapture.counts)})`);
     assert(adjacentCapture.top_timers?.some((timer) => typeof timer.name === 'string' && timer.name.endsWith(marker) && timer.count > 0),
       `the follow-up capture contains its new scope, not stale cached events (${JSON.stringify(adjacentCapture.top_timers)})`);
@@ -259,8 +254,8 @@ return {marker = marker, iterations = iterations, checksum = checksum}`,
     assert(severeLogs.length === 0,
       `runtime logs contain no new profiler/plugin timeout or error (${JSON.stringify(severeLogs)})`);
     console.log(
-      `  capture elapsed=${captureElapsedMs}ms events=${capture.counts.events_sampled} ` +
-      `buffer=${capture.counts.buffer_bytes} maxProbeLatency=${maxProbeLatencyMs}ms ` +
+      `  capture elapsed=${captureElapsedMs}ms events=${capture.counts.events} ` +
+      `bytes=${capture.capture?.bytes} maxProbeLatency=${maxProbeLatencyMs}ms ` +
       `runtimeLogs=${(processLogs.entries ?? []).length}`,
     );
   } catch (error) {

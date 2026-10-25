@@ -131,6 +131,9 @@ const CLIENT_BROKER_ALLOWED_ENDPOINTS = new Set<string>([
 	"/api/breakpoints",
 	"/api/capture-script-profiler",
 	"/api/capture-micro-profiler",
+	// The server pulls a client's MicroProfiler capture in bounded chunks.
+	"/api/micro-profiler-read",
+	"/api/micro-profiler-release",
 	"/api/multiplayer-test-state",
 	"/api/multiplayer-test-leave-client",
 	// Screenshot capture must run in the client peer: CaptureService captures
@@ -278,6 +281,12 @@ function routeClientRequest(payload: BrokerEnvelope): unknown {
 	}
 	if (payload.endpoint === "/api/capture-micro-profiler") {
 		return MicroProfilerHandlers.captureMicroProfiler(payload.data ?? {});
+	}
+	if (payload.endpoint === "/api/micro-profiler-read") {
+		return MicroProfilerHandlers.readTransfer(payload.data ?? {});
+	}
+	if (payload.endpoint === "/api/micro-profiler-release") {
+		return MicroProfilerHandlers.releaseTransfer(payload.data ?? {});
 	}
 	if (payload.endpoint === "/api/multiplayer-test-state") {
 		return handleMultiplayerTestState();

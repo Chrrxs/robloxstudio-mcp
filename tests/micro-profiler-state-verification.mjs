@@ -147,7 +147,7 @@ function captureSummary(capture) {
   return {
     ok: capture.ok,
     error: capture.error,
-    frames_considered: capture.counts?.frames_considered,
+    method: capture.capture?.method,
     analyzed_frame_count: capture.analysis_window?.analyzed_frame_count,
     analysis_duration_us: capture.analysis_window?.analysis_duration_us,
     was_recording: capture.capture_state?.was_recording,
@@ -158,7 +158,7 @@ async function unitsCheck(client, target) {
   const marker = `RSMCP_VERIFY_UNITS_${randomUUID().replaceAll('-', '')}`;
   const workload = client.callTool('execute_luau', { target, code: busyWaitCode(marker) }, 20_000);
   await delay(300);
-  const capture = await client.callTool('capture_micro_profiler', { target, duration_ms: 1000, frame_window: 64, filter: marker, min_total_us: 0 }, 60_000);
+  const capture = await client.callTool('capture_micro_profiler', { target, duration_ms: 1000, filter: marker, min_total_us: 0 }, 60_000);
   const measured = JSON.parse((await workload).returnValue);
   const row = capture.top_timers?.find((timer) => typeof timer.name === 'string' && timer.name.endsWith(marker));
   return { measured_avg_us: measured.avg_us, tool_avg_invocation_us: row?.avg_invocation_us, ratio: row ? row.avg_invocation_us / measured.avg_us : undefined };

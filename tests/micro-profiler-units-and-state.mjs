@@ -7,10 +7,10 @@
 // 2. The tool leaves capture as it found it. Studio peers start paused; a peer
 //    that something else keeps recording must still be recording afterwards.
 // 3. Only frames recorded during the capture are analyzed, not earlier history
-//    or the time a paused peer spent paused, and frames the engine's memory
-//    budget dropped are reported instead of silently shortening the analysis.
+//    or the time a paused peer spent paused, and a capture longer than Studio's
+//    live history is recorded whole (streamed) instead of losing its start.
 // Capture state is driven and observed through a staged copy of LibMP. Raw
-// snapshots go to tmp/micro-profiler-units-and-state/ (kept when a run fails).
+// captures go to tmp/micro-profiler-units-and-state/ (kept when a run fails).
 
 import { randomUUID } from 'node:crypto';
 import path from 'node:path';
@@ -47,41 +47,38 @@ async function waitForRuntimePeersToDrain(client, timeoutMs = 30_000) {
   }
 }
 
-const COVERAGE_REASONS = ['capture_history_truncated', 'capture_coverage_below_requested', 'event_limit_hit'];
+const COVERAGE_REASONS = ['capture_history_truncated', 'capture_coverage_below_requested'];
 
 function assertNoSilentTruncation(capture, label) {
   const window = capture.analysis_window ?? {};
   const quality = capture.data_quality ?? {};
   const reasons = (quality.partial_reasons ?? []).filter((reason) => COVERAGE_REASONS.includes(reason));
   assert(window.coverage_pct >= 90 || reasons.length > 0,
-    `${label}: analysis covers the capture or says why not (${window.coverage_pct}% of ${window.capture_wall_ms} ms, ${window.frames_evicted} frames dropped, reasons=${JSON.stringify(reasons)})`);
-  if (quality.history_truncated === true) {
-    assert(window.frames_evicted > 0 && quality.partial_reasons?.includes('capture_history_truncated'),
-      `${label}: a truncated capture reports the dropped frames and is partial`);
+    `${label}: analysis covers the capture or says why not (${window.coverage_pct}% of ${window.capture_wall_ms} ms, ${window.frames_dropped} frames dropped, reasons=${JSON.stringify(reasons)})`);
+  if (quality.partial_reasons?.includes('capture_history_truncated')) {
+    assert(window.frames_dropped > 0, `${label}: a truncated capture reports the dropped frames`);
   }
 }
 
 function assertCaptureWindow(capture, label) {
   const analyzedUs = capture.analysis_window?.analysis_duration_us;
-  const truncated = capture.data_quality?.history_truncated === true;
+  const truncated = capture.data_quality?.partial_reasons?.includes('capture_history_truncated') === true;
   // Earlier history would add seconds; one capture covers about CAPTURE_MS, or
-  // less when the engine's memory budget dropped frames (reported as truncated).
+  // less when Studio's live history dropped frames (reported as truncated).
   assert(typeof analyzedUs === 'number' && analyzedUs < CAPTURE_MS * 1300 && (truncated || analyzedUs > CAPTURE_MS * 500),
     `${label}: analysis covers the capture, not earlier history (${analyzedUs} us for ${CAPTURE_MS} ms, truncated=${truncated})`);
   assertNoSilentTruncation(capture, label);
 }
 
 // The analysis window must hold only frames with work (no warm-up frames
-// without scope events, no paused frame), and cover the capture unless the
-// engine's memory budget dropped frames, which must then be reported. That
-// budget varies: a fresh server peer has held anywhere from 40 to 76 frames.
+// without scope events, no paused frame) and cover the whole capture: the
+// plugin streams the recording, so Studio's live history limit does not apply.
 function assertCompleteWindow(capture, label) {
   const window = capture.analysis_window ?? {};
   const quality = capture.data_quality ?? {};
   const reasons = quality.partial_reasons ?? [];
-  assert(window.selected_frame_event_coverage_pct === 100
-    && (window.coverage_pct >= 95 || (quality.history_truncated === true && window.frames_evicted > 0)),
-    `${label}: the window holds the capture's frames with work (${window.coverage_pct}%, waited ${window.first_frame_wait_ms} ms for the first frame with events, reasons ${JSON.stringify(reasons)}, window ${JSON.stringify(window)})`);
+  assert(capture.capture?.method === 'stream' && window.coverage_pct >= 95 && window.frames_dropped === 0,
+    `${label}: the window holds the whole recorded capture (${capture.capture?.method}, ${window.coverage_pct}%, waited ${capture.capture?.first_frame_wait_ms} ms for the first frame with events, reasons ${JSON.stringify(reasons)}, window ${JSON.stringify(window)})`);
 }
 
 await runTest('capture_micro_profiler converts ticks and preserves capture state', async ({ track }) => {
@@ -102,7 +99,7 @@ await runTest('capture_micro_profiler converts ticks and preserves capture state
 
     // 0. The first capture in this Studio session (fresh when run alone; the
     //    first frames after capture starts carry no scope events).
-    const first = await client.callTool('capture_micro_profiler', { target: 'server', duration_ms: CAPTURE_MS, max_events: 1_000_000 }, 60_000);
+    const first = await client.callTool('capture_micro_profiler', { target: 'server', duration_ms: CAPTURE_MS }, 60_000);
     assert(first.ok === true && first.capture_state?.was_recording === false, `first capture succeeds (${first.error ?? ''})`);
     assertCaptureWindow(first, 'first capture in the session');
     assertCompleteWindow(first, 'first capture in the session');
@@ -119,14 +116,12 @@ await runTest('capture_micro_profiler converts ticks and preserves capture state
     const workload = client.callTool('execute_luau', { target: 'server', code: busyWaitCode(marker) }, 20_000);
     pending.push(workload);
     await delay(300);
-    // max_events covers the whole capture under this workload (~4,400 events per
-    // frame), so coverage below shows timing, not the event limit.
     const capture = await client.callTool('capture_micro_profiler', {
-      target: 'server', duration_ms: CAPTURE_MS, filter: marker, min_total_us: 0, max_events: 1_000_000,
-      output_path: path.join(process.cwd(), 'tmp', 'micro-profiler-units-and-state', 'first.mp'),
+      target: 'server', duration_ms: CAPTURE_MS, filter: marker, min_total_us: 0,
+      output_path: path.join(process.cwd(), 'tmp', 'micro-profiler-units-and-state', 'first.gprx'),
     }, 60_000);
     const measured = JSON.parse((await workload).returnValue);
-    assert(capture.ok === true && capture.schema_version === 2, `capture succeeds with schema 2 (${capture.error ?? ''})`);
+    assert(capture.ok === true && capture.schema_version === 3, `capture succeeds with schema 3 (${capture.error ?? ''})`);
     assert(capture.clock?.tick_to_ms_cpu > 0, `capture reports its clock (${JSON.stringify(capture.clock)})`);
     const row = capture.top_timers?.find((timer) => typeof timer.name === 'string' && timer.name.endsWith(marker));
     assert(row, 'the profiled workload scope is captured');
@@ -144,18 +139,19 @@ await runTest('capture_micro_profiler converts ticks and preserves capture state
     const resumed = await client.callTool('capture_micro_profiler', {
       target: 'server',
       duration_ms: CAPTURE_MS,
-      output_path: path.join(process.cwd(), 'tmp', 'micro-profiler-units-and-state', 'resumed.mp'),
+      output_path: path.join(process.cwd(), 'tmp', 'micro-profiler-units-and-state', 'resumed.gprx'),
     }, 60_000);
     assert(resumed.ok === true && resumed.capture_state?.was_recording === false,
       `capture after a pause succeeds and sees a paused peer (${resumed.error ?? ''})`);
     assertCaptureWindow(resumed, 'peer resumed after a pause');
 
-    // 1c. A capture longer than the engine's memory budget can hold (about 70
-    // frames on a server peer here): what is lost must be reported.
+    // 1c. A capture longer than Studio's live history holds (about 70 frames on
+    // a server peer here) is still recorded whole.
     const long = await client.callTool('capture_micro_profiler', { target: 'server', duration_ms: 3000 }, 60_000);
     assert(long.ok === true, `long capture succeeds (${long.error ?? ''})`);
     assertNoSilentTruncation(long, 'long capture');
-    console.log(`  long capture: ${long.analysis_window?.coverage_pct}% of ${long.analysis_window?.capture_wall_ms} ms analyzed, ${long.analysis_window?.frames_evicted} frames dropped, truncated=${long.data_quality?.history_truncated}`);
+    assertCompleteWindow(long, 'long capture');
+    console.log(`  long capture: ${long.analysis_window?.coverage_pct}% of ${long.analysis_window?.capture_wall_ms} ms analyzed, ${long.analysis_window?.analyzed_frame_count} frames, ${long.analysis_window?.frames_dropped} dropped`);
 
     // 2. A peer that something else keeps recording, with history from before the call.
     await runLibMP(client, 'server', 'Control:EnableCapture(true) task.wait(1.5) return state()');

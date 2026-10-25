@@ -42,6 +42,25 @@ import {
   prepareHostWindowCapture,
 } from '../host-capture.js';
 import type { HostCaptureResult, HostWindowIdentity, ViewportRect } from '../host-capture.js';
+import { analyzeMicroProfilerCapture } from '../micro-profiler/analysis.js';
+import {
+  CaptureTransferError,
+  CLIENT_CHUNK_BYTES,
+  isMicroProfilerAction,
+  MICRO_PROFILER_ACTIONS,
+  MICRO_PROFILER_DEFAULT_DURATION_MS,
+  MICRO_PROFILER_MAX_DURATION_MS,
+  MICRO_PROFILER_MIN_DURATION_MS,
+  MICRO_PROFILER_REQUEST_MARGIN_MS,
+  microProfilerAnalysisOptions,
+  parseCaptureTransfer,
+  pullCapture,
+  readWindowSidecar,
+  resolveCapturePath,
+  SERVER_CHUNK_BYTES,
+  windowFromRecording,
+  writeWindowSidecar,
+} from '../micro-profiler/capture.js';
 import { createHash } from 'crypto';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -3103,35 +3122,50 @@ export class RobloxStudioTools {
   }
 
   async captureMicroProfiler(target?: string, request: Record<string, unknown> = {}, instance_id?: string) {
-    const data: Record<string, unknown> = { ...request };
-    const outputPath = data.output_path;
-    const summaryOutputPath = data.summary_output_path;
-    const baselinePath = data.baseline_path;
-    const baseline = data.baseline;
-    const baselineLabel = typeof data.baseline_label === 'string' ? data.baseline_label : undefined;
-    const currentLabel = typeof data.current_label === 'string' ? data.current_label : undefined;
-    const maxComparisonRows = typeof data.max_comparison_rows === 'number' ? data.max_comparison_rows : undefined;
-    const includeComparisonIndex = data.include_comparison_index === true;
-    delete data.output_path;
-    delete data.summary_output_path;
-    delete data.baseline_path;
-    delete data.baseline;
-    delete data.baseline_label;
-    delete data.current_label;
-    delete data.max_comparison_rows;
-    delete data.include_comparison_index;
-
+    const action = request.action ?? 'capture';
+    if (!isMicroProfilerAction(action)) {
+      throw new Error(`action must be one of ${MICRO_PROFILER_ACTIONS.join(', ')}`);
+    }
+    const outputPath = request.output_path;
+    const summaryOutputPath = request.summary_output_path;
+    const inputPath = request.input_path;
+    const baselinePath = request.baseline_path;
+    const baseline = request.baseline;
     if (outputPath !== undefined && typeof outputPath !== 'string') {
       throw new Error('output_path must be a string when provided');
     }
     if (summaryOutputPath !== undefined && typeof summaryOutputPath !== 'string') {
       throw new Error('summary_output_path must be a string when provided');
     }
-    if (outputPath) {
-      data.__mcp_include_raw_buffer = true;
+    const finish = {
+      summaryOutputPath,
+      baselinePath,
+      baseline,
+      baselineLabel: typeof request.baseline_label === 'string' ? request.baseline_label : undefined,
+      currentLabel: typeof request.current_label === 'string' ? request.current_label : undefined,
+      maxComparisonRows: typeof request.max_comparison_rows === 'number' ? request.max_comparison_rows : undefined,
+      includeComparisonIndex: request.include_comparison_index === true,
+    };
+    const analysisOptions = microProfilerAnalysisOptions(request);
+    analysisOptions.includeComparisonIndex = Boolean(summaryOutputPath || baselinePath || baseline || finish.includeComparisonIndex);
+
+    // A saved capture (an earlier capture_path, or a Studio "Dump in binary
+    // format" .gprx file) is analyzed without Studio.
+    if (action === 'analyze') {
+      if (typeof inputPath !== 'string' || inputPath === '') {
+        throw new Error('input_path is required for action="analyze": a capture_path from an earlier capture, or a MicroProfiler .gprx dump');
+      }
+      const resolvedInput = path.resolve(inputPath);
+      const bytes = await fs.promises.readFile(resolvedInput);
+      // A capture this tool saved re-analyzes over the frames it was recorded for.
+      const window = await readWindowSidecar(resolvedInput);
+      const summary = await analyzeMicroProfilerCapture(bytes, { ...analysisOptions, window });
+      summary.action = action;
+      summary.capture = { path: resolvedInput, bytes: bytes.length, source: 'file', recorded_window: window !== undefined };
+      return this._finishMicroProfilerResult(summary, finish);
     }
-    if (summaryOutputPath || baselinePath || baseline || includeComparisonIndex) {
-      data.__mcp_include_comparison_index = true;
+    if (inputPath !== undefined) {
+      throw new Error('input_path is only used with action="analyze"');
     }
 
     const refresh = this.bridge.refreshTopologyForRouting();
@@ -3147,53 +3181,159 @@ export class RobloxStudioTools {
       });
     }
 
-    data.__mcp_instance_id = resolved.targetInstanceId;
-    data.__mcp_target_role = resolved.targetRole;
-    const response = await this._requestPeer(
-      '/api/capture-micro-profiler',
-      data,
-      resolved.targetPeerId,
-    );
-
-    const body: unknown = response !== null && typeof response === 'object' && !Array.isArray(response)
-      ? { ...response, target: resolved.targetRole }
-      : response;
-
-    if (body !== null && typeof body === 'object' && !Array.isArray(body)) {
-      const mutable = body as Record<string, unknown>;
-      const rawSnapshotBase64 = mutable.raw_snapshot_base64;
-      if (typeof rawSnapshotBase64 === 'string') {
-        if (typeof outputPath === 'string' && outputPath !== '') {
-          const resolvedOutputPath = path.resolve(outputPath);
-          fs.mkdirSync(path.dirname(resolvedOutputPath), { recursive: true });
-          fs.writeFileSync(resolvedOutputPath, Buffer.from(rawSnapshotBase64, 'base64'));
-          mutable.output_path = resolvedOutputPath;
-        }
-        delete mutable.raw_snapshot_base64;
+    const role = resolved.targetRole;
+    const peerId = resolved.targetPeerId;
+    const durationMs = typeof request.duration_ms === 'number' && Number.isFinite(request.duration_ms)
+      ? Math.min(MICRO_PROFILER_MAX_DURATION_MS, Math.max(MICRO_PROFILER_MIN_DURATION_MS, Math.floor(request.duration_ms)))
+      : MICRO_PROFILER_DEFAULT_DURATION_MS;
+    const pluginRequest: Record<string, unknown> = {
+      action,
+      __mcp_instance_id: resolved.targetInstanceId,
+      __mcp_target_role: role,
+    };
+    if (action === 'capture') pluginRequest.duration_ms = durationMs;
+    // Recording waits in Studio; finalizing a stream and staging it takes a few seconds more.
+    const timeoutMs = action === 'capture' ? durationMs + MICRO_PROFILER_REQUEST_MARGIN_MS : MICRO_PROFILER_REQUEST_MARGIN_MS;
+    const response = await this._requestPeer('/api/capture-micro-profiler', pluginRequest, peerId, timeoutMs);
+    if (response === null || typeof response !== 'object' || Array.isArray(response)) {
+      return { content: [{ type: 'text', text: JSON.stringify(response) }] };
+    }
+    const reply: Record<string, unknown> = { ...(response as Record<string, unknown>), target: role };
+    if (action === 'start' || typeof reply.error === 'string') {
+      delete reply.transfer;
+      return { content: [{ type: 'text', text: JSON.stringify(reply) }] };
+    }
+    const transfer = parseCaptureTransfer(reply.transfer);
+    if (transfer === undefined) {
+      const staged = asRecord(reply.transfer)?.transfer_id;
+      if (typeof staged === 'string') {
+        await this._requestPeer('/api/micro-profiler-release', { transfer_id: staged }, peerId).catch(() => undefined);
       }
-
-      const baselineCapture = loadMicroProfilerBaseline(baseline, baselinePath);
-      if (baselineCapture) {
-        mutable.baseline_comparison = compareMicroProfilerCaptures(mutable, baselineCapture, {
-          baselineLabel,
-          currentLabel,
-          maxRows: maxComparisonRows,
-        });
-      }
-
-      if (typeof summaryOutputPath === 'string' && summaryOutputPath !== '') {
-        const resolvedSummaryPath = path.resolve(summaryOutputPath);
-        fs.mkdirSync(path.dirname(resolvedSummaryPath), { recursive: true });
-        fs.writeFileSync(resolvedSummaryPath, JSON.stringify(mutable, null, 2), 'utf8');
-        mutable.summary_output_path = resolvedSummaryPath;
-      }
-
-      if (!includeComparisonIndex) {
-        delete mutable.comparison_index;
-      }
+      return {
+        content: [{
+          type: 'text',
+          text: JSON.stringify({
+            error: 'micro_profiler_transfer_invalid',
+            message: 'Studio finished the capture but did not stage readable capture data.',
+            target: role,
+            recording: reply.recording,
+            transfer: reply.transfer,
+          }),
+        }],
+      };
     }
 
-    return { content: [{ type: 'text', text: JSON.stringify(body) }] };
+    const recording = asRecord(reply.recording) ?? {};
+    let bytes: Buffer;
+    try {
+      bytes = await pullCapture(
+        transfer,
+        role.startsWith('client-') ? CLIENT_CHUNK_BYTES : SERVER_CHUNK_BYTES,
+        (chunk) => this._requestPeer('/api/micro-profiler-read', chunk, peerId, MICRO_PROFILER_REQUEST_MARGIN_MS),
+      );
+    } catch (error) {
+      await this._requestPeer('/api/micro-profiler-release', { transfer_id: transfer.transferId }, peerId).catch(() => undefined);
+      const detail = error instanceof CaptureTransferError ? error.detail : undefined;
+      return {
+        content: [{
+          type: 'text',
+          text: JSON.stringify({
+            error: 'micro_profiler_transfer_failed',
+            message: `The capture was recorded but could not be copied from Studio: ${error instanceof Error ? error.message : String(error)}`,
+            target: role,
+            recording,
+            detail,
+          }),
+        }],
+      };
+    }
+
+    // A capture that cannot be saved is still analyzed; the result says why.
+    let capturePath: string | undefined;
+    let saveError: string | undefined;
+    try {
+      capturePath = await resolveCapturePath(typeof outputPath === 'string' ? outputPath : undefined, role);
+      await fs.promises.mkdir(path.dirname(capturePath), { recursive: true });
+      await fs.promises.writeFile(capturePath, bytes);
+      await writeWindowSidecar(capturePath, role, recording);
+    } catch (error) {
+      saveError = `Could not save the capture${capturePath ? ` to ${capturePath}` : ''}: ${errorMessage(error)}`;
+      capturePath = undefined;
+    }
+
+    const summary = await analyzeMicroProfilerCapture(bytes, {
+      ...analysisOptions,
+      targetRole: role,
+      window: windowFromRecording(recording),
+    });
+    summary.action = action;
+    summary.target = role;
+    summary.capture = {
+      path: capturePath,
+      save_error: saveError,
+      bytes: bytes.length,
+      source: 'studio',
+      method: recording.method,
+      first_frame_wait_ms: recording.first_frame_wait_ms,
+      stream: recording.stream,
+      stopped_by: recording.stopped_by,
+    };
+    if (reply.capture_state !== undefined) summary.capture_state = reply.capture_state;
+    const recordingNotes = Array.isArray(recording.notes) ? recording.notes.filter((note): note is string => typeof note === 'string') : [];
+    const stream = asRecord(recording.stream);
+    const quality = asRecord(summary.data_quality);
+    if (quality) {
+      const reasons = Array.isArray(quality.partial_reasons) ? quality.partial_reasons as string[] : [];
+      if (stream?.size_limit_reached === true) reasons.push('stream_size_limit_reached');
+      if (recording.stopped_by === 'max_duration') reasons.push('recording_time_limit_reached');
+      quality.partial_reasons = reasons;
+      quality.partial = reasons.length > 0;
+      if (recordingNotes.length > 0) {
+        const notes = Array.isArray(quality.notes) ? quality.notes as string[] : [];
+        quality.notes = [...recordingNotes, ...notes];
+      }
+    }
+    return this._finishMicroProfilerResult(summary, finish);
+  }
+
+  private _finishMicroProfilerResult(
+    summary: Record<string, unknown>,
+    options: {
+      summaryOutputPath?: string;
+      baselinePath?: unknown;
+      baseline?: unknown;
+      baselineLabel?: string;
+      currentLabel?: string;
+      maxComparisonRows?: number;
+      includeComparisonIndex: boolean;
+    },
+  ) {
+    // Re-analysis suggestions read the capture this result came from.
+    const capturePath = asRecord(summary.capture)?.path;
+    if (typeof capturePath === 'string') {
+      for (const recommendation of asRows(summary.recommended_tools)) {
+        const args = asRecord(recommendation.arguments);
+        if (recommendation.tool === 'capture_micro_profiler' && args?.action === 'analyze') args.input_path = capturePath;
+      }
+    }
+    const baselineCapture = loadMicroProfilerBaseline(options.baseline, options.baselinePath);
+    if (baselineCapture) {
+      summary.baseline_comparison = compareMicroProfilerCaptures(summary, baselineCapture, {
+        baselineLabel: options.baselineLabel,
+        currentLabel: options.currentLabel,
+        maxRows: options.maxComparisonRows,
+      });
+    }
+    if (typeof options.summaryOutputPath === 'string' && options.summaryOutputPath !== '') {
+      const resolvedSummaryPath = path.resolve(options.summaryOutputPath);
+      fs.mkdirSync(path.dirname(resolvedSummaryPath), { recursive: true });
+      fs.writeFileSync(resolvedSummaryPath, JSON.stringify(summary, null, 2), 'utf8');
+      summary.summary_output_path = resolvedSummaryPath;
+    }
+    if (!options.includeComparisonIndex) {
+      delete summary.comparison_index;
+    }
+    return { content: [{ type: 'text', text: JSON.stringify(summary) }] };
   }
 
   async breakpoints(action: string, request: Record<string, unknown> = {}, target?: string, instance_id?: string) {
