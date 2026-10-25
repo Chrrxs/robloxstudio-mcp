@@ -1426,9 +1426,20 @@ export class RobloxStudioTools {
   private _targetForInstanceId(instance_id: string | undefined, choice: TargetChoice): string {
     const requested = choice.requested || undefined;
     const selected = this._peerSelectedByInstanceId(instance_id);
-    if (!selected || !choice.accepts(selected.role)) return requested ?? choice.fallback;
+    if (!selected || instance_id === undefined || !choice.accepts(selected.role)) return requested ?? choice.fallback;
     if (requested === undefined) return selected.role;
     if (requested !== selected.role && !SCOPE_WIDE_TARGETS.has(requested)) {
+      // A playtest Peer that left (a client whose connection dropped) can leave
+      // one runtime Peer that the Instance ID then appears to select. The real
+      // problem is the missing role, not an ambiguous target.
+      const roles = this.bridge.getPeersInScope(instance_id).map((peer) => peer.role);
+      if (!roles.includes(requested)) {
+        throw new RoutingFailure({
+          code: 'target_role_not_present_on_instance',
+          message: `instance_id "${instance_id}" has no ${requested} Peer; connected roles: ${roles.join(', ') || 'none'}. A playtest client that disconnected does not return; restart the playtest to get it back.`,
+          data: this._routingErrorData(),
+        });
+      }
       throw new RoutingFailure({
         code: 'ambiguous_target',
         message: `instance_id "${instance_id}" selects ${selected.role}, but target=${requested}. Omit target, pass target=${selected.role}, or pass the controller Instance ID with target=${requested}.`,

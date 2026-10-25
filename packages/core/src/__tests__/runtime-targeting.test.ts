@@ -175,6 +175,17 @@ describe('explicit runtime viewport targeting', () => {
         'peer:instance:solo:client-1',
       ]);
     });
+
+    test('a client that left the solo playtest is reported missing, not ambiguous', async () => {
+      const { tools, request } = setupSolo(['edit', 'server']);
+      await expect(tools.captureMicroProfiler('client-1', { duration_ms: 1000 }, 'instance:solo')).rejects.toMatchObject({
+        routingError: {
+          code: 'target_role_not_present_on_instance',
+          message: expect.stringContaining('has no client-1 Peer; connected roles: edit, server'),
+        },
+      });
+      expect(request).not.toHaveBeenCalled();
+    });
   });
 
   describe('a Peer-naming instance_id selects that Peer for every targeted tool', () => {
