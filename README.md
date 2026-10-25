@@ -21,7 +21,7 @@ screenshots, memory reports, and profiler captures from each peer.
 
 ### Find performance problems
 
-- Record server or client CPU timings with `capture_script_profiler` and `capture_micro_profiler`.
+- Record server or client CPU timings with `capture_script_profiler` and `capture_micro_profiler`. MicroProfiler captures are saved for re-analysis, and `capture_micro_profiler` also analyzes `.gprx` dumps from Studio's MicroProfiler.
 - Break down memory use with `get_memory_breakdown` or attribute scene cost with `get_scene_analysis`.
 
 ### Work in edit mode
@@ -148,7 +148,8 @@ Read-only access to the DataModel.
 
 No DataModel or script edits. The selection tool can change editor selection and
 camera framing; export and profiler tools can write files only to explicit local
-paths.
+paths, except that `capture_micro_profiler` keeps its 10 most recent captures in
+the system temp directory.
 
 Install only one variant at a time (the installers remove the other automatically):
 

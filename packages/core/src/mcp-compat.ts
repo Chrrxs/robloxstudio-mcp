@@ -71,8 +71,10 @@ Read output with get_runtime_logs. Reuse nextCursor as cursor for one Instance, 
 - breakpoints clear removes only MCP-created breakpoints unless clear_all is true. clear_all also removes user-created breakpoints.
 - capture_script_profiler ranks Luau functions by CPU time. Use output_path when the raw capture is needed.
 - capture_micro_profiler attributes frame time across engine and game work. Its rows are inclusive or cumulative views, so do not sum them as disjoint totals.
-- MicroProfiler records frames only while Studio renders. Studio stops rendering when the display turns off or Studio is minimized, and the capture then fails with micro_profiler_no_frames.
-- MicroProfiler keeps a limited number of frames. When data_quality.history_truncated is true, it dropped the start of a long capture and analysis_window.coverage_pct shows how much was analyzed; use a shorter duration_ms to cover all of it.
+- capture_micro_profiler records every frame of the window (up to 30 s with duration_ms). To profile a moment you trigger with other tools, such as opening a UI, call action=start, trigger it, then action=stop on the same target; a recording stops itself after 120 s.
+- Each result saves the raw capture at capture.path and analyzes it on the MCP host. spike_frames breaks the slowest frames down by thread, top timers, and hot path. Re-analyze a saved capture (over the same recorded frames) or a MicroProfiler .gprx dump with action=analyze and input_path, narrowing with focus, filter, start_frame, and end_frame, without recording again. LibMP (github.com/Roblox/libmp) also opens capture.path for custom analysis.
+- MicroProfiler records frames only while Studio renders. Studio stops rendering when the display turns off or Studio is minimized, and the capture then fails with micro_profiler_no_frames. An unfocused Studio window renders fewer frames, which lengthens frame times.
+- data_quality.partial_reasons says when a result covers less than the requested window, for example capture_history_truncated when Studio could not stream the recording and its live history dropped frames.
 - Use baseline_path or baseline for before-and-after MicroProfiler comparisons.
 - Use get_memory_breakdown for memory categories and get_scene_analysis for instance, script, triangle, animation, or audio cost.
 

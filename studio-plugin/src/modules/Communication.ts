@@ -93,6 +93,8 @@ const routeMap: Record<string, Handler> = {
 	"/api/breakpoints": BreakpointHandlers.breakpoints,
 	"/api/capture-script-profiler": ScriptProfilerHandlers.captureScriptProfiler,
 	"/api/capture-micro-profiler": MicroProfilerHandlers.captureMicroProfiler,
+	"/api/micro-profiler-read": MicroProfilerHandlers.readTransfer,
+	"/api/micro-profiler-release": MicroProfilerHandlers.releaseTransfer,
 	"/api/generate-model": GenerateModelHandlers.generateModel,
 
 	"/api/export-rbxm": SerializationHandlers.exportRbxm,

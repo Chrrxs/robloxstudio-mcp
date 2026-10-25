@@ -1069,10 +1069,16 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
   {
     name: 'capture_micro_profiler',
     category: 'read',
-    description: 'Use to profile engine and game frame time on a live peer.',
+    description: 'Use to profile engine and game frame time on a live peer, or to analyze a saved MicroProfiler capture.',
     inputSchema: {
       type: 'object',
       properties: {
+        action: {
+          type: 'string',
+          enum: ['capture', 'start', 'stop', 'analyze'],
+          default: 'capture',
+          description: 'capture records duration_ms; start/stop record around other tool calls; analyze reads input_path.'
+        },
         target: {
           type: 'string',
           pattern: '^(server|client-[0-9]+)$',
@@ -1082,8 +1088,12 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
           type: 'number',
           default: 1000,
           minimum: 100,
-          maximum: 5000,
-          description: 'Capture length in ms.'
+          maximum: 30000,
+          description: 'Recording length for action=capture.'
+        },
+        input_path: {
+          type: 'string',
+          description: 'Capture to analyze: an earlier capture.path or a MicroProfiler .gprx dump.'
         },
         focus: {
           type: 'string',
@@ -1137,23 +1147,26 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
           type: 'boolean',
           description: 'Include GPU events; defaults to false.'
         },
-        max_events: {
+        spike_frames: {
           type: 'number',
-          default: 250000,
-          minimum: 10000,
-          maximum: 1000000,
-          description: 'LibMP event inspection limit.'
+          default: 3,
+          minimum: 0,
+          maximum: 10,
+          description: 'Slowest frames broken down by thread, timer, and hot path.'
         },
-        frame_window: {
+        start_frame: {
           type: 'number',
-          default: 240,
           minimum: 1,
-          maximum: 2000,
-          description: 'Trailing frames to analyze.'
+          description: 'First frame_id to analyze.'
+        },
+        end_frame: {
+          type: 'number',
+          minimum: 1,
+          description: 'Last frame_id to analyze.'
         },
         output_path: {
           type: 'string',
-          description: 'Raw snapshot file; the response stays summarized.'
+          description: 'Capture file path; defaults to a kept temp file.'
         },
         summary_output_path: {
           type: 'string',

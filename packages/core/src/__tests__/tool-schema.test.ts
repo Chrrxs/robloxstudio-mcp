@@ -557,29 +557,34 @@ describe('Tool schema compatibility', () => {
     const schema = tool!.inputSchema as { properties?: Record<string, unknown> };
     const props = schema.properties ?? {};
     expect(Object.keys(props).sort()).toEqual([
+      'action',
       'baseline',
       'baseline_label',
       'baseline_path',
       'current_label',
       'duration_ms',
+      'end_frame',
       'filter',
       'focus',
-      'frame_window',
       'include_comparison_index',
       'include_gpu',
       'include_idle',
+      'input_path',
       'instance_id',
       'max_comparison_rows',
-      'max_events',
       'max_groups',
       'max_related_timers',
       'max_timers',
       'max_timers_per_group',
       'min_total_us',
       'output_path',
+      'spike_frames',
+      'start_frame',
       'summary_output_path',
       'target',
     ].sort());
+    expect((props.action as { enum?: string[]; default?: string }).enum).toEqual(['capture', 'start', 'stop', 'analyze']);
+    expect((props.action as { enum?: string[]; default?: string }).default).toBe('capture');
     expect(tool!.category).toBe('read');
     expect(tool!.description).toMatch(/^Use /);
     expect(TOOL_GUIDE_MARKDOWN).toContain('capture_micro_profiler attributes frame time');
@@ -588,7 +593,7 @@ describe('Tool schema compatibility', () => {
     expect((props.target as { pattern?: string }).pattern).toBe('^(server|client-[0-9]+)$');
     expect((props.duration_ms as { default?: number; minimum?: number; maximum?: number }).default).toBe(1000);
     expect((props.duration_ms as { default?: number; minimum?: number; maximum?: number }).minimum).toBe(100);
-    expect((props.duration_ms as { default?: number; minimum?: number; maximum?: number }).maximum).toBe(5000);
+    expect((props.duration_ms as { default?: number; minimum?: number; maximum?: number }).maximum).toBe(30000);
     expect((props.focus as { enum?: string[]; default?: string }).enum).toEqual(['all', 'script', 'physics', 'render', 'network', 'jobs']);
     expect((props.focus as { enum?: string[]; default?: string }).default).toBe('all');
     expect((props.max_timers as { default?: number; minimum?: number; maximum?: number }).default).toBe(20);
@@ -603,10 +608,12 @@ describe('Tool schema compatibility', () => {
     expect((props.max_related_timers as { default?: number; minimum?: number; maximum?: number }).default).toBe(3);
     expect((props.max_related_timers as { default?: number; minimum?: number; maximum?: number }).minimum).toBe(0);
     expect((props.max_related_timers as { default?: number; minimum?: number; maximum?: number }).maximum).toBe(10);
-    expect((props.max_events as { default?: number; minimum?: number; maximum?: number }).default).toBe(250000);
-    expect((props.max_events as { default?: number; minimum?: number; maximum?: number }).minimum).toBe(10000);
-    expect((props.max_events as { default?: number; minimum?: number; maximum?: number }).maximum).toBe(1000000);
-    expect((props.output_path as { description?: string }).description).toContain('Raw snapshot file');
+    expect((props.spike_frames as { default?: number; minimum?: number; maximum?: number }).default).toBe(3);
+    expect((props.spike_frames as { default?: number; minimum?: number; maximum?: number }).maximum).toBe(10);
+    expect((props.input_path as { description?: string }).description).toContain('.gprx');
+    expect((props.output_path as { description?: string }).description).toContain('Capture file');
+    expect(TOOL_GUIDE_MARKDOWN).toContain('action=start');
+    expect(TOOL_GUIDE_MARKDOWN).toContain('action=analyze');
     expect((props.summary_output_path as { description?: string }).description).toContain('comparison index');
     expect((props.baseline_path as { description?: string }).description).toContain('baseline');
   });
