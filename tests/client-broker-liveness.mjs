@@ -154,7 +154,7 @@ local modules = {
       nativeWidth = 1, nativeHeight = 1, data = 'AAAAAAAA'}
   end},
 }
-local unused = {'MemoryHandlers', 'SceneAnalysisHandlers', 'InputHandlers', 'MetadataHandlers', 'BreakpointHandlers', 'ScriptProfilerHandlers', 'MicroProfilerHandlers', 'LuauExec', 'HttpDiagnostics', 'TopologyId'}
+local unused = {'MemoryHandlers', 'SceneAnalysisHandlers', 'InputHandlers', 'MetadataHandlers', 'BreakpointHandlers', 'ScriptProfilerHandlers', 'MicroProfilerHandlers', 'SimulationHandlers', 'LuauExec', 'HttpDiagnostics', 'TopologyId'}
 for _, name in ipairs(unused) do modules[name] = {} end
 modules.CaptureTransfer = (function()
 ${transferSource}
