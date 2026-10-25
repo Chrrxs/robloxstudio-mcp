@@ -42,7 +42,7 @@ describe('generate_model jobs', () => {
     tools = new RobloxStudioTools(bridge);
     let nextAssetId = 1000;
     uploads = jest.fn<Promise<number>, [Buffer, string | undefined]>(async () => ++nextAssetId);
-    Object.assign(tools, { uploadGenerateModelReferenceImage: uploads });
+    Object.assign(tools, { referenceUploadUnavailable: () => undefined, uploadGenerateModelReferenceImage: uploads });
     registerEdit(bridge, 'edit', 'instance:jobs');
   });
 
@@ -191,7 +191,7 @@ describe('generate_model reference image uploads', () => {
     tools = new RobloxStudioTools(bridge);
     upload = jest.fn<Promise<number>, [Buffer, string | undefined, ReferenceUploadProgress]>(async () => 1001);
     resume = jest.fn<Promise<number>, [ReferenceUploadCheckpoint, string | undefined, ReferenceUploadProgress]>(async () => 1002);
-    Object.assign(tools, { uploadGenerateModelReferenceImage: upload, resumeGenerateModelReferenceImage: resume });
+    Object.assign(tools, { referenceUploadUnavailable: () => undefined, uploadGenerateModelReferenceImage: upload, resumeGenerateModelReferenceImage: resume });
     registerEdit(bridge, 'edit', 'instance:jobs');
   });
 
@@ -236,6 +236,19 @@ describe('generate_model reference image uploads', () => {
     bridge.unregisterPeer('edit');
     await expect(tools.generateModel({ prompt: 'crate', ...image }, undefined)).rejects.toBeInstanceOf(RoutingFailure);
     expect(upload).not.toHaveBeenCalled();
+  });
+
+  test('missing upload credentials fail the call before a job starts', async () => {
+    // The real check, against clients holding no cookie and no API key.
+    Reflect.deleteProperty(tools, 'referenceUploadUnavailable');
+    Object.assign(tools, { cookieClient: new RobloxCookieClient(''), openCloudClient: { hasApiKey: () => false } });
+    for (const async of [true, false]) {
+      expect(parse(await tools.generateModel({ prompt: 'crate', ...image, async, operation_id: 'no-credentials' }, 'instance:jobs')))
+        .toMatchObject({ success: false, error: expect.stringContaining('require Roblox asset upload credentials') });
+    }
+    expect(upload).not.toHaveBeenCalled();
+    expect(parse(await tools.getRequestStatus('no-credentials'))).toMatchObject({ state: 'unknown' });
+    expect(bridge.claimNextRequestForTransport('edit', 'socket')).toBeNull();
   });
 
   test('an operation ID already used for other arguments uploads nothing', async () => {
@@ -402,7 +415,7 @@ describe('generate_model reference image uploads', () => {
 
   test('another session\'s operation on this primary is rejoined without uploading', async () => {
     const otherSession = new RobloxStudioTools(bridge);
-    Object.assign(otherSession, { uploadGenerateModelReferenceImage: upload });
+    Object.assign(otherSession, { referenceUploadUnavailable: () => undefined, uploadGenerateModelReferenceImage: upload });
     const args = { prompt: 'crate', ...image, operation_id: 'cross-session' };
     const first = otherSession.generateModel(args, 'instance:jobs');
     await jest.advanceTimersByTimeAsync(0);
@@ -564,7 +577,7 @@ describe('generate_model jobs through a proxy', () => {
     try {
       await proxy.waitForInitialRefresh();
       const proxyTools = new RobloxStudioTools(proxy);
-      Object.assign(proxyTools, { uploadGenerateModelReferenceImage: async () => 2000 + proxyBodies.length });
+      Object.assign(proxyTools, { referenceUploadUnavailable: () => undefined, uploadGenerateModelReferenceImage: async () => 2000 + proxyBodies.length });
       await run({ primary, proxyTools, proxyBodies });
     } finally {
       proxy.stop();
@@ -609,7 +622,7 @@ describe('generate_model jobs through a proxy', () => {
   test('an older primary refuses async jobs before anything reaches it', async () => {
     await withProxy({ olderPrimary: true }, async ({ primary, proxyTools, proxyBodies }) => {
       const uploads = jest.fn(async () => 2001);
-      Object.assign(proxyTools, { uploadGenerateModelReferenceImage: uploads });
+      Object.assign(proxyTools, { referenceUploadUnavailable: () => undefined, uploadGenerateModelReferenceImage: uploads });
       const image = { image_base64: referencePngBase64(), image_mime_type: 'image/png' };
       for (const args of [{ prompt: 'crate' }, { prompt: 'crate', ...image }]) {
         const result = parse(await proxyTools.generateModel({ ...args, async: true, operation_id: 'old-job' }, 'instance:jobs'));
@@ -635,7 +648,7 @@ describe('generate_model jobs through a proxy', () => {
     await withProxy({ olderPrimary: true }, async ({ primary, proxyTools, proxyBodies }) => {
       answerAdmittedRequests(primary);
       const uploads = jest.fn(async () => 2001);
-      Object.assign(proxyTools, { uploadGenerateModelReferenceImage: uploads });
+      Object.assign(proxyTools, { referenceUploadUnavailable: () => undefined, uploadGenerateModelReferenceImage: uploads });
       const image = { image_base64: referencePngBase64(), image_mime_type: 'image/png' };
 
       expect(parse(await proxyTools.generateModel({ prompt: 'crate', ...image }, 'instance:jobs'))).toEqual(MODEL);
@@ -653,7 +666,7 @@ describe('generate_model jobs through a proxy', () => {
     await withProxy({}, async ({ primary, proxyTools, proxyBodies }) => {
       answerAdmittedRequests(primary);
       const uploads = jest.fn(async () => 2001);
-      Object.assign(proxyTools, { uploadGenerateModelReferenceImage: uploads });
+      Object.assign(proxyTools, { referenceUploadUnavailable: () => undefined, uploadGenerateModelReferenceImage: uploads });
       const args = { prompt: 'crate', image_base64: referencePngBase64(), image_mime_type: 'image/png', operation_id: 'new-image' };
 
       expect(parse(await proxyTools.generateModel(args, 'instance:jobs'))).toEqual(MODEL);
@@ -670,7 +683,7 @@ describe('generate_model jobs through a proxy', () => {
       const primaryTools = new RobloxStudioTools(primary);
       await primaryTools.generateModel({ prompt: 'crate', async: true, operation_id: 'foreign' }, 'instance:jobs');
       const uploads = jest.fn(async () => 2001);
-      Object.assign(proxyTools, { uploadGenerateModelReferenceImage: uploads });
+      Object.assign(proxyTools, { referenceUploadUnavailable: () => undefined, uploadGenerateModelReferenceImage: uploads });
 
       const retry = parse(await proxyTools.generateModel(
         { prompt: 'crate', image_base64: referencePngBase64(), image_mime_type: 'image/png', operation_id: 'foreign' }, 'instance:jobs'));

@@ -4875,6 +4875,8 @@ export class RobloxStudioTools {
     }
     const submit = request.async === true;
     if (!referencePng) return this._dispatchGenerateModel(payload, instance_id, timeoutMs, submit, operationId, undefined);
+    const uploadUnavailable = this.referenceUploadUnavailable();
+    if (uploadUnavailable) throw new Error(uploadUnavailable);
     // Route before preparing anything: a request that cannot reach an edit
     // Peer must not upload an image first.
     const targetPeerId = await this._resolveSinglePeer('edit', instance_id);
@@ -5201,6 +5203,19 @@ export class RobloxStudioTools {
     throw new Error(`Reference image upload succeeded, but the backing image asset ID could not be resolved for Decal ${decalAssetId}.${suffix}`);
   }
 
+  // Why a reference image cannot be uploaded from this server, or undefined.
+  // Checked before a generation is routed, so it fails without starting a job.
+  private referenceUploadUnavailable(): string | undefined {
+    if (this.cookieClient.hasCookie()) return undefined;
+    if (!this.openCloudClient.hasApiKey()) {
+      return 'image_path and image_base64 require Roblox asset upload credentials because GenerateModelAsync only accepts rbxassetid:// or rbxasset:// image inputs. Set ROBLOX_OPEN_CLOUD_API_KEY plus ROBLOX_CREATOR_USER_ID or ROBLOX_CREATOR_GROUP_ID, or pass image_asset_id.';
+    }
+    if (!process.env.ROBLOX_CREATOR_USER_ID && !process.env.ROBLOX_CREATOR_GROUP_ID) {
+      return 'Creator identity required for image upload. Set ROBLOX_CREATOR_USER_ID or ROBLOX_CREATOR_GROUP_ID, or pass image_asset_id.';
+    }
+    return undefined;
+  }
+
   private async uploadGenerateModelReferenceImage(
     imageContent: Buffer,
     instance_id: string | undefined,
@@ -5220,19 +5235,10 @@ export class RobloxStudioTools {
       return result.assetId;
     }
 
-    if (!this.openCloudClient.hasApiKey()) {
-      throw new Error(
-        'image_path and image_base64 require Roblox asset upload credentials because GenerateModelAsync only accepts rbxassetid:// or rbxasset:// image inputs. Set ROBLOX_OPEN_CLOUD_API_KEY plus ROBLOX_CREATOR_USER_ID or ROBLOX_CREATOR_GROUP_ID, or pass image_asset_id.'
-      );
-    }
-
+    const unavailable = this.referenceUploadUnavailable();
+    if (unavailable) throw new Error(unavailable);
     const resolvedGroupId = process.env.ROBLOX_CREATOR_GROUP_ID;
     const resolvedUserId = process.env.ROBLOX_CREATOR_USER_ID;
-    if (!resolvedUserId && !resolvedGroupId) {
-      throw new Error(
-        'Creator identity required for image upload. Set ROBLOX_CREATOR_USER_ID or ROBLOX_CREATOR_GROUP_ID, or pass image_asset_id.'
-      );
-    }
 
     const creator: { userId?: string; groupId?: string } = {};
     if (resolvedGroupId) {
