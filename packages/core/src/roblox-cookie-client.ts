@@ -5,6 +5,26 @@ export interface CookieImageUploadOptions {
   description: string;
   userId?: string;
   groupId?: string;
+  /** Called just before the create request is sent. */
+  onSending?: () => void;
+  /** Called when Roblox accepts the create request as a long-running operation. */
+  onAccepted?: (operationId: string) => void;
+}
+
+/** A non-2xx response; Roblox answered, so status says whether it acted. */
+export class RobloxCookieRequestError extends Error {
+  constructor(message: string, readonly status: number) {
+    super(message);
+    this.name = 'RobloxCookieRequestError';
+  }
+}
+
+/** An upload operation Roblox finished without creating an asset. */
+export class RobloxUploadOperationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'RobloxUploadOperationError';
+  }
 }
 
 interface UserAuthAssetOperation {
@@ -88,6 +108,7 @@ export class RobloxCookieClient {
       options.fileName,
     );
 
+    options.onSending?.();
     const response = await this.fetchWithCsrf(
       'https://apis.roblox.com/assets/user-auth/v1/assets',
       {
@@ -96,7 +117,15 @@ export class RobloxCookieClient {
       },
     );
     const operation = await this.readOperation(response, 'Image upload');
-    return { assetId: await this.completeOperation(operation) };
+    return { assetId: await this.completeOperation(operation, options.onAccepted) };
+  }
+
+  /** Continues polling an upload operation Roblox already accepted. */
+  async resumeImageUpload(operationId: string): Promise<{ assetId: number }> {
+    if (!this.cookie) {
+      throw new Error('ROBLOSECURITY cookie is not set.');
+    }
+    return { assetId: await this.pollOperation(operationId) };
   }
 
   private async resolveCreator(
@@ -144,7 +173,7 @@ export class RobloxCookieClient {
   ): Promise<UserAuthAssetOperation> {
     const body = await response.text();
     if (!response.ok) {
-      throw new Error(`${action} failed (${response.status}): ${body}`);
+      throw new RobloxCookieRequestError(`${action} failed (${response.status}): ${body}`, response.status);
     }
 
     try {
@@ -173,20 +202,21 @@ export class RobloxCookieClient {
     return null;
   }
 
-  private async completeOperation(operation: UserAuthAssetOperation): Promise<number> {
+  private async completeOperation(operation: UserAuthAssetOperation, onAccepted?: (operationId: string) => void): Promise<number> {
     const initialError = this.operationError(operation);
-    if (initialError) throw new Error(`Image upload failed: ${initialError}`);
+    if (initialError) throw new RobloxUploadOperationError(`Image upload failed: ${initialError}`);
 
     const initialAssetId = this.operationAssetId(operation);
     if (initialAssetId !== null) return initialAssetId;
     if (operation.done) {
-      throw new Error('Image upload completed without an asset ID.');
+      throw new RobloxUploadOperationError('Image upload completed without an asset ID.');
     }
 
     const operationId = operation.operationId ?? operation.path?.split('/').pop();
     if (!operationId) {
       throw new Error('Image upload response did not include an operation ID.');
     }
+    onAccepted?.(operationId);
     return this.pollOperation(operationId);
   }
 
@@ -200,12 +230,12 @@ export class RobloxCookieClient {
       const response = await this.fetchWithCsrf(url);
       const operation = await this.readOperation(response, 'Image upload status');
       const operationError = this.operationError(operation);
-      if (operationError) throw new Error(`Image upload failed: ${operationError}`);
+      if (operationError) throw new RobloxUploadOperationError(`Image upload failed: ${operationError}`);
 
       const assetId = this.operationAssetId(operation);
       if (assetId !== null) return assetId;
       if (operation.done) {
-        throw new Error('Image upload completed without an asset ID.');
+        throw new RobloxUploadOperationError('Image upload completed without an asset ID.');
       }
       if (attempt < maxAttempts - 1) {
         await new Promise(resolve => setTimeout(resolve, intervalMs));

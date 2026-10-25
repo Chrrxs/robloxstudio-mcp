@@ -337,6 +337,13 @@ type RequestAdmission =
   | { kind: 'pending'; requestId: string; request: PendingRequest }
   | { kind: 'retained'; requestId: string; status: RequestStatus };
 
+/** An operation found by BridgeService.joinOperation. */
+export interface JoinedOperation {
+  status: RequestStatus;
+  /** Waits on the operation, or replays its retained outcome, as an identical retry would. */
+  response(): Promise<unknown>;
+}
+
 interface PendingCancellation extends StudioRequestCancellation {
   transportPeerId: string;
   createdAt: number;
@@ -1169,6 +1176,47 @@ export class BridgeService implements StudioTransportQueue {
     return Promise.resolve(this.getRequestStatus(admission.requestId)!);
   }
 
+  /**
+   * Rejoins the operation already admitted under operationId exactly as an
+   * identical retry would, but never admits new work: resolves undefined when
+   * no such operation is retained. A caller whose payload is costly to prepare
+   * (for example, an asset upload) checks here before preparing it.
+   */
+  joinOperation(endpoint: string, targetPeerId: string, operationId: string, identity: unknown): Promise<JoinedOperation | undefined> {
+    let fingerprint: string;
+    try {
+      fingerprint = this.operationFingerprint(targetPeerId, endpoint, undefined, identity);
+    } catch {
+      return Promise.reject(new RequestFailure(`Request ${operationId} cannot be serialized; queued; not_executed`, 'request_serialization_failed', {
+        requestId: operationId, targetPeerId, stage: 'queued', outcome: 'not_executed', executionOutcome: 'not_executed',
+      }));
+    }
+    this.pruneOperations(Date.now());
+    const existing = this.operations.get(operationId);
+    if (!existing) return Promise.resolve(undefined);
+    if (existing.fingerprint !== fingerprint) return Promise.reject(this.operationCollision(operationId, existing));
+    const status = this.getRequestStatus(operationId)!;
+    const pending = this.pendingRequests.get(operationId);
+    return Promise.resolve({
+      status,
+      response: () => pending ? pending.promise : this.replayRetained(status, targetPeerId),
+    });
+  }
+
+  private operationFingerprint(targetPeerId: string, endpoint: string, data: unknown, identity: unknown): string {
+    return createHash('sha256').update(JSON.stringify(
+      identity === undefined ? { targetPeerId, endpoint, data } : { targetPeerId, endpoint, identity },
+    )).digest('hex');
+  }
+
+  private operationCollision(requestId: string, existing: OperationRecord): RequestFailure {
+    return new RequestFailure(
+      `Request ${requestId} already identifies a different operation; existing operation ${existing.status.stage}; not replayed`,
+      'operation_id_collision',
+      { requestId, targetPeerId: existing.status.targetPeerId, stage: existing.status.stage, outcome: 'unknown', ...observations(existing.status) },
+    );
+  }
+
   // An operation's identity defaults to its payload. Callers whose dispatched
   // payload is not reproducible on retry (for example, a freshly uploaded asset
   // ID) supply the identity of their arguments instead.
@@ -1195,9 +1243,7 @@ export class BridgeService implements StudioTransportQueue {
     let fingerprint: string;
     try {
       const target = this.getPeerById(targetPeerId);
-      fingerprint = createHash('sha256').update(JSON.stringify(
-        identity === undefined ? { targetPeerId, endpoint, data } : { targetPeerId, endpoint, identity },
-      )).digest('hex');
+      fingerprint = this.operationFingerprint(targetPeerId, endpoint, data, identity);
       requestBytes = Buffer.byteLength(JSON.stringify({
         kind: 'request', requestId, peerId: targetPeerId, target: target?.role,
         endpoint, data: data ?? null, remainingMs: effectiveTimeoutMs,
@@ -1208,13 +1254,7 @@ export class BridgeService implements StudioTransportQueue {
     this.pruneOperations(Date.now());
     const existing = this.operations.get(requestId);
     if (existing) {
-      if (existing.fingerprint !== fingerprint) {
-        return reject(new RequestFailure(
-          `Request ${requestId} already identifies a different operation; existing operation ${existing.status.stage}; not replayed`,
-          'operation_id_collision',
-          { requestId, targetPeerId: existing.status.targetPeerId, stage: existing.status.stage, outcome: 'unknown', ...observations(existing.status) },
-        ));
-      }
+      if (existing.fingerprint !== fingerprint) return reject(this.operationCollision(requestId, existing));
       const pending = this.pendingRequests.get(requestId);
       if (pending) return { kind: 'pending', requestId, request: pending };
       return { kind: 'retained', requestId, status: this.getRequestStatus(requestId)! };

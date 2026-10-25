@@ -353,6 +353,36 @@ export class ProxyBridgeService extends BridgeService {
     return status;
   }
 
+  // The primary owns operation records and does not expose their identity, so
+  // a proxy can only confirm that an operation ID is still unused. An existing
+  // one is refused rather than matched by repeating the costly preparation.
+  override async joinOperation(_endpoint: string, targetPeerId: string, operationId: string): Promise<undefined> {
+    await this.initialRefresh;
+    if (!this.primaryFeatures.has('identity')) {
+      // Its retries would be matched by payload, which a fresh upload changes.
+      throw new RequestFailure(
+        `${this.primaryDescription()} cannot match a retry of operation ${operationId} to its first attempt; call without operation_id, or restart that server on this version; queued; not_executed`,
+        'primary_unsupported', { requestId: operationId, targetPeerId, stage: 'queued', outcome: 'not_executed', executionOutcome: 'not_executed' },
+      );
+    }
+    const status = await this.getRequestStatusEverywhere(operationId);
+    if (!status) return undefined;
+    const details: RequestFailureDetails = {
+      requestId: operationId, targetPeerId: status.targetPeerId, stage: status.stage,
+      outcome: status.outcome === 'not_executed' ? 'not_executed' : 'unknown',
+    };
+    if (status.targetPeerId !== targetPeerId) {
+      throw new RequestFailure(
+        `Request ${operationId} already identifies a different operation; existing operation ${status.stage}; not replayed`,
+        'operation_id_collision', details,
+      );
+    }
+    throw new RequestFailure(
+      `${this.primaryDescription()} already holds request ${operationId}. This server did not prepare it and cannot confirm the arguments match without repeating the preparation; use get_request_status, or retry with a new operation_id; not replayed`,
+      'operation_unverifiable', details,
+    );
+  }
+
   override async sendRequest(
     endpoint: string,
     data: unknown,

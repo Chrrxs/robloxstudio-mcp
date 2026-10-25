@@ -5,6 +5,7 @@ import type { PublicStudioPeer, RequestStatus, StudioPeer } from '../bridge-serv
 import {
   openCloudAssetUploadLimitBytes,
   OpenCloudClient,
+  type AssetOperationResponse,
   type AssetSearchParams,
   type CreatorStoreSearchCategory,
 } from '../opencloud-client.js';
@@ -61,7 +62,9 @@ import {
   windowFromRecording,
   writeWindowSidecar,
 } from '../micro-profiler/capture.js';
-import { createHash } from 'crypto';
+import { createHash, randomUUID } from 'crypto';
+import { ReferenceUploads } from './reference-uploads.js';
+import type { ReferenceUploadAttempt, ReferenceUploadCheckpoint, ReferenceUploadProgress, ReferenceUploadView } from './reference-uploads.js';
 import * as fs from 'fs';
 import * as path from 'path';
 
@@ -346,6 +349,22 @@ function peerRequestFailure(reason: unknown): { error: string; message: string }
   }
   return { error: 'request_failed', message: boundedMessage(errorMessage(reason)) };
 }
+
+function unretainedStatus(requestId: string): Record<string, unknown> {
+  return {
+    requestId,
+    state: 'unknown',
+    outcome: 'unknown',
+    message: 'No retained operation record. It may have expired, been evicted, or belonged to an earlier server session. Do not infer that the mutation was not executed.',
+  };
+}
+
+// For an upload no retry can join, its progress has no one to inform.
+const UNTRACKED_UPLOAD: ReferenceUploadProgress = {
+  sending: () => undefined,
+  accepted: () => undefined,
+  created: () => undefined,
+};
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {
   return value !== null && typeof value === 'object' && !Array.isArray(value)
@@ -1162,6 +1181,8 @@ export class RobloxStudioTools {
   private hostWindowCapture: HostWindowCaptureFn = captureStudioWindow;
   private hostViewportRects = new Map<string, HostViewportRectCacheEntry>();
   private viewportCaptureQueues = new Map<string, Promise<void>>();
+  // generate_model reference images, shared by retries under one operation ID.
+  private readonly referenceUploads = new ReferenceUploads();
 
   constructor(bridge: BridgeService) {
     this.client = new StudioHttpClient(bridge);
@@ -4489,17 +4510,49 @@ export class RobloxStudioTools {
     if (wait_ms !== undefined && (!Number.isInteger(wait_ms) || wait_ms < 0 || wait_ms > MAX_OPERATION_WAIT_MS)) {
       throw new Error(`wait_ms must be an integer from 0 to ${MAX_OPERATION_WAIT_MS}`);
     }
-    return this._requestStatusResult(request_id, await this.bridge.getRequestStatusEverywhere(request_id, wait_ms ?? 0, signal));
+    const deadline = Date.now() + (wait_ms ?? 0);
+    // A generate_model job may still be preparing its reference image here,
+    // before the bridge holds any record of it.
+    if (this.referenceUploads.view(request_id)) {
+      await this.referenceUploads.waitForPreparation(request_id, wait_ms ?? 0, signal);
+      const preparation = this.referenceUploads.view(request_id);
+      if (preparation && preparation.stage !== 'dispatched') {
+        return this._textResult(this._preparationStatus(request_id, preparation));
+      }
+    }
+    const remainingMs = Math.max(0, deadline - Date.now());
+    return this._operationStatusResult(request_id, await this.bridge.getRequestStatusEverywhere(request_id, remainingMs, signal));
   }
 
   private _requestStatusResult(requestId: string, status: RequestStatus | undefined) {
-    if (status) return this._textResult({ ...status });
-    return this._textResult({
+    return this._textResult(status ? { ...status } : unretainedStatus(requestId));
+  }
+
+  // A bridge status, plus the reference-image preparation and an overall phase
+  // when this server prepared the operation for generate_model.
+  private _operationStatusResult(requestId: string, status: RequestStatus | undefined) {
+    const preparation = this.referenceUploads.view(requestId);
+    if (!preparation) return this._requestStatusResult(requestId, status);
+    if (!status) return this._textResult({ ...unretainedStatus(requestId), preparation });
+    const phase = status.state !== 'settled' ? 'generating' : status.outcome === 'success' ? 'completed' : 'failed';
+    return this._textResult({ ...status, phase, preparation });
+  }
+
+  // A generate_model job that has not reached the bridge, shaped like a request
+  // status. Its generation has not been sent, so it has not executed.
+  private _preparationStatus(requestId: string, preparation: ReferenceUploadView): Record<string, unknown> {
+    const failed = preparation.stage === 'upload_failed' || preparation.stage === 'upload_unknown' || preparation.error !== undefined;
+    return {
       requestId,
-      state: 'unknown',
-      outcome: 'unknown',
-      message: 'No retained operation record. It may have expired, been evicted, or belonged to an earlier server session. Do not infer that the mutation was not executed.',
-    });
+      targetPeerId: preparation.targetPeerId,
+      queuedAt: preparation.startedAt,
+      phase: failed ? 'failed' : preparation.stage === 'uploading' ? 'uploading' : 'preparing',
+      stage: 'preparing',
+      state: failed ? 'settled' : 'pending',
+      outcome: failed ? 'error' : 'pending',
+      executionOutcome: 'not_executed',
+      preparation,
+    };
   }
 
 
@@ -4732,14 +4785,6 @@ export class RobloxStudioTools {
       throw new Error('async must be a boolean.');
     }
 
-    // Every upload mints a new asset ID, so a retry is identified by the
-    // reference image's content rather than by the dispatched payload.
-    let imageIdentity: unknown;
-    if (referencePng) {
-      image = { kind: 'asset', asset_id: await this.uploadGenerateModelReferenceImage(referencePng, instance_id) };
-      imageIdentity = { kind: 'png_sha256', sha256: createHash('sha256').update(referencePng).digest('hex') };
-    }
-
     const payload: Record<string, unknown> = {
       prompt,
       image,
@@ -4752,23 +4797,80 @@ export class RobloxStudioTools {
     if (!schemaGroups) {
       payload.schema = schema ?? 'Body1';
     }
-    const identity = imageIdentity === undefined ? undefined : { ...payload, image: imageIdentity };
+    const submit = request.async === true;
+    if (!referencePng) return this._dispatchGenerateModel(payload, instance_id, timeoutMs, submit, operationId, undefined);
+    // Route before preparing anything: a request that cannot reach an edit
+    // Peer must not upload an image first.
+    const targetPeerId = await this._resolveSinglePeer('edit', instance_id);
 
-    if (request.async === true) {
-      // The job stays tied to this Peer and outlives the caller; timeout_ms only
-      // bounds how long the bridge holds it open. Observe it with get_request_status.
-      const status = await this._withSinglePeer('edit', instance_id, undefined, (targetPeerId) =>
-        this.client.submit('/api/generate-model', payload, targetPeerId, timeoutMs, operationId, identity));
-      return this._requestStatusResult(status.requestId, status);
-    }
-    const response = await this._withSinglePeer('edit', instance_id, undefined, (targetPeerId) =>
-      this._requestPeer('/api/generate-model', payload, targetPeerId, timeoutMs, undefined, operationId, identity));
-    return {
-      content: [{
-        type: 'text',
-        text: JSON.stringify(response),
-      }],
+    // Every upload mints a new asset ID, so a retry is identified by the
+    // reference image's content rather than by the dispatched payload.
+    const png = referencePng;
+    const identity = { ...payload, image: { kind: 'png_sha256', sha256: createHash('sha256').update(png).digest('hex') } };
+    const attempt: ReferenceUploadAttempt = {
+      upload: (progress) => this.uploadGenerateModelReferenceImage(png, instance_id, progress),
+      resume: (checkpoint, progress) => this.resumeGenerateModelReferenceImage(checkpoint, instance_id, progress),
     };
+    if (operationId === undefined && !submit) {
+      // Nothing can retry a call without an operation ID, so nothing is shared.
+      payload.image = { kind: 'asset', asset_id: await attempt.upload(UNTRACKED_UPLOAD) };
+      return this._dispatchGenerateModel(payload, instance_id, timeoutMs, false, undefined, identity);
+    }
+
+    // An async job without a caller ID still needs one before its upload starts.
+    const jobId = operationId ?? randomUUID();
+    const identityKey = createHash('sha256').update(JSON.stringify({ endpoint: '/api/generate-model', identity })).digest('hex');
+    const prepared = this.referenceUploads.lookup(jobId, identityKey, targetPeerId);
+    if (operationId !== undefined && !prepared) {
+      // Another server's caller may already have started this operation on
+      // the bridge; rejoin it instead of uploading the image again.
+      const joined = await this.bridge.joinOperation('/api/generate-model', targetPeerId, jobId, identity);
+      if (joined && submit) return this._requestStatusResult(jobId, joined.status);
+      if (joined) return { content: [{ type: 'text', text: JSON.stringify(await joined.response()) }] };
+    }
+    const generate = async () => {
+      payload.image = { kind: 'asset', asset_id: await this.referenceUploads.acquire(jobId, identityKey, targetPeerId, attempt) };
+      return this._dispatchGenerateModel(payload, instance_id, timeoutMs, submit, jobId, identity,
+        (dispatchPeerId) => this.referenceUploads.dispatched(jobId, dispatchPeerId));
+    };
+    // Checked again in the same turn that starts the work: a concurrent caller
+    // may have claimed this ID while the bridge was consulted.
+    const current = this.referenceUploads.lookup(jobId, identityKey, targetPeerId);
+    const job = generate();
+    this.referenceUploads.attach(jobId, job);
+    if (submit && current?.imageAssetId === undefined) {
+      // The job outlives this call from the moment its upload starts. Its
+      // progress and any failure are reported by get_request_status.
+      job.catch((error: unknown) => this.referenceUploads.dispatchFailed(jobId, error));
+      return this._textResult(this._preparationStatus(jobId, this.referenceUploads.view(jobId)!));
+    }
+    return job;
+  }
+
+  private _resolveSinglePeer(target: string, instance_id: string | undefined): Promise<string> {
+    return this._withSinglePeer(target, instance_id, undefined, async (targetPeerId) => targetPeerId);
+  }
+
+  private async _dispatchGenerateModel(
+    payload: Record<string, unknown>,
+    instance_id: string | undefined,
+    timeoutMs: number | undefined,
+    submit: boolean,
+    operationId: string | undefined,
+    identity: unknown,
+    onDispatch?: (targetPeerId: string) => void,
+  ) {
+    return this._withSinglePeer('edit', instance_id, undefined, async (targetPeerId) => {
+      onDispatch?.(targetPeerId);
+      if (submit) {
+        // The job stays tied to this Peer and outlives the caller; timeout_ms only
+        // bounds how long the bridge holds it open. Observe it with get_request_status.
+        const status = await this.client.submit('/api/generate-model', payload, targetPeerId, timeoutMs, operationId, identity);
+        return this._operationStatusResult(status.requestId, status);
+      }
+      const response = await this._requestPeer('/api/generate-model', payload, targetPeerId, timeoutMs, undefined, operationId, identity);
+      return { content: [{ type: 'text', text: JSON.stringify(response) }] };
+    });
   }
 
   async previewAsset(
@@ -5017,7 +5119,8 @@ export class RobloxStudioTools {
 
   private async uploadGenerateModelReferenceImage(
     imageContent: Buffer,
-    instance_id?: string,
+    instance_id: string | undefined,
+    progress: ReferenceUploadProgress = UNTRACKED_UPLOAD,
   ): Promise<number> {
     if (this.cookieClient.hasCookie()) {
       const result = await this.cookieClient.uploadImage({
@@ -5027,6 +5130,8 @@ export class RobloxStudioTools {
         description: STUDIO_ASSISTANT_SOURCE_IMAGE_LABEL,
         userId: process.env.ROBLOX_CREATOR_USER_ID,
         groupId: process.env.ROBLOX_CREATOR_GROUP_ID,
+        onSending: () => progress.sending(),
+        onAccepted: (id) => progress.accepted({ provider: 'user_auth', id }),
       });
       return result.assetId;
     }
@@ -5061,12 +5166,42 @@ export class RobloxStudioTools {
       },
       imageContent,
       'generate-model-reference.png',
+      {
+        onSending: () => progress.sending(),
+        onAccepted: (id) => progress.accepted({ provider: 'open_cloud', id }),
+      },
     );
+    return this.resolveCreatedReferenceDecal(result, instance_id, progress);
+  }
 
+  // Continues an upload Roblox already accepted, or resolves the image of a
+  // Decal it already created, without sending the image again.
+  private async resumeGenerateModelReferenceImage(
+    checkpoint: ReferenceUploadCheckpoint,
+    instance_id: string | undefined,
+    progress: ReferenceUploadProgress,
+  ): Promise<number> {
+    if (checkpoint.createdAssetId !== undefined) {
+      return this.resolveUploadedReferenceImageId(checkpoint.createdAssetId, instance_id);
+    }
+    const operation = checkpoint.remoteOperation;
+    if (!operation) throw new Error('A reference image upload can only be resumed from a remote operation.');
+    if (operation.provider === 'user_auth') {
+      return (await this.cookieClient.resumeImageUpload(operation.id)).assetId;
+    }
+    return this.resolveCreatedReferenceDecal(await this.openCloudClient.resumeAssetOperation(operation.id), instance_id, progress);
+  }
+
+  private async resolveCreatedReferenceDecal(
+    result: AssetOperationResponse,
+    instance_id: string | undefined,
+    progress: ReferenceUploadProgress,
+  ): Promise<number> {
     const decalId = result.response?.assetId;
     if (!decalId || !/^\d+$/.test(decalId)) {
       throw new Error('Reference image upload did not return an asset ID.');
     }
+    progress.created(decalId);
     return this.resolveUploadedReferenceImageId(decalId, instance_id);
   }
 

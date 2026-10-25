@@ -1,9 +1,12 @@
 import request from 'supertest';
-import { BridgeService } from '../bridge-service.js';
+import { BridgeService, RoutingFailure } from '../bridge-service.js';
 import { createHttpServer } from '../http-server.js';
+import { OpenCloudClient } from '../opencloud-client.js';
 import { rgbaToPng } from '../png-encoder.js';
 import { ProxyBridgeService } from '../proxy-bridge-service.js';
+import { RobloxCookieClient } from '../roblox-cookie-client.js';
 import { RobloxStudioTools } from '../tools/index.js';
+import type { ReferenceUploadCheckpoint, ReferenceUploadProgress } from '../tools/reference-uploads.js';
 
 class JobTestBridge extends BridgeService {
   protected override notifyPeerRegistered(): void {
@@ -23,8 +26,8 @@ function registerEdit(bridge: BridgeService, peerId: string, instanceId: string)
   }).ok).toBe(true);
 }
 
-function referencePngBase64(): string {
-  const rgba = Buffer.from([255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 255]);
+function referencePngBase64(firstPixel = [255, 0, 0, 255]): string {
+  const rgba = Buffer.from([...firstPixel, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 255]);
   return rgbaToPng(rgba, 2, 2).toString('base64');
 }
 
@@ -75,12 +78,13 @@ describe('generate_model jobs', () => {
     await jest.advanceTimersByTimeAsync(1000);
     expect(bridge.settleTransportResponse('edit', 'crate-job', MODEL)).toBe('accepted');
 
-    // A retry re-uploads the same image under a new asset ID but still joins the job.
+    // A retry reuses the image uploaded for the job and joins it.
     expect(parse(await tools.generateModel(args, 'instance:jobs'))).toEqual(MODEL);
     expect(parse(await tools.generateModel({ ...args, async: true }, 'instance:jobs'))).toMatchObject({
       requestId: 'crate-job', state: 'settled', outcome: 'success', response: MODEL,
+      phase: 'completed', preparation: { stage: 'dispatched', imageAssetId: 1001 },
     });
-    expect(uploads).toHaveBeenCalledTimes(3);
+    expect(uploads).toHaveBeenCalledTimes(1);
     expect(bridge.claimNextRequestForTransport('edit', 'socket')).toBeNull();
 
     const changed = parse(await tools.generateModel({ ...args, prompt: 'barrel' }, 'instance:jobs'));
@@ -171,6 +175,296 @@ describe('generate_model jobs', () => {
     await expect(tools.getRequestStatus('job', 300_001)).rejects.toThrow('wait_ms');
     expect(uploads).not.toHaveBeenCalled();
     expect(bridge.claimNextRequestForTransport('edit', 'socket')).toBeNull();
+  });
+});
+
+describe('generate_model reference image uploads', () => {
+  let bridge: BridgeService;
+  let tools: RobloxStudioTools;
+  let upload: jest.Mock<Promise<number>, [Buffer, string | undefined, ReferenceUploadProgress]>;
+  let resume: jest.Mock<Promise<number>, [ReferenceUploadCheckpoint, string | undefined, ReferenceUploadProgress]>;
+  const image = { image_base64: referencePngBase64(), image_mime_type: 'image/png' };
+
+  beforeEach(() => {
+    jest.useFakeTimers();
+    bridge = new JobTestBridge();
+    tools = new RobloxStudioTools(bridge);
+    upload = jest.fn<Promise<number>, [Buffer, string | undefined, ReferenceUploadProgress]>(async () => 1001);
+    resume = jest.fn<Promise<number>, [ReferenceUploadCheckpoint, string | undefined, ReferenceUploadProgress]>(async () => 1002);
+    Object.assign(tools, { uploadGenerateModelReferenceImage: upload, resumeGenerateModelReferenceImage: resume });
+    registerEdit(bridge, 'edit', 'instance:jobs');
+  });
+
+  afterEach(() => {
+    bridge.clearAllPendingRequests();
+    jest.useRealTimers();
+    jest.restoreAllMocks();
+  });
+
+  function claimAndSettle(requestId: string, imageAssetId: number): void {
+    expect(bridge.claimNextRequestForTransport('edit', 'socket')).toMatchObject({
+      requestId, data: { image: { kind: 'asset', asset_id: imageAssetId } },
+    });
+    expect(bridge.claimNextRequestForTransport('edit', 'socket')).toBeNull();
+    expect(bridge.settleTransportResponse('edit', requestId, MODEL)).toBe('accepted');
+  }
+
+  test('concurrent retries share one upload and one generation', async () => {
+    const uploaded = Promise.withResolvers<number>();
+    upload.mockReturnValueOnce(uploaded.promise);
+    const args = { prompt: 'crate', ...image, operation_id: 'shared' };
+    const first = tools.generateModel(args, 'instance:jobs');
+    const second = tools.generateModel(args, 'instance:jobs');
+    await jest.advanceTimersByTimeAsync(0);
+
+    expect(upload).toHaveBeenCalledTimes(1);
+    expect(parse(await tools.getRequestStatus('shared'))).toMatchObject({
+      requestId: 'shared', phase: 'uploading', stage: 'preparing', state: 'pending',
+      executionOutcome: 'not_executed', preparation: { stage: 'uploading', targetPeerId: 'edit' },
+    });
+    uploaded.resolve(1001);
+    await jest.advanceTimersByTimeAsync(0);
+    claimAndSettle('shared', 1001);
+    expect(parse(await first)).toEqual(MODEL);
+    expect(parse(await second)).toEqual(MODEL);
+    expect(upload).toHaveBeenCalledTimes(1);
+  });
+
+  test('a request that cannot be routed uploads nothing', async () => {
+    await expect(tools.generateModel({ prompt: 'crate', ...image, operation_id: 'lost' }, 'instance:missing'))
+      .rejects.toBeInstanceOf(RoutingFailure);
+    bridge.unregisterPeer('edit');
+    await expect(tools.generateModel({ prompt: 'crate', ...image }, undefined)).rejects.toBeInstanceOf(RoutingFailure);
+    expect(upload).not.toHaveBeenCalled();
+  });
+
+  test('an operation ID already used for other arguments uploads nothing', async () => {
+    await tools.generateModel({ prompt: 'crate', async: true, operation_id: 'taken' }, 'instance:jobs');
+    expect(parse(await tools.generateModel({ prompt: 'crate', ...image, operation_id: 'taken' }, 'instance:jobs')))
+      .toMatchObject({ success: false, error: expect.stringContaining('different operation') });
+    expect(upload).not.toHaveBeenCalled();
+
+    await tools.generateModel({ prompt: 'crate', ...image, async: true, operation_id: 'pictured' }, 'instance:jobs');
+    const otherImage = { ...image, image_base64: referencePngBase64([0, 0, 0, 255]) };
+    expect(parse(await tools.generateModel({ prompt: 'crate', ...otherImage, operation_id: 'pictured' }, 'instance:jobs')))
+      .toMatchObject({ success: false, error: expect.stringContaining('nothing was uploaded or sent') });
+    expect(upload).toHaveBeenCalledTimes(1);
+  });
+
+  test('an upload Roblox refused is uploaded again on retry', async () => {
+    upload.mockRejectedValueOnce(new Error('Creator identity required for image upload.'));
+    const args = { prompt: 'crate', ...image, operation_id: 'refused' };
+    expect(parse(await tools.generateModel(args, 'instance:jobs')))
+      .toMatchObject({ success: false, error: expect.stringContaining('Reference image upload failed') });
+    expect(parse(await tools.getRequestStatus('refused'))).toMatchObject({
+      phase: 'failed', state: 'settled', outcome: 'error', executionOutcome: 'not_executed',
+      preparation: { stage: 'upload_failed', error: 'Creator identity required for image upload.' },
+    });
+    expect(bridge.claimNextRequestForTransport('edit', 'socket')).toBeNull();
+
+    const retry = tools.generateModel(args, 'instance:jobs');
+    await jest.advanceTimersByTimeAsync(0);
+    claimAndSettle('refused', 1001);
+    expect(parse(await retry)).toEqual(MODEL);
+    expect(upload).toHaveBeenCalledTimes(2);
+  });
+
+  test('an upload with an unknown outcome is never repeated', async () => {
+    upload.mockImplementationOnce(async (_png, _instance, progress) => {
+      progress.sending();
+      throw new TypeError('fetch failed: connection reset');
+    });
+    const args = { prompt: 'crate', ...image, operation_id: 'unknown-upload' };
+    expect(parse(await tools.generateModel(args, 'instance:jobs')))
+      .toMatchObject({ success: false, error: expect.stringContaining('unknown outcome') });
+    expect(parse(await tools.generateModel(args, 'instance:jobs')))
+      .toMatchObject({ success: false, error: expect.stringContaining('image_asset_id') });
+    expect(parse(await tools.getRequestStatus('unknown-upload'))).toMatchObject({
+      phase: 'failed', executionOutcome: 'not_executed', preparation: { stage: 'upload_unknown' },
+    });
+    expect(upload).toHaveBeenCalledTimes(1);
+    expect(resume).not.toHaveBeenCalled();
+    expect(bridge.claimNextRequestForTransport('edit', 'socket')).toBeNull();
+  });
+
+  test('an accepted upload resumes its remote operation instead of uploading again', async () => {
+    const remoteOperation = { provider: 'open_cloud', id: 'operations/op-9' } as const;
+    upload.mockImplementationOnce(async (_png, _instance, progress) => {
+      progress.sending();
+      progress.accepted(remoteOperation);
+      throw new Error('Asset upload timed out after 60s. Operation ID: op-9');
+    });
+    const args = { prompt: 'crate', ...image, operation_id: 'accepted-upload' };
+    expect(parse(await tools.generateModel(args, 'instance:jobs')))
+      .toMatchObject({ success: false, error: expect.stringContaining('unknown outcome') });
+    expect(parse(await tools.getRequestStatus('accepted-upload'))).toMatchObject({
+      preparation: { stage: 'upload_unknown', remoteOperation },
+    });
+
+    const retry = tools.generateModel(args, 'instance:jobs');
+    await jest.advanceTimersByTimeAsync(0);
+    expect(resume).toHaveBeenCalledWith({ remoteOperation, createdAssetId: undefined }, 'instance:jobs', expect.anything());
+    claimAndSettle('accepted-upload', 1002);
+    expect(parse(await retry)).toEqual(MODEL);
+    expect(upload).toHaveBeenCalledTimes(1);
+  });
+
+  test('async mode returns while the image uploads and reports each phase', async () => {
+    const uploaded = Promise.withResolvers<number>();
+    upload.mockReturnValueOnce(uploaded.promise);
+    const started = parse(await tools.generateModel({ prompt: 'crate', ...image, async: true, operation_id: 'phased' }, 'instance:jobs'));
+    expect(started).toMatchObject({ requestId: 'phased', phase: 'uploading', stage: 'preparing', state: 'pending' });
+
+    const waited = tools.getRequestStatus('phased', 60_000);
+    uploaded.resolve(1001);
+    await jest.advanceTimersByTimeAsync(0);
+    expect(parse(await tools.getRequestStatus('phased'))).toMatchObject({
+      phase: 'generating', stage: 'queued', state: 'pending', preparation: { stage: 'dispatched', imageAssetId: 1001 },
+    });
+    claimAndSettle('phased', 1001);
+    expect(parse(await waited)).toMatchObject({
+      phase: 'completed', state: 'settled', outcome: 'success', response: MODEL, preparation: { stage: 'dispatched' },
+    });
+  });
+
+  test('an async job whose upload fails reports the failure', async () => {
+    upload.mockRejectedValueOnce(new Error('ROBLOSECURITY cookie is not set.'));
+    const started = parse(await tools.generateModel({ prompt: 'crate', ...image, async: true }, 'instance:jobs'));
+    const jobId = String(started.requestId);
+    await jest.advanceTimersByTimeAsync(0);
+    expect(parse(await tools.getRequestStatus(jobId))).toMatchObject({
+      requestId: jobId, phase: 'failed', outcome: 'error', preparation: { stage: 'upload_failed' },
+    });
+    expect(bridge.claimNextRequestForTransport('edit', 'socket')).toBeNull();
+  });
+
+  test('a generation that could not be sent after its upload reuses the image on retry', async () => {
+    const uploaded = Promise.withResolvers<number>();
+    upload.mockReturnValueOnce(uploaded.promise);
+    const args = { prompt: 'crate', ...image, operation_id: 'stranded' };
+    const first = tools.generateModel(args, 'instance:jobs');
+    await jest.advanceTimersByTimeAsync(0);
+    bridge.unregisterPeer('edit');
+    uploaded.resolve(1001);
+    await expect(first).rejects.toBeInstanceOf(RoutingFailure);
+
+    registerEdit(bridge, 'edit', 'instance:jobs');
+    const retry = tools.generateModel(args, 'instance:jobs');
+    await jest.advanceTimersByTimeAsync(0);
+    claimAndSettle('stranded', 1001);
+    expect(parse(await retry)).toEqual(MODEL);
+    expect(upload).toHaveBeenCalledTimes(1);
+  });
+
+  test('another session\'s operation on this primary is rejoined without uploading', async () => {
+    const otherSession = new RobloxStudioTools(bridge);
+    Object.assign(otherSession, { uploadGenerateModelReferenceImage: upload });
+    const args = { prompt: 'crate', ...image, operation_id: 'cross-session' };
+    const first = otherSession.generateModel(args, 'instance:jobs');
+    await jest.advanceTimersByTimeAsync(0);
+    const joined = tools.generateModel(args, 'instance:jobs');
+    await jest.advanceTimersByTimeAsync(0);
+    claimAndSettle('cross-session', 1001);
+    expect(parse(await first)).toEqual(MODEL);
+    expect(parse(await joined)).toEqual(MODEL);
+    expect(upload).toHaveBeenCalledTimes(1);
+    await otherSession.dispose();
+  });
+});
+
+describe('generate_model reference uploads through Roblox clients', () => {
+  const CREATOR = process.env.ROBLOX_CREATOR_USER_ID;
+  let bridge: BridgeService;
+  let tools: RobloxStudioTools;
+  let posts: number;
+  const args = { prompt: 'crate', image_base64: referencePngBase64(), image_mime_type: 'image/png', operation_id: 'open-cloud' };
+
+  beforeEach(() => {
+    jest.useFakeTimers();
+    process.env.ROBLOX_CREATOR_USER_ID = '42';
+    bridge = new JobTestBridge();
+    tools = new RobloxStudioTools(bridge);
+    Object.assign(tools, {
+      openCloudClient: new OpenCloudClient({ apiKey: 'test-key' }),
+      cookieClient: new RobloxCookieClient(''),
+    });
+    registerEdit(bridge, 'edit', 'instance:jobs');
+    posts = 0;
+  });
+
+  afterEach(() => {
+    if (CREATOR === undefined) delete process.env.ROBLOX_CREATOR_USER_ID;
+    else process.env.ROBLOX_CREATOR_USER_ID = CREATOR;
+    bridge.clearAllPendingRequests();
+    jest.useRealTimers();
+    jest.restoreAllMocks();
+  });
+
+  // Serves Open Cloud: create answers come from createAnswers in order, the
+  // operation stays unfinished until finished is set, and Decal 987 uses image 555.
+  function serveOpenCloud(createAnswers: Array<() => Response>, operation: { finished: boolean }) {
+    jest.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+      const url = new URL(String(input));
+      if (init?.method === 'POST' && url.pathname === '/assets/v1/assets') {
+        const answer = createAnswers[Math.min(posts, createAnswers.length - 1)];
+        posts++;
+        return answer();
+      }
+      if (url.pathname === '/assets/v1/operations/op-1') {
+        return Response.json(operation.finished
+          ? { path: 'operations/op-1', done: true, response: { assetId: '987' } }
+          : { path: 'operations/op-1', done: false });
+      }
+      if (url.pathname === '/toolbox-service/v2/assets/987') return Response.json({ asset: { textureId: 555 } });
+      throw new Error(`unexpected request ${url.pathname}`);
+    });
+  }
+
+  async function generate(): Promise<Record<string, unknown>> {
+    const pending = tools.generateModel(args, 'instance:jobs');
+    await jest.advanceTimersByTimeAsync(70_000);
+    return parse(await pending);
+  }
+
+  test('a refused create request is uploaded again', async () => {
+    serveOpenCloud([
+      () => Response.json({ message: 'bad image' }, { status: 400 }),
+      () => Response.json({ path: 'operations/op-1', done: true, response: { assetId: '987' } }),
+    ], { finished: true });
+    expect(await generate()).toMatchObject({ success: false, error: expect.stringContaining('Reference image upload failed') });
+    const retry = tools.generateModel(args, 'instance:jobs');
+    await jest.advanceTimersByTimeAsync(0);
+    expect(bridge.claimNextRequestForTransport('edit', 'socket')).toMatchObject({ data: { image: { asset_id: 555 } } });
+    bridge.settleTransportResponse('edit', 'open-cloud', MODEL);
+    expect(parse(await retry)).toEqual(MODEL);
+    expect(posts).toBe(2);
+  });
+
+  test('a create request without an answer is not sent again', async () => {
+    serveOpenCloud([() => { throw new TypeError('fetch failed'); }], { finished: true });
+    expect(await generate()).toMatchObject({ success: false, error: expect.stringContaining('unknown outcome') });
+    expect(await generate()).toMatchObject({ success: false, error: expect.stringContaining('not repeated') });
+    expect(posts).toBe(1);
+  });
+
+  test('an operation that outlived its poll is resumed by the retry', async () => {
+    const operation = { finished: false };
+    serveOpenCloud([() => Response.json({ path: 'operations/op-1', done: false })], operation);
+    expect(await generate()).toMatchObject({ success: false, error: expect.stringContaining('Operation ID: op-1') });
+    expect(parse(await tools.getRequestStatus('open-cloud'))).toMatchObject({
+      preparation: { stage: 'upload_unknown', remoteOperation: { provider: 'open_cloud', id: 'operations/op-1' } },
+    });
+
+    operation.finished = true;
+    const retry = tools.generateModel(args, 'instance:jobs');
+    await jest.advanceTimersByTimeAsync(0);
+    expect(bridge.claimNextRequestForTransport('edit', 'socket')).toMatchObject({ data: { image: { asset_id: 555 } } });
+    bridge.settleTransportResponse('edit', 'open-cloud', MODEL);
+    expect(parse(await retry)).toEqual(MODEL);
+    expect(parse(await tools.getRequestStatus('open-cloud'))).toMatchObject({
+      phase: 'completed', preparation: { stage: 'dispatched', imageAssetId: 555, uploadedAssetId: '987' },
+    });
+    expect(posts).toBe(1);
   });
 });
 
@@ -268,6 +562,8 @@ describe('generate_model jobs through a proxy', () => {
   test('an older primary still generates from an image, but refuses image retries keyed by operation ID', async () => {
     await withProxy({ olderPrimary: true }, async ({ primary, proxyTools, proxyBodies }) => {
       answerAdmittedRequests(primary);
+      const uploads = jest.fn(async () => 2001);
+      Object.assign(proxyTools, { uploadGenerateModelReferenceImage: uploads });
       const image = { image_base64: referencePngBase64(), image_mime_type: 'image/png' };
 
       expect(parse(await proxyTools.generateModel({ prompt: 'crate', ...image }, 'instance:jobs'))).toEqual(MODEL);
@@ -277,19 +573,39 @@ describe('generate_model jobs through a proxy', () => {
       const keyed = parse(await proxyTools.generateModel({ prompt: 'crate', ...image, operation_id: 'old-image' }, 'instance:jobs'));
       expect(keyed).toMatchObject({ success: false, error: expect.stringContaining('cannot match a retry of operation old-image') });
       expect(proxyBodies).toHaveLength(1);
+      expect(uploads).toHaveBeenCalledTimes(1);
     });
   });
 
   test('a current primary matches an image retry to its first attempt by content', async () => {
     await withProxy({}, async ({ primary, proxyTools, proxyBodies }) => {
       answerAdmittedRequests(primary);
+      const uploads = jest.fn(async () => 2001);
+      Object.assign(proxyTools, { uploadGenerateModelReferenceImage: uploads });
       const args = { prompt: 'crate', image_base64: referencePngBase64(), image_mime_type: 'image/png', operation_id: 'new-image' };
 
       expect(parse(await proxyTools.generateModel(args, 'instance:jobs'))).toEqual(MODEL);
       expect(parse(await proxyTools.generateModel(args, 'instance:jobs'))).toEqual(MODEL);
+      expect(uploads).toHaveBeenCalledTimes(1);
       expect(proxyBodies).toHaveLength(2);
       expect(proxyBodies[1]).toHaveProperty('identity');
       expect(primary.claimNextRequestForTransport('edit', 'socket')).toBeNull();
+    });
+  });
+
+  test('a proxy will not upload for an operation the primary already holds from another server', async () => {
+    await withProxy({}, async ({ primary, proxyTools, proxyBodies }) => {
+      const primaryTools = new RobloxStudioTools(primary);
+      await primaryTools.generateModel({ prompt: 'crate', async: true, operation_id: 'foreign' }, 'instance:jobs');
+      const uploads = jest.fn(async () => 2001);
+      Object.assign(proxyTools, { uploadGenerateModelReferenceImage: uploads });
+
+      const retry = parse(await proxyTools.generateModel(
+        { prompt: 'crate', image_base64: referencePngBase64(), image_mime_type: 'image/png', operation_id: 'foreign' }, 'instance:jobs'));
+      expect(retry).toMatchObject({ success: false, error: expect.stringContaining('did not prepare it') });
+      expect(uploads).not.toHaveBeenCalled();
+      expect(proxyBodies).toEqual([]);
+      await primaryTools.dispose();
     });
   });
 });

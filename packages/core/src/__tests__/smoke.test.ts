@@ -2474,6 +2474,7 @@ describe('Smoke', () => {
         }),
         expect.any(Buffer),
         'generate-model-reference.png',
+        { onSending: expect.any(Function), onAccepted: expect.any(Function) },
       );
       expect(tools.resolveImageId).not.toHaveBeenCalled();
     } finally {
@@ -2506,6 +2507,8 @@ describe('Smoke', () => {
       description: 'Studio Assistant Source Image',
       userId: process.env.ROBLOX_CREATOR_USER_ID,
       groupId: process.env.ROBLOX_CREATOR_GROUP_ID,
+      onSending: expect.any(Function),
+      onAccepted: expect.any(Function),
     });
   });
 
