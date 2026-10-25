@@ -542,8 +542,14 @@ describe('generate_model jobs through a proxy', () => {
 
   test('an older primary refuses async jobs before anything reaches it', async () => {
     await withProxy({ olderPrimary: true }, async ({ primary, proxyTools, proxyBodies }) => {
-      const result = parse(await proxyTools.generateModel({ prompt: 'crate', async: true, operation_id: 'old-job' }, 'instance:jobs'));
-      expect(result).toMatchObject({ success: false, error: expect.stringContaining('cannot start a job that outlives the call') });
+      const uploads = jest.fn(async () => 2001);
+      Object.assign(proxyTools, { uploadGenerateModelReferenceImage: uploads });
+      const image = { image_base64: referencePngBase64(), image_mime_type: 'image/png' };
+      for (const args of [{ prompt: 'crate' }, { prompt: 'crate', ...image }]) {
+        const result = parse(await proxyTools.generateModel({ ...args, async: true, operation_id: 'old-job' }, 'instance:jobs'));
+        expect(result).toMatchObject({ success: false, error: expect.stringContaining('cannot start a job that outlives the call') });
+      }
+      expect(uploads).not.toHaveBeenCalled();
       expect(proxyBodies).toEqual([]);
       expect(primary.claimNextRequestForTransport('edit', 'socket')).toBeNull();
     });

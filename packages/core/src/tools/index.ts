@@ -4858,6 +4858,9 @@ export class RobloxStudioTools {
     // Route before preparing anything: a request that cannot reach an edit
     // Peer must not upload an image first.
     const targetPeerId = await this._resolveSinglePeer('edit', instance_id);
+    if (submit && !this.bridge.supportsPrimaryFeature('submit')) {
+      throw new Error('The primary MCP server cannot start a job that outlives the call; call without async, or restart that server on this version. Nothing was uploaded.');
+    }
 
     // Every upload mints a new asset ID, so a retry is identified by the
     // reference image's content rather than by the dispatched payload.
