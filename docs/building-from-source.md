@@ -38,3 +38,19 @@ npm run test:e2e:full
 
 See [`tests/README.md`](../tests/README.md) for the selection guide and
 individual commands.
+
+## Releasing
+
+`npm run publish:all` publishes the exact tarballs that passed the release
+gate, bound to a clean commit. It never edits versions or rebuilds:
+
+```bash
+npm run release:sync-versions -- <version>   # then commit
+npm run test:e2e:full                        # writes release/release-record.json
+npm run publish:all                          # verifies the record, publishes its tarballs
+```
+
+Missing, stale (over 7 days), failed, skipped, or mismatched evidence stops
+publication. The explicit `--emergency-override --reason "..."` escape hatch
+is logged to `release/overrides.jsonl`. See
+[Publishing a release](../tests/README.md#publishing-a-release).

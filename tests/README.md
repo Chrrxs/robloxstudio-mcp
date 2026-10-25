@@ -20,7 +20,7 @@ state it starts.
 ## Run
 
 GitHub Actions runs lint, typechecking, server builds, plugin compilation, and
-`npm test` on Windows and Linux with Node 22. These checks do not launch Studio.
+`npm test` on Windows, Linux, and macOS with Node 22. These checks do not launch Studio.
 Run `npm run build` before `npm test` or `npm run test:package-contents`: the
 package checks also exercise both built CLIs from relocated fixture packages,
 with plugin installation redirected to temporary directories.
@@ -69,7 +69,7 @@ The runner stops at the first failure and reports remaining checks as not run.
 | WebSocket progress, response loss/recovery, or multi-Studio capacity | `npm run test:studio:websocket-recovery` and `npm run test:studio:websocket-capacity` |
 | Plugin reconnect, registration deadlines, or listener replacement | `npm run test:studio:websocket-reconnect` |
 | Play-server shutdown, peer unregistration, or plugin HTTP requests | `npm run test:studio:shutdown-http-slots` |
-| Release | `npm run test:e2e:full`, plus affected standalone payload/WebSocket probes above |
+| Release | `npm run test:e2e:full`, plus affected standalone payload/WebSocket probes above; then `npm run publish:all` (see [Publishing a release](#publishing-a-release)) |
 
 When `MCP_INSTANCE_ID` is unset, the runner starts the built MCP server as the
 required primary on the configured port and gives it a random, run-scoped auth
@@ -275,6 +275,59 @@ npm run test:codex-wrapper
 
 Each test prints `✅ PASSED` or `❌ FAILED` plus the failing assertion. On
 failure the test's MCP subprocess stderr tail is dumped for context.
+
+## Publishing a release
+
+`npm run publish:all` publishes only tarballs that passed the full gate. It
+never edits `package.json`, builds, or installs plugins:
+
+```bash
+npm run release:sync-versions -- 3.5.0   # root, workspaces, and package-lock.json
+git commit -am "chore: release v3.5.0"   # the gate must run on a clean commit
+npm run test:e2e:full                    # writes release/release-record.json
+npm run release:verify                   # optional: check the evidence only
+npm run publish:all                      # npm publish each recorded tarball
+```
+
+For `tests/run-release.mjs` in a managed snapshot, the launcher records the
+source commit and whether the worktree was clean before and after export. The
+dedicated account only sees the snapshot, so it cannot supply these facts.
+The auto-install stage copies the exact local-pack tarballs it installs and
+tests. The runner writes a record whether the gate passes or fails. It holds the
+package names, versions, tarball names, SHA-256 hashes, and sizes. It also holds
+the OS, Node, npm, and Studio versions (`unknown` when not determinable), each
+stage as passed, failed, or skipped, the overall result, and a timestamp. The
+launcher then copies the record and tarballs into the gitignored `release/`
+directory before deleting the snapshot. A new gate run removes the previous
+evidence first. A run with an explicit `--repo` writes no record.
+
+`publish:all` refuses unless all of these hold:
+
+- The record's commit is `HEAD`.
+- The current tree and the gate's source were both clean.
+- All `package.json` versions match each other and the tested tarballs.
+- The result passed, with every stage passed and none failed or skipped.
+- Each tarball exists, its SHA-256 and size match the record, and its own
+  `package.json` has the recorded name and version.
+- The record is at most 7 days old.
+
+Every failed check is reported by name. In an emergency, bypass the checks
+explicitly:
+
+```bash
+npm run publish:all -- --emergency-override --reason "Why the gate cannot run"
+```
+
+The override prints every bypassed check. Before publishing, it appends the
+timestamp, user, reason, commit, tree state, versions, bypassed checks, and
+tarball hashes to the tracked `release/overrides.jsonl`; commit that entry. It
+publishes the recorded tarballs when they are intact. Otherwise it packs fresh
+ones after an artifact-only build, which never touches Studio's Plugins folder.
+Add `--dry-run` to report the outcome without logging or publishing.
+
+Attach the tested plugins to the GitHub release from the recorded tarballs
+(`package/studio-plugin/*.rbxmx` inside each file under `release/artifacts/`),
+not from a fresh build.
 
 ## Creator Store sanitizer unit test
 

@@ -166,12 +166,15 @@ try {
     assert.equal(existsSync(path.join(destinationParent, 'escaped.ts')), false);
     assert.deepEqual(readdirSync(destinationParent).sort(), existingWorkers);
     rmSync(path.join(sourceDirectory, '..\\escaped.ts'));
+    // Only a case-sensitive filesystem (Linux, not default macOS) can hold both names.
     put('Case/one.ts', 'one\n');
-    put('case/two.ts', 'two\n');
-    await assert.rejects(prepareStudioTestSnapshot({ sourceDirectory, destinationParent }), /case-colliding/);
-    assert.deepEqual(readdirSync(destinationParent).sort(), existingWorkers);
+    if (!existsSync(path.join(sourceDirectory, 'case', 'one.ts'))) {
+      put('case/two.ts', 'two\n');
+      await assert.rejects(prepareStudioTestSnapshot({ sourceDirectory, destinationParent }), /case-colliding/);
+      assert.deepEqual(readdirSync(destinationParent).sort(), existingWorkers);
+      rmSync(path.join(sourceDirectory, 'case'), { recursive: true });
+    }
     rmSync(path.join(sourceDirectory, 'Case'), { recursive: true });
-    rmSync(path.join(sourceDirectory, 'case'), { recursive: true });
   }
 
   // Linked worktrees use a .git file instead of a directory; no history is copied.

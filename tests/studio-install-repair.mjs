@@ -2,12 +2,16 @@
 // Offline only: no native commands, downloads, installer dispatch or timers.
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
-import { mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync, appendFileSync, statSync, existsSync, symlinkSync, utimesSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync, appendFileSync, statSync, existsSync, symlinkSync, utimesSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { repairStudioInstallation, readFreshInstallerEvidence, parseStudioRepairArguments, finalizeStudioRepair, parseCompletedInstallerLog, updateStudioInstallation } from '../scripts/studio-install-repair.mjs';
 import { studioSignInSessions, waitForStudioSignIn } from '../scripts/studio-sign-in.mjs';
 import { createStudioTestSafety, STUDIO_TEST_LAUNCH_COST_LIMIT } from '../scripts/studio-test-safety.mjs';
+
+// macOS reports tmpdir() behind the /var -> /private/var symlink; repair
+// finalization rightly rejects redirected paths, so fixtures use the real path.
+const temporaryRoot = realpathSync(tmpdir());
 
 const identity = {
   sid: 'S-1-5-21-1-2-3-1001', profileDirectory: 'C:\\Users\\StudioTests',
@@ -88,7 +92,7 @@ assert.throws(() => parseStudioRepairArguments(['--if-outdated', 'x']), /accepts
   // Pre-run update supervisor: current installs are untouched; outdated ones are
   // updated once inside the active run, with the installer admitted as one
   // launch in a worker job that is always drained afterwards.
-  const root = mkdtempSync(path.join(tmpdir(), 'rsmcp-update-'));
+  const root = mkdtempSync(path.join(temporaryRoot, 'rsmcp-update-'));
   try {
     const localAppData = path.join(root, 'Local');
     let installedVersion = 'version-1111111111111111';
@@ -207,7 +211,7 @@ assert.throws(() => parseStudioRepairArguments(['--if-outdated', 'x']), /accepts
 }
 {
   // Sign-in settling reads only event names and times from new Studio session logs.
-  const root = mkdtempSync(path.join(tmpdir(), 'rsmcp-sign-in-'));
+  const root = mkdtempSync(path.join(temporaryRoot, 'rsmcp-sign-in-'));
   try {
     const base = Date.now();
     const since = base - 1000;
@@ -427,7 +431,7 @@ assert.throws(() => parseCompletedInstallerLog(completedLog, finalizeStart + 3_6
   assert.equal(test.calls.starts, 0);
 }
 
-const directory = mkdtempSync(path.join(tmpdir(), 'studio-install-repair-'));
+const directory = mkdtempSync(path.join(temporaryRoot, 'studio-install-repair-'));
 try {
   const logs = path.join(directory, 'logs');
   mkdirSync(logs);
