@@ -298,8 +298,11 @@ export function isValidOperationId(value: unknown): value is string {
  *     simulator reads (/api/get-network-simulation-state,
  *     /api/get-device-simulator-state). Older plugins only offer them as
  *     generated Luau, which an Inspector primary's /proxy forbids.
+ *   atomic_properties: this primary's plugins honour `atomic` and `dryRun` on
+ *     /api/set-properties. An older plugin ignores both and writes each
+ *     property separately, even for a preview.
  */
-export const PRIMARY_PROXY_FEATURES = ['submit', 'identity', 'status_wait', 'script_preconditions', 'simulation_reads'] as const;
+export const PRIMARY_PROXY_FEATURES = ['submit', 'identity', 'status_wait', 'script_preconditions', 'simulation_reads', 'atomic_properties'] as const;
 export type PrimaryProxyFeature = typeof PRIMARY_PROXY_FEATURES[number];
 
 const REVISION_CHECKED_SCRIPT_ENDPOINTS = new Set([
@@ -319,6 +322,15 @@ export function requiresScriptPreconditions(endpoint: string, data: unknown): bo
     return 'expectedRevisions' in data && !('dryRun' in data && data.dryRun === true);
   }
   return REVISION_CHECKED_SCRIPT_ENDPOINTS.has(endpoint) && 'expectedRevision' in data;
+}
+
+/**
+ * True for a set_properties request that asks for atomic mode or a preview,
+ * which only an atomic_properties primary's plugin honours.
+ */
+export function requiresAtomicProperties(endpoint: string, data: unknown): boolean {
+  if (endpoint !== '/api/set-properties' || !data || typeof data !== 'object') return false;
+  return ('atomic' in data && data.atomic === true) || ('dryRun' in data && data.dryRun === true);
 }
 
 interface OperationRecord {

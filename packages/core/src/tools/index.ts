@@ -2004,11 +2004,31 @@ export class RobloxStudioTools {
     };
   }
 
-  async setProperties(instancePath: string, properties: Record<string, unknown>, instance_id?: string, operation_id?: string) {
+  async setProperties(
+    instancePath: string,
+    properties: Record<string, unknown>,
+    instance_id?: string,
+    operation_id?: string,
+    options: { atomic?: unknown; dryRun?: unknown } = {},
+  ) {
     if (!instancePath || !properties) {
       throw new Error('instancePath and properties are required for set_properties');
     }
-    const response = await this._callSingle('/api/set-properties', { instancePath, properties }, undefined, instance_id, undefined, undefined, operation_id);
+    const { atomic, dryRun } = options;
+    if (atomic !== undefined && typeof atomic !== 'boolean') {
+      throw new Error('set_properties atomic must be a boolean');
+    }
+    if (dryRun !== undefined && typeof dryRun !== 'boolean') {
+      throw new Error('set_properties dryRun must be a boolean');
+    }
+    if (dryRun === true && atomic !== true) {
+      throw new Error('set_properties dryRun requires atomic: true');
+    }
+    // Omitted options keep the original payload, and with it the operation fingerprint.
+    const payload: Record<string, unknown> = { instancePath, properties };
+    if (atomic !== undefined) payload.atomic = atomic;
+    if (dryRun !== undefined) payload.dryRun = dryRun;
+    const response = await this._callSingle('/api/set-properties', payload, undefined, instance_id, undefined, undefined, operation_id);
     return { content: [{ type: 'text', text: JSON.stringify(response) }] };
   }
 

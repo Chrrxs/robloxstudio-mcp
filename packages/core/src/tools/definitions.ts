@@ -156,6 +156,14 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
           type: 'object',
           description: 'Property names mapped to new values.'
         },
+        atomic: {
+          type: 'boolean',
+          description: 'Validate all first; undo applied writes if one fails.'
+        },
+        dryRun: {
+          type: 'boolean',
+          description: 'With atomic, validate and preview only.'
+        },
         instance_id: {
           type: 'string',
           description: 'Studio process ID when ambiguous.'
@@ -326,7 +334,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
   {
     name: 'get_attributes',
     category: 'read',
-    description: 'Use to inspect every attribute on one instance; CFrame values list all 12 CFrame.new Components.',
+    description: 'Use to inspect every attribute on one instance.',
     inputSchema: {
       type: 'object',
       properties: {

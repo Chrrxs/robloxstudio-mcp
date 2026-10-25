@@ -21,9 +21,9 @@ Tool descriptions explain selection. Input schemas explain arguments. This guide
 ## Discovery and edit work
 
 - Use get_project_structure for a bounded hierarchy, search_objects for an instance query, and grep_scripts for source text.
-- Use get_instance_properties and get_attributes after locating an instance.
+- Use get_instance_properties and get_attributes after locating an instance. get_attributes reports a CFrame value with Position and Components, the 12 CFrame.new arguments including rotation.
 - Use execute_luau for custom traversal, bulk edits, and work that would otherwise need many tool calls. It runs through the Studio plugin context.
-- Use set_properties when several known properties on one instance can be updated in one request.
+- Use set_properties when several known properties on one instance can be updated in one request. Pass atomic=true when none should change unless all validate; a failed write restores the applied values. Add dryRun=true to preview the conversions.
 
 ## Selection and viewport
 

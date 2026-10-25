@@ -297,6 +297,33 @@ describe('script write preconditions through a proxy', () => {
   });
 
   test.each([
+    { atomic: true },
+    { atomic: true, dryRun: true },
+  ])('an older primary refuses set_properties %j, which its plugin would write non-atomically', async (options) => {
+    await withProxy({ olderPrimary: true }, async ({ proxyTools, proxyBodies }) => {
+      await expect(TOOL_HANDLERS.set_properties(proxyTools, {
+        instancePath: 'game.Workspace.Part', properties: { Name: 'X' }, ...options, instance_id: 'instance:proxy',
+      })).rejects.toMatchObject({
+        code: 'primary_unsupported',
+        message: expect.stringContaining('ignores atomic'),
+        details: { stage: 'queued', outcome: 'not_executed' },
+      });
+      expect(proxyBodies).toEqual([]);
+    });
+  });
+
+  test('a current primary receives atomic set_properties', async () => {
+    await withProxy({}, async ({ proxyTools }) => {
+      const result = parse(await TOOL_HANDLERS.set_properties(proxyTools, {
+        instancePath: 'game.Workspace.Part', properties: { Name: 'X' }, atomic: true, dryRun: true, instance_id: 'instance:proxy',
+      }));
+      expect(result).toMatchObject({ success: true, data: { atomic: true, dryRun: true } });
+    });
+  });
+
+  test.each([
+    ['set_properties', { instancePath: 'game.Workspace.Part', properties: { Name: 'X' } }],
+    ['set_properties', { instancePath: 'game.Workspace.Part', properties: { Name: 'X' }, atomic: false }],
     ['find_and_replace_in_scripts', { pattern: 'a', replacement: 'b' }],
     ['find_and_replace_in_scripts', { pattern: 'a', replacement: 'b', dryRun: true }],
     ['find_and_replace_in_scripts', { pattern: 'a', replacement: 'b', dryRun: true, expected_revisions: { [MAIN]: '9:1' } }],
