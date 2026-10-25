@@ -1,4 +1,4 @@
-import { BridgeService, isRequestStage, isValidOperationId, MultiplayerGroupInUseError, parseFailureDetails, parseObservations, PRIMARY_PROXY_FEATURES, RequestFailure, requiresScriptPreconditions, toPublicPeer } from './bridge-service.js';
+import { BridgeService, isRequestStage, isValidOperationId, MultiplayerGroupInUseError, parseFailureDetails, parseObservations, PRIMARY_PROXY_FEATURES, RequestFailure, requiresAtomicProperties, requiresScriptPreconditions, toPublicPeer } from './bridge-service.js';
 import type {
   MultiplayerGroup,
   PublicStudioPeer,
@@ -419,6 +419,12 @@ export class ProxyBridgeService extends BridgeService {
       const argument = endpoint === '/api/find-and-replace-in-scripts' ? 'expected_revisions' : 'expected_revision';
       throw new RequestFailure(
         `${this.primaryDescription()} serves a Studio plugin that ignores ${argument} and would write unchecked; restart that server on this version, or call without ${argument}; queued; not_executed`,
+        'primary_unsupported', details,
+      );
+    }
+    if (requiresAtomicProperties(endpoint, data) && !this.primaryFeatures.has('atomic_properties')) {
+      throw new RequestFailure(
+        `${this.primaryDescription()} serves a Studio plugin that ignores atomic and dryRun and would write each property separately; restart that server on this version, or call without atomic; queued; not_executed`,
         'primary_unsupported', details,
       );
     }

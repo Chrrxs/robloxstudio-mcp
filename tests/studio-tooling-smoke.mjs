@@ -316,6 +316,59 @@ return true
     });
     assert(setProp.summary?.failed === 0, 'set_properties updates smoke part');
 
+    const readPart = async () => {
+      const read = await client.callTool('execute_luau', {
+        target: 'edit',
+        instance_id: instanceId,
+        code: 'local p = workspace.__RSMCP_ToolingSmoke.SmokePart return string.format("%s|%.2f", tostring(p.Anchored), p.Transparency)',
+      });
+      return String(read.returnValue);
+    };
+    const atomicPreview = await client.callTool('set_properties', {
+      instancePath: partPath,
+      properties: { Transparency: 0.5, Anchored: 'false' },
+      atomic: true,
+      dryRun: true,
+      instance_id: instanceId,
+    });
+    assert(atomicPreview.success === true && atomicPreview.phase === 'validation' && atomicPreview.changed?.length === 0
+      && atomicPreview.results?.find((result) => result.property === 'Anchored')?.value === false,
+    `set_properties atomic dryRun previews conversions (${JSON.stringify(atomicPreview)})`);
+    assert(await readPart() === 'true|0.25', 'set_properties atomic dryRun writes nothing');
+
+    const atomicInvalid = await client.callToolError('set_properties', {
+      instancePath: partPath,
+      properties: { Transparency: 0.75, Material: 'NotAMaterial' },
+      atomic: true,
+      instance_id: instanceId,
+    });
+    assert(atomicInvalid.phase === 'validation'
+      && atomicInvalid.results?.find((result) => result.property === 'Material')?.code === 'type_mismatch',
+    `set_properties atomic reports the invalid field (${JSON.stringify(atomicInvalid)})`);
+    assert(await readPart() === 'true|0.25', 'set_properties atomic validation failure applies nothing');
+
+    // ClassName is readable but read-only, so its write fails after Anchored was applied.
+    const atomicRollback = await client.callToolError('set_properties', {
+      instancePath: partPath,
+      properties: { Anchored: false, ClassName: 'Part' },
+      atomic: true,
+      instance_id: instanceId,
+    });
+    assert(atomicRollback.phase === 'apply' && atomicRollback.failedProperty === 'ClassName'
+      && atomicRollback.rolledBack === true && atomicRollback.restored?.includes('Anchored'),
+    `set_properties atomic restores applied writes after a failed write (${JSON.stringify(atomicRollback)})`);
+    assert(await readPart() === 'true|0.25', 'set_properties atomic rollback restores Anchored');
+
+    const atomicApplied = await client.callTool('set_properties', {
+      instancePath: partPath,
+      properties: { Transparency: 0.5 },
+      atomic: true,
+      instance_id: instanceId,
+    });
+    assert(atomicApplied.success === true && atomicApplied.phase === 'apply' && atomicApplied.changed?.length === 1,
+      `set_properties atomic applies a valid request (${JSON.stringify(atomicApplied)})`);
+    assert(await readPart() === 'true|0.50', 'set_properties atomic writes the value');
+
     const props = await client.callTool('get_instance_properties', {
       instancePath: partPath,
       instance_id: instanceId,
