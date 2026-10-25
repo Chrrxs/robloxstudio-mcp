@@ -1,6 +1,6 @@
 import { readRbxmInput } from '../rbxm-input.js';
 import { StudioHttpClient } from './studio-client.js';
-import { BridgeService, isValidOperationId, MAX_OPERATION_ID_LENGTH, MAX_OPERATION_WAIT_MS, RoutingFailure } from '../bridge-service.js';
+import { BridgeService, isValidOperationId, MAX_OPERATION_ID_LENGTH, MAX_OPERATION_WAIT_MS, RequestFailure, RoutingFailure } from '../bridge-service.js';
 import type { PublicStudioPeer, RequestStatus, StudioPeer } from '../bridge-service.js';
 import {
   openCloudAssetUploadLimitBytes,
@@ -329,6 +329,22 @@ function sleep(ms: number): Promise<void> {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+const MAX_PEER_ERROR_MESSAGE_LENGTH = 500;
+
+function boundedMessage(message: string): string {
+  return message.slice(0, MAX_PEER_ERROR_MESSAGE_LENGTH);
+}
+
+// A fanned-out Peer request that rejected, as a code callers can branch on
+// (request_timeout, peer_unregistered, forbidden_endpoint, ...) plus its reason.
+function peerRequestFailure(reason: unknown): { error: string; message: string } {
+  if (reason instanceof RequestFailure) return { error: reason.code, message: boundedMessage(reason.message) };
+  if (reason instanceof RoutingFailure) {
+    return { error: reason.routingError.code, message: boundedMessage(reason.routingError.message) };
+  }
+  return { error: 'request_failed', message: boundedMessage(errorMessage(reason)) };
 }
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {
@@ -5241,39 +5257,7 @@ export class RobloxStudioTools {
   async getMemoryBreakdown(target?: string, tags?: string[], instance_id?: string) {
     const data: Record<string, unknown> = {};
     if (tags !== undefined) data.tags = tags;
-
-    const refresh = this.bridge.refreshTopologyForRouting();
-    if (refresh) await refresh;
-    const tgt = this._targetForInstanceId(instance_id, { requested: target, fallback: 'all', accepts: anyRole });
-    const resolved = this.bridge.resolveTarget({ instance_id, target: tgt });
-    if (!resolved.ok) throw new RoutingFailure(resolved.error);
-
-    if (resolved.mode === 'single') {
-      const response = await this._requestPeer('/api/get-memory-breakdown', data, resolved.targetPeerId);
-      return { content: [{ type: 'text', text: JSON.stringify(response) }] };
-    }
-
-    const targets = resolved.targets;
-
-    const responses = await Promise.allSettled(
-      targets.map(async (t) => ({
-        peer: t.targetRole,
-        result: await this._requestPeer('/api/get-memory-breakdown', data, t.targetPeerId),
-      })),
-    );
-
-    const body: Record<string, unknown> = {};
-    for (let i = 0; i < responses.length; i++) {
-      const r = responses[i];
-      const peer = targets[i].targetRole;
-      if (r.status === 'fulfilled') {
-        body[peer] = r.value.result;
-      } else {
-        body[peer] = { error: 'disconnected' };
-      }
-    }
-
-    return { content: [{ type: 'text', text: JSON.stringify(body) }] };
+    return this._readPeerOrFanOut('/api/get-memory-breakdown', data, target, instance_id);
   }
 
   async getSceneAnalysis(mode?: string, target?: string, topN?: number, raw?: boolean, instance_id?: string) {
@@ -5281,7 +5265,13 @@ export class RobloxStudioTools {
     if (mode !== undefined) data.mode = mode;
     if (topN !== undefined) data.topN = topN;
     if (raw !== undefined) data.raw = raw;
+    return this._readPeerOrFanOut('/api/get-scene-analysis', data, target, instance_id);
+  }
 
+  // One Peer returns its response as is. A fanout keys each Peer's response by
+  // role and classifies it here, from the request outcome and the response
+  // envelope only: data nested inside a successful response is never inspected.
+  private async _readPeerOrFanOut(endpoint: string, data: Record<string, unknown>, target: string | undefined, instance_id: string | undefined) {
     const refresh = this.bridge.refreshTopologyForRouting();
     if (refresh) await refresh;
     const tgt = this._targetForInstanceId(instance_id, { requested: target, fallback: 'all', accepts: anyRole });
@@ -5289,31 +5279,37 @@ export class RobloxStudioTools {
     if (!resolved.ok) throw new RoutingFailure(resolved.error);
 
     if (resolved.mode === 'single') {
-      const response = await this._requestPeer('/api/get-scene-analysis', data, resolved.targetPeerId);
-      return { content: [{ type: 'text', text: JSON.stringify(response) }] };
+      return this._textResult(await this._requestPeer(endpoint, data, resolved.targetPeerId));
     }
 
-    const targets = resolved.targets;
-
+    const { targets } = resolved;
     const responses = await Promise.allSettled(
-      targets.map(async (t) => ({
-        peer: t.targetRole,
-        result: await this._requestPeer('/api/get-scene-analysis', data, t.targetPeerId),
-      })),
+      targets.map((peer) => this._requestPeer(endpoint, data, peer.targetPeerId)),
     );
-
-    const body: Record<string, unknown> = {};
-    for (let i = 0; i < responses.length; i++) {
-      const r = responses[i];
-      const peer = targets[i].targetRole;
-      if (r.status === 'fulfilled') {
-        body[peer] = r.value.result;
+    const peers: Record<string, unknown> = {};
+    const failures: string[] = [];
+    responses.forEach((response, index) => {
+      const role = targets[index].targetRole;
+      if (response.status === 'rejected') {
+        const failure = peerRequestFailure(response.reason);
+        peers[role] = failure;
+        failures.push(`${role}: ${failure.error}`);
       } else {
-        body[peer] = { error: 'disconnected' };
+        peers[role] = response.value;
+        const handlerError = asRecord(response.value)?.error;
+        if (typeof handlerError === 'string') failures.push(`${role}: ${boundedMessage(handlerError)}`);
       }
+    });
+    const summary = { requested: targets.length, succeeded: targets.length - failures.length, failed: failures.length };
+    if (summary.succeeded === 0) {
+      return this._textResult({
+        error: 'all_peers_failed',
+        message: boundedMessage(`Every Peer failed: ${failures.join('; ')}`),
+        summary,
+        ...peers,
+      });
     }
-
-    return { content: [{ type: 'text', text: JSON.stringify(body) }] };
+    return this._textResult({ ...(summary.failed > 0 ? { partial: true } : {}), summary, ...peers });
   }
 
   async exportRbxm(instancePaths: string[], outputPath: string, target?: string, instance_id?: string) {

@@ -3366,6 +3366,7 @@ describe('Smoke', () => {
     const result = await resultPromise;
     const body = JSON.parse(result.content[0].text);
     expect(body).toEqual({
+      summary: { requested: 2, succeeded: 2, failed: 0 },
       edit: { mode: 'script_memory', peer: 'edit' },
       server: { mode: 'script_memory', peer: 'server' },
     });
