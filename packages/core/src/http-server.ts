@@ -87,6 +87,8 @@ const TOOL_PROXY_ENDPOINTS: Record<string, readonly string[]> = {
   export_rbxm: ['/api/export-rbxm'],
   import_rbxm: ['/api/import-rbxm'],
   find_and_replace_in_scripts: ['/api/find-and-replace-in-scripts'],
+  get_simulation_state: ['/api/get-network-simulation-state', '/api/get-device-simulator-state'],
+  get_device_simulator_state: ['/api/get-device-simulator-state'],
   manage_monetization: ['/api/place-info'],
   manage_experience: ['/api/place-info'],
 };
@@ -234,7 +236,10 @@ export const TOOL_HANDLERS: Record<string, ToolHandler> = {
   }, body.instance_id),
   get_instance_properties: (tools, body) => tools.getInstanceProperties(body.instancePath, body.excludeSource, body.instance_id),
   get_project_structure: (tools, body) => tools.getProjectStructure(body.path, body.maxDepth, body.scriptsOnly, body.instance_id),
-  set_properties: (tools, body) => tools.setProperties(body.instancePath, body.properties, body.instance_id, body.operation_id),
+  set_properties: (tools, body) => tools.setProperties(body.instancePath, body.properties, body.instance_id, body.operation_id, {
+    atomic: body.atomic,
+    dryRun: body.dryRun,
+  }),
   grep_scripts: (tools, body, context) => tools.grepScripts(body.pattern, {
     caseSensitive: body.caseSensitive,
     usePattern: body.usePattern,

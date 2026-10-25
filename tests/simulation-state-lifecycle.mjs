@@ -87,6 +87,15 @@ await runTest('simulation state tools reset network and device simulator determi
     let state = await client.callTool('get_simulation_state', { target: 'edit', include: 'both', instance_id: instanceId });
     assertNetworkValues(state.roles.edit, Object.fromEntries(NETWORK_KEYS.map((key) => [key, 0])), 'edit baseline');
     assertDeviceDefault(state.roles.edit, 'edit baseline');
+    assert(!state.roles.edit.errors, `edit baseline reads without errors (got ${JSON.stringify(state.roles.edit.errors)})`);
+
+    const deviceList = await client.callTool('get_device_simulator_state', { target: 'edit', instance_id: instanceId });
+    assert(Array.isArray(deviceList.devices) && deviceList.devices.length > 0, 'get_device_simulator_state lists built-in devices');
+    assert(deviceList.devices.every((device) => device.IsCustom !== true), 'get_device_simulator_state lists only built-in devices');
+    const unknownDevice = await client.callToolError('get_device_simulator_state', {
+      target: 'edit', deviceId: 'mcp_not_a_device', instance_id: instanceId,
+    });
+    assert(JSON.stringify(unknownDevice).includes('invalid_device_id'), `unknown deviceId reports invalid_device_id (got ${JSON.stringify(unknownDevice)})`);
 
     const matrix = await client.callTool('capture_device_matrix', {
       target: 'edit',

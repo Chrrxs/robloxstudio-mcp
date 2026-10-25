@@ -107,6 +107,14 @@ export interface AssetUploadRequest {
   };
 }
 
+/** Lets a caller tell an upload that never left from one Roblox accepted. */
+export interface AssetUploadProgress {
+  /** Called just before the create request is sent. */
+  onSending?: () => void;
+  /** Called when Open Cloud accepts the create request as a long-running operation. */
+  onAccepted?: (operationPath: string) => void;
+}
+
 export interface AssetOperationResponse {
   path: string;
   done: boolean;
@@ -486,6 +494,8 @@ export class OpenCloudOperationError extends Error {
     readonly providerMessage: string,
     readonly operationPath: string,
     readonly providerCode?: number,
+    /** The operation reported no error, only no asset ID; the asset may exist. */
+    readonly completedWithoutAsset = false,
   ) {
     super(`Asset upload failed: ${providerMessage} (operation ${operationPath})`);
     this.name = 'OpenCloudOperationError';
@@ -515,7 +525,7 @@ function finishedAssetOperation(
   if (operation.done !== true) return undefined;
   const assetId: unknown = readField(operation.response, 'assetId');
   if ((typeof assetId !== 'string' || !assetId) && typeof assetId !== 'number') {
-    throw new OpenCloudOperationError('Open Cloud operation completed without an asset ID.', operationPath);
+    throw new OpenCloudOperationError('Open Cloud operation completed without an asset ID.', operationPath, undefined, true);
   }
   return operation;
 }
@@ -943,7 +953,8 @@ export class OpenCloudClient {
   async createAsset(
     uploadRequest: AssetUploadRequest,
     fileContent: Buffer,
-    fileName: string
+    fileName: string,
+    progress: AssetUploadProgress = {},
   ): Promise<AssetOperationResponse> {
     const formData = new FormData();
     formData.append('request', JSON.stringify(uploadRequest));
@@ -954,6 +965,7 @@ export class OpenCloudClient {
     );
 
     // The create request is never retried; only the status poll repeats.
+    progress.onSending?.();
     const operation = await this.requestMultipart<AssetOperationResponse>(
       '/assets/v1/assets',
       formData
@@ -964,6 +976,12 @@ export class OpenCloudClient {
     if (!operationPath) {
       throw new Error('Asset upload response did not include an operation path.');
     }
+    progress.onAccepted?.(operationPath);
+    return this.pollOperation(operationPath);
+  }
+
+  /** Continues polling an asset operation Open Cloud already accepted. */
+  resumeAssetOperation(operationPath: string): Promise<AssetOperationResponse> {
     return this.pollOperation(operationPath);
   }
 

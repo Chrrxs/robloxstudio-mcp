@@ -2474,6 +2474,7 @@ describe('Smoke', () => {
         }),
         expect.any(Buffer),
         'generate-model-reference.png',
+        { onSending: expect.any(Function), onAccepted: expect.any(Function) },
       );
       expect(tools.resolveImageId).not.toHaveBeenCalled();
     } finally {
@@ -2506,6 +2507,8 @@ describe('Smoke', () => {
       description: 'Studio Assistant Source Image',
       userId: process.env.ROBLOX_CREATOR_USER_ID,
       groupId: process.env.ROBLOX_CREATOR_GROUP_ID,
+      onSending: expect.any(Function),
+      onAccepted: expect.any(Function),
     });
   });
 
@@ -3366,6 +3369,7 @@ describe('Smoke', () => {
     const result = await resultPromise;
     const body = JSON.parse(result.content[0].text);
     expect(body).toEqual({
+      summary: { requested: 2, succeeded: 2, failed: 0 },
       edit: { mode: 'script_memory', peer: 'edit' },
       server: { mode: 'script_memory', peer: 'server' },
     });
@@ -3605,36 +3609,20 @@ describe('Smoke', () => {
     const clientNetworkPending = claimQueuedRequest(bridge, 'server-1');
     const serverPending = claimQueuedRequest(bridge, 'server-1');
     expect(serverPending).toBeNull();
-    expect(editNetworkPending?.request).toMatchObject({ endpoint: '/api/execute-luau' });
-    expect(clientNetworkPending?.request).toMatchObject({ endpoint: '/api/execute-luau' });
-    expect(editNetworkPending?.request.data.code).toContain('NetworkSettings');
-    expect(clientNetworkPending?.request.data.code).toContain('NetworkSettings');
+    expect(editNetworkPending?.request).toMatchObject({ endpoint: '/api/get-network-simulation-state', data: {} });
+    expect(clientNetworkPending?.request).toMatchObject({ endpoint: '/api/get-network-simulation-state', data: {} });
 
-    bridge.resolveRequest(editNetworkPending!.requestId, {
-      success: true,
-      returnValue: JSON.stringify({ success: true, state: ZERO_NETWORK_STATE }),
-    });
-    bridge.resolveRequest(clientNetworkPending!.requestId, {
-      success: true,
-      returnValue: JSON.stringify({ success: true, state: DIRTY_NETWORK_STATE }),
-    });
+    bridge.resolveRequest(editNetworkPending!.requestId, { success: true, state: ZERO_NETWORK_STATE });
+    bridge.resolveRequest(clientNetworkPending!.requestId, { success: true, state: DIRTY_NETWORK_STATE });
 
     await new Promise((resolve) => setTimeout(resolve, 0));
     const editDevicePending = claimQueuedRequest(bridge, 'session-1');
     const clientDevicePending = claimQueuedRequest(bridge, 'server-1');
-    expect(editDevicePending?.request).toMatchObject({ endpoint: '/api/execute-luau' });
-    expect(clientDevicePending?.request).toMatchObject({ endpoint: '/api/execute-luau' });
-    expect(editDevicePending?.request.data.code).toContain('StudioDeviceSimulatorService');
-    expect(clientDevicePending?.request.data.code).toContain('StudioDeviceSimulatorService');
+    expect(editDevicePending?.request).toMatchObject({ endpoint: '/api/get-device-simulator-state', data: { includeDeviceList: false } });
+    expect(clientDevicePending?.request).toMatchObject({ endpoint: '/api/get-device-simulator-state', data: { includeDeviceList: false } });
 
-    bridge.resolveRequest(editDevicePending!.requestId, {
-      success: true,
-      returnValue: JSON.stringify({ activeDeviceId: 'default', isSimulating: false }),
-    });
-    bridge.resolveRequest(clientDevicePending!.requestId, {
-      success: true,
-      returnValue: JSON.stringify({ activeDeviceId: 'iphone_XR', isSimulating: true, orientation: 'LandscapeRight' }),
-    });
+    bridge.resolveRequest(editDevicePending!.requestId, { activeDeviceId: 'default', isSimulating: false });
+    bridge.resolveRequest(clientDevicePending!.requestId, { activeDeviceId: 'iphone_XR', isSimulating: true, orientation: 'LandscapeRight' });
 
     const result = await resultPromise;
     const body = JSON.parse(result.content[0].text);
@@ -3667,13 +3655,8 @@ describe('Smoke', () => {
 
     const networkOnlyPromise = tools.getSimulationState('network', 'edit', 'instance:test');
     const networkPending = claimQueuedRequest(bridge, 'session-1');
-    expect(networkPending?.request).toMatchObject({ endpoint: '/api/execute-luau' });
-    expect(networkPending?.request.data.code).toContain('NetworkSettings');
-    expect(networkPending?.request.data.code).not.toContain('StudioDeviceSimulatorService');
-    bridge.resolveRequest(networkPending!.requestId, {
-      success: true,
-      returnValue: JSON.stringify({ success: true, state: ZERO_NETWORK_STATE }),
-    });
+    expect(networkPending?.request).toMatchObject({ endpoint: '/api/get-network-simulation-state' });
+    bridge.resolveRequest(networkPending!.requestId, { success: true, state: ZERO_NETWORK_STATE });
 
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(claimQueuedRequest(bridge, 'session-1')).toBeNull();
@@ -3686,13 +3669,8 @@ describe('Smoke', () => {
 
     const deviceOnlyPromise = tools.getSimulationState('deviceSimulator', 'edit', 'instance:test');
     const devicePending = claimQueuedRequest(bridge, 'session-1');
-    expect(devicePending?.request).toMatchObject({ endpoint: '/api/execute-luau' });
-    expect(devicePending?.request.data.code).toContain('StudioDeviceSimulatorService');
-    expect(devicePending?.request.data.code).not.toContain('NetworkSettings');
-    bridge.resolveRequest(devicePending!.requestId, {
-      success: true,
-      returnValue: JSON.stringify({ activeDeviceId: 'default', isSimulating: false }),
-    });
+    expect(devicePending?.request).toMatchObject({ endpoint: '/api/get-device-simulator-state' });
+    bridge.resolveRequest(devicePending!.requestId, { activeDeviceId: 'default', isSimulating: false });
 
     const deviceOnly = JSON.parse((await deviceOnlyPromise).content[0].text);
     expect(deviceOnly).toMatchObject({
@@ -3845,18 +3823,15 @@ describe('Smoke', () => {
 
     const resultPromise = tools.getDeviceSimulatorState(undefined, undefined, undefined, 'instance:test');
     const pending = claimQueuedRequest(bridge, 'session-1');
-    expect(pending?.request).toMatchObject({ endpoint: '/api/execute-luau' });
-    expect(pending?.request.data.code).toContain('StudioDeviceSimulatorService');
-    expect(pending?.request.data.code).toContain('GetDeviceAsync');
-    expect(pending?.request.data.code).toContain('GetDeviceListAsync');
+    expect(pending?.request).toEqual(expect.objectContaining({
+      endpoint: '/api/get-device-simulator-state',
+      data: { includeDeviceList: true },
+    }));
 
     bridge.resolveRequest(pending!.requestId, {
-      success: true,
-      returnValue: JSON.stringify({
-        activeDeviceId: 'default',
-        isSimulating: false,
-        devices: [{ DeviceId: 'iphone_XR' }],
-      }),
+      activeDeviceId: 'default',
+      isSimulating: false,
+      devices: [{ DeviceId: 'iphone_XR' }],
     });
 
     const result = await resultPromise;
@@ -4015,15 +3990,12 @@ describe('Smoke', () => {
     );
 
     const snapshotPending = claimQueuedRequest(bridge, 'session-1');
-    expect(snapshotPending?.request).toMatchObject({ endpoint: '/api/execute-luau' });
+    expect(snapshotPending?.request).toMatchObject({ endpoint: '/api/get-device-simulator-state', data: { includeDeviceList: true } });
     bridge.resolveRequest(snapshotPending!.requestId, {
-      success: true,
-      returnValue: JSON.stringify({
         activeDeviceId: 'custom_phone',
         isSimulating: true,
         devices: [{ DeviceId: 'iphone_XR', IsCustom: false }],
-      }),
-    });
+      });
 
     await expect(resultPromise).rejects.toThrow(/cannot safely restore active custom device "custom_phone"/);
     expect(claimQueuedRequest(bridge, 'session-1')).toBeNull();
@@ -4050,10 +4022,7 @@ describe('Smoke', () => {
       );
 
       const snapshotPending = claimQueuedRequest(bridge, 'session-1');
-      bridge.resolveRequest(snapshotPending!.requestId, {
-        success: true,
-        returnValue: JSON.stringify({ activeDeviceId: 'default', isSimulating: false, devices: [] }),
-      });
+      bridge.resolveRequest(snapshotPending!.requestId, { activeDeviceId: 'default', isSimulating: false, devices: [] });
 
       await new Promise((resolve) => setTimeout(resolve, 0));
       const setPending = claimQueuedRequest(bridge, 'session-1');
@@ -4116,10 +4085,7 @@ describe('Smoke', () => {
     );
 
     const snapshotPending = claimQueuedRequest(bridge, 'session-1');
-    bridge.resolveRequest(snapshotPending!.requestId, {
-      success: true,
-      returnValue: JSON.stringify({ activeDeviceId: 'default', isSimulating: false, devices: [] }),
-    });
+    bridge.resolveRequest(snapshotPending!.requestId, { activeDeviceId: 'default', isSimulating: false, devices: [] });
 
     await new Promise((resolve) => setTimeout(resolve, 0));
     const setPending = claimQueuedRequest(bridge, 'session-1');
@@ -4166,11 +4132,8 @@ describe('Smoke', () => {
     );
 
     const snapshotPending = claimQueuedRequest(bridge, 'session-1');
-    expect(snapshotPending?.request).toMatchObject({ endpoint: '/api/execute-luau' });
-    bridge.resolveRequest(snapshotPending!.requestId, {
-      success: true,
-      returnValue: JSON.stringify({ activeDeviceId: 'default', isSimulating: false }),
-    });
+    expect(snapshotPending?.request).toMatchObject({ endpoint: '/api/get-device-simulator-state', data: { includeDeviceList: true } });
+    bridge.resolveRequest(snapshotPending!.requestId, { activeDeviceId: 'default', isSimulating: false });
 
     await new Promise((resolve) => setTimeout(resolve, 0));
     const setPending = claimQueuedRequest(bridge, 'session-1');
@@ -4407,10 +4370,7 @@ describe('Smoke', () => {
     );
 
     const snapshotPending = claimQueuedRequest(bridge, 'session-1');
-    bridge.resolveRequest(snapshotPending!.requestId, {
-      success: true,
-      returnValue: JSON.stringify({ activeDeviceId: 'default', isSimulating: false }),
-    });
+    bridge.resolveRequest(snapshotPending!.requestId, { activeDeviceId: 'default', isSimulating: false });
 
     for (const label of ['a', 'b']) {
       await new Promise((resolve) => setTimeout(resolve, 0));

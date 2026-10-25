@@ -1,10 +1,11 @@
 import { readRbxmInput } from '../rbxm-input.js';
 import { StudioHttpClient } from './studio-client.js';
-import { BridgeService, isValidOperationId, MAX_OPERATION_ID_LENGTH, MAX_OPERATION_WAIT_MS, RoutingFailure } from '../bridge-service.js';
+import { BridgeService, isValidOperationId, MAX_OPERATION_ID_LENGTH, MAX_OPERATION_WAIT_MS, RequestFailure, RoutingFailure, StudioOperationError } from '../bridge-service.js';
 import type { PublicStudioPeer, RequestStatus, StudioPeer } from '../bridge-service.js';
 import {
   openCloudAssetUploadLimitBytes,
   OpenCloudClient,
+  type AssetOperationResponse,
   type AssetSearchParams,
   type CreatorStoreSearchCategory,
 } from '../opencloud-client.js';
@@ -61,7 +62,9 @@ import {
   windowFromRecording,
   writeWindowSidecar,
 } from '../micro-profiler/capture.js';
-import { createHash } from 'crypto';
+import { createHash, randomUUID } from 'crypto';
+import { ReferenceUploads } from './reference-uploads.js';
+import type { ReferenceUploadAttempt, ReferenceUploadCheckpoint, ReferenceUploadProgress, ReferenceUploadView } from './reference-uploads.js';
 import * as fs from 'fs';
 import * as path from 'path';
 
@@ -329,6 +332,67 @@ function sleep(ms: number): Promise<void> {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+const MAX_FAILURE_MESSAGE_LENGTH = 500;
+
+function boundedMessage(message: string): string {
+  return message.slice(0, MAX_FAILURE_MESSAGE_LENGTH);
+}
+
+// A failure's code, so callers can tell permission (forbidden_endpoint),
+// version (primary_unsupported), service (service_unavailable), routing, and
+// transport (request_timeout, peer_unregistered, ...) failures apart.
+function failureCode(error: unknown, fallback: string): string {
+  if (error instanceof RequestFailure || error instanceof StudioOperationError) return error.code;
+  if (error instanceof RoutingFailure) return error.routingError.code;
+  return fallback;
+}
+
+function codedError(error: unknown): { code: string; message: string } {
+  return { code: failureCode(error, 'studio_error'), message: boundedMessage(errorMessage(error)) };
+}
+
+// A fanned-out Peer request that rejected, shaped like a Studio handler failure.
+function peerRequestFailure(reason: unknown): { error: string; message: string } {
+  return { error: failureCode(reason, 'request_failed'), message: boundedMessage(errorMessage(reason)) };
+}
+
+function unretainedStatus(requestId: string): Record<string, unknown> {
+  return {
+    requestId,
+    state: 'unknown',
+    outcome: 'unknown',
+    message: 'No retained operation record. It may have expired, been evicted, or belonged to an earlier server session. Do not infer that the mutation was not executed.',
+  };
+}
+
+// For an upload no retry can join, its progress has no one to inform.
+const UNTRACKED_UPLOAD: ReferenceUploadProgress = {
+  sending: () => undefined,
+  accepted: () => undefined,
+  created: () => undefined,
+};
+
+// Bridge refusals at admission: no operation record was created, so nothing
+// under that ID can run. Any other failure may follow an admitted operation.
+const NOT_ADMITTED_FAILURE_CODES = new Set([
+  'invalid_operation_id', 'request_serialization_failed', 'request_too_large',
+  'request_capacity_exceeded', 'primary_unsupported', 'forbidden_endpoint',
+]);
+
+function generationNotAdmitted(error: unknown): boolean {
+  if (error instanceof RoutingFailure) return true;
+  return error instanceof RequestFailure && NOT_ADMITTED_FAILURE_CODES.has(error.code)
+    && error.details.stage === 'queued' && error.details.outcome === 'not_executed';
+}
+
+// pending: Studio may still be generating. A wait that ended without a result
+// is failed when nothing ran, otherwise unknown: a late result can still settle it.
+function generationPhase(status: RequestStatus): 'generating' | 'completed' | 'failed' | 'unknown' {
+  if (status.state === 'pending') return 'generating';
+  if (status.state === 'settled') return status.outcome === 'success' ? 'completed' : 'failed';
+  return status.outcome === 'not_executed' || status.executionOutcome === 'not_executed' ? 'failed' : 'unknown';
 }
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {
@@ -1146,6 +1210,8 @@ export class RobloxStudioTools {
   private hostWindowCapture: HostWindowCaptureFn = captureStudioWindow;
   private hostViewportRects = new Map<string, HostViewportRectCacheEntry>();
   private viewportCaptureQueues = new Map<string, Promise<void>>();
+  // generate_model reference images, shared by retries under one operation ID.
+  private readonly referenceUploads = new ReferenceUploads();
 
   constructor(bridge: BridgeService) {
     this.client = new StudioHttpClient(bridge);
@@ -1607,11 +1673,33 @@ export class RobloxStudioTools {
     }
   }
 
+  // A primary of this version serves simulation reads natively; an older one
+  // only through generated Luau, which a restricted /proxy refuses.
+  private _supportsSimulationReads(): boolean {
+    return this.bridge.supportsPrimaryFeature('simulation_reads');
+  }
+
+  private _parseSimulationReadResponse(response: unknown, label: string): unknown {
+    const record = asRecord(response);
+    if (!record) throw new StudioOperationError(`${label} returned an invalid response`, 'invalid_response');
+    const { success, error, message, ...details } = record;
+    if (success === false) {
+      const code = typeof error === 'string' && error !== '' ? error : 'read_failed';
+      throw new StudioOperationError(typeof message === 'string' && message !== '' ? message : `${label} failed: ${code}`, code, details);
+    }
+    if (typeof error === 'string') throw new StudioOperationError(error, 'studio_error');
+    return response;
+  }
+
   private async _executeNetworkStateOperation(
     instanceId: string,
     role: string,
     operation: 'get' | 'reset',
   ): Promise<unknown> {
+    if (operation === 'get' && this._supportsSimulationReads()) {
+      const response = await this._request('/api/get-network-simulation-state', {}, instanceId, role);
+      return this._parseSimulationReadResponse(response, 'network simulation get');
+    }
     const code = buildNetworkStateLuau(operation);
     const response = await this._request('/api/execute-luau', { code }, instanceId, role);
     return this._parseExecuteLuauJsonResponse(response, `network simulation ${operation}`);
@@ -1623,6 +1711,12 @@ export class RobloxStudioTools {
     operation: 'get' | 'set',
     options: Record<string, unknown>,
   ): Promise<unknown> {
+    if (operation === 'get' && this._supportsSimulationReads()) {
+      const data: Record<string, unknown> = { includeDeviceList: options.includeDeviceList !== false };
+      if (options.deviceId !== undefined) data.deviceId = options.deviceId;
+      const response = await this._request('/api/get-device-simulator-state', data, instanceId, role);
+      return this._parseSimulationReadResponse(response, 'device simulator get');
+    }
     const code = buildDeviceSimulatorLuau(operation, options);
     const response = await this._request('/api/execute-luau', { code }, instanceId, role);
     return this._parseExecuteLuauJsonResponse(response, `device simulator ${operation}`);
@@ -1931,11 +2025,31 @@ export class RobloxStudioTools {
     };
   }
 
-  async setProperties(instancePath: string, properties: Record<string, unknown>, instance_id?: string, operation_id?: string) {
+  async setProperties(
+    instancePath: string,
+    properties: Record<string, unknown>,
+    instance_id?: string,
+    operation_id?: string,
+    options: { atomic?: unknown; dryRun?: unknown } = {},
+  ) {
     if (!instancePath || !properties) {
       throw new Error('instancePath and properties are required for set_properties');
     }
-    const response = await this._callSingle('/api/set-properties', { instancePath, properties }, undefined, instance_id, undefined, undefined, operation_id);
+    const { atomic, dryRun } = options;
+    if (atomic !== undefined && typeof atomic !== 'boolean') {
+      throw new Error('set_properties atomic must be a boolean');
+    }
+    if (dryRun !== undefined && typeof dryRun !== 'boolean') {
+      throw new Error('set_properties dryRun must be a boolean');
+    }
+    if (dryRun === true && atomic !== true) {
+      throw new Error('set_properties dryRun requires atomic: true');
+    }
+    // Omitted options keep the original payload, and with it the operation fingerprint.
+    const payload: Record<string, unknown> = { instancePath, properties };
+    if (atomic !== undefined) payload.atomic = atomic;
+    if (dryRun !== undefined) payload.dryRun = dryRun;
+    const response = await this._callSingle('/api/set-properties', payload, undefined, instance_id, undefined, undefined, operation_id);
     return { content: [{ type: 'text', text: JSON.stringify(response) }] };
   }
 
@@ -2363,13 +2477,13 @@ export class RobloxStudioTools {
 
     const roleEntries = await Promise.all(resolved.roles.map(async (role) => {
       const state: Record<string, unknown> = {};
-      const errors: Record<string, string> = {};
+      const errors: Record<string, { code: string; message: string }> = {};
 
       if (includeNetwork) {
         try {
           state.network = await this._executeNetworkStateOperation(resolved.instanceId, role, 'get');
         } catch (error) {
-          errors.network = errorMessage(error);
+          errors.network = codedError(error);
         }
       }
 
@@ -2382,7 +2496,7 @@ export class RobloxStudioTools {
             { includeDeviceList: false },
           );
         } catch (error) {
-          errors.deviceSimulator = errorMessage(error);
+          errors.deviceSimulator = codedError(error);
         }
       }
 
@@ -4473,17 +4587,48 @@ export class RobloxStudioTools {
     if (wait_ms !== undefined && (!Number.isInteger(wait_ms) || wait_ms < 0 || wait_ms > MAX_OPERATION_WAIT_MS)) {
       throw new Error(`wait_ms must be an integer from 0 to ${MAX_OPERATION_WAIT_MS}`);
     }
-    return this._requestStatusResult(request_id, await this.bridge.getRequestStatusEverywhere(request_id, wait_ms ?? 0, signal));
+    const deadline = Date.now() + (wait_ms ?? 0);
+    // A generate_model job may still be preparing its reference image here,
+    // before the bridge holds any record of it.
+    if (this.referenceUploads.view(request_id)) {
+      await this.referenceUploads.waitForPreparation(request_id, wait_ms ?? 0, signal);
+      const preparation = this.referenceUploads.view(request_id);
+      if (preparation && preparation.stage !== 'dispatched') {
+        return this._textResult(this._preparationStatus(request_id, preparation));
+      }
+    }
+    const remainingMs = Math.max(0, deadline - Date.now());
+    return this._operationStatusResult(request_id, await this.bridge.getRequestStatusEverywhere(request_id, remainingMs, signal));
   }
 
   private _requestStatusResult(requestId: string, status: RequestStatus | undefined) {
-    if (status) return this._textResult({ ...status });
-    return this._textResult({
+    return this._textResult(status ? { ...status } : unretainedStatus(requestId));
+  }
+
+  // A bridge status, plus the reference-image preparation and an overall phase
+  // when this server prepared the operation for generate_model.
+  private _operationStatusResult(requestId: string, status: RequestStatus | undefined) {
+    const preparation = this.referenceUploads.view(requestId);
+    if (!preparation) return this._requestStatusResult(requestId, status);
+    if (!status) return this._textResult({ ...unretainedStatus(requestId), preparation });
+    return this._textResult({ ...status, phase: generationPhase(status), preparation });
+  }
+
+  // A generate_model job that has not reached the bridge, shaped like a request
+  // status. Its generation has not been sent, so it has not executed.
+  private _preparationStatus(requestId: string, preparation: ReferenceUploadView): Record<string, unknown> {
+    const failed = preparation.stage === 'upload_failed' || preparation.stage === 'upload_unknown' || preparation.error !== undefined;
+    return {
       requestId,
-      state: 'unknown',
-      outcome: 'unknown',
-      message: 'No retained operation record. It may have expired, been evicted, or belonged to an earlier server session. Do not infer that the mutation was not executed.',
-    });
+      targetPeerId: preparation.targetPeerId,
+      queuedAt: preparation.startedAt,
+      phase: failed ? 'failed' : preparation.stage === 'uploading' ? 'uploading' : 'preparing',
+      stage: 'preparing',
+      state: failed ? 'settled' : 'pending',
+      outcome: failed ? 'error' : 'pending',
+      executionOutcome: 'not_executed',
+      preparation,
+    };
   }
 
 
@@ -4716,14 +4861,6 @@ export class RobloxStudioTools {
       throw new Error('async must be a boolean.');
     }
 
-    // Every upload mints a new asset ID, so a retry is identified by the
-    // reference image's content rather than by the dispatched payload.
-    let imageIdentity: unknown;
-    if (referencePng) {
-      image = { kind: 'asset', asset_id: await this.uploadGenerateModelReferenceImage(referencePng, instance_id) };
-      imageIdentity = { kind: 'png_sha256', sha256: createHash('sha256').update(referencePng).digest('hex') };
-    }
-
     const payload: Record<string, unknown> = {
       prompt,
       image,
@@ -4736,23 +4873,88 @@ export class RobloxStudioTools {
     if (!schemaGroups) {
       payload.schema = schema ?? 'Body1';
     }
-    const identity = imageIdentity === undefined ? undefined : { ...payload, image: imageIdentity };
-
-    if (request.async === true) {
-      // The job stays tied to this Peer and outlives the caller; timeout_ms only
-      // bounds how long the bridge holds it open. Observe it with get_request_status.
-      const status = await this._withSinglePeer('edit', instance_id, undefined, (targetPeerId) =>
-        this.client.submit('/api/generate-model', payload, targetPeerId, timeoutMs, operationId, identity));
-      return this._requestStatusResult(status.requestId, status);
+    const submit = request.async === true;
+    if (!referencePng) return this._dispatchGenerateModel(payload, instance_id, timeoutMs, submit, operationId, undefined);
+    // Route before preparing anything: a request that cannot reach an edit
+    // Peer must not upload an image first.
+    const targetPeerId = await this._resolveSinglePeer('edit', instance_id);
+    if (submit && !this.bridge.supportsPrimaryFeature('submit')) {
+      throw new Error('The primary MCP server cannot start a job that outlives the call; call without async, or restart that server on this version. Nothing was uploaded.');
     }
-    const response = await this._withSinglePeer('edit', instance_id, undefined, (targetPeerId) =>
-      this._requestPeer('/api/generate-model', payload, targetPeerId, timeoutMs, undefined, operationId, identity));
-    return {
-      content: [{
-        type: 'text',
-        text: JSON.stringify(response),
-      }],
+
+    // Every upload mints a new asset ID, so a retry is identified by the
+    // reference image's content rather than by the dispatched payload.
+    const png = referencePng;
+    const identity = { ...payload, image: { kind: 'png_sha256', sha256: createHash('sha256').update(png).digest('hex') } };
+    const attempt: ReferenceUploadAttempt = {
+      upload: (progress) => this.uploadGenerateModelReferenceImage(png, instance_id, progress),
+      resume: (checkpoint, progress) => this.resumeGenerateModelReferenceImage(checkpoint, instance_id, progress),
     };
+    if (operationId === undefined && !submit) {
+      // Nothing can retry a call without an operation ID, so nothing is shared.
+      payload.image = { kind: 'asset', asset_id: await attempt.upload(UNTRACKED_UPLOAD) };
+      return this._dispatchGenerateModel(payload, instance_id, timeoutMs, false, undefined, identity);
+    }
+
+    // An async job without a caller ID still needs one before its upload starts.
+    const jobId = operationId ?? randomUUID();
+    const identityKey = createHash('sha256').update(JSON.stringify({ endpoint: '/api/generate-model', identity })).digest('hex');
+    const prepared = this.referenceUploads.lookup(jobId, identityKey, targetPeerId);
+    if (operationId !== undefined && !prepared) {
+      // Another server's caller may already have started this operation on
+      // the bridge; rejoin it instead of uploading the image again.
+      const joined = await this.bridge.joinOperation('/api/generate-model', targetPeerId, jobId, identity);
+      if (joined && submit) return this._requestStatusResult(jobId, joined.status);
+      if (joined) return { content: [{ type: 'text', text: JSON.stringify(await joined.response()) }] };
+    }
+    let dispatchPeerId = targetPeerId;
+    const generate = async () => {
+      payload.image = { kind: 'asset', asset_id: await this.referenceUploads.acquire(jobId, identityKey, targetPeerId, attempt) };
+      return this._dispatchGenerateModel(payload, instance_id, timeoutMs, submit, jobId, identity, (peerId) => {
+        dispatchPeerId = peerId;
+        this.referenceUploads.dispatched(jobId, peerId);
+      });
+    };
+    // Checked again in the same turn that starts the work: a concurrent caller
+    // may have claimed this ID while the bridge was consulted.
+    const current = this.referenceUploads.lookup(jobId, identityKey, targetPeerId);
+    const job = generate();
+    this.referenceUploads.attach(jobId, job);
+    job.catch((error: unknown) => {
+      if (generationNotAdmitted(error)) this.referenceUploads.notDispatched(jobId, dispatchPeerId, error);
+    });
+    if (submit && current?.imageAssetId === undefined) {
+      // The job outlives this call from the moment its upload starts. Its
+      // progress and any failure are reported by get_request_status.
+      return this._textResult(this._preparationStatus(jobId, this.referenceUploads.view(jobId)!));
+    }
+    return job;
+  }
+
+  private _resolveSinglePeer(target: string, instance_id: string | undefined): Promise<string> {
+    return this._withSinglePeer(target, instance_id, undefined, async (targetPeerId) => targetPeerId);
+  }
+
+  private async _dispatchGenerateModel(
+    payload: Record<string, unknown>,
+    instance_id: string | undefined,
+    timeoutMs: number | undefined,
+    submit: boolean,
+    operationId: string | undefined,
+    identity: unknown,
+    onDispatch?: (targetPeerId: string) => void,
+  ) {
+    return this._withSinglePeer('edit', instance_id, undefined, async (targetPeerId) => {
+      onDispatch?.(targetPeerId);
+      if (submit) {
+        // The job stays tied to this Peer and outlives the caller; timeout_ms only
+        // bounds how long the bridge holds it open. Observe it with get_request_status.
+        const status = await this.client.submit('/api/generate-model', payload, targetPeerId, timeoutMs, operationId, identity);
+        return this._operationStatusResult(status.requestId, status);
+      }
+      const response = await this._requestPeer('/api/generate-model', payload, targetPeerId, timeoutMs, undefined, operationId, identity);
+      return { content: [{ type: 'text', text: JSON.stringify(response) }] };
+    });
   }
 
   async previewAsset(
@@ -5001,7 +5203,8 @@ export class RobloxStudioTools {
 
   private async uploadGenerateModelReferenceImage(
     imageContent: Buffer,
-    instance_id?: string,
+    instance_id: string | undefined,
+    progress: ReferenceUploadProgress = UNTRACKED_UPLOAD,
   ): Promise<number> {
     if (this.cookieClient.hasCookie()) {
       const result = await this.cookieClient.uploadImage({
@@ -5011,6 +5214,8 @@ export class RobloxStudioTools {
         description: STUDIO_ASSISTANT_SOURCE_IMAGE_LABEL,
         userId: process.env.ROBLOX_CREATOR_USER_ID,
         groupId: process.env.ROBLOX_CREATOR_GROUP_ID,
+        onSending: () => progress.sending(),
+        onAccepted: (id) => progress.accepted({ provider: 'user_auth', id }),
       });
       return result.assetId;
     }
@@ -5045,12 +5250,42 @@ export class RobloxStudioTools {
       },
       imageContent,
       'generate-model-reference.png',
+      {
+        onSending: () => progress.sending(),
+        onAccepted: (id) => progress.accepted({ provider: 'open_cloud', id }),
+      },
     );
+    return this.resolveCreatedReferenceDecal(result, instance_id, progress);
+  }
 
+  // Continues an upload Roblox already accepted, or resolves the image of a
+  // Decal it already created, without sending the image again.
+  private async resumeGenerateModelReferenceImage(
+    checkpoint: ReferenceUploadCheckpoint,
+    instance_id: string | undefined,
+    progress: ReferenceUploadProgress,
+  ): Promise<number> {
+    if (checkpoint.createdAssetId !== undefined) {
+      return this.resolveUploadedReferenceImageId(checkpoint.createdAssetId, instance_id);
+    }
+    const operation = checkpoint.remoteOperation;
+    if (!operation) throw new Error('A reference image upload can only be resumed from a remote operation.');
+    if (operation.provider === 'user_auth') {
+      return (await this.cookieClient.resumeImageUpload(operation.id)).assetId;
+    }
+    return this.resolveCreatedReferenceDecal(await this.openCloudClient.resumeAssetOperation(operation.id), instance_id, progress);
+  }
+
+  private async resolveCreatedReferenceDecal(
+    result: AssetOperationResponse,
+    instance_id: string | undefined,
+    progress: ReferenceUploadProgress,
+  ): Promise<number> {
     const decalId = result.response?.assetId;
     if (!decalId || !/^\d+$/.test(decalId)) {
       throw new Error('Reference image upload did not return an asset ID.');
     }
+    progress.created(decalId);
     return this.resolveUploadedReferenceImageId(decalId, instance_id);
   }
 
@@ -5241,39 +5476,7 @@ export class RobloxStudioTools {
   async getMemoryBreakdown(target?: string, tags?: string[], instance_id?: string) {
     const data: Record<string, unknown> = {};
     if (tags !== undefined) data.tags = tags;
-
-    const refresh = this.bridge.refreshTopologyForRouting();
-    if (refresh) await refresh;
-    const tgt = this._targetForInstanceId(instance_id, { requested: target, fallback: 'all', accepts: anyRole });
-    const resolved = this.bridge.resolveTarget({ instance_id, target: tgt });
-    if (!resolved.ok) throw new RoutingFailure(resolved.error);
-
-    if (resolved.mode === 'single') {
-      const response = await this._requestPeer('/api/get-memory-breakdown', data, resolved.targetPeerId);
-      return { content: [{ type: 'text', text: JSON.stringify(response) }] };
-    }
-
-    const targets = resolved.targets;
-
-    const responses = await Promise.allSettled(
-      targets.map(async (t) => ({
-        peer: t.targetRole,
-        result: await this._requestPeer('/api/get-memory-breakdown', data, t.targetPeerId),
-      })),
-    );
-
-    const body: Record<string, unknown> = {};
-    for (let i = 0; i < responses.length; i++) {
-      const r = responses[i];
-      const peer = targets[i].targetRole;
-      if (r.status === 'fulfilled') {
-        body[peer] = r.value.result;
-      } else {
-        body[peer] = { error: 'disconnected' };
-      }
-    }
-
-    return { content: [{ type: 'text', text: JSON.stringify(body) }] };
+    return this._readPeerOrFanOut('/api/get-memory-breakdown', data, target, instance_id);
   }
 
   async getSceneAnalysis(mode?: string, target?: string, topN?: number, raw?: boolean, instance_id?: string) {
@@ -5281,7 +5484,13 @@ export class RobloxStudioTools {
     if (mode !== undefined) data.mode = mode;
     if (topN !== undefined) data.topN = topN;
     if (raw !== undefined) data.raw = raw;
+    return this._readPeerOrFanOut('/api/get-scene-analysis', data, target, instance_id);
+  }
 
+  // One Peer returns its response as is. A fanout keys each Peer's response by
+  // role and classifies it here, from the request outcome and the response
+  // envelope only: data nested inside a successful response is never inspected.
+  private async _readPeerOrFanOut(endpoint: string, data: Record<string, unknown>, target: string | undefined, instance_id: string | undefined) {
     const refresh = this.bridge.refreshTopologyForRouting();
     if (refresh) await refresh;
     const tgt = this._targetForInstanceId(instance_id, { requested: target, fallback: 'all', accepts: anyRole });
@@ -5289,31 +5498,37 @@ export class RobloxStudioTools {
     if (!resolved.ok) throw new RoutingFailure(resolved.error);
 
     if (resolved.mode === 'single') {
-      const response = await this._requestPeer('/api/get-scene-analysis', data, resolved.targetPeerId);
-      return { content: [{ type: 'text', text: JSON.stringify(response) }] };
+      return this._textResult(await this._requestPeer(endpoint, data, resolved.targetPeerId));
     }
 
-    const targets = resolved.targets;
-
+    const { targets } = resolved;
     const responses = await Promise.allSettled(
-      targets.map(async (t) => ({
-        peer: t.targetRole,
-        result: await this._requestPeer('/api/get-scene-analysis', data, t.targetPeerId),
-      })),
+      targets.map((peer) => this._requestPeer(endpoint, data, peer.targetPeerId)),
     );
-
-    const body: Record<string, unknown> = {};
-    for (let i = 0; i < responses.length; i++) {
-      const r = responses[i];
-      const peer = targets[i].targetRole;
-      if (r.status === 'fulfilled') {
-        body[peer] = r.value.result;
+    const peers: Record<string, unknown> = {};
+    const failures: string[] = [];
+    responses.forEach((response, index) => {
+      const role = targets[index].targetRole;
+      if (response.status === 'rejected') {
+        const failure = peerRequestFailure(response.reason);
+        peers[role] = failure;
+        failures.push(`${role}: ${failure.error}`);
       } else {
-        body[peer] = { error: 'disconnected' };
+        peers[role] = response.value;
+        const handlerError = asRecord(response.value)?.error;
+        if (typeof handlerError === 'string') failures.push(`${role}: ${boundedMessage(handlerError)}`);
       }
+    });
+    const summary = { requested: targets.length, succeeded: targets.length - failures.length, failed: failures.length };
+    if (summary.succeeded === 0) {
+      return this._textResult({
+        error: 'all_peers_failed',
+        message: boundedMessage(`Every Peer failed: ${failures.join('; ')}`),
+        summary,
+        ...peers,
+      });
     }
-
-    return { content: [{ type: 'text', text: JSON.stringify(body) }] };
+    return this._textResult({ ...(summary.failed > 0 ? { partial: true } : {}), summary, ...peers });
   }
 
   async exportRbxm(instancePaths: string[], outputPath: string, target?: string, instance_id?: string) {

@@ -294,6 +294,30 @@ describe('ProxyBridgeService', () => {
     }
   });
 
+  test('reports an endpoint the primary forbids as not executed, naming the endpoint', async () => {
+    const fetchMock = jest.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+      if (String(input) === 'http://primary/topology') return jsonResponse({ ...topology(), serverVersion: '3.4.0' });
+      return new Response(JSON.stringify({ error: 'forbidden_endpoint' }), { status: 403 });
+    });
+    const proxy = new ProxyBridgeService('http://primary');
+    try {
+      await proxy.waitForInitialRefresh();
+      const result = await proxy.sendRequest('/api/execute-luau', { code: 'return 1' }, 'edit-peer', 1000, undefined, 'forbidden-op')
+        .catch((error: unknown) => error);
+      expect(result).toBeInstanceOf(RequestFailure);
+      expect(result).toMatchObject({
+        code: 'forbidden_endpoint',
+        message: expect.stringMatching(/http:\/\/primary \(v3\.4\.0\) refused \/api\/execute-luau through \/proxy.*edition/),
+        details: {
+          requestId: 'forbidden-op', targetPeerId: 'edit-peer', stage: 'queued', outcome: 'not_executed', executionOutcome: 'not_executed',
+        },
+      });
+    } finally {
+      proxy.stop();
+      fetchMock.mockRestore();
+    }
+  });
+
   test('preserves observed completion through proxy failures and request status parsing', async () => {
     const observations = { executionStartedAt: 10, executionCompletedAt: 20, executionOutcome: 'error' };
     const details = { requestId: 'completed', targetPeerId: 'edit-peer', stage: 'response_delivery', outcome: 'unknown', ...observations };

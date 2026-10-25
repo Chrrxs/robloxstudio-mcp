@@ -1,4 +1,4 @@
-import { RobloxCookieClient } from '../roblox-cookie-client.js';
+import { RobloxCookieClient, RobloxCookieRequestError, RobloxUploadOperationError } from '../roblox-cookie-client.js';
 
 function jsonResponse(
   body: unknown,
@@ -146,12 +146,55 @@ describe('RobloxCookieClient asset uploads', () => {
       }));
 
     const client = new RobloxCookieClient('cookie-value');
-    await expect(client.uploadImage({
+    const failure = client.uploadImage({
       fileContent: Buffer.from('image data'),
       fileName: 'rejected.tga',
       displayName: 'Rejected',
       description: '',
       userId: '12345',
-    })).rejects.toThrow('Image upload failed: Asset moderation rejected the upload');
+    });
+    await expect(failure).rejects.toBeInstanceOf(RobloxUploadOperationError);
+    await expect(failure).rejects.toThrow('Image upload failed: Asset moderation rejected the upload');
+  });
+
+  test('reports when the create request leaves and when Roblox accepts it', async () => {
+    const events: string[] = [];
+    jest.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+      events.push(`fetch ${String(input)}`);
+      return String(input).endsWith('/assets')
+        ? jsonResponse({ path: 'operations/upload-1', operationId: 'upload-1', done: false })
+        : jsonResponse({ operationId: 'upload-1', done: true, response: { assetId: '5' } });
+    });
+
+    const client = new RobloxCookieClient('cookie-value');
+    await expect(client.uploadImage({
+      fileContent: Buffer.from('png data'), fileName: 'reference.png', displayName: 'Reference', description: '', userId: '1',
+      onSending: () => events.push('sending'),
+      onAccepted: (operationId) => events.push(`accepted ${operationId}`),
+    })).resolves.toEqual({ assetId: 5 });
+    expect(events).toEqual([
+      'sending',
+      'fetch https://apis.roblox.com/assets/user-auth/v1/assets',
+      'accepted upload-1',
+      'fetch https://apis.roblox.com/assets/user-auth/v1/operations/upload-1',
+    ]);
+  });
+
+  test('a refused create request carries its HTTP status', async () => {
+    jest.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('bad image', { status: 400 }));
+    const client = new RobloxCookieClient('cookie-value');
+    const failure = client.uploadImage({
+      fileContent: Buffer.from('png data'), fileName: 'reference.png', displayName: 'Reference', description: '', userId: '1',
+    });
+    await expect(failure).rejects.toBeInstanceOf(RobloxCookieRequestError);
+    await expect(failure).rejects.toMatchObject({ status: 400, message: 'Image upload failed (400): bad image' });
+  });
+
+  test('resumes polling an accepted upload without sending the image again', async () => {
+    const fetchMock = jest.spyOn(globalThis, 'fetch').mockResolvedValue(
+      jsonResponse({ operationId: 'upload-2', done: true, response: { assetId: '6' } }));
+    await expect(new RobloxCookieClient('cookie-value').resumeImageUpload('upload-2')).resolves.toEqual({ assetId: 6 });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls[0][0]).toBe('https://apis.roblox.com/assets/user-auth/v1/operations/upload-2');
   });
 });

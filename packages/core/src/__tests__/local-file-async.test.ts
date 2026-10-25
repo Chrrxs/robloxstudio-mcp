@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { appendFileSync, closeSync, constants, openSync, readdirSync } from 'node:fs';
+import { appendFileSync, closeSync, constants, openSync, readdirSync, readlinkSync, realpathSync } from 'node:fs';
 import { mkdir, mkdtemp, rm, truncate, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -29,8 +29,20 @@ function makeFifo(name = 'input.rbxm'): string {
   return fifo;
 }
 
-function openDescriptorCount(): number {
-  return readdirSync('/proc/self/fd').length;
+// Descriptors open on paths under root. Other suites sharing this Jest worker
+// open and close their own sockets and files meanwhile, so a process-wide count
+// changes without any leak here.
+function openDescriptorsUnder(root: string): number {
+  const prefix = `${realpathSync(root)}/`;
+  let count = 0;
+  for (const fd of readdirSync('/proc/self/fd')) {
+    try {
+      if (`${readlinkSync(join('/proc/self/fd', fd))}/`.startsWith(prefix)) count++;
+    } catch {
+      // Closed while listing.
+    }
+  }
+  return count;
 }
 
 const accept = () => {};
@@ -142,7 +154,7 @@ describe('readRegularFileWithinLimitAsync', () => {
     const fifo = makeFifo();
     const file = join(directory, 'large.bin');
     await writeFile(file, Buffer.alloc(256 * 1024, 1));
-    const before = openDescriptorCount();
+    expect(openDescriptorsUnder(directory)).toBe(0);
     for (let attempt = 0; attempt < 5; attempt++) {
       await expect(readRegularFileWithinLimitAsync(fifo, 'File', accept)).rejects.toThrow('regular file');
       await expect(readRegularFileWithinLimitAsync(directory, 'File', accept)).rejects.toThrow('regular file');
@@ -159,7 +171,7 @@ describe('readRegularFileWithinLimitAsync', () => {
       await expect(readRegularFileWithinLimitAsync(file, 'File', accept, controller.signal))
         .rejects.toThrow('aborted');
     }
-    expect(openDescriptorCount()).toBe(before);
+    expect(openDescriptorsUnder(directory)).toBe(0);
   });
 });
 

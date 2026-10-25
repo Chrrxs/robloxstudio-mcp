@@ -1,4 +1,4 @@
-import { BridgeService, isRequestStage, isValidOperationId, MultiplayerGroupInUseError, parseFailureDetails, parseObservations, PRIMARY_PROXY_FEATURES, RequestFailure, requiresScriptPreconditions, toPublicPeer } from './bridge-service.js';
+import { BridgeService, isRequestStage, isValidOperationId, MultiplayerGroupInUseError, parseFailureDetails, parseObservations, PRIMARY_PROXY_FEATURES, RequestFailure, requiresAtomicProperties, requiresScriptPreconditions, toPublicPeer } from './bridge-service.js';
 import type {
   MultiplayerGroup,
   PublicStudioPeer,
@@ -119,6 +119,12 @@ export class ProxyBridgeService extends BridgeService {
 
   override refreshTopologyForRouting(signal?: AbortSignal): Promise<void> {
     return this.refreshTopology(signal, true);
+  }
+
+  // Known from the primary's latest topology; a primary that predates a
+  // feature, or has not been reached yet, lists none.
+  override supportsPrimaryFeature(feature: PrimaryProxyFeature): boolean {
+    return this.primaryFeatures.has(feature);
   }
 
   private async refreshTopology(signal?: AbortSignal, requireFresh = false): Promise<void> {
@@ -353,6 +359,36 @@ export class ProxyBridgeService extends BridgeService {
     return status;
   }
 
+  // The primary owns operation records and does not expose their identity, so
+  // a proxy can only confirm that an operation ID is still unused. An existing
+  // one is refused rather than matched by repeating the costly preparation.
+  override async joinOperation(_endpoint: string, targetPeerId: string, operationId: string): Promise<undefined> {
+    await this.initialRefresh;
+    if (!this.primaryFeatures.has('identity')) {
+      // Its retries would be matched by payload, which a fresh upload changes.
+      throw new RequestFailure(
+        `${this.primaryDescription()} cannot match a retry of operation ${operationId} to its first attempt; call without operation_id, or restart that server on this version; queued; not_executed`,
+        'primary_unsupported', { requestId: operationId, targetPeerId, stage: 'queued', outcome: 'not_executed', executionOutcome: 'not_executed' },
+      );
+    }
+    const status = await this.getRequestStatusEverywhere(operationId);
+    if (!status) return undefined;
+    const details: RequestFailureDetails = {
+      requestId: operationId, targetPeerId: status.targetPeerId, stage: status.stage,
+      outcome: status.outcome === 'not_executed' ? 'not_executed' : 'unknown',
+    };
+    if (status.targetPeerId !== targetPeerId) {
+      throw new RequestFailure(
+        `Request ${operationId} already identifies a different operation; existing operation ${status.stage}; not replayed`,
+        'operation_id_collision', details,
+      );
+    }
+    throw new RequestFailure(
+      `${this.primaryDescription()} already holds request ${operationId}. This server did not prepare it and cannot confirm the arguments match without repeating the preparation; use get_request_status, or retry with a new operation_id; not replayed`,
+      'operation_unverifiable', details,
+    );
+  }
+
   override async sendRequest(
     endpoint: string,
     data: unknown,
@@ -422,6 +458,12 @@ export class ProxyBridgeService extends BridgeService {
         'primary_unsupported', details,
       );
     }
+    if (requiresAtomicProperties(endpoint, data) && !this.primaryFeatures.has('atomic_properties')) {
+      throw new RequestFailure(
+        `${this.primaryDescription()} serves a Studio plugin that ignores atomic and dryRun and would write each property separately; restart that server on this version, or call without atomic; queued; not_executed`,
+        'primary_unsupported', details,
+      );
+    }
     const controller = new AbortController();
     const effectiveTimeoutMs = Math.max(1, request.timeoutMs);
     let requestBody: string;
@@ -476,6 +518,12 @@ export class ProxyBridgeService extends BridgeService {
       if ('error' in result && result.error !== undefined && typeof result.error !== 'string') {
         primaryError = true;
         throw result.error;
+      }
+      if (response.status === 403 && 'error' in result && result.error === 'forbidden_endpoint') {
+        throw new RequestFailure(
+          `${this.primaryDescription()} refused ${endpoint} through /proxy: that server's edition does not permit this Studio endpoint, so nothing reached Studio; queued; not_executed`,
+          'forbidden_endpoint', details,
+        );
       }
       if ('error' in result && typeof result.error === 'string') {
         const details = 'details' in result ? parseFailureDetails(result.details, { requestId, targetPeerId }) : undefined;

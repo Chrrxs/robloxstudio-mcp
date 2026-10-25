@@ -75,9 +75,11 @@ await runTest('proxy-mode subprocess fans out to peers via primary', async ({ tr
 
     // Case 2: get_memory_breakdown target=all should produce per-peer data
     const mem = await proxy.callTool('get_memory_breakdown', { target: 'all' });
-    const memPeers = Object.keys(mem);
-    assert(memPeers.length > 0,
-      `get_memory_breakdown target=all reports per-peer data (got peers: ${JSON.stringify(memPeers)})`);
+    const memPeers = Object.keys(mem).filter((key) => key === 'edit' || key === 'server' || /^client-\d+$/.test(key));
+    assert(memPeers.length > 0 && mem.summary?.requested === memPeers.length,
+      `get_memory_breakdown target=all reports per-peer data (got peers: ${JSON.stringify(memPeers)}, summary: ${JSON.stringify(mem.summary)})`);
+    assert(mem.summary.succeeded > 0,
+      `get_memory_breakdown target=all reads at least one Peer (${JSON.stringify(mem)})`);
   } finally {
     await safeStopPlaytest(proxy);
   }

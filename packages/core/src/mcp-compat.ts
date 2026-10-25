@@ -21,9 +21,9 @@ Tool descriptions explain selection. Input schemas explain arguments. This guide
 ## Discovery and edit work
 
 - Use get_project_structure for a bounded hierarchy, search_objects for an instance query, and grep_scripts for source text.
-- Use get_instance_properties and get_attributes after locating an instance.
+- Use get_instance_properties and get_attributes after locating an instance. get_attributes reports a CFrame value with Position and Components, the 12 CFrame.new arguments including rotation.
 - Use execute_luau for custom traversal, bulk edits, and work that would otherwise need many tool calls. It runs through the Studio plugin context.
-- Use set_properties when several known properties on one instance can be updated in one request.
+- Use set_properties when several known properties on one instance can be updated in one request. Pass atomic=true when none should change unless all validate; a failed write restores the applied values. Add dryRun=true to preview the conversions.
 
 ## Selection and viewport
 
@@ -86,7 +86,7 @@ Studio must allow third-party asset loading for public third-party previews and 
 
 generate_model stages generated content under ServerStorage for review. upload_asset sends an explicit local file to the chosen Roblox user or group.
 
-generate_model with async=true returns a job status with its requestId before generation finishes. Check it, wait for it, or read its result with get_request_status (wait_ms waits for completion). The job stays on the Studio instance that started it. A disconnected caller or an ended wait never cancels it, and no tool can cancel a running generation. Pass operation_id so a retry with identical arguments joins the same job instead of generating a second model. Results stay available for five minutes after the job finishes (or after timeout_ms passes without a result), within the current server session; large results can be evicted sooner.
+generate_model with async=true returns a job status with its requestId before generation finishes. Check it, wait for it, or read its result with get_request_status (wait_ms waits for completion). The job stays on the Studio instance that started it. A disconnected caller or an ended wait never cancels it, and no tool can cancel a running generation. Pass operation_id so a retry with identical arguments joins the same job instead of generating a second model. With image_path or image_base64, the status adds phase (uploading, generating, completed, failed, or unknown when a wait ended without a result) and preparation; a retry reuses the uploaded image, and an upload whose outcome is unknown is never repeated. Results stay available for five minutes after the job finishes (or after timeout_ms passes without a result), within the current server session; large results can be evicted sooner.
 
 ## Monetization
 

@@ -251,6 +251,9 @@ part.Anchored = true
 part.Size = Vector3.new(4, 1, 2)
 part.Position = Vector3.new(0, 5, 0)
 part:SetAttribute("SmokeAttr", "ok")
+part:SetAttribute("SmokeTurned", CFrame.new(1, 2, 3) * CFrame.Angles(math.rad(30), math.rad(90), math.rad(-45)))
+part:SetAttribute("SmokeIdentity", CFrame.identity)
+part:SetAttribute("SmokeMoved", CFrame.new(4, -5, 6))
 game:GetService("CollectionService"):AddTag(part, "RSMCPToolingSmoke")
 part.Parent = folder
 local script = Instance.new("Script")
@@ -316,6 +319,59 @@ return true
     });
     assert(setProp.summary?.failed === 0, 'set_properties updates smoke part');
 
+    const readPart = async () => {
+      const read = await client.callTool('execute_luau', {
+        target: 'edit',
+        instance_id: instanceId,
+        code: 'local p = workspace.__RSMCP_ToolingSmoke.SmokePart return string.format("%s|%.2f", tostring(p.Anchored), p.Transparency)',
+      });
+      return String(read.returnValue);
+    };
+    const atomicPreview = await client.callTool('set_properties', {
+      instancePath: partPath,
+      properties: { Transparency: 0.5, Anchored: 'false' },
+      atomic: true,
+      dryRun: true,
+      instance_id: instanceId,
+    });
+    assert(atomicPreview.success === true && atomicPreview.phase === 'validation' && atomicPreview.changed?.length === 0
+      && atomicPreview.results?.find((result) => result.property === 'Anchored')?.value === false,
+    `set_properties atomic dryRun previews conversions (${JSON.stringify(atomicPreview)})`);
+    assert(await readPart() === 'true|0.25', 'set_properties atomic dryRun writes nothing');
+
+    const atomicInvalid = await client.callToolError('set_properties', {
+      instancePath: partPath,
+      properties: { Transparency: 0.75, Material: 'NotAMaterial' },
+      atomic: true,
+      instance_id: instanceId,
+    });
+    assert(atomicInvalid.phase === 'validation'
+      && atomicInvalid.results?.find((result) => result.property === 'Material')?.code === 'type_mismatch',
+    `set_properties atomic reports the invalid field (${JSON.stringify(atomicInvalid)})`);
+    assert(await readPart() === 'true|0.25', 'set_properties atomic validation failure applies nothing');
+
+    // ClassName is readable but read-only, so its write fails after Anchored was applied.
+    const atomicRollback = await client.callToolError('set_properties', {
+      instancePath: partPath,
+      properties: { Anchored: false, ClassName: 'Part' },
+      atomic: true,
+      instance_id: instanceId,
+    });
+    assert(atomicRollback.phase === 'apply' && atomicRollback.failedProperty === 'ClassName'
+      && atomicRollback.rolledBack === true && atomicRollback.restored?.includes('Anchored'),
+    `set_properties atomic restores applied writes after a failed write (${JSON.stringify(atomicRollback)})`);
+    assert(await readPart() === 'true|0.25', 'set_properties atomic rollback restores Anchored');
+
+    const atomicApplied = await client.callTool('set_properties', {
+      instancePath: partPath,
+      properties: { Transparency: 0.5 },
+      atomic: true,
+      instance_id: instanceId,
+    });
+    assert(atomicApplied.success === true && atomicApplied.phase === 'apply' && atomicApplied.changed?.length === 1,
+      `set_properties atomic applies a valid request (${JSON.stringify(atomicApplied)})`);
+    assert(await readPart() === 'true|0.50', 'set_properties atomic writes the value');
+
     const props = await client.callTool('get_instance_properties', {
       instancePath: partPath,
       instance_id: instanceId,
@@ -328,6 +384,57 @@ return true
       instance_id: instanceId,
     });
     assert(attrs.attributes?.SmokeAttr?.value === 'ok', 'get_attributes returns smoke attribute');
+    // CFrame attributes must survive a round trip: rebuild each transform in
+    // Studio from the reported Components and compare with the stored value.
+    const CFRAME_TOLERANCE = 1e-5;
+    const cframeNames = ['SmokeTurned', 'SmokeIdentity', 'SmokeMoved'];
+    for (const name of cframeNames) {
+      const encoded = attrs.attributes?.[name];
+      assert(
+        encoded?.type === 'CFrame' && Array.isArray(encoded.value?.Components) && encoded.value.Components.length === 12,
+        `get_attributes reports all 12 CFrame components for ${name} (${JSON.stringify(encoded)})`,
+      );
+      const [x, y, z] = encoded.value.Components;
+      assert(
+        encoded.value.Position?.X === x && encoded.value.Position?.Y === y && encoded.value.Position?.Z === z,
+        `get_attributes keeps Position consistent with Components for ${name}`,
+      );
+    }
+    const rebuilt = await client.callTool('execute_luau', {
+      target: 'edit',
+      instance_id: instanceId,
+      code: `
+local part = workspace.__RSMCP_ToolingSmoke.SmokePart
+local encoded = game:GetService("HttpService"):JSONDecode(${JSON.stringify(JSON.stringify(Object.fromEntries(
+        cframeNames.map((name) => [name, attrs.attributes[name].value.Components]))))})
+local result = {}
+for name, components in pairs(encoded) do
+  local actual = { part:GetAttribute(name):GetComponents() }
+  local rebuiltComponents = { CFrame.new(table.unpack(components)):GetComponents() }
+  local matches = true
+  for i = 1, 12 do
+    if math.abs(rebuiltComponents[i] - actual[i]) > ${CFRAME_TOLERANCE} then matches = false end
+  end
+  result[name] = { actual = actual, matches = matches }
+end
+return result
+`,
+    });
+    assert(rebuilt.success === true, `execute_luau rebuilds CFrame attributes (${JSON.stringify(rebuilt)})`);
+    const reconstruction = JSON.parse(rebuilt.returnValue);
+    for (const name of cframeNames) {
+      assert(reconstruction[name]?.matches === true, `${name} reconstructs from reported Components in Studio`);
+      const reported = attrs.attributes[name].value.Components;
+      assert(
+        reconstruction[name].actual.every((component, index) => Math.abs(component - reported[index]) <= CFRAME_TOLERANCE),
+        `${name} Components match the stored transform within ${CFRAME_TOLERANCE}`,
+      );
+    }
+    const turned = attrs.attributes.SmokeTurned.value.Components;
+    assert(
+      turned.slice(3).some((component, index) => Math.abs(component - [1, 0, 0, 0, 1, 0, 0, 0, 1][index]) > 0.1),
+      'a rotated CFrame attribute reports a non-identity rotation',
+    );
 
     const emptyAttrs = await client.callTool('get_attributes', {
       instancePath: scriptPath,

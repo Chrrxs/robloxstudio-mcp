@@ -215,6 +215,18 @@ export class RequestFailure extends Error {
   }
 }
 
+/** A Studio handler's structured refusal, e.g. `{ success: false, error: 'service_unavailable' }`. */
+export class StudioOperationError extends Error {
+  constructor(
+    message: string,
+    readonly code: string,
+    readonly details: Record<string, unknown> = {},
+  ) {
+    super(message);
+    this.name = 'StudioOperationError';
+  }
+}
+
 export function parseObservations(value: object): RequestObservations {
   const result: RequestObservations = {};
   if ('executionOutcome' in value) {
@@ -282,8 +294,15 @@ export function isValidOperationId(value: unknown): value is string {
  *   script_preconditions: Studio plugins must match their primary's version, so
  *     this primary's plugins enforce expectedRevision(s) on script writes. An
  *     older plugin ignores those fields and writes unchecked.
+ *   simulation_reads: this primary's plugins serve the fixed network and device
+ *     simulator reads (/api/get-network-simulation-state,
+ *     /api/get-device-simulator-state). Older plugins only offer them as
+ *     generated Luau, which an Inspector primary's /proxy forbids.
+ *   atomic_properties: this primary's plugins honour `atomic` and `dryRun` on
+ *     /api/set-properties. An older plugin ignores both and writes each
+ *     property separately, even for a preview.
  */
-export const PRIMARY_PROXY_FEATURES = ['submit', 'identity', 'status_wait', 'script_preconditions'] as const;
+export const PRIMARY_PROXY_FEATURES = ['submit', 'identity', 'status_wait', 'script_preconditions', 'simulation_reads', 'atomic_properties'] as const;
 export type PrimaryProxyFeature = typeof PRIMARY_PROXY_FEATURES[number];
 
 const REVISION_CHECKED_SCRIPT_ENDPOINTS = new Set([
@@ -303,6 +322,15 @@ export function requiresScriptPreconditions(endpoint: string, data: unknown): bo
     return 'expectedRevisions' in data && !('dryRun' in data && data.dryRun === true);
   }
   return REVISION_CHECKED_SCRIPT_ENDPOINTS.has(endpoint) && 'expectedRevision' in data;
+}
+
+/**
+ * True for a set_properties request that asks for atomic mode or a preview,
+ * which only an atomic_properties primary's plugin honours.
+ */
+export function requiresAtomicProperties(endpoint: string, data: unknown): boolean {
+  if (endpoint !== '/api/set-properties' || !data || typeof data !== 'object') return false;
+  return ('atomic' in data && data.atomic === true) || ('dryRun' in data && data.dryRun === true);
 }
 
 interface OperationRecord {
@@ -336,6 +364,13 @@ type RequestAdmission =
   | { kind: 'rejected'; failure: RequestFailure }
   | { kind: 'pending'; requestId: string; request: PendingRequest }
   | { kind: 'retained'; requestId: string; status: RequestStatus };
+
+/** An operation found by BridgeService.joinOperation. */
+export interface JoinedOperation {
+  status: RequestStatus;
+  /** Waits on the operation, or replays its retained outcome, as an identical retry would. */
+  response(): Promise<unknown>;
+}
 
 interface PendingCancellation extends StudioRequestCancellation {
   transportPeerId: string;
@@ -960,6 +995,11 @@ export class BridgeService implements StudioTransportQueue {
     return undefined;
   }
 
+  /** A local primary's plugins match its version, so it supports every feature it advertises. */
+  supportsPrimaryFeature(feature: PrimaryProxyFeature): boolean {
+    return PRIMARY_PROXY_FEATURES.includes(feature);
+  }
+
   resolveConnectedInstanceId(instanceId: string): string | undefined {
     const exact = this.getInstances().find((instance) => instance.id === instanceId);
     const groupedRuntime = this.getPeers().find((peer) =>
@@ -1169,6 +1209,47 @@ export class BridgeService implements StudioTransportQueue {
     return Promise.resolve(this.getRequestStatus(admission.requestId)!);
   }
 
+  /**
+   * Rejoins the operation already admitted under operationId exactly as an
+   * identical retry would, but never admits new work: resolves undefined when
+   * no such operation is retained. A caller whose payload is costly to prepare
+   * (for example, an asset upload) checks here before preparing it.
+   */
+  joinOperation(endpoint: string, targetPeerId: string, operationId: string, identity: unknown): Promise<JoinedOperation | undefined> {
+    let fingerprint: string;
+    try {
+      fingerprint = this.operationFingerprint(targetPeerId, endpoint, undefined, identity);
+    } catch {
+      return Promise.reject(new RequestFailure(`Request ${operationId} cannot be serialized; queued; not_executed`, 'request_serialization_failed', {
+        requestId: operationId, targetPeerId, stage: 'queued', outcome: 'not_executed', executionOutcome: 'not_executed',
+      }));
+    }
+    this.pruneOperations(Date.now());
+    const existing = this.operations.get(operationId);
+    if (!existing) return Promise.resolve(undefined);
+    if (existing.fingerprint !== fingerprint) return Promise.reject(this.operationCollision(operationId, existing));
+    const status = this.getRequestStatus(operationId)!;
+    const pending = this.pendingRequests.get(operationId);
+    return Promise.resolve({
+      status,
+      response: () => pending ? pending.promise : this.replayRetained(status, targetPeerId),
+    });
+  }
+
+  private operationFingerprint(targetPeerId: string, endpoint: string, data: unknown, identity: unknown): string {
+    return createHash('sha256').update(JSON.stringify(
+      identity === undefined ? { targetPeerId, endpoint, data } : { targetPeerId, endpoint, identity },
+    )).digest('hex');
+  }
+
+  private operationCollision(requestId: string, existing: OperationRecord): RequestFailure {
+    return new RequestFailure(
+      `Request ${requestId} already identifies a different operation; existing operation ${existing.status.stage}; not replayed`,
+      'operation_id_collision',
+      { requestId, targetPeerId: existing.status.targetPeerId, stage: existing.status.stage, outcome: 'unknown', ...observations(existing.status) },
+    );
+  }
+
   // An operation's identity defaults to its payload. Callers whose dispatched
   // payload is not reproducible on retry (for example, a freshly uploaded asset
   // ID) supply the identity of their arguments instead.
@@ -1195,9 +1276,7 @@ export class BridgeService implements StudioTransportQueue {
     let fingerprint: string;
     try {
       const target = this.getPeerById(targetPeerId);
-      fingerprint = createHash('sha256').update(JSON.stringify(
-        identity === undefined ? { targetPeerId, endpoint, data } : { targetPeerId, endpoint, identity },
-      )).digest('hex');
+      fingerprint = this.operationFingerprint(targetPeerId, endpoint, data, identity);
       requestBytes = Buffer.byteLength(JSON.stringify({
         kind: 'request', requestId, peerId: targetPeerId, target: target?.role,
         endpoint, data: data ?? null, remainingMs: effectiveTimeoutMs,
@@ -1208,13 +1287,7 @@ export class BridgeService implements StudioTransportQueue {
     this.pruneOperations(Date.now());
     const existing = this.operations.get(requestId);
     if (existing) {
-      if (existing.fingerprint !== fingerprint) {
-        return reject(new RequestFailure(
-          `Request ${requestId} already identifies a different operation; existing operation ${existing.status.stage}; not replayed`,
-          'operation_id_collision',
-          { requestId, targetPeerId: existing.status.targetPeerId, stage: existing.status.stage, outcome: 'unknown', ...observations(existing.status) },
-        ));
-      }
+      if (existing.fingerprint !== fingerprint) return reject(this.operationCollision(requestId, existing));
       const pending = this.pendingRequests.get(requestId);
       if (pending) return { kind: 'pending', requestId, request: pending };
       return { kind: 'retained', requestId, status: this.getRequestStatus(requestId)! };

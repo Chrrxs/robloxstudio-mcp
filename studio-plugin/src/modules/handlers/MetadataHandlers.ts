@@ -14,8 +14,16 @@ function serializeValue(value: unknown): unknown {
 		const v = value as Color3;
 		return { R: v.R, G: v.G, B: v.B, _type: "Color3" };
 	} else if (vType === "CFrame") {
+		// Components is lossless: x, y, z, R00, R01, R02, R10, R11, R12, R20, R21, R22
+		// in GetComponents order, so CFrame.new(unpack(Components)) rebuilds the value.
+		// Position stays for callers that only read the translation.
 		const v = value as CFrame;
-		return { Position: { X: v.Position.X, Y: v.Position.Y, Z: v.Position.Z }, _type: "CFrame" };
+		const [x, y, z, r00, r01, r02, r10, r11, r12, r20, r21, r22] = v.GetComponents();
+		return {
+			Position: { X: v.Position.X, Y: v.Position.Y, Z: v.Position.Z },
+			Components: [x, y, z, r00, r01, r02, r10, r11, r12, r20, r21, r22],
+			_type: "CFrame",
+		};
 	} else if (vType === "UDim2") {
 		const v = value as UDim2;
 		return {

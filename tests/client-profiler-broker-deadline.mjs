@@ -131,7 +131,7 @@ local modules = {
     return {success = true, capture = captures, duration_ms = data.duration_ms}
   end},
 }
-local unused = {'RuntimeLogBuffer', 'MemoryHandlers', 'SceneAnalysisHandlers', 'CaptureHandlers', 'CaptureTransfer', 'InputHandlers', 'MetadataHandlers', 'EvalRuntimeHandlers', 'BreakpointHandlers', 'MicroProfilerHandlers', 'LuauExec', 'HttpDiagnostics', 'TopologyId'}
+local unused = {'RuntimeLogBuffer', 'MemoryHandlers', 'SceneAnalysisHandlers', 'CaptureHandlers', 'CaptureTransfer', 'InputHandlers', 'MetadataHandlers', 'EvalRuntimeHandlers', 'BreakpointHandlers', 'MicroProfilerHandlers', 'SimulationHandlers', 'LuauExec', 'HttpDiagnostics', 'TopologyId'}
 for _, name in ipairs(unused) do modules[name] = {} end
 local runtime = {
   getModule = function(_, _, name) return assert(modules[name], name) end,
