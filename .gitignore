@@ -85,3 +85,8 @@ bash.exe.stackdump
 # scratch notes, and the like — keep ad-hoc paths out of this file.
 *.local.*
 local/
+
+# Release gate evidence written by npm run test:e2e:full and checked by
+# npm run publish:all. Only the emergency-override log is tracked.
+release/*
+!release/overrides.jsonl

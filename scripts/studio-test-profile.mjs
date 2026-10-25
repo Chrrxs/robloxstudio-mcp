@@ -4,6 +4,15 @@ import { execFileSync, spawn } from 'node:child_process';
 import { mkdirSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import {
+  clearReleaseEvidence,
+  collectReleaseOutput,
+  readSourceState,
+  RELEASE_DIRECTORY,
+  RELEASE_OUTPUT_DIRECTORY,
+  RELEASE_OUTPUT_ENV,
+  RELEASE_RECORD_FILE,
+} from './release-record.mjs';
 import { isWsl, probeWindowsStudioIdentity, windowsPowerShellEnvironment } from './studio-lifecycle.mjs';
 import { validateStudioRepairChannel, validateStudioFinalizeLog } from './studio-install-repair.mjs';
 import { prepareStudioTestSnapshot } from './studio-test-snapshot.mjs';
@@ -202,6 +211,39 @@ export async function holdDisplayRequired({ spawnProcess = spawn, readyTimeoutMs
   };
 }
 
+export function isReleaseGateCommand(command) {
+  return Array.isArray(command) && typeof command[0] === 'string' &&
+    path.posix.normalize(command[0].replaceAll('\\', '/')) === 'tests/run-release.mjs';
+}
+
+const runGit = (args, cwd) => execFileSync('git', args, { cwd, encoding: 'utf8', windowsHide: true });
+
+// The source user observes the worktree around the export; the dedicated
+// account only ever sees the snapshot, so it cannot vouch for the commit.
+export function beginReleaseRecord(sourceDirectory, { git = runGit } = {}) {
+  const before = readSourceState(sourceDirectory, git);
+  clearReleaseEvidence(path.join(sourceDirectory, RELEASE_DIRECTORY));
+  return before;
+}
+
+// A change during export would make the snapshot differ from the commit.
+export function confirmReleaseSource(sourceDirectory, before, { git = runGit, now = () => new Date() } = {}) {
+  const after = readSourceState(sourceDirectory, git);
+  return {
+    commit: before.commit,
+    clean: before.clean && after.clean && before.commit === after.commit,
+    exportedAt: now().toISOString(),
+  };
+}
+
+export function finishReleaseRecord({ snapshotDirectory, sourceDirectory, source }) {
+  return collectReleaseOutput({
+    outputDirectory: path.join(snapshotDirectory, RELEASE_OUTPUT_DIRECTORY),
+    releaseDirectory: path.join(sourceDirectory, RELEASE_DIRECTORY),
+    source,
+  });
+}
+
 function windowsPath(value) {
   if (/^[A-Za-z]:[\\/]/u.test(value) || value.startsWith('\\\\')) return value;
   if (isWsl()) return execFileSync('wslpath', ['-w', path.resolve(value)], { encoding: 'utf8' }).trim();
@@ -232,6 +274,12 @@ export async function runTestProfilePayload(payload, {
   // Account-global, never a snapshot/worker/port directory or inherited setting.
   env.RSMCP_STUDIO_TEST_SAFETY_DIR = path.win32.join(identity.localAppData, 'robloxstudio-mcp', 'test-safety');
   if (payload.prepareWorkspace === true) env.RSMCP_STUDIO_TEST_PREPARED = '1';
+  if (payload.releaseRecord !== undefined) {
+    if (payload.releaseRecord !== true || payload.managedSnapshot !== true || payload.mode !== 'run' || !isReleaseGateCommand(payload.command)) {
+      throw new Error('A release record is written only by the release gate in a managed snapshot.');
+    }
+    env[RELEASE_OUTPUT_ENV] = path.win32.join(payload.repo, RELEASE_OUTPUT_DIRECTORY);
+  }
   console.log(`Studio test identity: ${identity.accountName} (${identity.sid})`);
   console.log(`Studio harness checkout: ${payload.repo}`);
   const options = { cwd: payload.repo, env };
@@ -318,8 +366,11 @@ async function main() {
   if (Object.keys(testExpectations).length && payload.mode === 'run' && payload.command.length) payload.testExpectations = testExpectations;
   if (process.platform !== 'win32' && !isWsl()) throw new Error('This launcher needs Windows or WSL with Windows PowerShell interop.');
   const scriptsDirectory = path.dirname(fileURLToPath(import.meta.url));
+  const sourceDirectory = path.dirname(scriptsDirectory);
   let snapshot;
   let result;
+  let releaseSourceBefore;
+  let releaseSource;
   try {
     if (payload.mode !== 'forget') {
       if (payload.repo) {
@@ -328,7 +379,13 @@ async function main() {
           throw new Error('--repo must name a Windows-local prepared checkout. Omit --repo to export this worktree automatically.');
         }
         payload.prepareWorkspace = payload.mode === 'enroll';
+        if (isReleaseGateCommand(payload.command)) {
+          console.warn('The release gate writes no release record for an explicit --repo checkout; publish:all needs a managed snapshot run.');
+        }
       } else {
+        if (payload.mode === 'run' && isReleaseGateCommand(payload.command)) {
+          releaseSourceBefore = beginReleaseRecord(sourceDirectory);
+        }
         const windowsSnapshotRoot = execFileSync('powershell.exe', [
           '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File',
           windowsPath(path.join(scriptsDirectory, 'studio-test-snapshot-root.ps1')), '-Initialize',
@@ -341,12 +398,17 @@ async function main() {
           ? execFileSync('wslpath', ['-u', windowsSnapshotRoot], { encoding: 'utf8' }).trim()
           : windowsSnapshotRoot;
         snapshot = await prepareStudioTestSnapshot({
-          sourceDirectory: path.dirname(scriptsDirectory),
+          sourceDirectory,
           destinationParent: hostSnapshotRoot,
         });
         payload.repo = windowsPath(snapshot.workingDirectory);
         payload.managedSnapshot = true;
         payload.prepareWorkspace = true;
+        if (releaseSourceBefore) {
+          releaseSource = confirmReleaseSource(sourceDirectory, releaseSourceBefore);
+          payload.releaseRecord = true;
+          if (!releaseSource.clean) console.warn('The worktree is not a clean commit; this release record cannot authorize publish:all.');
+        }
         console.log(`Prepared isolated worktree snapshot: ${payload.repo}`);
       }
       if (payload.nodeExecutable) payload.nodeExecutable = windowsPath(payload.nodeExecutable);
@@ -355,6 +417,15 @@ async function main() {
       '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', windowsPath(path.join(scriptsDirectory, 'studio-test-profile.ps1')),
       '-Payload', encodeTestProfilePayload(payload),
     ], { cwd: isWsl() ? '/mnt/c/Windows' : process.cwd() });
+    if (releaseSource && snapshot) {
+      try {
+        const record = finishReleaseRecord({ snapshotDirectory: snapshot.workingDirectory, sourceDirectory, source: releaseSource });
+        console.log(`Release record (${record.result}, ${record.source.clean ? 'clean' : 'DIRTY'} source ${record.source.commit}): ${path.join(sourceDirectory, RELEASE_DIRECTORY, RELEASE_RECORD_FILE)}`);
+      } catch (error) {
+        console.error(`Could not collect the release record: ${error instanceof Error ? error.message : String(error)}`);
+        if (result === 0) result = 1;
+      }
+    }
     return result;
   } finally {
     if (snapshot) {

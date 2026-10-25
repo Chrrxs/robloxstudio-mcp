@@ -3,7 +3,7 @@
 import { spawn } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { createConnection } from 'node:net';
-import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { mkdtemp } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -29,6 +29,7 @@ import {
   assertStudioTestProfile,
   createIsolatedStudioDirectory,
 } from '../scripts/studio-lifecycle.mjs';
+import { RELEASE_ARTIFACTS_DIRECTORY, RELEASE_OUTPUT_ENV } from '../scripts/release-record.mjs';
 
 const VARIANTS = {
   main: {
@@ -385,9 +386,20 @@ async function packLocal(def, tmpRoot) {
     timeoutMs: 120000,
   });
   const tarball = packTarballPath(result.stdout, packDir);
+  exportReleaseArtifact(tarball);
   const packageDir = await extractTarball(tarball, path.join(tmpRoot, `${def.variant}-local-extract`));
   linkLocalDependencies(packageDir);
   return artifactFromPackage(def, 'local-pack', packageDir);
+}
+
+// Release runs record the exact tarballs installed and tested here so
+// publish.mjs can publish those bytes instead of a rebuild.
+export function exportReleaseArtifact(tarball, env = process.env) {
+  const outputDirectory = env[RELEASE_OUTPUT_ENV];
+  if (!outputDirectory) return;
+  const destination = path.join(outputDirectory, RELEASE_ARTIFACTS_DIRECTORY);
+  mkdirSync(destination, { recursive: true });
+  copyFileSync(tarball, path.join(destination, path.basename(tarball)));
 }
 
 function linkLocalDependencies(packageDir) {
