@@ -374,6 +374,27 @@ const UNTRACKED_UPLOAD: ReferenceUploadProgress = {
   created: () => undefined,
 };
 
+// Bridge refusals at admission: no operation record was created, so nothing
+// under that ID can run. Any other failure may follow an admitted operation.
+const NOT_ADMITTED_FAILURE_CODES = new Set([
+  'invalid_operation_id', 'request_serialization_failed', 'request_too_large',
+  'request_capacity_exceeded', 'primary_unsupported', 'forbidden_endpoint',
+]);
+
+function generationNotAdmitted(error: unknown): boolean {
+  if (error instanceof RoutingFailure) return true;
+  return error instanceof RequestFailure && NOT_ADMITTED_FAILURE_CODES.has(error.code)
+    && error.details.stage === 'queued' && error.details.outcome === 'not_executed';
+}
+
+// pending: Studio may still be generating. A wait that ended without a result
+// is failed when nothing ran, otherwise unknown: a late result can still settle it.
+function generationPhase(status: RequestStatus): 'generating' | 'completed' | 'failed' | 'unknown' {
+  if (status.state === 'pending') return 'generating';
+  if (status.state === 'settled') return status.outcome === 'success' ? 'completed' : 'failed';
+  return status.outcome === 'not_executed' || status.executionOutcome === 'not_executed' ? 'failed' : 'unknown';
+}
+
 function asRecord(value: unknown): Record<string, unknown> | undefined {
   return value !== null && typeof value === 'object' && !Array.isArray(value)
     ? value as Record<string, unknown>
@@ -4590,8 +4611,7 @@ export class RobloxStudioTools {
     const preparation = this.referenceUploads.view(requestId);
     if (!preparation) return this._requestStatusResult(requestId, status);
     if (!status) return this._textResult({ ...unretainedStatus(requestId), preparation });
-    const phase = status.state !== 'settled' ? 'generating' : status.outcome === 'success' ? 'completed' : 'failed';
-    return this._textResult({ ...status, phase, preparation });
+    return this._textResult({ ...status, phase: generationPhase(status), preparation });
   }
 
   // A generate_model job that has not reached the bridge, shaped like a request
@@ -4887,20 +4907,25 @@ export class RobloxStudioTools {
       if (joined && submit) return this._requestStatusResult(jobId, joined.status);
       if (joined) return { content: [{ type: 'text', text: JSON.stringify(await joined.response()) }] };
     }
+    let dispatchPeerId = targetPeerId;
     const generate = async () => {
       payload.image = { kind: 'asset', asset_id: await this.referenceUploads.acquire(jobId, identityKey, targetPeerId, attempt) };
-      return this._dispatchGenerateModel(payload, instance_id, timeoutMs, submit, jobId, identity,
-        (dispatchPeerId) => this.referenceUploads.dispatched(jobId, dispatchPeerId));
+      return this._dispatchGenerateModel(payload, instance_id, timeoutMs, submit, jobId, identity, (peerId) => {
+        dispatchPeerId = peerId;
+        this.referenceUploads.dispatched(jobId, peerId);
+      });
     };
     // Checked again in the same turn that starts the work: a concurrent caller
     // may have claimed this ID while the bridge was consulted.
     const current = this.referenceUploads.lookup(jobId, identityKey, targetPeerId);
     const job = generate();
     this.referenceUploads.attach(jobId, job);
+    job.catch((error: unknown) => {
+      if (generationNotAdmitted(error)) this.referenceUploads.notDispatched(jobId, dispatchPeerId, error);
+    });
     if (submit && current?.imageAssetId === undefined) {
       // The job outlives this call from the moment its upload starts. Its
       // progress and any failure are reported by get_request_status.
-      job.catch((error: unknown) => this.referenceUploads.dispatchFailed(jobId, error));
       return this._textResult(this._preparationStatus(jobId, this.referenceUploads.view(jobId)!));
     }
     return job;

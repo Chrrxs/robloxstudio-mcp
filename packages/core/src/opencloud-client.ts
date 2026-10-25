@@ -494,6 +494,8 @@ export class OpenCloudOperationError extends Error {
     readonly providerMessage: string,
     readonly operationPath: string,
     readonly providerCode?: number,
+    /** The operation reported no error, only no asset ID; the asset may exist. */
+    readonly completedWithoutAsset = false,
   ) {
     super(`Asset upload failed: ${providerMessage} (operation ${operationPath})`);
     this.name = 'OpenCloudOperationError';
@@ -523,7 +525,7 @@ function finishedAssetOperation(
   if (operation.done !== true) return undefined;
   const assetId: unknown = readField(operation.response, 'assetId');
   if ((typeof assetId !== 'string' || !assetId) && typeof assetId !== 'number') {
-    throw new OpenCloudOperationError('Open Cloud operation completed without an asset ID.', operationPath);
+    throw new OpenCloudOperationError('Open Cloud operation completed without an asset ID.', operationPath, undefined, true);
   }
   return operation;
 }

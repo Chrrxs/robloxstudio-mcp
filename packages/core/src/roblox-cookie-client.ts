@@ -19,9 +19,13 @@ export class RobloxCookieRequestError extends Error {
   }
 }
 
-/** An upload operation Roblox finished without creating an asset. */
+/** An upload operation that finished without a usable asset: Roblox reported an error, or no asset ID. */
 export class RobloxUploadOperationError extends Error {
-  constructor(message: string) {
+  constructor(
+    message: string,
+    /** The operation reported no error, only no asset ID; the asset may exist. */
+    readonly completedWithoutAsset = false,
+  ) {
     super(message);
     this.name = 'RobloxUploadOperationError';
   }
@@ -209,7 +213,7 @@ export class RobloxCookieClient {
     const initialAssetId = this.operationAssetId(operation);
     if (initialAssetId !== null) return initialAssetId;
     if (operation.done) {
-      throw new RobloxUploadOperationError('Image upload completed without an asset ID.');
+      throw new RobloxUploadOperationError('Image upload completed without an asset ID.', true);
     }
 
     const operationId = operation.operationId ?? operation.path?.split('/').pop();
@@ -235,7 +239,7 @@ export class RobloxCookieClient {
       const assetId = this.operationAssetId(operation);
       if (assetId !== null) return assetId;
       if (operation.done) {
-        throw new RobloxUploadOperationError('Image upload completed without an asset ID.');
+        throw new RobloxUploadOperationError('Image upload completed without an asset ID.', true);
       }
       if (attempt < maxAttempts - 1) {
         await new Promise(resolve => setTimeout(resolve, intervalMs));

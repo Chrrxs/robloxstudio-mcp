@@ -1,5 +1,5 @@
 import request from 'supertest';
-import { BridgeService, RoutingFailure } from '../bridge-service.js';
+import { BridgeService, RequestFailure, RoutingFailure } from '../bridge-service.js';
 import { createHttpServer } from '../http-server.js';
 import { OpenCloudClient } from '../opencloud-client.js';
 import { rgbaToPng } from '../png-encoder.js';
@@ -347,6 +347,9 @@ describe('generate_model reference image uploads', () => {
     bridge.unregisterPeer('edit');
     uploaded.resolve(1001);
     await expect(first).rejects.toBeInstanceOf(RoutingFailure);
+    expect(parse(await tools.getRequestStatus('stranded'))).toMatchObject({
+      phase: 'failed', state: 'settled', executionOutcome: 'not_executed', preparation: { stage: 'uploaded', imageAssetId: 1001 },
+    });
 
     registerEdit(bridge, 'edit', 'instance:jobs');
     const retry = tools.generateModel(args, 'instance:jobs');
@@ -354,6 +357,47 @@ describe('generate_model reference image uploads', () => {
     claimAndSettle('stranded', 1001);
     expect(parse(await retry)).toEqual(MODEL);
     expect(upload).toHaveBeenCalledTimes(1);
+  });
+
+  test('a dispatch whose outcome is unknown is not reported as never run', async () => {
+    const lost = new RequestFailure('Proxy request timeout: lost-answer; dispatched to primary; unknown', 'proxy_request_timeout', {
+      requestId: 'lost-answer', targetPeerId: 'edit', stage: 'dispatched', outcome: 'unknown', executionOutcome: 'unknown',
+    });
+    const submit = jest.spyOn(bridge, 'submitRequest').mockRejectedValueOnce(lost);
+    await tools.generateModel({ prompt: 'crate', ...image, async: true, operation_id: 'lost-answer' }, 'instance:jobs');
+    await jest.advanceTimersByTimeAsync(0);
+    expect(submit).toHaveBeenCalledTimes(1);
+    const status = parse(await tools.getRequestStatus('lost-answer'));
+    expect(status).toMatchObject({ state: 'unknown', preparation: { stage: 'dispatched' } });
+    expect(status).not.toHaveProperty('executionOutcome', 'not_executed');
+  });
+
+  test('a refused dispatch keeps the uploaded image for the retry', async () => {
+    const refused = new RequestFailure('pending capacity exceeded; queued; not_executed', 'request_capacity_exceeded', {
+      requestId: 'refused-dispatch', targetPeerId: 'edit', stage: 'queued', outcome: 'not_executed', executionOutcome: 'not_executed',
+    });
+    jest.spyOn(bridge, 'submitRequest').mockRejectedValueOnce(refused);
+    const args = { prompt: 'crate', ...image, async: true, operation_id: 'refused-dispatch' };
+    await tools.generateModel(args, 'instance:jobs');
+    await jest.advanceTimersByTimeAsync(0);
+    expect(parse(await tools.getRequestStatus('refused-dispatch'))).toMatchObject({
+      phase: 'failed', executionOutcome: 'not_executed',
+      preparation: { stage: 'uploaded', imageAssetId: 1001, error: expect.stringContaining('capacity') },
+    });
+
+    expect(parse(await tools.generateModel(args, 'instance:jobs'))).toMatchObject({
+      requestId: 'refused-dispatch', phase: 'generating', preparation: { stage: 'dispatched' },
+    });
+    claimAndSettle('refused-dispatch', 1001);
+    expect(upload).toHaveBeenCalledTimes(1);
+  });
+
+  test('a job that ends unclaimed reports a failed phase', async () => {
+    await tools.generateModel({ prompt: 'crate', ...image, async: true, operation_id: 'unclaimed', timeout_ms: 1000 }, 'instance:jobs');
+    await jest.advanceTimersByTimeAsync(1000);
+    expect(parse(await tools.getRequestStatus('unclaimed'))).toMatchObject({
+      state: 'timed_out', outcome: 'not_executed', phase: 'failed', preparation: { stage: 'dispatched' },
+    });
   });
 
   test('another session\'s operation on this primary is rejoined without uploading', async () => {
@@ -465,6 +509,28 @@ describe('generate_model reference uploads through Roblox clients', () => {
       phase: 'completed', preparation: { stage: 'dispatched', imageAssetId: 555, uploadedAssetId: '987' },
     });
     expect(posts).toBe(1);
+  });
+
+  test('an operation that completed without an asset ID is never uploaded again', async () => {
+    serveOpenCloud([() => Response.json({ path: 'operations/op-2', done: true, response: {} })], { finished: true });
+    expect(await generate()).toMatchObject({ success: false, error: expect.stringContaining('unknown outcome') });
+    expect(await generate()).toMatchObject({ success: false, error: expect.stringContaining('not repeated') });
+    expect(parse(await tools.getRequestStatus('open-cloud'))).toMatchObject({ preparation: { stage: 'upload_unknown' } });
+    expect(posts).toBe(1);
+  });
+
+  test('an operation Roblox reports as failed is uploaded again', async () => {
+    serveOpenCloud([
+      () => Response.json({ path: 'operations/op-3', done: true, error: { code: 3, message: 'moderated' } }),
+      () => Response.json({ path: 'operations/op-1', done: true, response: { assetId: '987' } }),
+    ], { finished: true });
+    expect(await generate()).toMatchObject({ success: false, error: expect.stringContaining('moderated') });
+    const retry = tools.generateModel(args, 'instance:jobs');
+    await jest.advanceTimersByTimeAsync(0);
+    expect(bridge.claimNextRequestForTransport('edit', 'socket')).toMatchObject({ data: { image: { asset_id: 555 } } });
+    bridge.settleTransportResponse('edit', 'open-cloud', MODEL);
+    expect(parse(await retry)).toEqual(MODEL);
+    expect(posts).toBe(2);
   });
 });
 

@@ -94,13 +94,16 @@ const PHASE_ORDER: Record<UploadPhase, number> = { local: 0, sending: 1, accepte
 // True only when Roblox certainly created no asset for this attempt.
 function createdNothing(error: unknown, phase: UploadPhase): boolean {
   if (phase === 'local') return true;
-  if (phase === 'sending') {
-    // An HTTP answer below 500 is a refusal. A 5xx, timeout, or lost connection
-    // leaves the outcome unknown.
-    return (error instanceof OpenCloudRequestError || error instanceof RobloxCookieRequestError) && error.status < 500;
+  if (phase === 'created') return false;
+  // Roblox reported that the operation failed. One that completed without a
+  // readable asset ID may still have created the asset.
+  if ((error instanceof OpenCloudOperationError || error instanceof RobloxUploadOperationError) && !error.completedWithoutAsset) {
+    return true;
   }
-  if (phase === 'accepted') return error instanceof OpenCloudOperationError || error instanceof RobloxUploadOperationError;
-  return false;
+  // A refusal of the create request itself. A 5xx, timeout, or lost connection
+  // leaves the outcome unknown, as does any failure while polling.
+  return phase === 'sending'
+    && (error instanceof OpenCloudRequestError || error instanceof RobloxCookieRequestError) && error.status < 500;
 }
 
 function errorText(error: unknown): string {
@@ -135,8 +138,9 @@ export class ReferenceUploads {
   acquire(operationId: string, identityKey: string, targetPeerId: string, attempt: ReferenceUploadAttempt): Promise<number> {
     let record = this.matching(operationId, identityKey, targetPeerId);
     if (record) {
-      record.targetPeerId = targetPeerId;
       if (record.inFlight) return record.inFlight;
+      // A retry may reach a reconnected Peer until the generation is dispatched.
+      record.targetPeerId = targetPeerId;
       if (record.imageAssetId !== undefined) return Promise.resolve(record.imageAssetId);
       if (record.stage === 'upload_unknown') {
         const checkpoint = { remoteOperation: record.remoteOperation, createdAssetId: record.createdAssetId };
@@ -160,10 +164,15 @@ export class ReferenceUploads {
     return this.run(record, (progress) => attempt.upload(progress));
   }
 
-  /** Records that the generation was handed to the bridge for targetPeerId. */
+  /**
+   * Records that the generation was handed to the bridge for targetPeerId. The
+   * first dispatch wins: a concurrent caller for another Peer is refused by
+   * the bridge and must not take the record over.
+   */
   dispatched(operationId: string, targetPeerId: string): void {
     const record = this.records.get(operationId);
     if (!record || record.imageAssetId === undefined) return;
+    if (record.stage === 'dispatched' && record.targetPeerId !== targetPeerId) return;
     record.stage = 'dispatched';
     record.targetPeerId = targetPeerId;
     record.error = undefined;
@@ -171,12 +180,14 @@ export class ReferenceUploads {
   }
 
   /**
-   * Records that a job with a finished upload was not admitted. Upload
-   * failures are already recorded; a retry reuses the uploaded image.
+   * Records that a generation whose image is uploaded was certainly not
+   * admitted, so the bridge holds no record of it. A retry reuses the image.
+   * Failures with any other outcome leave the bridge as the source of truth.
    */
-  dispatchFailed(operationId: string, error: unknown): void {
+  notDispatched(operationId: string, targetPeerId: string, error: unknown): void {
     const record = this.records.get(operationId);
     if (!record || record.imageAssetId === undefined || record.inFlight) return;
+    if (record.stage === 'dispatched' && record.targetPeerId !== targetPeerId) return;
     record.stage = 'uploaded';
     record.error = errorText(error);
     this.touch(record);
@@ -283,9 +294,9 @@ export class ReferenceUploads {
   }
 
   private prune(): void {
-    const cutoff = this.now() - REFERENCE_UPLOAD_RETENTION_MS;
+    const now = this.now();
     for (const [operationId, record] of this.records) {
-      if (record.updatedAt >= cutoff) break;
+      if (now - record.updatedAt < REFERENCE_UPLOAD_RETENTION_MS) break;
       if (!record.inFlight) this.records.delete(operationId);
     }
     for (const [operationId, record] of this.records) {
