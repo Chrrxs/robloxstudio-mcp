@@ -1,6 +1,6 @@
 import { readRbxmInput } from '../rbxm-input.js';
 import { StudioHttpClient } from './studio-client.js';
-import { BridgeService, isValidOperationId, MAX_OPERATION_ID_LENGTH, MAX_OPERATION_WAIT_MS, RoutingFailure } from '../bridge-service.js';
+import { BridgeService, isValidOperationId, MAX_OPERATION_ID_LENGTH, MAX_OPERATION_WAIT_MS, RequestFailure, RoutingFailure, StudioOperationError } from '../bridge-service.js';
 import type { PublicStudioPeer, RequestStatus, StudioPeer } from '../bridge-service.js';
 import {
   openCloudAssetUploadLimitBytes,
@@ -329,6 +329,14 @@ function sleep(ms: number): Promise<void> {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+// Keeps permission, version, service, and transport failures distinguishable.
+function codedError(error: unknown): { code: string; message: string } {
+  const message = errorMessage(error);
+  if (error instanceof RequestFailure || error instanceof StudioOperationError) return { code: error.code, message };
+  if (error instanceof RoutingFailure) return { code: error.routingError.code, message };
+  return { code: 'studio_error', message };
 }
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {
@@ -1607,11 +1615,33 @@ export class RobloxStudioTools {
     }
   }
 
+  // A primary of this version serves simulation reads natively; an older one
+  // only through generated Luau, which a restricted /proxy refuses.
+  private _supportsSimulationReads(): boolean {
+    return this.bridge.supportsPrimaryFeature('simulation_reads');
+  }
+
+  private _parseSimulationReadResponse(response: unknown, label: string): unknown {
+    const record = asRecord(response);
+    if (!record) throw new StudioOperationError(`${label} returned an invalid response`, 'invalid_response');
+    const { success, error, message, ...details } = record;
+    if (success === false) {
+      const code = typeof error === 'string' && error !== '' ? error : 'read_failed';
+      throw new StudioOperationError(typeof message === 'string' && message !== '' ? message : `${label} failed: ${code}`, code, details);
+    }
+    if (typeof error === 'string') throw new StudioOperationError(error, 'studio_error');
+    return response;
+  }
+
   private async _executeNetworkStateOperation(
     instanceId: string,
     role: string,
     operation: 'get' | 'reset',
   ): Promise<unknown> {
+    if (operation === 'get' && this._supportsSimulationReads()) {
+      const response = await this._request('/api/get-network-simulation-state', {}, instanceId, role);
+      return this._parseSimulationReadResponse(response, 'network simulation get');
+    }
     const code = buildNetworkStateLuau(operation);
     const response = await this._request('/api/execute-luau', { code }, instanceId, role);
     return this._parseExecuteLuauJsonResponse(response, `network simulation ${operation}`);
@@ -1623,6 +1653,12 @@ export class RobloxStudioTools {
     operation: 'get' | 'set',
     options: Record<string, unknown>,
   ): Promise<unknown> {
+    if (operation === 'get' && this._supportsSimulationReads()) {
+      const data: Record<string, unknown> = { includeDeviceList: options.includeDeviceList !== false };
+      if (options.deviceId !== undefined) data.deviceId = options.deviceId;
+      const response = await this._request('/api/get-device-simulator-state', data, instanceId, role);
+      return this._parseSimulationReadResponse(response, 'device simulator get');
+    }
     const code = buildDeviceSimulatorLuau(operation, options);
     const response = await this._request('/api/execute-luau', { code }, instanceId, role);
     return this._parseExecuteLuauJsonResponse(response, `device simulator ${operation}`);
@@ -2363,13 +2399,13 @@ export class RobloxStudioTools {
 
     const roleEntries = await Promise.all(resolved.roles.map(async (role) => {
       const state: Record<string, unknown> = {};
-      const errors: Record<string, string> = {};
+      const errors: Record<string, { code: string; message: string }> = {};
 
       if (includeNetwork) {
         try {
           state.network = await this._executeNetworkStateOperation(resolved.instanceId, role, 'get');
         } catch (error) {
-          errors.network = errorMessage(error);
+          errors.network = codedError(error);
         }
       }
 
@@ -2382,7 +2418,7 @@ export class RobloxStudioTools {
             { includeDeviceList: false },
           );
         } catch (error) {
-          errors.deviceSimulator = errorMessage(error);
+          errors.deviceSimulator = codedError(error);
         }
       }
 

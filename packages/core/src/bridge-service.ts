@@ -215,6 +215,18 @@ export class RequestFailure extends Error {
   }
 }
 
+/** A Studio handler's structured refusal, e.g. `{ success: false, error: 'service_unavailable' }`. */
+export class StudioOperationError extends Error {
+  constructor(
+    message: string,
+    readonly code: string,
+    readonly details: Record<string, unknown> = {},
+  ) {
+    super(message);
+    this.name = 'StudioOperationError';
+  }
+}
+
 export function parseObservations(value: object): RequestObservations {
   const result: RequestObservations = {};
   if ('executionOutcome' in value) {
@@ -282,8 +294,12 @@ export function isValidOperationId(value: unknown): value is string {
  *   script_preconditions: Studio plugins must match their primary's version, so
  *     this primary's plugins enforce expectedRevision(s) on script writes. An
  *     older plugin ignores those fields and writes unchecked.
+ *   simulation_reads: this primary's plugins serve the fixed network and device
+ *     simulator reads (/api/get-network-simulation-state,
+ *     /api/get-device-simulator-state). Older plugins only offer them as
+ *     generated Luau, which an Inspector primary's /proxy forbids.
  */
-export const PRIMARY_PROXY_FEATURES = ['submit', 'identity', 'status_wait', 'script_preconditions'] as const;
+export const PRIMARY_PROXY_FEATURES = ['submit', 'identity', 'status_wait', 'script_preconditions', 'simulation_reads'] as const;
 export type PrimaryProxyFeature = typeof PRIMARY_PROXY_FEATURES[number];
 
 const REVISION_CHECKED_SCRIPT_ENDPOINTS = new Set([
@@ -958,6 +974,11 @@ export class BridgeService implements StudioTransportQueue {
   refreshTopologyForRouting(signal?: AbortSignal): Promise<void> | undefined {
     if (signal?.aborted) throw new Error('Request aborted before topology resolution');
     return undefined;
+  }
+
+  /** A local primary's plugins match its version, so it supports every feature it advertises. */
+  supportsPrimaryFeature(feature: PrimaryProxyFeature): boolean {
+    return PRIMARY_PROXY_FEATURES.includes(feature);
   }
 
   resolveConnectedInstanceId(instanceId: string): string | undefined {

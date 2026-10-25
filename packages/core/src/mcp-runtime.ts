@@ -7,7 +7,7 @@ import {
   type McpRequestContext,
   type ToolAnnotations,
 } from '@modelcontextprotocol/server';
-import { MultiplayerGroupInUseError, RequestFailure, RoutingFailure } from './bridge-service.js';
+import { MultiplayerGroupInUseError, RequestFailure, RoutingFailure, StudioOperationError } from './bridge-service.js';
 import { registerResourceHandlers } from './mcp-compat.js';
 import { OpenCloudOperationError } from './opencloud-client.js';
 import { StudioLaunchPreDispatchError } from './studio-instance-manager.js';
@@ -218,6 +218,9 @@ export function publicToolErrorBody(name: string, error: unknown): Record<string
   }
   if (error instanceof RoutingFailure) return publicRoutingError(error);
   if (error instanceof RequestFailure) {
+    return { error: error.code, message: error.message.slice(0, 500), ...error.details };
+  }
+  if (error instanceof StudioOperationError) {
     return { error: error.code, message: error.message.slice(0, 500), ...error.details };
   }
   if (error instanceof OpenCloudOperationError) {

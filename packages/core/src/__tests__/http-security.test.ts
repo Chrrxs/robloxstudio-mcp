@@ -83,7 +83,8 @@ describe('HTTP security', () => {
 
     it.each(['/api/place-info', '/api/instance-properties', '/api/get-script-source',
       '/api/get-selection', '/api/set-selection', '/api/focus-viewport',
-      '/api/capture-begin', '/api/capture-read', '/api/get-runtime-logs'])(
+      '/api/capture-begin', '/api/capture-read', '/api/get-runtime-logs',
+      '/api/get-network-simulation-state', '/api/get-device-simulator-state'])(
       'forwards permitted Inspector endpoint %s', async (endpoint) => {
         const app = createHttpServer(tools, bridge, new Set(getReadOnlyTools().map(tool => tool.name)),
           undefined, { authToken: token });

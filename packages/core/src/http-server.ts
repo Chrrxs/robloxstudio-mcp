@@ -87,6 +87,8 @@ const TOOL_PROXY_ENDPOINTS: Record<string, readonly string[]> = {
   export_rbxm: ['/api/export-rbxm'],
   import_rbxm: ['/api/import-rbxm'],
   find_and_replace_in_scripts: ['/api/find-and-replace-in-scripts'],
+  get_simulation_state: ['/api/get-network-simulation-state', '/api/get-device-simulator-state'],
+  get_device_simulator_state: ['/api/get-device-simulator-state'],
   manage_monetization: ['/api/place-info'],
   manage_experience: ['/api/place-info'],
 };

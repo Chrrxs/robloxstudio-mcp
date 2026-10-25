@@ -10,6 +10,7 @@ import EvalRuntimeHandlers from "./handlers/EvalRuntimeHandlers";
 import BreakpointHandlers from "./handlers/BreakpointHandlers";
 import ScriptProfilerHandlers from "./handlers/ScriptProfilerHandlers";
 import MicroProfilerHandlers from "./handlers/MicroProfilerHandlers";
+import SimulationHandlers from "./handlers/SimulationHandlers";
 import LuauExec from "./LuauExec";
 import HttpDiagnostics from "./HttpDiagnostics";
 import PluginSession from "./PluginSession";
@@ -151,6 +152,10 @@ const CLIENT_BROKER_ALLOWED_ENDPOINTS = new Set<string>([
 	"/api/simulate-keyboard-input",
 	// Viewport framing must target the same live client captured by screenshots.
 	"/api/focus-viewport",
+	// Network and device simulation state is per DataModel, so a client's
+	// own settings are read in its VM.
+	"/api/get-network-simulation-state",
+	"/api/get-device-simulator-state",
 ]);
 
 
@@ -321,6 +326,12 @@ function routeClientRequest(payload: BrokerEnvelope): unknown {
 	}
 	if (payload.endpoint === "/api/focus-viewport") {
 		return MetadataHandlers.focusViewport(payload.data ?? {});
+	}
+	if (payload.endpoint === "/api/get-network-simulation-state") {
+		return SimulationHandlers.getNetworkSimulationState();
+	}
+	if (payload.endpoint === "/api/get-device-simulator-state") {
+		return SimulationHandlers.getDeviceSimulatorState(payload.data ?? {});
 	}
 	if (payload.endpoint === "/api/execute-luau") {
 		return handleExecuteLuau(payload.data);

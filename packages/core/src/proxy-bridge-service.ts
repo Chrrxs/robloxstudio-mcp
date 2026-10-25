@@ -121,6 +121,12 @@ export class ProxyBridgeService extends BridgeService {
     return this.refreshTopology(signal, true);
   }
 
+  // Known from the primary's latest topology; a primary that predates a
+  // feature, or has not been reached yet, lists none.
+  override supportsPrimaryFeature(feature: PrimaryProxyFeature): boolean {
+    return this.primaryFeatures.has(feature);
+  }
+
   private async refreshTopology(signal?: AbortSignal, requireFresh = false): Promise<void> {
     const generation = ++this.topologyGeneration;
     const controller = new AbortController();
@@ -476,6 +482,12 @@ export class ProxyBridgeService extends BridgeService {
       if ('error' in result && result.error !== undefined && typeof result.error !== 'string') {
         primaryError = true;
         throw result.error;
+      }
+      if (response.status === 403 && 'error' in result && result.error === 'forbidden_endpoint') {
+        throw new RequestFailure(
+          `${this.primaryDescription()} refused ${endpoint} through /proxy: that server's edition does not permit this Studio endpoint, so nothing reached Studio; queued; not_executed`,
+          'forbidden_endpoint', details,
+        );
       }
       if ('error' in result && typeof result.error === 'string') {
         const details = 'details' in result ? parseFailureDetails(result.details, { requestId, targetPeerId }) : undefined;
