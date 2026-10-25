@@ -123,4 +123,34 @@ export interface TransportUpdate {
 
 declare global {
 	function loadstring(code: string): LuaTuple<[(() => unknown) | undefined, string?]>;
+
+	// Network simulation properties absent from @rbxts/types.
+	interface NetworkSettings {
+		InboundNetworkMinDelayMs: number;
+		OutboundNetworkMinDelayMs: number;
+		InboundNetworkJitterMs: number;
+		OutboundNetworkJitterMs: number;
+		InboundNetworkLossPercent: number;
+		OutboundNetworkLossPercent: number;
+	}
+
+	// @rbxts/types gives GlobalSettings no service map, so GetService accepts no name.
+	interface GlobalSettings {
+		GetService(this: GlobalSettings, className: "NetworkSettings"): NetworkSettings;
+	}
+
+	// The read surface of Studio's Device Emulator service, absent from @rbxts/types.
+	interface StudioDeviceSimulatorService extends Instance {
+		GetDeviceAsync(this: StudioDeviceSimulatorService): string;
+		GetDeviceListAsync(this: StudioDeviceSimulatorService): Array<unknown>;
+		GetDeviceInfoAsync(this: StudioDeviceSimulatorService, deviceId: string): unknown;
+		GetResolutionAsync(this: StudioDeviceSimulatorService): unknown;
+		GetPixelDensityAsync(this: StudioDeviceSimulatorService): unknown;
+		GetOrientationAsync(this: StudioDeviceSimulatorService): unknown;
+		GetScalingModeAsync(this: StudioDeviceSimulatorService): unknown;
+	}
+
+	interface Services {
+		StudioDeviceSimulatorService: StudioDeviceSimulatorService;
+	}
 }

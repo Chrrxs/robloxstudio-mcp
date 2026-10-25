@@ -1,6 +1,6 @@
 import { readRbxmInput } from '../rbxm-input.js';
 import { StudioHttpClient } from './studio-client.js';
-import { BridgeService, isValidOperationId, MAX_OPERATION_ID_LENGTH, MAX_OPERATION_WAIT_MS, RequestFailure, RoutingFailure } from '../bridge-service.js';
+import { BridgeService, isValidOperationId, MAX_OPERATION_ID_LENGTH, MAX_OPERATION_WAIT_MS, RequestFailure, RoutingFailure, StudioOperationError } from '../bridge-service.js';
 import type { PublicStudioPeer, RequestStatus, StudioPeer } from '../bridge-service.js';
 import {
   openCloudAssetUploadLimitBytes,
@@ -334,20 +334,28 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-const MAX_PEER_ERROR_MESSAGE_LENGTH = 500;
+const MAX_FAILURE_MESSAGE_LENGTH = 500;
 
 function boundedMessage(message: string): string {
-  return message.slice(0, MAX_PEER_ERROR_MESSAGE_LENGTH);
+  return message.slice(0, MAX_FAILURE_MESSAGE_LENGTH);
 }
 
-// A fanned-out Peer request that rejected, as a code callers can branch on
-// (request_timeout, peer_unregistered, forbidden_endpoint, ...) plus its reason.
+// A failure's code, so callers can tell permission (forbidden_endpoint),
+// version (primary_unsupported), service (service_unavailable), routing, and
+// transport (request_timeout, peer_unregistered, ...) failures apart.
+function failureCode(error: unknown, fallback: string): string {
+  if (error instanceof RequestFailure || error instanceof StudioOperationError) return error.code;
+  if (error instanceof RoutingFailure) return error.routingError.code;
+  return fallback;
+}
+
+function codedError(error: unknown): { code: string; message: string } {
+  return { code: failureCode(error, 'studio_error'), message: boundedMessage(errorMessage(error)) };
+}
+
+// A fanned-out Peer request that rejected, shaped like a Studio handler failure.
 function peerRequestFailure(reason: unknown): { error: string; message: string } {
-  if (reason instanceof RequestFailure) return { error: reason.code, message: boundedMessage(reason.message) };
-  if (reason instanceof RoutingFailure) {
-    return { error: reason.routingError.code, message: boundedMessage(reason.routingError.message) };
-  }
-  return { error: 'request_failed', message: boundedMessage(errorMessage(reason)) };
+  return { error: failureCode(reason, 'request_failed'), message: boundedMessage(errorMessage(reason)) };
 }
 
 function unretainedStatus(requestId: string): Record<string, unknown> {
@@ -1644,11 +1652,33 @@ export class RobloxStudioTools {
     }
   }
 
+  // A primary of this version serves simulation reads natively; an older one
+  // only through generated Luau, which a restricted /proxy refuses.
+  private _supportsSimulationReads(): boolean {
+    return this.bridge.supportsPrimaryFeature('simulation_reads');
+  }
+
+  private _parseSimulationReadResponse(response: unknown, label: string): unknown {
+    const record = asRecord(response);
+    if (!record) throw new StudioOperationError(`${label} returned an invalid response`, 'invalid_response');
+    const { success, error, message, ...details } = record;
+    if (success === false) {
+      const code = typeof error === 'string' && error !== '' ? error : 'read_failed';
+      throw new StudioOperationError(typeof message === 'string' && message !== '' ? message : `${label} failed: ${code}`, code, details);
+    }
+    if (typeof error === 'string') throw new StudioOperationError(error, 'studio_error');
+    return response;
+  }
+
   private async _executeNetworkStateOperation(
     instanceId: string,
     role: string,
     operation: 'get' | 'reset',
   ): Promise<unknown> {
+    if (operation === 'get' && this._supportsSimulationReads()) {
+      const response = await this._request('/api/get-network-simulation-state', {}, instanceId, role);
+      return this._parseSimulationReadResponse(response, 'network simulation get');
+    }
     const code = buildNetworkStateLuau(operation);
     const response = await this._request('/api/execute-luau', { code }, instanceId, role);
     return this._parseExecuteLuauJsonResponse(response, `network simulation ${operation}`);
@@ -1660,6 +1690,12 @@ export class RobloxStudioTools {
     operation: 'get' | 'set',
     options: Record<string, unknown>,
   ): Promise<unknown> {
+    if (operation === 'get' && this._supportsSimulationReads()) {
+      const data: Record<string, unknown> = { includeDeviceList: options.includeDeviceList !== false };
+      if (options.deviceId !== undefined) data.deviceId = options.deviceId;
+      const response = await this._request('/api/get-device-simulator-state', data, instanceId, role);
+      return this._parseSimulationReadResponse(response, 'device simulator get');
+    }
     const code = buildDeviceSimulatorLuau(operation, options);
     const response = await this._request('/api/execute-luau', { code }, instanceId, role);
     return this._parseExecuteLuauJsonResponse(response, `device simulator ${operation}`);
@@ -2400,13 +2436,13 @@ export class RobloxStudioTools {
 
     const roleEntries = await Promise.all(resolved.roles.map(async (role) => {
       const state: Record<string, unknown> = {};
-      const errors: Record<string, string> = {};
+      const errors: Record<string, { code: string; message: string }> = {};
 
       if (includeNetwork) {
         try {
           state.network = await this._executeNetworkStateOperation(resolved.instanceId, role, 'get');
         } catch (error) {
-          errors.network = errorMessage(error);
+          errors.network = codedError(error);
         }
       }
 
@@ -2419,7 +2455,7 @@ export class RobloxStudioTools {
             { includeDeviceList: false },
           );
         } catch (error) {
-          errors.deviceSimulator = errorMessage(error);
+          errors.deviceSimulator = codedError(error);
         }
       }
 

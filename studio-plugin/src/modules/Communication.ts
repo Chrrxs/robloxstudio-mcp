@@ -20,6 +20,7 @@ import ScriptProfilerHandlers from "./handlers/ScriptProfilerHandlers";
 import MicroProfilerHandlers from "./handlers/MicroProfilerHandlers";
 import GenerateModelHandlers from "./handlers/GenerateModelHandlers";
 import EvalRuntimeHandlers from "./handlers/EvalRuntimeHandlers";
+import SimulationHandlers from "./handlers/SimulationHandlers";
 import ClientBroker from "./ClientBroker";
 import ServerUrlSettings from "./ServerUrlSettings";
 import PluginSession from "./PluginSession";
@@ -102,6 +103,9 @@ const routeMap: Record<string, Handler> = {
 
 	"/api/get-memory-breakdown": MemoryHandlers.getMemoryBreakdown,
 	"/api/get-scene-analysis": SceneAnalysisHandlers.getSceneAnalysis,
+
+	"/api/get-network-simulation-state": SimulationHandlers.getNetworkSimulationState,
+	"/api/get-device-simulator-state": SimulationHandlers.getDeviceSimulatorState,
 };
 
 const pathGuard = PathGuard.createPathGuard((path) => Utils.resolveInstancePath(path).ambiguity);
