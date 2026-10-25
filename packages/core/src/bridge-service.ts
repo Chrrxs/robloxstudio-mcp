@@ -301,8 +301,11 @@ export function isValidOperationId(value: unknown): value is string {
  *   atomic_properties: this primary's plugins honour `atomic` and `dryRun` on
  *     /api/set-properties. An older plugin ignores both and writes each
  *     property separately, even for a preview.
+ *   micro_profiler_transfer: this primary's plugins record MicroProfiler
+ *     captures and stage them for /api/micro-profiler-read. An older plugin
+ *     analyzes in Studio and stages nothing this server can read.
  */
-export const PRIMARY_PROXY_FEATURES = ['submit', 'identity', 'status_wait', 'script_preconditions', 'simulation_reads', 'atomic_properties'] as const;
+export const PRIMARY_PROXY_FEATURES = ['submit', 'identity', 'status_wait', 'script_preconditions', 'simulation_reads', 'atomic_properties', 'micro_profiler_transfer'] as const;
 export type PrimaryProxyFeature = typeof PRIMARY_PROXY_FEATURES[number];
 
 const REVISION_CHECKED_SCRIPT_ENDPOINTS = new Set([

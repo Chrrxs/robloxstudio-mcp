@@ -321,6 +321,25 @@ describe('script write preconditions through a proxy', () => {
     });
   });
 
+  test('an older primary refuses MicroProfiler captures it cannot stage before Studio records', async () => {
+    await withProxy({ olderPrimary: true }, async ({ proxyTools, proxyBodies }) => {
+      await expect(TOOL_HANDLERS.capture_micro_profiler(proxyTools, { target: 'edit', duration_ms: 1000, instance_id: 'instance:proxy' }))
+        .rejects.toMatchObject({
+          code: 'primary_unsupported',
+          message: expect.stringContaining('stages none for this server to read'),
+          details: { stage: 'queued', outcome: 'not_executed' },
+        });
+      expect(proxyBodies).toEqual([]);
+    });
+  });
+
+  test('a current primary receives MicroProfiler captures', async () => {
+    await withProxy({}, async ({ proxyTools, proxyBodies }) => {
+      await TOOL_HANDLERS.capture_micro_profiler(proxyTools, { target: 'edit', duration_ms: 1000, instance_id: 'instance:proxy' });
+      expect(proxyBodies).toEqual([expect.objectContaining({ endpoint: '/api/capture-micro-profiler' })]);
+    });
+  });
+
   test.each([
     ['set_properties', { instancePath: 'game.Workspace.Part', properties: { Name: 'X' } }],
     ['set_properties', { instancePath: 'game.Workspace.Part', properties: { Name: 'X' }, atomic: false }],

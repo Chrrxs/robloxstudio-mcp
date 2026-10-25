@@ -464,6 +464,12 @@ export class ProxyBridgeService extends BridgeService {
         'primary_unsupported', details,
       );
     }
+    if (endpoint === '/api/capture-micro-profiler' && !this.primaryFeatures.has('micro_profiler_transfer')) {
+      throw new RequestFailure(
+        `${this.primaryDescription()} serves a Studio plugin that analyzes MicroProfiler captures in Studio and stages none for this server to read; restart that server on this version; queued; not_executed`,
+        'primary_unsupported', details,
+      );
+    }
     const controller = new AbortController();
     const effectiveTimeoutMs = Math.max(1, request.timeoutMs);
     let requestBody: string;
