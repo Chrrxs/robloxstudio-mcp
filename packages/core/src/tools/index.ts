@@ -47,6 +47,7 @@ import { analyzeMicroProfilerCapture } from '../micro-profiler/analysis.js';
 import {
   CaptureTransferError,
   CLIENT_CHUNK_BYTES,
+  idleAsLongAsRead,
   isMicroProfilerAction,
   MICRO_PROFILER_ACTIONS,
   MICRO_PROFILER_DEFAULT_DURATION_MS,
@@ -62,6 +63,7 @@ import {
   windowFromRecording,
   writeWindowSidecar,
 } from '../micro-profiler/capture.js';
+import type { PaceCaptureChunk } from '../micro-profiler/capture.js';
 import { createHash, randomUUID } from 'crypto';
 import { ReferenceUploads } from './reference-uploads.js';
 import type { ReferenceUploadAttempt, ReferenceUploadCheckpoint, ReferenceUploadProgress, ReferenceUploadView } from './reference-uploads.js';
@@ -1220,6 +1222,8 @@ export class RobloxStudioTools {
   private viewportCaptureQueues = new Map<string, Promise<void>>();
   // generate_model reference images, shared by retries under one operation ID.
   private readonly referenceUploads = new ReferenceUploads();
+  // Paces chunks of a client capture copied through the client broker.
+  private captureChunkPace: PaceCaptureChunk = idleAsLongAsRead;
 
   constructor(bridge: BridgeService) {
     this.client = new StudioHttpClient(bridge);
@@ -3369,10 +3373,12 @@ export class RobloxStudioTools {
     const recording = asRecord(reply.recording) ?? {};
     let bytes: Buffer;
     try {
+      const throughBroker = isClientRole(recordedBy);
       bytes = await pullCapture(
         transfer,
-        isClientRole(recordedBy) ? CLIENT_CHUNK_BYTES : SERVER_CHUNK_BYTES,
+        throughBroker ? CLIENT_CHUNK_BYTES : SERVER_CHUNK_BYTES,
         (chunk) => this._requestPeer('/api/micro-profiler-read', chunk, peerId, MICRO_PROFILER_REQUEST_MARGIN_MS),
+        throughBroker ? this.captureChunkPace : undefined,
       );
     } catch (error) {
       await this._requestPeer('/api/micro-profiler-release', { transfer_id: transfer.transferId }, peerId).catch(() => undefined);

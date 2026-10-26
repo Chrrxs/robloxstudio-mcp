@@ -970,6 +970,9 @@ function invokeClientOnce(
 
 // Screenshot transfer is several invocations; they share one deadline, and the
 // first broker failure ends the transfer with that failure's diagnosis.
+// Between chunk reads the connection idles as long as the last read took: in a
+// busy game, reads back to back dropped the client after about 40 s (Studio
+// logged "QUIC: 1 (Internal Error)"), and reads at half that duty did not.
 function invokeClientCapture(
 	entry: ProxyEntry,
 	target: string,
@@ -982,10 +985,19 @@ function invokeClientCapture(
 	let brokerFailure: Record<string, unknown> | undefined;
 	let outcome: StudioRequestContext["executionOutcome"];
 	let invocations = 0;
+	let lastReadSeconds: number | undefined;
 	const result = CaptureTransfer.receive((captureEndpoint, captureData) => {
 		if (brokerFailure !== undefined) error("client broker failed", 0);
+		const isRead = captureEndpoint === CaptureTransfer.READ_ENDPOINT;
+		if (isRead && lastReadSeconds !== undefined) {
+			// Keep time for the next read within the shared deadline.
+			const idle = math.min(lastReadSeconds, call.deadlineAt - os.clock() - lastReadSeconds);
+			if (idle > 0) task.wait(idle);
+		}
 		invocations++;
+		const startedAt = os.clock();
 		const invoked = invokeClient(call, captureEndpoint, captureData, `${context.requestId}:${invocations}`);
+		if (isRead) lastReadSeconds = os.clock() - startedAt;
 		if (!invoked.ok) {
 			brokerFailure = invoked.failure;
 			outcome = context.executionOutcome;

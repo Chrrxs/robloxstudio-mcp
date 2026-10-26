@@ -186,9 +186,11 @@ describe('capture_micro_profiler', () => {
     expect(JSON.parse(fs.readFileSync(summaryPath, 'utf8')).capture.path).toBe(path.resolve(outputPath));
   });
 
-  test('pulls a client capture in broker-sized chunks when no server shares its process', async () => {
+  test('pulls a client capture in paced broker-sized chunks when no server shares its process', async () => {
     const bridge = new BridgeService();
     const tools = new RobloxStudioTools(bridge);
+    const paces: number[] = [];
+    Object.assign(tools, { captureChunkPace: async (readMs: number) => { paces.push(readMs); } });
     bridge.registerPeer(EDIT);
     bridge.registerPeer(runtimePeer('client-1'));
     const capture = Buffer.alloc(1_000_000, 7);
@@ -199,6 +201,8 @@ describe('capture_micro_profiler', () => {
     const body = JSON.parse((await call).content[0].text);
     expect(body.ok).toBe(true);
     expect(seen.slice(1).map((request) => request.data.length)).toEqual([786_432, 213_568]);
+    // The broker's connection idles between chunks, not after the last one.
+    expect(paces).toHaveLength(1);
   });
 
   test('records a solo client through the server Peer of its process and says the process is shared', async () => {
@@ -207,6 +211,8 @@ describe('capture_micro_profiler', () => {
     bridge.registerPeer(EDIT);
     bridge.registerPeer(runtimePeer('server'));
     bridge.registerPeer(runtimePeer('client-1'));
+    const paces: number[] = [];
+    Object.assign(tools, { captureChunkPace: async (readMs: number) => { paces.push(readMs); } });
     const capture = Buffer.alloc(1_000_000, 7);
     const call = tools.captureMicroProfiler('client-1', { output_path: path.join(tmpDir, 'solo.gprx') }, 'instance:test');
     const seen = await servePlugin(bridge, 'server-peer', call, (request) => request.endpoint === '/api/capture-micro-profiler'
@@ -221,6 +227,7 @@ describe('capture_micro_profiler', () => {
     expect(body).toMatchObject({ ok: true, target: 'client-1', recorded_by: 'server', process_roles: ['edit', 'server', 'client-1'] });
     expect(body.data_quality.notes.join(' ')).toContain('This Studio process runs edit, server, client-1, and MicroProfiler records the whole process');
     expect(bridge.claimNextRequestForTransport('client-1-peer', CLAIM_OWNER)).toBeNull();
+    expect(paces).toEqual([]);
   });
 
   test('writes a capture failure to summary_output_path', async () => {
@@ -408,6 +415,17 @@ describe('capture helpers', () => {
     await expect(pullCapture({ transferId: 't', totalBytes: 8, maxChunkBytes: 4 }, 4, async (request) => ({
       transfer_id: 't', offset: request.offset + 1, data: Buffer.alloc(4).toString('base64'),
     }))).rejects.toThrow('different capture chunk');
+  });
+
+  test('pullCapture paces between chunks with how long each read took', async () => {
+    const paces: number[] = [];
+    const bytes = await pullCapture({ transferId: 't', totalBytes: 10, maxChunkBytes: 4 }, 4, async (request) => ({
+      transfer_id: 't', offset: request.offset, data: Buffer.alloc(request.length, 1).toString('base64'),
+    }), async (readMs) => { paces.push(readMs); });
+    expect(bytes.length).toBe(10);
+    // Three chunks: a pause after each of the first two, with how long it took.
+    expect(paces).toHaveLength(2);
+    for (const readMs of paces) expect(readMs).toBeGreaterThanOrEqual(0);
   });
 
   test('pruneDefaultCaptures keeps the newest tool-named captures only', async () => {

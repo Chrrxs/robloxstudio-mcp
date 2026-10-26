@@ -3,6 +3,7 @@
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
+import { setTimeout as sleep } from 'timers/promises';
 import type { MicroProfilerAnalysisOptions, MicroProfilerCaptureWindow } from './analysis.js';
 
 export const MICRO_PROFILER_ACTIONS = ['capture', 'start', 'stop', 'analyze'] as const;
@@ -122,6 +123,14 @@ export function parseCaptureTransfer(value: unknown): CaptureTransferInfo | unde
 }
 
 export type ReadCaptureChunk = (request: { transfer_id: string; offset: number; length: number }) => Promise<unknown>;
+// Called between chunk reads with how long the last read took.
+export type PaceCaptureChunk = (readMs: number) => Promise<void>;
+
+// A client capture crosses the playtest's server-client connection. In a busy
+// game, copying it back to back dropped the client after about 40 s (Studio
+// logged "QUIC: 1 (Internal Error)"); leaving the connection idle as long as
+// each chunk took kept the client connected (tests/client-broker-transfer-repro.mjs).
+export const idleAsLongAsRead: PaceCaptureChunk = (readMs) => sleep(readMs);
 
 export class CaptureTransferError extends Error {
   constructor(message: string, readonly detail?: Record<string, unknown>) {
@@ -131,7 +140,12 @@ export class CaptureTransferError extends Error {
 
 // Pulls a staged capture in order. Each chunk is checked for its offset and
 // length so a dropped or reordered response cannot corrupt the capture.
-export async function pullCapture(transfer: CaptureTransferInfo, chunkBytes: number, read: ReadCaptureChunk): Promise<Buffer> {
+export async function pullCapture(
+  transfer: CaptureTransferInfo,
+  chunkBytes: number,
+  read: ReadCaptureChunk,
+  pace?: PaceCaptureChunk,
+): Promise<Buffer> {
   if (transfer.totalBytes > MAX_CAPTURE_BYTES) {
     throw new CaptureTransferError(`The capture is ${transfer.totalBytes} bytes, more than the ${MAX_CAPTURE_BYTES}-byte limit.`);
   }
@@ -140,7 +154,9 @@ export async function pullCapture(transfer: CaptureTransferInfo, chunkBytes: num
   let offset = 0;
   while (offset < transfer.totalBytes) {
     const wanted = Math.min(length, transfer.totalBytes - offset);
+    const readStartedAt = performance.now();
     const response = await read({ transfer_id: transfer.transferId, offset, length: wanted });
+    const readMs = performance.now() - readStartedAt;
     if (!response || typeof response !== 'object' || Array.isArray(response)) {
       throw new CaptureTransferError(`The plugin returned no data for capture bytes ${offset}-${offset + wanted}.`);
     }
@@ -157,6 +173,7 @@ export async function pullCapture(transfer: CaptureTransferInfo, chunkBytes: num
     }
     chunks.push(chunk);
     offset += wanted;
+    if (pace && offset < transfer.totalBytes) await pace(readMs);
   }
   return Buffer.concat(chunks, transfer.totalBytes);
 }
