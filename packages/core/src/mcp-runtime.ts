@@ -189,6 +189,19 @@ export function normalizeToolResult(raw: unknown, era: ProtocolEra): CallToolRes
   };
 }
 
+// Clients such as Claude Code show a failed call's text content and ignore its
+// structuredContent, so an error with no text block reaches the user as
+// "Unknown error". Keep the error JSON as text on MCP failures.
+function withErrorText(result: CallToolResult): CallToolResult {
+  if (!result.isError || !result.structuredContent || result.content.some((block) => block.type === 'text')) {
+    return result;
+  }
+  return {
+    ...result,
+    content: [{ type: 'text', text: JSON.stringify(result.structuredContent) }, ...result.content],
+  };
+}
+
 function publicRoutingError(error: RoutingFailure): Record<string, unknown> {
   return {
     error: error.routingError.code,
@@ -371,12 +384,12 @@ export function createToolServer(options: McpRuntimeOptions): McpServer {
             args as Record<string, unknown>,
             { signal: context.mcpReq.signal },
           );
-          return normalizeToolResult(raw, options.era);
+          return withErrorText(normalizeToolResult(raw, options.era));
         } catch (error) {
-          return normalizeToolResult({
+          return withErrorText(normalizeToolResult({
             content: [{ type: 'text', text: JSON.stringify(publicToolErrorBody(definition.name, error)) }],
             isError: true,
-          }, options.era);
+          }, options.era));
         }
       },
     );
