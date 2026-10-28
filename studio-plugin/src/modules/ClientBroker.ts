@@ -35,6 +35,12 @@ const DEFAULT_MCP_URL = "http://localhost:58741";
 let mcpUrl = DEFAULT_MCP_URL;
 const BROKER_NAME = "__MCPClientBroker";
 const BROKER_OWNER_ATTRIBUTE = "__MCPBrokerOwner";
+// Some games rename every remote in ReplicatedStorage on the client (Pet
+// Simulator X renames each one to its class name), so the client also finds
+// the bridge channels by this attribute, which a rename leaves in place.
+const CHANNEL_ATTRIBUTE = "__MCPChannel";
+const CHANNEL_WAIT_SECONDS = 10;
+const CHANNEL_POLL_SECONDS = 0.1;
 const CLIENT_IDENTITY_KIND = "identity";
 // A normal capture needs at most 15s sampling + 5s waiting for profiler data.
 // Leave room for processing, then return a diagnostic before the outer 30s wait.
@@ -408,9 +414,25 @@ function handleClientInvoke(payload: BrokerEnvelope | undefined): unknown {
 	return result;
 }
 
+function findChannel(name: string): Instance | undefined {
+	const named = ReplicatedStorage.FindFirstChild(name);
+	if (named !== undefined) return named;
+	return ReplicatedStorage.GetChildren().find((child) => child.GetAttribute(CHANNEL_ATTRIBUTE) === name);
+}
+
+function waitForChannel(name: string): Instance | undefined {
+	const deadline = os.clock() + CHANNEL_WAIT_SECONDS;
+	let channel = findChannel(name);
+	while (channel === undefined && os.clock() < deadline) {
+		task.wait(CHANNEL_POLL_SECONDS);
+		channel = findChannel(name);
+	}
+	return channel;
+}
+
 function startClientHeartbeat(attempt = 0): void {
 	if (clientHeartbeatStarted || PeerRole.detect() !== "client" || !RunService.IsRunning()) return;
-	const event = ReplicatedStorage.WaitForChild(HEARTBEAT_NAME, 10);
+	const event = waitForChannel(HEARTBEAT_NAME);
 	if (!event || !event.IsA("RemoteEvent")) {
 		// An older server broker has no heartbeat channel; requests still work.
 		if (RunService.IsRunning() && attempt < 5) {
@@ -447,7 +469,7 @@ function startClientHeartbeat(attempt = 0): void {
 
 function setupClientBroker(attempt = 0) {
 	if (PeerRole.detect() !== "client") return;
-	const rf = ReplicatedStorage.WaitForChild(BROKER_NAME, 10);
+	const rf = waitForChannel(BROKER_NAME);
 	if (!rf || !rf.IsA("RemoteFunction")) {
 		if (attempt === 0) warn(`[robloxstudio-mcp] client: ${BROKER_NAME} not found; retrying`);
 		if (RunService.IsRunning()) {
@@ -1098,6 +1120,7 @@ function setupHeartbeatChannel(): void {
 	}
 	const event = existing ?? new Instance("RemoteEvent");
 	event.Name = HEARTBEAT_NAME;
+	event.SetAttribute(CHANNEL_ATTRIBUTE, HEARTBEAT_NAME);
 	event.OnServerEvent.Connect((player, payload) => {
 		const entry = proxyByPlayer.get(player);
 		if (entry === undefined) return;
@@ -1139,6 +1162,7 @@ function setupServerBroker() {
 
 	rf.Name = BROKER_NAME;
 	rf.SetAttribute(BROKER_OWNER_ATTRIBUTE, PluginSession.peerId);
+	rf.SetAttribute(CHANNEL_ATTRIBUTE, BROKER_NAME);
 	rf.OnServerInvoke = (player, payload: unknown) => {
 		const identity = parseClientIdentity(payload);
 		if (identity === undefined) {

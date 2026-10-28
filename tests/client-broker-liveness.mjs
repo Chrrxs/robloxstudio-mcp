@@ -96,6 +96,7 @@ local heartbeatsBlocked = false
 local pingsBlocked = false
 local heartbeat = {Name = '__MCPClientBrokerHeartbeat', Parent = {}}
 function heartbeat:IsA(class) return class == 'RemoteEvent' end
+function heartbeat:SetAttribute() end
 heartbeat.OnServerEvent = {Connect = function(_, callback) serverListener = callback end}
 heartbeat.OnClientEvent = {Connect = function(_, callback) clientListener = callback end}
 function heartbeat:FireServer(payload)
