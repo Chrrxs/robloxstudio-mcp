@@ -110,7 +110,9 @@ describe('readRegularFileWithinLimitAsync', () => {
     await expect(readRegularFileWithinLimitAsync(file, 'File', (size) => {
       if (size > 1024) throw new Error('too large');
     })).rejects.toThrow('too large');
-    expect(allocate).not.toHaveBeenCalled();
+    // The spy sees every allocation in the worker, including small ones Node and
+    // Jest make during the awaits; only a buffer past the limit is the reader's.
+    expect(allocate.mock.calls.filter(([size]) => size > 1024)).toEqual([]);
   });
 
   test('rejects a file that grows while it is read', async () => {
