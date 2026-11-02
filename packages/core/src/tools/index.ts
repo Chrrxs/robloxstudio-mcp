@@ -1,10 +1,11 @@
 import { readRbxmInput } from '../rbxm-input.js';
 import { StudioHttpClient } from './studio-client.js';
-import { BridgeService, isValidOperationId, MAX_OPERATION_ID_LENGTH, MAX_OPERATION_WAIT_MS, RequestFailure, RoutingFailure, StudioOperationError } from '../bridge-service.js';
+import { BridgeService, isValidOperationId, MAX_OPERATION_ID_LENGTH, MAX_OPERATION_WAIT_MS, MultiplayerGroupInUseError, RequestFailure, RoutingFailure, StudioOperationError } from '../bridge-service.js';
 import type { PublicStudioPeer, RequestStatus, StudioPeer } from '../bridge-service.js';
 import {
   openCloudAssetUploadLimitBytes,
   OpenCloudClient,
+  OpenCloudOperationError,
   type AssetOperationResponse,
   type AssetSearchParams,
   type CreatorStoreSearchCategory,
@@ -61,11 +62,12 @@ import {
   resolveCapturePath,
   SERVER_CHUNK_BYTES,
   windowFromRecording,
+  writeCaptureFile,
   writeWindowSidecar,
 } from '../micro-profiler/capture.js';
 import type { PaceCaptureChunk } from '../micro-profiler/capture.js';
 import { createHash, randomUUID } from 'crypto';
-import { ReferenceUploads } from './reference-uploads.js';
+import { ReferenceUploadError, ReferenceUploads } from './reference-uploads.js';
 import type { ReferenceUploadAttempt, ReferenceUploadCheckpoint, ReferenceUploadProgress, ReferenceUploadView } from './reference-uploads.js';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -201,6 +203,21 @@ const DEFAULT_ASSET_PREVIEW_DEPTH = 4;
 const MAX_ASSET_PREVIEW_HIERARCHY_NODES = 100;
 const MAX_SEARCH_ASSET_DESCRIPTION_LENGTH = 240;
 const ROBLOX_CREATOR_USER_ID = 1;
+
+export type UploadCreator = { userId: string } | { groupId: string };
+
+// Creator for an asset upload. Explicit arguments replace the environment
+// defaults entirely (groupId wins when both are passed); otherwise
+// ROBLOX_CREATOR_GROUP_ID wins over ROBLOX_CREATOR_USER_ID.
+export function resolveUploadCreator(userId?: string, groupId?: string): UploadCreator | undefined {
+  if (groupId) return { groupId };
+  if (userId) return { userId };
+  const envGroupId = process.env.ROBLOX_CREATOR_GROUP_ID;
+  if (envGroupId) return { groupId: envGroupId };
+  const envUserId = process.env.ROBLOX_CREATOR_USER_ID;
+  if (envUserId) return { userId: envUserId };
+  return undefined;
+}
 const MAX_DEVICE_MATRIX_ENTRIES = 6;
 const MAX_NETWORK_PACKET_LOSS_PERCENT = 0.5;
 const GREP_SCRIPTS_TIMEOUT_MS = 120_000;
@@ -1405,7 +1422,7 @@ export class RobloxStudioTools {
     target: string | TargetChoice | undefined,
     instance_id: string | undefined,
     signal: AbortSignal | undefined,
-    dispatch: (targetPeerId: string) => Promise<T>,
+    dispatch: (targetPeerId: string, targetInstanceId: string) => Promise<T>,
   ): Promise<T> {
     const refresh = this.bridge.refreshTopologyForRouting(signal);
     if (refresh) await refresh;
@@ -1419,7 +1436,7 @@ export class RobloxStudioTools {
         data: this._routingErrorData(),
       });
     }
-    return dispatch(resolved.targetPeerId);
+    return dispatch(resolved.targetPeerId, resolved.targetInstanceId);
   }
 
   // A grouped runtime process ID, or its role-suffixed Instance ID, names exactly
@@ -3396,9 +3413,9 @@ export class RobloxStudioTools {
     let capturePath: string | undefined;
     let saveError: string | undefined;
     try {
-      capturePath = await resolveCapturePath(typeof outputPath === 'string' ? outputPath : undefined, role);
-      await fs.promises.mkdir(path.dirname(capturePath), { recursive: true });
-      await fs.promises.writeFile(capturePath, bytes);
+      const target = await resolveCapturePath(typeof outputPath === 'string' ? outputPath : undefined, role);
+      capturePath = target.path;
+      await writeCaptureFile(target, bytes);
       await writeWindowSidecar(capturePath, role, recording);
     } catch (error) {
       saveError = `Could not save the capture${capturePath ? ` to ${capturePath}` : ''}: ${errorMessage(error)}`;
@@ -4807,7 +4824,17 @@ export class RobloxStudioTools {
     try {
       return await this._generateModel(request, instance_id);
     } catch (error) {
-      if (error instanceof RoutingFailure) throw error;
+      // Structured failures keep their code and recovery fields (request ID,
+      // stage, outcome) for the shared error formatter; only plain validation
+      // errors are reported inline.
+      if (
+        error instanceof RoutingFailure
+        || error instanceof RequestFailure
+        || error instanceof StudioOperationError
+        || error instanceof OpenCloudOperationError
+        || error instanceof ReferenceUploadError
+        || error instanceof MultiplayerGroupInUseError
+      ) throw error;
       const message = error instanceof Error ? error.message : String(error);
       return {
         content: [{
@@ -4922,11 +4949,28 @@ export class RobloxStudioTools {
     if (!referencePng) return this._dispatchGenerateModel(payload, instance_id, timeoutMs, submit, operationId, undefined);
     const uploadUnavailable = this.referenceUploadUnavailable();
     if (uploadUnavailable) throw new Error(uploadUnavailable);
-    // Route before preparing anything: a request that cannot reach an edit
-    // Peer must not upload an image first.
-    const targetPeerId = await this._resolveSinglePeer('edit', instance_id);
+    // Pin the target before preparing anything: a request that cannot reach
+    // an edit Peer must not upload an image first, and the generation must
+    // reach this Studio even if another one connects during the upload. A
+    // retry that names no instance_id returns to its operation's Instance.
+    const pinnedInstanceId = operationId !== undefined ? this.referenceUploads.pinnedInstance(operationId) : undefined;
+    const { targetPeerId, targetInstanceId } = await this._resolveEditTarget(instance_id ?? pinnedInstanceId).catch((error: unknown) => {
+      // A retry that named no instance_id follows its operation; naming another
+      // connected Studio would only collide with that operation's record.
+      if (instance_id === undefined && pinnedInstanceId !== undefined && error instanceof RoutingFailure) {
+        throw new RoutingFailure({
+          ...error.routingError,
+          message: `Operation ${operationId} is tied to Studio instance ${pinnedInstanceId}, which is no longer connected; reconnect that Studio, or start over with a new operation_id.`,
+        });
+      }
+      throw error;
+    });
     if (submit && !this.bridge.supportsPrimaryFeature('submit')) {
-      throw new Error('The primary MCP server cannot start a job that outlives the call; call without async, or restart that server on this version. Nothing was uploaded.');
+      throw new RequestFailure(
+        'The primary MCP server cannot start a job that outlives the call; call without async, or restart that server on this version. Nothing was uploaded; queued; not_executed',
+        'primary_unsupported',
+        { requestId: operationId ?? randomUUID(), targetPeerId, stage: 'queued', outcome: 'not_executed', executionOutcome: 'not_executed' },
+      );
     }
 
     // Every upload mints a new asset ID, so a retry is identified by the
@@ -4934,19 +4978,19 @@ export class RobloxStudioTools {
     const png = referencePng;
     const identity = { ...payload, image: { kind: 'png_sha256', sha256: createHash('sha256').update(png).digest('hex') } };
     const attempt: ReferenceUploadAttempt = {
-      upload: (progress) => this.uploadGenerateModelReferenceImage(png, instance_id, progress),
-      resume: (checkpoint, progress) => this.resumeGenerateModelReferenceImage(checkpoint, instance_id, progress),
+      upload: (progress) => this.uploadGenerateModelReferenceImage(png, targetInstanceId, progress),
+      resume: (checkpoint, progress) => this.resumeGenerateModelReferenceImage(checkpoint, targetInstanceId, progress),
     };
     if (operationId === undefined && !submit) {
       // Nothing can retry a call without an operation ID, so nothing is shared.
       payload.image = { kind: 'asset', asset_id: await attempt.upload(UNTRACKED_UPLOAD) };
-      return this._dispatchGenerateModel(payload, instance_id, timeoutMs, false, undefined, identity);
+      return this._dispatchGenerateModel(payload, targetInstanceId, timeoutMs, false, undefined, identity);
     }
 
     // An async job without a caller ID still needs one before its upload starts.
     const jobId = operationId ?? randomUUID();
     const identityKey = createHash('sha256').update(JSON.stringify({ endpoint: '/api/generate-model', identity })).digest('hex');
-    const prepared = this.referenceUploads.lookup(jobId, identityKey, targetPeerId);
+    const prepared = this.referenceUploads.lookup(jobId, identityKey, targetPeerId, targetInstanceId);
     if (operationId !== undefined && !prepared) {
       // Another server's caller may already have started this operation on
       // the bridge; rejoin it instead of uploading the image again.
@@ -4956,15 +5000,20 @@ export class RobloxStudioTools {
     }
     let dispatchPeerId = targetPeerId;
     const generate = async () => {
-      payload.image = { kind: 'asset', asset_id: await this.referenceUploads.acquire(jobId, identityKey, targetPeerId, attempt) };
-      return this._dispatchGenerateModel(payload, instance_id, timeoutMs, submit, jobId, identity, (peerId) => {
+      payload.image = {
+        kind: 'asset',
+        asset_id: await this.referenceUploads.acquire(jobId, identityKey, targetPeerId, targetInstanceId, attempt),
+      };
+      // Dispatch resolves only within the pinned Instance: if it left, this
+      // fails as not admitted and the uploaded image is kept for a retry.
+      return this._dispatchGenerateModel(payload, targetInstanceId, timeoutMs, submit, jobId, identity, (peerId) => {
         dispatchPeerId = peerId;
         this.referenceUploads.dispatched(jobId, peerId);
       });
     };
     // Checked again in the same turn that starts the work: a concurrent caller
     // may have claimed this ID while the bridge was consulted.
-    const current = this.referenceUploads.lookup(jobId, identityKey, targetPeerId);
+    const current = this.referenceUploads.lookup(jobId, identityKey, targetPeerId, targetInstanceId);
     const job = generate();
     this.referenceUploads.attach(jobId, job);
     job.catch((error: unknown) => {
@@ -4978,8 +5027,11 @@ export class RobloxStudioTools {
     return job;
   }
 
-  private _resolveSinglePeer(target: string, instance_id: string | undefined): Promise<string> {
-    return this._withSinglePeer(target, instance_id, undefined, async (targetPeerId) => targetPeerId);
+  // The edit Peer for instance_id and the Studio Instance it belongs to. A
+  // multi-step operation pins the Instance, so a plugin reload in that Studio
+  // still reaches it, but a different Studio never does.
+  private _resolveEditTarget(instance_id: string | undefined): Promise<{ targetPeerId: string; targetInstanceId: string }> {
+    return this._withSinglePeer('edit', instance_id, undefined, async (targetPeerId, targetInstanceId) => ({ targetPeerId, targetInstanceId }));
   }
 
   private async _dispatchGenerateModel(
@@ -5255,7 +5307,7 @@ export class RobloxStudioTools {
     if (!this.openCloudClient.hasApiKey()) {
       return 'image_path and image_base64 require Roblox asset upload credentials because GenerateModelAsync only accepts rbxassetid:// or rbxasset:// image inputs. Set ROBLOX_OPEN_CLOUD_API_KEY plus ROBLOX_CREATOR_USER_ID or ROBLOX_CREATOR_GROUP_ID, or pass image_asset_id.';
     }
-    if (!process.env.ROBLOX_CREATOR_USER_ID && !process.env.ROBLOX_CREATOR_GROUP_ID) {
+    if (!resolveUploadCreator()) {
       return 'Creator identity required for image upload. Set ROBLOX_CREATOR_USER_ID or ROBLOX_CREATOR_GROUP_ID, or pass image_asset_id.';
     }
     return undefined;
@@ -5272,8 +5324,7 @@ export class RobloxStudioTools {
         fileName: 'generate-model-reference.png',
         displayName: STUDIO_ASSISTANT_SOURCE_IMAGE_LABEL,
         description: STUDIO_ASSISTANT_SOURCE_IMAGE_LABEL,
-        userId: process.env.ROBLOX_CREATOR_USER_ID,
-        groupId: process.env.ROBLOX_CREATOR_GROUP_ID,
+        ...resolveUploadCreator(),
         onSending: () => progress.sending(),
         onAccepted: (id) => progress.accepted({ provider: 'user_auth', id }),
       });
@@ -5282,15 +5333,8 @@ export class RobloxStudioTools {
 
     const unavailable = this.referenceUploadUnavailable();
     if (unavailable) throw new Error(unavailable);
-    const resolvedGroupId = process.env.ROBLOX_CREATOR_GROUP_ID;
-    const resolvedUserId = process.env.ROBLOX_CREATOR_USER_ID;
-
-    const creator: { userId?: string; groupId?: string } = {};
-    if (resolvedGroupId) {
-      creator.groupId = resolvedGroupId;
-    } else {
-      creator.userId = resolvedUserId;
-    }
+    // referenceUploadUnavailable already rejected a missing creator.
+    const creator = resolveUploadCreator() ?? {};
 
     const result = await this.openCloudClient.createAsset(
       {
@@ -5358,8 +5402,7 @@ export class RobloxStudioTools {
       }
     });
     const fileName = path.basename(filePath);
-    const resolvedGroupId = groupId || process.env.ROBLOX_CREATOR_GROUP_ID;
-    const resolvedUserId = userId || process.env.ROBLOX_CREATOR_USER_ID;
+    const resolvedCreator = resolveUploadCreator(userId, groupId);
 
     if (assetType === 'Decal' && this.cookieClient.hasCookie()) {
       const result = await this.cookieClient.uploadImage({
@@ -5367,8 +5410,7 @@ export class RobloxStudioTools {
         fileName,
         displayName,
         description: description || '',
-        userId: resolvedUserId,
-        groupId: resolvedGroupId,
+        ...resolvedCreator,
       });
       return {
         content: [{
@@ -5396,18 +5438,12 @@ export class RobloxStudioTools {
       );
     }
 
-    if (!resolvedUserId && !resolvedGroupId) {
+    if (!resolvedCreator) {
       throw new Error(
         'Creator identity required for Open Cloud upload. Set ROBLOX_CREATOR_USER_ID or ROBLOX_CREATOR_GROUP_ID, or pass userId/groupId as parameters.'
       );
     }
-
-    const creator: { userId?: string; groupId?: string } = {};
-    if (resolvedGroupId) {
-      creator.groupId = resolvedGroupId;
-    } else {
-      creator.userId = resolvedUserId;
-    }
+    const creator = resolvedCreator;
 
     const result = await this.openCloudClient.createAsset(
       {

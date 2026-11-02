@@ -96,8 +96,8 @@ manage_monetization lists, reads, creates, and updates developer products and ga
 
 - Roblox cannot delete developer products or game passes. To retire one, update it with for_sale=false.
 - create keeps new items off sale unless for_sale=true, which also needs a price.
-- create refuses a name that already exists in the universe and returns the existing item. If a create times out, list the universe before retrying.
-- update changes only the arguments supplied, then reads the item back.
+- create refuses a name that already exists in the universe and returns the existing item. If a create returns create_outcome_unknown, list the universe first; if the item never appears, retry after retry_after.
+- update changes only the arguments supplied, then reads the item back. It refuses to rename an item to a name another item already uses.
 - image_path uploads a local PNG, JPEG, or BMP icon. Roblox shows icons at 512x512 inside a circle, so keep details away from the corners.
 
 ## Experience settings

@@ -20,6 +20,15 @@ let connected = false;
 // positives from ordinary frame hitches while still catching the real case.
 const STALE_THRESHOLD = 1.0;
 
+// Run on the first rendered frame after a stale gap. Input sent while the
+// window wasn't rendering may never have reached the engine, so callers use
+// this to re-send cleanup (e.g. key releases) once it can land.
+const resumeCallbacks = new Array<() => void>();
+
+export function onRenderResumed(callback: () => void): void {
+	resumeCallbacks.push(callback);
+}
+
 export function start(): void {
 	if (connected) return;
 	// RenderStepped can only be connected from a client/edit render loop; it
@@ -27,7 +36,13 @@ export function start(): void {
 	// (connected stays false → notRenderingReason() returns undefined there).
 	const [ok] = pcall(() => {
 		RunService.RenderStepped.Connect(() => {
-			lastFrame = tick();
+			const now = tick();
+			// One compare per frame; callbacks only fire on the stale→fresh edge.
+			const resumed = now - lastFrame > STALE_THRESHOLD;
+			lastFrame = now;
+			if (resumed) {
+				for (const callback of resumeCallbacks) task.spawn(callback);
+			}
 		});
 	});
 	if (ok) {

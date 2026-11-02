@@ -12,6 +12,7 @@ import { registerResourceHandlers } from './mcp-compat.js';
 import { OpenCloudOperationError } from './opencloud-client.js';
 import { StudioLaunchPreDispatchError } from './studio-instance-manager.js';
 import type { RobloxStudioTools } from './tools/index.js';
+import { ReferenceUploadError } from './tools/reference-uploads.js';
 import type { ToolDefinition } from './tools/definitions.js';
 
 export type ProtocolEra = McpRequestContext['era'];
@@ -244,6 +245,9 @@ export function publicToolErrorBody(name: string, error: unknown): Record<string
       ...(error.providerCode !== undefined ? { provider_code: error.providerCode } : {}),
       operation_path: error.operationPath,
     };
+  }
+  if (error instanceof ReferenceUploadError) {
+    return { error: error.code, message: error.message.slice(0, 500) };
   }
 
   console.error(`[tool:${name}]`, error);

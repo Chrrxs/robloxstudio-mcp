@@ -13,6 +13,7 @@ import {
 } from '../mcp-runtime.js';
 import { getReadOnlyTools, TOOL_DEFINITIONS } from '../tools/definitions.js';
 import type { RobloxStudioTools } from '../tools/index.js';
+import { ReferenceUploadError } from '../tools/reference-uploads.js';
 
 type JsonObject = Record<string, unknown>;
 
@@ -244,6 +245,18 @@ describe('MCP v2 tool runtime', () => {
       message: expect.stringContaining('test:live'),
       multiplayer_group_id: 'test:live',
     });
+  });
+
+  test('keeps reference upload failure codes without logging them as tool failures', () => {
+    const consoleError = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+    try {
+      const error = new ReferenceUploadError(`Reference image upload for operation job has an unknown outcome: ${'x'.repeat(600)}`, 'reference_upload_unknown');
+      const body = publicToolErrorBody('generate_model', error);
+      expect(body).toEqual({ error: 'reference_upload_unknown', message: error.message.slice(0, 500) });
+      expect(consoleError).not.toHaveBeenCalled();
+    } finally {
+      consoleError.mockRestore();
+    }
   });
 
 

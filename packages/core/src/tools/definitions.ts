@@ -1530,7 +1530,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
   {
     name: 'upload_asset',
     category: 'write',
-    description: 'Use to upload a local asset file to a Roblox user or group.',
+    description: 'Use to upload a local asset file to a Roblox user or group. Without userId or groupId, ROBLOX_CREATOR_GROUP_ID wins over ROBLOX_CREATOR_USER_ID.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -1553,11 +1553,11 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
         },
         userId: {
           type: 'string',
-          description: 'Creator user ID; overrides the environment default.'
+          description: 'Creator user ID; replaces env defaults (groupId wins if both)'
         },
         groupId: {
           type: 'string',
-          description: 'Creator group ID; overrides userId and environment defaults.'
+          description: 'Creator group ID; replaces env defaults and wins over userId'
         }
       },
       required: ['filePath', 'assetType', 'displayName']

@@ -82,6 +82,25 @@ async function claimStudioRequest(bridge: BridgeService, transportPeerId: string
   throw new Error('Expected a queued Studio request');
 }
 
+// Lets every pending call run until it reaches a gate or finishes.
+async function settle(): Promise<void> {
+  for (let hop = 0; hop < 50; hop++) await Promise.resolve();
+}
+
+// A universe whose list calls wait for `gate`, then report every item created so far.
+function gatedUniverse(client: FakeClient, gate: Promise<void>): void {
+  const created: MonetizationItem[] = [];
+  client.listMonetizationItems.mockImplementation(async () => {
+    await gate;
+    return { items: [...created] };
+  });
+  client.createMonetizationItem.mockImplementation(async (kind, universeId, changes) => {
+    const made = item({ kind, universeId, id: 500 + created.length, name: changes.name });
+    created.push(made);
+    return made;
+  });
+}
+
 describe('manage_monetization', () => {
   let bridge: BridgeService;
   let tools: RobloxStudioTools;
@@ -262,6 +281,176 @@ describe('manage_monetization', () => {
         existing: { id: 7, name: '100 coins' },
       });
     });
+
+    test.each([
+      [400, 'invalid_request'],
+      [429, 'rate_limited'],
+    ])('does not remember a create that Roblox refused with HTTP %i', async (status, code) => {
+      client.createMonetizationItem.mockRejectedValueOnce(
+        new OpenCloudRequestError(`Open Cloud API error (${status}): refused`, status),
+      );
+      const request = { action: 'create', kind: 'game_pass', universe_id: 42, name: 'Refused Pass', price: 5 };
+
+      expect(body(await tools.manageMonetization(request))).toMatchObject({ error: code });
+      expect(body(await tools.manageMonetization(request))).toMatchObject({ created: true });
+      expect(client.createMonetizationItem).toHaveBeenCalledTimes(2);
+    });
+
+    test('treats a gateway error from create as an unknown outcome', async () => {
+      client.createMonetizationItem.mockRejectedValueOnce(
+        new OpenCloudRequestError('Open Cloud API error (504): upstream timed out', 504),
+      );
+      const request = { action: 'create', kind: 'game_pass', universe_id: 42, name: 'Gateway Pass' };
+
+      expect(body(await tools.manageMonetization(request))).toMatchObject({
+        error: 'create_outcome_unknown',
+        message: expect.stringContaining('HTTP 504'),
+        hint: expect.stringContaining('run list'),
+      });
+      expect(body(await tools.manageMonetization(request))).toMatchObject({ error: 'create_outcome_unknown' });
+      expect(client.createMonetizationItem).toHaveBeenCalledTimes(1);
+
+      // Listing the item clears the unknown create so later tests can reuse the name.
+      client.listMonetizationItems.mockResolvedValueOnce({ items: [item({ kind: 'game_pass', name: 'Gateway Pass' })] });
+      await tools.manageMonetization({ action: 'list', kind: 'game_pass', universe_id: 42 });
+    });
+
+    describe('when the outcome is unknown', () => {
+      const WINDOW_MS = 10 * 60 * 1000;
+      const request = { action: 'create', kind: 'developer_product', universe_id: 42, name: 'Timed Out Coins' };
+
+      beforeEach(() => {
+        jest.useFakeTimers({ now: new Date('2026-01-01T00:00:00Z') });
+        client.createMonetizationItem.mockRejectedValueOnce(new Error('Request timed out'));
+      });
+
+      afterEach(async () => {
+        // Listing the item clears any unknown create a test left behind for this name.
+        client.listMonetizationItems.mockResolvedValueOnce({ items: [item({ name: 'Timed Out Coins' })] });
+        await tools.manageMonetization({ action: 'list', kind: 'developer_product', universe_id: 42 });
+        jest.useRealTimers();
+      });
+
+      test('refuses to create the same name again until the window passes', async () => {
+        expect(body(await tools.manageMonetization(request))).toEqual({
+          error: 'create_outcome_unknown',
+          message: expect.stringContaining('Request timed out'),
+          hint: 'An item may have been created; run list (or get) before retrying create.',
+          retry_after: '2026-01-01T00:10:00.000Z',
+        });
+
+        jest.advanceTimersByTime(WINDOW_MS - 1);
+        const retry = body(await tools.manageMonetization({ ...request, name: ' timed out coins ' }));
+        expect(retry).toMatchObject({
+          error: 'create_outcome_unknown',
+          hint: 'No item with this name is listed yet. If list still shows none, create can be retried after retry_after.',
+          retry_after: '2026-01-01T00:10:00.000Z',
+        });
+        expect(client.createMonetizationItem).toHaveBeenCalledTimes(1);
+
+        jest.advanceTimersByTime(1);
+        expect(body(await tools.manageMonetization(request))).toMatchObject({ created: true });
+        expect(client.createMonetizationItem).toHaveBeenCalledTimes(2);
+      });
+
+      test('forgets the unknown create once Roblox lists the item', async () => {
+        await tools.manageMonetization(request);
+        client.listMonetizationItems.mockResolvedValueOnce({ items: [item({ id: 8, name: 'Timed Out Coins' })] });
+        await tools.manageMonetization({ action: 'list', kind: 'developer_product', universe_id: 42 });
+
+        // The item has since been renamed, so the name is free again.
+        expect(body(await tools.manageMonetization(request))).toMatchObject({ created: true });
+        expect(client.createMonetizationItem).toHaveBeenCalledTimes(2);
+      });
+
+      test('refuses to rename another item to the pending name', async () => {
+        await tools.manageMonetization(request);
+        jest.advanceTimersByTime(60_000);
+
+        const renamed = body(await tools.manageMonetization({
+          action: 'update', kind: 'developer_product', universe_id: 42, id: 8, name: 'Timed Out Coins',
+        }));
+        expect(renamed).toMatchObject({
+          error: 'create_outcome_unknown',
+          message: expect.stringContaining('nothing was renamed'),
+          retry_after: '2026-01-01T00:10:00.000Z',
+        });
+        expect(client.updateMonetizationItem).not.toHaveBeenCalled();
+      });
+
+      test('still blocks other names only for their own unknown creates', async () => {
+        await tools.manageMonetization(request);
+
+        expect(body(await tools.manageMonetization({ ...request, name: 'Other Coins' }))).toMatchObject({ created: true });
+        expect(body(await tools.manageMonetization({ ...request, kind: 'game_pass' }))).toMatchObject({ created: true });
+        expect(body(await tools.manageMonetization({ ...request, universe_id: 43 }))).toMatchObject({ created: true });
+        expect(body(await tools.manageMonetization(request))).toMatchObject({ error: 'create_outcome_unknown' });
+      });
+    });
+
+    describe('overlapping calls', () => {
+      test('lets only one of two creates of the same name through', async () => {
+        const gate = Promise.withResolvers<void>();
+        gatedUniverse(client, gate.promise);
+
+        const first = tools.manageMonetization({
+          action: 'create', kind: 'developer_product', universe_id: 42, name: 'Coins',
+        });
+        const second = tools.manageMonetization({
+          action: 'create', kind: 'developer_product', universe_id: 42, name: ' coins ',
+        });
+        await settle();
+        // The second check waits for the first create instead of scanning alongside it.
+        expect(client.listMonetizationItems).toHaveBeenCalledTimes(1);
+        gate.resolve();
+
+        expect(body(await first)).toMatchObject({ created: true, item: { name: 'Coins' } });
+        expect(body(await second)).toMatchObject({ error: 'duplicate_name', existing: { name: 'Coins' } });
+        expect(client.createMonetizationItem).toHaveBeenCalledTimes(1);
+      });
+
+      test('checks different names at the same time', async () => {
+        const gate = Promise.withResolvers<void>();
+        gatedUniverse(client, gate.promise);
+
+        const gems = tools.manageMonetization({
+          action: 'create', kind: 'developer_product', universe_id: 42, name: 'Gems',
+        });
+        const rubies = tools.manageMonetization({
+          action: 'create', kind: 'developer_product', universe_id: 42, name: 'Rubies',
+        });
+        await settle();
+        expect(client.listMonetizationItems).toHaveBeenCalledTimes(2);
+        gate.resolve();
+
+        expect(body(await gems)).toMatchObject({ created: true, item: { name: 'Gems' } });
+        expect(body(await rubies)).toMatchObject({ created: true, item: { name: 'Rubies' } });
+      });
+
+      test('a call that fails does not block the next call for the name', async () => {
+        const gate = Promise.withResolvers<void>();
+        client.listMonetizationItems
+          .mockImplementationOnce(async () => {
+            await gate.promise;
+            throw new OpenCloudRequestError('Open Cloud API error (500): busy', 500);
+          })
+          .mockResolvedValueOnce({ items: [] });
+
+        const failing = tools.manageMonetization({
+          action: 'create', kind: 'game_pass', universe_id: 42, name: 'Flaky Pass',
+        });
+        const next = tools.manageMonetization({
+          action: 'create', kind: 'game_pass', universe_id: 42, name: 'Flaky Pass',
+        });
+        await settle();
+        expect(client.listMonetizationItems).toHaveBeenCalledTimes(1);
+        gate.resolve();
+
+        expect(body(await failing)).toMatchObject({ error: 'open_cloud_error', status: 500 });
+        expect(body(await next)).toMatchObject({ created: true });
+        expect(client.createMonetizationItem).toHaveBeenCalledTimes(1);
+      });
+    });
   });
 
   describe('update', () => {
@@ -288,6 +477,27 @@ describe('manage_monetization', () => {
 
       expect(result).toMatchObject({ updated: true, item: null, warnings: [expect.stringContaining('Rate limit')] });
       expect(result).not.toHaveProperty('error');
+    });
+
+    test('refuses to rename an item to the name of another item', async () => {
+      client.listMonetizationItems.mockResolvedValue({
+        items: [item({ kind: 'game_pass', id: 9, name: 'vip' }), item({ kind: 'game_pass', id: 3, name: 'VIP ' })],
+      });
+
+      const result = body(await tools.manageMonetization({
+        action: 'update', kind: 'game_pass', universe_id: 42, id: 9, name: 'VIP',
+      }));
+
+      expect(result).toMatchObject({ error: 'duplicate_name', existing: { id: 3 } });
+      expect(client.updateMonetizationItem).not.toHaveBeenCalled();
+    });
+
+    test('allows an item to keep its own name with different casing', async () => {
+      client.listMonetizationItems.mockResolvedValue({ items: [item({ kind: 'game_pass', id: 9, name: 'vip' })] });
+
+      await tools.manageMonetization({ action: 'update', kind: 'game_pass', universe_id: 42, id: 9, name: 'VIP' });
+
+      expect(client.updateMonetizationItem).toHaveBeenCalledWith('game_pass', 42, 9, { name: 'VIP' });
     });
   });
 
