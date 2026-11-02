@@ -146,8 +146,9 @@ function parseJsonObject(text: string): Record<string, unknown> | undefined {
 
 /**
  * Converts the historic JSON-in-text result shape into the lean 2026 MCP shape.
- * Modern clients receive JSON once in structuredContent; legacy clients keep the
- * text projection required by older SDKs. Human-readable text and media survive.
+ * Modern clients receive JSON once in structuredContent (the MCP handler adds it
+ * back as text on failures; see withErrorText); legacy clients keep the text
+ * projection required by older SDKs. Human-readable text and media survive.
  */
 export function normalizeToolResult(raw: unknown, era: ProtocolEra): CallToolResult {
   const result = (raw && typeof raw === 'object' ? raw : {}) as ToolResultLike;
