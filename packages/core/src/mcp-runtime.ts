@@ -146,8 +146,9 @@ function parseJsonObject(text: string): Record<string, unknown> | undefined {
 
 /**
  * Converts the historic JSON-in-text result shape into the lean 2026 MCP shape.
- * Modern clients receive JSON once in structuredContent; legacy clients keep the
- * text projection required by older SDKs. Human-readable text and media survive.
+ * Modern clients receive JSON once in structuredContent (the MCP handler adds it
+ * back as text on failures; see withErrorText); legacy clients keep the text
+ * projection required by older SDKs. Human-readable text and media survive.
  */
 export function normalizeToolResult(raw: unknown, era: ProtocolEra): CallToolResult {
   const result = (raw && typeof raw === 'object' ? raw : {}) as ToolResultLike;
@@ -186,6 +187,19 @@ export function normalizeToolResult(raw: unknown, era: ProtocolEra): CallToolRes
     content: content as CallToolResult['content'],
     structuredContent: structured,
     ...(isError ? { isError: true } : {}),
+  };
+}
+
+// Clients such as Claude Code show a failed call's text content and ignore its
+// structuredContent, so an error with no text block reaches the user as
+// "Unknown error". Keep the error JSON as text on MCP failures.
+function withErrorText(result: CallToolResult): CallToolResult {
+  if (!result.isError || !result.structuredContent || result.content.some((block) => block.type === 'text')) {
+    return result;
+  }
+  return {
+    ...result,
+    content: [{ type: 'text', text: JSON.stringify(result.structuredContent) }, ...result.content],
   };
 }
 
@@ -371,12 +385,12 @@ export function createToolServer(options: McpRuntimeOptions): McpServer {
             args as Record<string, unknown>,
             { signal: context.mcpReq.signal },
           );
-          return normalizeToolResult(raw, options.era);
+          return withErrorText(normalizeToolResult(raw, options.era));
         } catch (error) {
-          return normalizeToolResult({
+          return withErrorText(normalizeToolResult({
             content: [{ type: 'text', text: JSON.stringify(publicToolErrorBody(definition.name, error)) }],
             isError: true,
-          }, options.era);
+          }, options.era));
         }
       },
     );

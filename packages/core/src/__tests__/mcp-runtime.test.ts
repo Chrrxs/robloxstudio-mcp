@@ -506,6 +506,39 @@ describe('MCP v2 tool runtime', () => {
     }
   });
 
+  test.each([
+    ['returned', async () => ({
+      content: [{ type: 'text', text: JSON.stringify({ error: 'Studio window appears minimized' }) }],
+    })],
+    ['thrown', async () => {
+      throw new Error('Studio window appears minimized');
+    }],
+  ])('keeps the error text on a %s failure for modern clients', async (_kind, invoke) => {
+    const definition = TOOL_DEFINITIONS.find((tool) => tool.name === 'get_place_info')!;
+    const server = createToolServer({
+      config: { name: 'test-server', version: '3.0.0', tools: [definition] },
+      getTools: () => ({} as RobloxStudioTools),
+      era: 'modern',
+      invoke,
+    });
+    const client = new Client({ name: 'test-client', version: '1.0.0' });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await server.connect(serverTransport);
+    await client.connect(clientTransport);
+
+    try {
+      const result = await client.callTool({ name: 'get_place_info', arguments: {} });
+      expect(result.isError).toBe(true);
+      expect(result.content).toEqual([
+        { type: 'text', text: JSON.stringify(result.structuredContent) },
+      ]);
+      expect(JSON.stringify(result.content)).toContain('Studio window appears minimized');
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  });
+
   test('passes live client cancellation to the tool invocation context', async () => {
     const definition = TOOL_DEFINITIONS.find((tool) => tool.name === 'get_place_info')!;
     const fakeTools = {} as RobloxStudioTools;
