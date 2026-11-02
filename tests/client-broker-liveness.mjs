@@ -6,7 +6,8 @@
 // request that never answers must settle before the MCP deadline with a
 // diagnosis of the client bridge, a stalled bridge must refuse new requests
 // instead of queueing them, and a request that reaches the client late must
-// not run there.
+// not run there. The client also has to find its channels after a game renames
+// them on arrival.
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { McpClient, runTest } from './lib/mcp-client.mjs';
@@ -77,8 +78,9 @@ local invocations = 0
 local droppedEnvelope
 local remote = {Name = '__MCPClientBroker', Parent = {}}
 function remote:IsA(class) return class == 'RemoteFunction' end
-function remote:GetAttribute() return nil end
-function remote:SetAttribute() end
+remote.attributes = {}
+function remote:GetAttribute(name) return self.attributes[name] end
+function remote:SetAttribute(name, value) self.attributes[name] = value end
 function remote:InvokeServer() return {success = true} end
 function remote:InvokeClient(target, envelope)
   assert(target == player)
@@ -96,6 +98,9 @@ local heartbeatsBlocked = false
 local pingsBlocked = false
 local heartbeat = {Name = '__MCPClientBrokerHeartbeat', Parent = {}}
 function heartbeat:IsA(class) return class == 'RemoteEvent' end
+heartbeat.attributes = {}
+function heartbeat:GetAttribute(name) return self.attributes[name] end
+function heartbeat:SetAttribute(name, value) self.attributes[name] = value end
 heartbeat.OnServerEvent = {Connect = function(_, callback) serverListener = callback end}
 heartbeat.OnClientEvent = {Connect = function(_, callback) clientListener = callback end}
 function heartbeat:FireServer(payload)
@@ -106,7 +111,20 @@ function heartbeat:FireClient(target, payload)
   if not pingsBlocked and clientListener then clientListener(payload) end
 end
 
-local children = {[remote.Name] = remote, [heartbeat.Name] = heartbeat}
+-- Lookups honour each channel's current Name, so a client-side rename hides it
+-- from a name lookup the way it does in the engine.
+local channels = {remote, heartbeat}
+local channelsReplicated = true
+local function replicatedChildren()
+  if not channelsReplicated then return {} end
+  return table.clone(channels)
+end
+local function findChild(name)
+  for _, child in ipairs(replicatedChildren()) do
+    if child.Name == name then return child end
+  end
+  return nil
+end
 local guid = 0
 local services = {
   HttpService = {
@@ -122,8 +140,9 @@ local services = {
   },
   Players = {PlayerRemoving = {Connect = function() end}},
   ReplicatedStorage = {
-    FindFirstChild = function(_, name) return children[name] end,
-    WaitForChild = function(_, name) return children[name] end,
+    FindFirstChild = function(_, name) return findChild(name) end,
+    WaitForChild = function(_, name) return findChild(name) end,
+    GetChildren = function() return replicatedChildren() end,
   },
   RunService = {IsRunning = function() return running end},
   Workspace = {GetServerTimeNow = function() return 1000000 + now end},
@@ -179,10 +198,21 @@ end)()
 
 broker.setupServerBroker()
 assert(remote.OnServerInvoke(player, {kind = 'identity', peerId = 'fixture-peer'}).success)
+-- The channels reach the client late, after the game's own ChildAdded handler
+-- has renamed every remote to its class name (issue #154). The client must
+-- still find both channels through the attribute the server set.
 localRole = 'client'
-broker.setupClientBroker()
+channelsReplicated = false
+task.spawn(broker.setupClientBroker)
+advance(3)
+assert(clientListener == nil, 'client has not found the channels before they replicate')
+remote.Name = 'RemoteFunction'
+heartbeat.Name = 'RemoteEvent'
+channelsReplicated = true
+advance(0.2)
 localRole = 'server'
-assert(clientListener ~= nil, 'client listens for server pings')
+assert(remote.OnClientInvoke ~= nil, 'client finds the renamed broker')
+assert(clientListener ~= nil, 'client listens for server pings on the renamed heartbeat')
 advance(2.5)
 
 local requestNumber = 0
