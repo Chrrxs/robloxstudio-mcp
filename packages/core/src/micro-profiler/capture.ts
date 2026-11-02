@@ -1,5 +1,6 @@
 // Host-side pieces of capture_micro_profiler that do not touch Studio routing:
 // request parsing, capture files, and pulling a capture from the plugin.
+import { randomUUID } from 'crypto';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
@@ -78,30 +79,70 @@ function captureFileStamp(date: Date): string {
   return date.toISOString().replace(/[:.]/g, '-');
 }
 
+// Captures younger than this are left alone by pruning: another server process
+// sharing the default directory may have just written one and still be using it.
+export const DEFAULT_CAPTURE_PRUNE_GRACE_MS = 10 * 60_000;
+
 // Keeps the newest captures in the default directory so repeated profiling
-// does not fill the disk. Only files this tool names are removed.
-export async function pruneDefaultCaptures(directory: string, keep = KEPT_DEFAULT_CAPTURES): Promise<void> {
+// does not fill the disk. Only files this tool names are removed, and only
+// once they are older than graceMs; the cap applies among those older files.
+export async function pruneDefaultCaptures(
+  directory: string,
+  keep = KEPT_DEFAULT_CAPTURES,
+  graceMs = DEFAULT_CAPTURE_PRUNE_GRACE_MS,
+  now = Date.now(),
+): Promise<void> {
   let entries: string[];
   try {
     entries = await fs.promises.readdir(directory);
   } catch {
     return;
   }
+  // Names start with the timestamp, so name order is age order.
   const captures = entries.filter((name) => name.startsWith('micro-profiler-') && name.endsWith(CAPTURE_EXTENSION)).sort();
-  for (const name of captures.slice(0, Math.max(0, captures.length - keep))) {
+  const settled: string[] = [];
+  for (const name of captures) {
+    try {
+      const stats = await fs.promises.stat(path.join(directory, name));
+      if (now - stats.mtimeMs >= graceMs) settled.push(name);
+    } catch {
+      // Removed meanwhile, e.g. by another process pruning.
+    }
+  }
+  for (const name of settled.slice(0, Math.max(0, settled.length - keep))) {
     await fs.promises.rm(path.join(directory, name), { force: true });
     await fs.promises.rm(path.join(directory, `${name}${WINDOW_SIDECAR_SUFFIX}`), { force: true });
   }
 }
 
-export async function resolveCapturePath(outputPath: string | undefined, role: string, now = new Date()): Promise<string> {
-  if (outputPath !== undefined && outputPath !== '') return path.resolve(outputPath);
+export interface ResolvedCapturePath {
+  path: string;
+  // True when the tool named the file in the default directory; such a file
+  // must never replace an existing one.
+  generated: boolean;
+}
+
+export async function resolveCapturePath(outputPath: string | undefined, role: string, now = new Date()): Promise<ResolvedCapturePath> {
+  if (outputPath !== undefined && outputPath !== '') return { path: path.resolve(outputPath), generated: false };
   const directory = defaultCaptureDirectory();
   await fs.promises.mkdir(directory, { recursive: true });
   // Leave room for the capture about to be written.
   await pruneDefaultCaptures(directory, KEPT_DEFAULT_CAPTURES - 1);
   const safeRole = role.replace(/[^A-Za-z0-9-]/g, '_');
-  return path.join(directory, `micro-profiler-${captureFileStamp(now)}-${safeRole}${CAPTURE_EXTENSION}`);
+  // Several server processes share this directory and may capture the same
+  // role in the same millisecond; the ID keeps their names apart.
+  const uniqueId = `${process.pid}-${randomUUID().slice(0, 8)}`;
+  return {
+    path: path.join(directory, `micro-profiler-${captureFileStamp(now)}-${safeRole}-${uniqueId}${CAPTURE_EXTENSION}`),
+    generated: true,
+  };
+}
+
+// A generated path is written exclusively, so a collision fails instead of
+// overwriting another capture. An explicit output_path is overwritten.
+export async function writeCaptureFile(target: ResolvedCapturePath, bytes: Uint8Array): Promise<void> {
+  await fs.promises.mkdir(path.dirname(target.path), { recursive: true });
+  await fs.promises.writeFile(target.path, bytes, { flag: target.generated ? 'wx' : 'w' });
 }
 
 export interface CaptureTransferInfo {

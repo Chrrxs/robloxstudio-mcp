@@ -434,7 +434,9 @@ describe('capture helpers', () => {
       'micro-profiler-2026-01-02-server.gprx', 'micro-profiler-2026-01-03-server.gprx', 'mine.gprx',
     ];
     for (const name of names) fs.writeFileSync(path.join(tmpDir, name), '');
-    await pruneDefaultCaptures(tmpDir, 2);
+    // Judge age from a clock well past the writes: a file's mtime can land a
+    // few milliseconds after Date.now() on some filesystems.
+    await pruneDefaultCaptures(tmpDir, 2, 0, Date.now() + 60_000);
     expect(fs.readdirSync(tmpDir).sort()).toEqual(['micro-profiler-2026-01-02-server.gprx', 'micro-profiler-2026-01-03-server.gprx', 'mine.gprx']);
   });
 });

@@ -54,6 +54,11 @@ const MAX_NAME_SCAN_PAGES = 200;
 // Roblox shows icons at 512x512, so a larger file is almost always the wrong file.
 const MAX_ICON_BYTES = 10 * 1024 * 1024;
 const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+// How long a create that may or may not have reached Roblox blocks another create of the same name.
+const UNKNOWN_CREATE_WINDOW_MS = 10 * 60 * 1000;
+const UNKNOWN_CREATE_HINT = 'An item may have been created; run list (or get) before retrying create.';
+const PENDING_UNKNOWN_CREATE_HINT =
+  'No item with this name is listed yet. If list still shows none, create can be retried after retry_after.';
 
 const SCOPE_PREFIX: Record<MonetizationKind, string> = {
   developer_product: 'developer-product',
@@ -201,26 +206,168 @@ function comparableName(name: string): string {
   return name.trim().toLowerCase();
 }
 
+// Identifies one name in one universe's products or passes, as findItemNamed compares them.
+function nameKey(universeId: number, kind: MonetizationKind, name: string): string {
+  return `${universeId}:${kind}:${comparableName(name)}`;
+}
+
+// Tails of the per-name queues. Only one call in this process checks and claims
+// a name at a time; other processes are not coordinated.
+const nameLocks = new Map<string, Promise<void>>();
+
+async function withNameLock<T>(key: string, run: () => Promise<T>): Promise<T> {
+  const previous = nameLocks.get(key) ?? Promise.resolve();
+  const { promise: released, resolve: release } = Promise.withResolvers<void>();
+  // The tail never rejects, so a holder that throws cannot block later callers.
+  const tail = previous.then(() => released);
+  nameLocks.set(key, tail);
+  await previous;
+  try {
+    return await run();
+  } finally {
+    release();
+    if (nameLocks.get(key) === tail) nameLocks.delete(key);
+  }
+}
+
+// When each name's create last ended without a known outcome, by nameKey.
+const unknownCreates = new Map<string, number>();
+
+function rememberUnknownCreate(key: string): number {
+  const now = Date.now();
+  for (const [other, failedAt] of unknownCreates) {
+    if (now - failedAt >= UNKNOWN_CREATE_WINDOW_MS) unknownCreates.delete(other);
+  }
+  unknownCreates.set(key, now);
+  return now;
+}
+
+// When a create of the name may be retried, if an unknown create still blocks it.
+function unknownCreateRetryAfter(key: string): string | undefined {
+  const failedAt = unknownCreates.get(key);
+  if (failedAt === undefined) return undefined;
+  if (Date.now() - failedAt < UNKNOWN_CREATE_WINDOW_MS) return retryAfter(failedAt);
+  unknownCreates.delete(key);
+  return undefined;
+}
+
+function retryAfter(failedAt: number): string {
+  return new Date(failedAt + UNKNOWN_CREATE_WINDOW_MS).toISOString();
+}
+
+function pendingUnknownCreate(
+  kind: MonetizationKind,
+  universeId: number,
+  name: string,
+  retryAfterTime: string,
+  action: 'created' | 'renamed',
+): MonetizationError {
+  return new MonetizationError(
+    'create_outcome_unknown',
+    `A recent create of the ${itemLabel(kind)} "${name}" in universe ${universeId} may have succeeded, but no item with that name is listed yet, so nothing was ${action}.`,
+    { hint: PENDING_UNKNOWN_CREATE_HINT, retry_after: retryAfterTime },
+  );
+}
+
+// An item Roblox reports settles any earlier unknown create of its name.
+function forgetUnknownCreates(items: readonly MonetizationItem[]): void {
+  for (const item of items) unknownCreates.delete(nameKey(item.universeId, item.kind, item.name));
+}
+
 // Roblox cannot delete products or passes, so a duplicate created by a retry is permanent.
 async function findItemNamed(
   client: MonetizationClient,
   kind: MonetizationKind,
   universeId: number,
   name: string,
+  excludeId?: number,
 ): Promise<MonetizationItem | undefined> {
   const wanted = comparableName(name);
   let pageToken: string | undefined;
   for (let page = 0; page < MAX_NAME_SCAN_PAGES; page++) {
     const result = await client.listMonetizationItems(kind, universeId, pageToken);
-    const match = result.items.find((candidate) => comparableName(candidate.name) === wanted);
+    forgetUnknownCreates(result.items);
+    const match = result.items.find(
+      (candidate) => candidate.id !== excludeId && comparableName(candidate.name) === wanted,
+    );
     if (match) return match;
     if (!result.nextPageToken) return undefined;
     pageToken = result.nextPageToken;
   }
   throw new MonetizationError(
     'duplicate_check_incomplete',
-    `Stopped looking for an existing ${itemLabel(kind)} named "${name}" after ${MAX_NAME_SCAN_PAGES} pages, so nothing was created.`,
+    `Stopped looking for an existing ${itemLabel(kind)} named "${name}" after ${MAX_NAME_SCAN_PAGES} pages, so nothing was ${excludeId === undefined ? 'created' : 'changed'}.`,
   );
+}
+
+function duplicateName(kind: MonetizationKind, universeId: number, existing: MonetizationItem): MonetizationError {
+  return new MonetizationError(
+    'duplicate_name',
+    `A ${itemLabel(kind)} named "${existing.name}" already exists in universe ${universeId}. Update it or choose another name.`,
+    { existing: publicItem(existing) },
+  );
+}
+
+// Checks for the name and creates the item while holding the name's lock.
+async function createNamed(
+  client: MonetizationClient,
+  kind: MonetizationKind,
+  universeId: number,
+  item: MonetizationItemChanges & { name: string },
+): Promise<MonetizationItem> {
+  const { name } = item;
+  const key = nameKey(universeId, kind, name);
+  return withNameLock(key, async () => {
+    const existing = await findItemNamed(client, kind, universeId, name);
+    if (existing) throw duplicateName(kind, universeId, existing);
+    const pendingRetryAfter = unknownCreateRetryAfter(key);
+    if (pendingRetryAfter) throw pendingUnknownCreate(kind, universeId, name, pendingRetryAfter, 'created');
+    let created: MonetizationItem;
+    try {
+      created = await client.createMonetizationItem(kind, universeId, item);
+    } catch (error) {
+      // A 4xx status means Roblox answered and refused. A 5xx may come from a
+      // gateway after the create landed, and anything else, such as a timeout,
+      // a dropped connection, or an unreadable success response, also leaves
+      // the outcome unknown. The API key is checked before any call is made.
+      if (error instanceof OpenCloudRequestError && error.status < 500) throw error;
+      const failedAt = rememberUnknownCreate(key);
+      const reason = error instanceof OpenCloudRequestError
+        ? `HTTP ${error.status}: ${error.message}`
+        : error instanceof Error ? error.message : String(error);
+      throw new MonetizationError(
+        'create_outcome_unknown',
+        `Could not confirm whether the ${itemLabel(kind)} "${name}" was created in universe ${universeId}: ${reason}`,
+        { hint: UNKNOWN_CREATE_HINT, retry_after: retryAfter(failedAt) },
+      );
+    }
+    unknownCreates.delete(key);
+    return created;
+  });
+}
+
+// A rename takes the new name's lock so it cannot race a create of that name.
+async function updateItem(
+  client: MonetizationClient,
+  kind: MonetizationKind,
+  universeId: number,
+  id: number,
+  changes: MonetizationItemChanges,
+): Promise<void> {
+  const { name } = changes;
+  if (name === undefined) {
+    await client.updateMonetizationItem(kind, universeId, id, changes);
+    return;
+  }
+  const key = nameKey(universeId, kind, name);
+  await withNameLock(key, async () => {
+    const existing = await findItemNamed(client, kind, universeId, name, id);
+    if (existing) throw duplicateName(kind, universeId, existing);
+    // The pending create may have made an item with this name, so a rename could duplicate it.
+    const pendingRetryAfter = unknownCreateRetryAfter(key);
+    if (pendingRetryAfter) throw pendingUnknownCreate(kind, universeId, name, pendingRetryAfter, 'renamed');
+    await client.updateMonetizationItem(kind, universeId, id, changes);
+  });
 }
 
 function requiredScopes(request: MonetizationRequest): string[] {
@@ -300,6 +447,7 @@ async function runAction(
   switch (request.action) {
     case 'list': {
       const page = await client.listMonetizationItems(kind, universeId, request.pageToken);
+      forgetUnknownCreates(page.items);
       return {
         kind,
         universe_id: universeId,
@@ -307,28 +455,22 @@ async function runAction(
         ...(page.nextPageToken ? { next_page_token: page.nextPageToken } : {}),
       };
     }
-    case 'get':
-      return { item: publicItem(await client.getMonetizationItem(kind, universeId, requiredId(request))) };
+    case 'get': {
+      const found = await client.getMonetizationItem(kind, universeId, requiredId(request));
+      forgetUnknownCreates([found]);
+      return { item: publicItem(found) };
+    }
     case 'create': {
-      const name = requiredName(request);
-      const existing = await findItemNamed(client, kind, universeId, name);
-      if (existing) {
-        throw new MonetizationError(
-          'duplicate_name',
-          `A ${itemLabel(kind)} named "${existing.name}" already exists in universe ${universeId}. Update it or choose another name.`,
-          { existing: publicItem(existing) },
-        );
-      }
-      const created = await client.createMonetizationItem(kind, universeId, {
+      const created = await createNamed(client, kind, universeId, {
         ...changes,
-        name,
+        name: requiredName(request),
         forSale: request.forSale ?? false,
       });
       return { created: true, item: publicItem(created) };
     }
     case 'update': {
       const id = requiredId(request);
-      await client.updateMonetizationItem(kind, universeId, id, changes);
+      await updateItem(client, kind, universeId, id, changes);
       try {
         return { updated: true, item: publicItem(await client.getMonetizationItem(kind, universeId, id)) };
       } catch (error) {

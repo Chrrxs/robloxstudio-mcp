@@ -34,6 +34,7 @@ const FULL_TESTS = [
   'capture-broker-transfers.mjs',
   'client-profiler-broker-deadline.mjs',
   'client-broker-liveness.mjs',
+  'input-release-cleanup.mjs',
   'large-input-workflow.mjs',
   'studio-tooling-smoke.mjs',
   'eval-bridge-error-preservation.mjs',

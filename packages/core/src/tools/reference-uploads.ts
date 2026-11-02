@@ -49,6 +49,8 @@ interface UploadRecord {
   operationId: string;
   identityKey: string;
   targetPeerId: string;
+  /** The Studio Instance the operation was pinned to when it started; never changes. */
+  targetInstanceId: string;
   stage: ReferenceUploadStage;
   phase: UploadPhase;
   startedAt: number;
@@ -66,6 +68,7 @@ interface UploadRecord {
 export interface ReferenceUploadView {
   stage: ReferenceUploadStage;
   targetPeerId: string;
+  targetInstanceId: string;
   startedAt: number;
   updatedAt: number;
   imageAssetId?: number;
@@ -125,9 +128,18 @@ export class ReferenceUploads {
    * The record for operationId after checking this request matches it.
    * Undefined when this session has prepared nothing under that ID.
    */
-  lookup(operationId: string, identityKey: string, targetPeerId: string): ReferenceUploadView | undefined {
-    const record = this.matching(operationId, identityKey, targetPeerId);
+  lookup(operationId: string, identityKey: string, targetPeerId: string, targetInstanceId: string): ReferenceUploadView | undefined {
+    const record = this.matching(operationId, identityKey, targetPeerId, targetInstanceId);
     return record && this.toView(record);
+  }
+
+  /**
+   * The Studio Instance an operation was pinned to, so a retry that names no
+   * instance_id returns to it rather than to whichever Studio is connected now.
+   */
+  pinnedInstance(operationId: string): string | undefined {
+    this.prune();
+    return this.records.get(operationId)?.targetInstanceId;
   }
 
   /**
@@ -135,11 +147,19 @@ export class ReferenceUploads {
    * in flight, resumes one Roblox accepted, or starts one. An upload whose
    * outcome is unknown and cannot be resumed is refused, never repeated.
    */
-  acquire(operationId: string, identityKey: string, targetPeerId: string, attempt: ReferenceUploadAttempt): Promise<number> {
-    let record = this.matching(operationId, identityKey, targetPeerId);
+  acquire(
+    operationId: string,
+    identityKey: string,
+    targetPeerId: string,
+    targetInstanceId: string,
+    attempt: ReferenceUploadAttempt,
+  ): Promise<number> {
+    let record = this.matching(operationId, identityKey, targetPeerId, targetInstanceId);
     if (record) {
       if (record.inFlight) return record.inFlight;
-      // A retry may reach a reconnected Peer until the generation is dispatched.
+      // Until the generation is dispatched, a retry may reach a reconnected
+      // Peer of the pinned Instance (a plugin reload); matching refused any
+      // other Instance.
       record.targetPeerId = targetPeerId;
       if (record.imageAssetId !== undefined) return Promise.resolve(record.imageAssetId);
       if (record.stage === 'upload_unknown') {
@@ -157,7 +177,9 @@ export class ReferenceUploads {
       record.createdAssetId = undefined;
     } else {
       const now = this.now();
-      record = { operationId, identityKey, targetPeerId, stage: 'uploading', phase: 'local', startedAt: now, updatedAt: now };
+      record = {
+        operationId, identityKey, targetPeerId, targetInstanceId, stage: 'uploading', phase: 'local', startedAt: now, updatedAt: now,
+      };
       this.records.set(operationId, record);
       this.prune();
     }
@@ -227,12 +249,17 @@ export class ReferenceUploads {
     }
   }
 
-  private matching(operationId: string, identityKey: string, targetPeerId: string): UploadRecord | undefined {
+  private matching(operationId: string, identityKey: string, targetPeerId: string, targetInstanceId: string): UploadRecord | undefined {
     this.prune();
     const record = this.records.get(operationId);
     if (!record) return undefined;
-    // A dispatched generation is bound to its Peer, exactly like the bridge record.
-    if (record.identityKey !== identityKey || (record.stage === 'dispatched' && record.targetPeerId !== targetPeerId)) {
+    // The operation stays on the Instance it started on, and a dispatched
+    // generation is bound to its Peer, exactly like the bridge record.
+    if (
+      record.identityKey !== identityKey
+      || record.targetInstanceId !== targetInstanceId
+      || (record.stage === 'dispatched' && record.targetPeerId !== targetPeerId)
+    ) {
       throw new ReferenceUploadError(
         `Request ${operationId} already identifies a different operation; nothing was uploaded or sent`,
         'operation_id_collision',
@@ -309,6 +336,7 @@ export class ReferenceUploads {
     return {
       stage: record.stage,
       targetPeerId: record.targetPeerId,
+      targetInstanceId: record.targetInstanceId,
       startedAt: record.startedAt,
       updatedAt: record.updatedAt,
       ...(record.imageAssetId !== undefined ? { imageAssetId: record.imageAssetId } : {}),

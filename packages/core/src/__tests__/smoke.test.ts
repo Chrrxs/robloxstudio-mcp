@@ -1,6 +1,7 @@
 import { BridgeService } from '../bridge-service.js';
 import { createHttpServer } from '../http-server.js';
 import { RobloxStudioTools } from './test-tools.js';
+import { resolveUploadCreator } from '../tools/index.js';
 import { buildStudioLaunchArgs, buildWindowsStudioStartScript, cleanupManagedBaseplateFiles, isWsl, quoteWindowsCommandLineArg, StudioInstanceManager, sweepStaleBaseplateFiles } from '../studio-instance-manager.js';
 import { detectStudioPlatform } from '../studio-platform.js';
 import { ManagedInstanceRegistry } from '../managed-instance-registry.js';
@@ -2505,8 +2506,7 @@ describe('Smoke', () => {
       fileName: 'generate-model-reference.png',
       displayName: 'Studio Assistant Source Image',
       description: 'Studio Assistant Source Image',
-      userId: process.env.ROBLOX_CREATOR_USER_ID,
-      groupId: process.env.ROBLOX_CREATOR_GROUP_ID,
+      ...resolveUploadCreator(),
       onSending: expect.any(Function),
       onAccepted: expect.any(Function),
     });

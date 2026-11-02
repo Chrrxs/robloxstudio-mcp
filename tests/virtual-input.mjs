@@ -72,6 +72,11 @@ return {
 }
 `;
 
+const KEY_STATE = String.raw`
+task.wait(0.1)
+return { w = game:GetService("UserInputService"):IsKeyDown(Enum.KeyCode.W) }
+`;
+
 const CLEANUP = String.raw`
 local gui = game:GetService("Players").LocalPlayer.PlayerGui:FindFirstChild("${GUI}")
 if gui then gui:Destroy() end
@@ -157,6 +162,25 @@ await runTest('simulate_mouse_input move and scroll reach the game', async ({ tr
     assert(recipe.heldMidway === true && recipe.heldAfter === false, 'recipe holds W, then releases it after the failure');
     const afterRecipe = await read('read after recipe');
     assert(afterRecipe.activated === 1, `recipe clicks the GUI button found by path with the inset (activated ${afterRecipe.activated})`);
+
+    // A bad keyCode is a validation error, not a render error. press then
+    // release must leave W up; a confirmed release carries no
+    // deliveryConfirmed=false warning (that only appears while the window
+    // isn't rendering, which needs a minimized window and can't be driven here).
+    const badKey = await client.callToolError('simulate_keyboard_input', { target: 'client-1', keyCode: 'NotAKey', action: 'press' });
+    assert(JSON.stringify(badKey).includes('Unknown keyCode'), 'bad keyCode reports a validation error');
+    const keyboard = (args) => client.callTool('simulate_keyboard_input', { target: 'client-1', keyCode: 'W', ...args });
+    try {
+      const pressed = await keyboard({ action: 'press' });
+      assert(pressed.success === true, 'press W succeeds');
+      const down = parsed(await evalClient(KEY_STATE, 'key state after press'), 'key state after press');
+      assert(down.w === true, 'press holds W in the game');
+    } finally {
+      const released = await keyboard({ action: 'release' });
+      assert(released.success === true && released.deliveryConfirmed === undefined, 'release W is a confirmed success');
+    }
+    const up = parsed(await evalClient(KEY_STATE, 'key state after release'), 'key state after release');
+    assert(up.w === false, 'release lets W up in the game');
 
     await client.callTool('set_device_simulator', { target: 'client-1', deviceId: 'iphone_XR' });
     try {
