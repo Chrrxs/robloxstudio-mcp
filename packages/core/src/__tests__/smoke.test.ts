@@ -27,6 +27,16 @@ function claimQueuedRequest(bridge: BridgeService, transportPeerId: string) {
   };
 }
 
+// The tool queues follow-up requests after awaited steps; drain microtasks, never timers.
+async function claimQueuedRequestSoon(bridge: BridgeService, transportPeerId: string) {
+  for (let attempt = 0; attempt < 200; attempt++) {
+    const claimed = claimQueuedRequest(bridge, transportPeerId);
+    if (claimed) return claimed;
+    await Promise.resolve();
+  }
+  return null;
+}
+
 const READY = {
   peerId: 'session-1',
   transportPeerId: 'session-1',
@@ -3062,6 +3072,61 @@ describe('Smoke', () => {
     });
   });
 
+  test('solo_playtest reports a start Studio refused with its own error instead of a readiness timeout', async () => {
+    const bridge = new BridgeService();
+    const tools = new RobloxStudioTools(bridge);
+    bridge.registerPeer(READY);
+    const resultPromise = tools.soloPlaytest('start', 'run', 60, READY.instanceId);
+    const start = claimQueuedRequest(bridge, READY.transportPeerId);
+    expect(start?.request.endpoint).toBe('/api/start-playtest');
+    bridge.resolveRequest(start!.requestId, { success: true, message: 'Playtest started in run mode.', testId: 'solo-1' });
+
+    const poll = await claimQueuedRequestSoon(bridge, READY.transportPeerId);
+    expect(poll?.request.endpoint).toBe('/api/multiplayer-test-state');
+    const studioError = 'Failed to start the test because a previous one is still in progress.';
+    bridge.resolveRequest(poll!.requestId, {
+      success: true,
+      peer: 'edit',
+      soloSession: { phase: 'failed', testId: 'solo-1', mode: 'run', error: studioError },
+    });
+
+    expect(JSON.parse((await resultPromise).content[0].text)).toMatchObject({
+      success: false,
+      action: 'start',
+      error: 'studio_test_in_progress',
+      message: 'Studio refused to start the playtest because it still considers a previous test in progress.',
+      studioError,
+      recoveryHint: expect.stringMatching(/reopen the place/),
+      runtimeReady: false,
+      timedOut: false,
+      roles: ['edit'],
+    });
+  });
+
+  test('solo_playtest keeps waiting when the polled failure belongs to an earlier start', async () => {
+    const bridge = new BridgeService();
+    const tools = new RobloxStudioTools(bridge);
+    bridge.registerPeer(READY);
+    const resultPromise = tools.soloPlaytest('start', 'run', 60, READY.instanceId);
+    const start = claimQueuedRequest(bridge, READY.transportPeerId);
+    bridge.resolveRequest(start!.requestId, { success: true, testId: 'solo-2' });
+
+    const poll = await claimQueuedRequestSoon(bridge, READY.transportPeerId);
+    bridge.resolveRequest(poll!.requestId, {
+      success: true,
+      soloSession: { phase: 'failed', testId: 'solo-1', error: 'old failure' },
+    });
+    // The runtime registers after the poll; readiness wins.
+    bridge.registerPeer({ ...READY, peerId: 'server-1', transportPeerId: 'server-1', role: 'server', isRunning: true });
+
+    expect(JSON.parse((await resultPromise).content[0].text)).toEqual({
+      success: true,
+      action: 'start',
+      message: 'Playtest started.',
+      roles: ['edit', 'server'],
+    });
+  });
+
   test.each([false, true])('solo_playtest preserves native teardown failure with runtime present=%s', async (runtimePresent) => {
     const bridge = new BridgeService();
     const tools = new RobloxStudioTools(bridge);
@@ -3207,6 +3272,41 @@ describe('Smoke', () => {
         instanceIds: ['instance:test'],
       }),
     ]);
+  });
+
+  test.each([
+    ['Failed to start the test because a previous one is still in progress.', 'studio_test_in_progress',
+      'Studio refused to start the multiplayer playtest because it still considers a previous test in progress.', true],
+    ['Something else broke.', 'studio_start_failed',
+      'Studio refused to start the multiplayer playtest: Something else broke.', false],
+  ])('multiplayer start reports Studio refusal %j instead of undetected peers', async (studioError, error, message, hinted) => {
+    const bridge = new BridgeService();
+    const tools = new RobloxStudioTools(bridge) as any;
+    tools._waitForMultiplayerStart = async () => ({
+      ok: false, roles: ['edit'], timedOut: false, phase: 'failed', error: studioError,
+    });
+    tools._buildMultiplayerState = async () => ({
+      phase: 'failed', error: studioError, peers: [{ role: 'edit' }], clientRoles: [], playerCount: 0,
+    });
+    bridge.registerPeer(READY);
+
+    const resultPromise = tools.multiplayerPlaytest('start', 2, undefined, undefined, undefined, 60, 'instance:test');
+    const pending = claimQueuedRequest(bridge, 'session-1');
+    bridge.resolveRequest(pending!.requestId, { success: true, testId: 'test-refused' });
+
+    const body = JSON.parse((await resultPromise).content[0].text);
+    expect(body).toEqual({
+      success: false,
+      action: 'start',
+      error,
+      message,
+      multiplayerGroupId: 'test-refused',
+      roles: ['edit'],
+      studioError,
+      ...(hinted ? { recoveryHint: expect.stringMatching(/stop\/end cannot clear it: reopen the place/) } : {}),
+    });
+    // A refused start never ran, so its group does not linger.
+    expect(bridge.getMultiplayerGroups()).toEqual([]);
   });
 
   test('multiplayer_playtest add_players returns a brief result', async () => {

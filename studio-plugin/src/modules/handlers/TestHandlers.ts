@@ -12,8 +12,24 @@ interface StudioTestServiceMultiplayer extends StudioTestService {
 }
 
 const StudioTestService = game.GetService("StudioTestService") as StudioTestServiceMultiplayer;
+const TestService = game.GetService("TestService");
 
 let testRunning = false;
+
+type SoloPhase = "idle" | "running" | "completed" | "failed";
+
+// Outcome of the latest solo Execute*Async call. MCP polls it so a start Studio
+// refuses is reported with Studio's own error instead of a readiness timeout.
+interface SoloSessionState {
+	phase: SoloPhase;
+	testId?: string;
+	mode?: string;
+	startedAt?: number;
+	completedAt?: number;
+	error?: string;
+}
+
+let soloState: SoloSessionState = { phase: "idle" };
 
 type MultiplayerPhase = "idle" | "starting" | "running" | "completed" | "failed";
 
@@ -59,6 +75,28 @@ function cloneMultiplayerState(): MultiplayerSessionState {
 	};
 }
 
+function cloneSoloState(): SoloSessionState {
+	return {
+		phase: soloState.phase,
+		testId: soloState.testId,
+		mode: soloState.mode,
+		startedAt: soloState.startedAt,
+		completedAt: soloState.completedAt,
+		error: soloState.error,
+	};
+}
+
+// With ExecuteWithStudioRun and NumberOfPlayers > 0, Run opens a separate server
+// and NumberOfPlayers client windows instead of a solo run session.
+function runModeClientCount(): number | undefined {
+	const [ok, settings] = pcall(() => ({
+		executeWithStudioRun: TestService.ExecuteWithStudioRun,
+		numberOfPlayers: TestService.NumberOfPlayers,
+	}));
+	if (!ok || !settings.executeWithStudioRun || settings.numberOfPlayers <= 0) return undefined;
+	return settings.numberOfPlayers;
+}
+
 function normalizeNumPlayers(value: unknown): number | undefined {
 	if (!typeIs(value, "number")) return undefined;
 	const n = math.floor(value);
@@ -76,6 +114,23 @@ function startPlaytest(requestData: Record<string, unknown>) {
 
 	if (numPlayers !== undefined) {
 		return { error: "start_playtest is single-player only. Use multiplayer_test_start for multi-client StudioTestService sessions." };
+	}
+
+	if (mode === "run") {
+		const clientCount = runModeClientCount();
+		if (clientCount !== undefined) {
+			return {
+				success: false,
+				error: "run_opens_multiplayer_session",
+				message:
+					`TestService.ExecuteWithStudioRun is true and TestService.NumberOfPlayers is ${clientCount}, ` +
+					`so Run would open a separate server and ${clientCount} client window(s) that solo_playtest cannot track or stop. ` +
+					"Ending that session by hand can leave Studio refusing new tests until the place is reopened. " +
+					'For a multi-client test use multiplayer_playtest action="start"; for a solo Run set ' +
+					"TestService.NumberOfPlayers to 0 or TestService.ExecuteWithStudioRun to false.",
+				numberOfPlayers: clientCount,
+			};
+		}
 	}
 
 	// Peer teardown and ExecutePlayModeAsync completion can precede native edit
@@ -105,6 +160,8 @@ function startPlaytest(requestData: Record<string, unknown>) {
 
 	testRunning = true;
 	const preparedTest = PluginSession.prepareSoloTest();
+	const testId = HttpService.GenerateGUID(false);
+	soloState = { phase: "running", testId, mode, startedAt: tick() };
 
 	task.spawn(() => {
 		const [ok, result] = pcall(() => {
@@ -118,6 +175,11 @@ function startPlaytest(requestData: Record<string, unknown>) {
 		if (!ok) {
 			warn(`[robloxstudio-mcp] Playtest ended with error: ${result}`);
 		}
+		if (soloState.testId === testId) {
+			soloState.completedAt = tick();
+			soloState.phase = ok ? "completed" : "failed";
+			soloState.error = ok ? undefined : tostring(result);
+		}
 
 		testRunning = false;
 	});
@@ -125,6 +187,7 @@ function startPlaytest(requestData: Record<string, unknown>) {
 	const response: Record<string, unknown> = {
 		success: true,
 		message: `Playtest started in ${mode} mode.`,
+		testId,
 	};
 
 	return response;
@@ -270,6 +333,7 @@ function multiplayerTestState(_requestData: Record<string, unknown>) {
 
 	if (peer === "edit") {
 		response.session = cloneMultiplayerState();
+		response.soloSession = cloneSoloState();
 		return response;
 	}
 

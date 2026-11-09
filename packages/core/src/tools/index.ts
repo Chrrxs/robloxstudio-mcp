@@ -28,6 +28,7 @@ import { DOC_CATEGORIES, getRobloxDoc, isDocCategory } from '../roblox-docs.js';
 import { findBuiltInStudioSkill, loadBuiltInStudioSkills } from '../studio-skills.js';
 import { runManageExperience } from './experience.js';
 import { runManageMonetization } from './monetization.js';
+import { describePlaytestStartFailure } from './playtest-start-errors.js';
 import { SCRIPT_CLASS_FILTERS } from './definitions.js';
 import { rgbaToJpeg } from '../jpeg-encoder.js';
 import { rgbaToPng } from '../png-encoder.js';
@@ -1881,7 +1882,8 @@ export class RobloxStudioTools {
     connectedAfter: number,
     requiredRoles: string[],
     timeoutSec = 60,
-  ): Promise<{ ok: boolean; roles: string[]; timedOut: boolean }> {
+    soloStart?: { editPeerId: string; testId: string },
+  ): Promise<{ ok: boolean; roles: string[]; timedOut: boolean; studioError?: string }> {
     const deadline = Date.now() + timeoutSec * 1000;
     while (Date.now() < deadline) {
       const refresh = this.bridge.refreshTopologyForRouting();
@@ -1896,6 +1898,12 @@ export class RobloxStudioTools {
       if (requiredRoles.every((role) => freshRoles.has(role))) {
         return { ok: true, roles, timedOut: false };
       }
+      if (soloStart) {
+        const studioError = await this._soloStartFailure(soloStart.editPeerId, soloStart.testId, deadline);
+        if (studioError !== undefined) {
+          return { ok: false, roles: this._rolesForScope(instanceId), timedOut: false, studioError };
+        }
+      }
       await sleep(250);
     }
     return {
@@ -1903,6 +1911,21 @@ export class RobloxStudioTools {
       roles: this._rolesForScope(instanceId),
       timedOut: true,
     };
+  }
+
+  // Studio's error when the edit plugin's Execute*Async call for this start failed.
+  private async _soloStartFailure(editPeerId: string, testId: string, deadline: number): Promise<string | undefined> {
+    try {
+      const remainingMs = Math.max(1, Math.min(1000, deadline - Date.now()));
+      const editState = await this._requestPeer('/api/multiplayer-test-state', {}, editPeerId, remainingMs);
+      const solo: unknown = editState?.soloSession;
+      if (solo === null || typeof solo !== 'object' || !('testId' in solo) || !('phase' in solo)) return undefined;
+      if (solo.testId !== testId || solo.phase !== 'failed') return undefined;
+      return 'error' in solo && typeof solo.error === 'string' ? solo.error : 'unknown error';
+    } catch {
+      // The edit peer may be busy while Studio starts the test; readiness decides.
+      return undefined;
+    }
   }
 
 
@@ -4052,19 +4075,32 @@ export class RobloxStudioTools {
       };
     }
     const response = await this._requestPeer('/api/start-playtest', data, resolved.targetPeerId);
-    let wait: { ok: boolean; roles: string[]; timedOut: boolean } | undefined;
+    let wait: { ok: boolean; roles: string[]; timedOut: boolean; studioError?: string } | undefined;
     if (response?.success === true) {
       const requiredRoles = mode === 'play' ? ['server', 'client-1'] : ['server'];
-      wait = await this._waitForRuntimeRolesFresh(resolved.targetInstanceId, startedAt, requiredRoles, timeout);
+      // Older plugins do not return a testId; they keep the readiness-only wait.
+      const soloStart = typeof response.testId === 'string'
+        ? { editPeerId: resolved.targetPeerId, testId: response.testId }
+        : undefined;
+      wait = await this._waitForRuntimeRolesFresh(resolved.targetInstanceId, startedAt, requiredRoles, timeout, soloStart);
     }
-    const body = wait
+    const body = wait?.studioError !== undefined
       ? {
         ...response,
-        runtimeReady: wait.ok,
-        timedOut: wait.timedOut,
+        ...describePlaytestStartFailure(wait.studioError, 'playtest'),
+        success: false,
+        runtimeReady: false,
+        timedOut: false,
         roles: wait.roles,
       }
-      : response;
+      : wait
+        ? {
+          ...response,
+          runtimeReady: wait.ok,
+          timedOut: wait.timedOut,
+          roles: wait.roles,
+        }
+        : response;
     return {
       content: [
         {
@@ -4343,6 +4379,8 @@ export class RobloxStudioTools {
           : body.message ?? 'Multiplayer playtest did not start.',
         multiplayerGroupId,
         roles: Array.isArray(body.roles) ? body.roles : undefined,
+        studioError: typeof body.studioError === 'string' ? body.studioError : undefined,
+        recoveryHint: typeof body.recoveryHint === 'string' ? body.recoveryHint : undefined,
       });
     }
 
@@ -4455,6 +4493,13 @@ export class RobloxStudioTools {
     const runtimeStillConnected = this._runtimeTargetsForScope(editTarget.instanceId).length > 0;
     const definitelyFailed = state.phase === 'failed' && !runtimeStillConnected;
     if (definitelyFailed) await this.bridge.removeMultiplayerGroupEverywhere(groupId);
+    // Studio refused the start (its async call failed); keep its error rather than blame peer detection.
+    const startFailure = !success && wait.phase === 'failed'
+      ? describePlaytestStartFailure(
+        typeof wait.error === 'string' ? wait.error : String(wait.error ?? 'unknown error'),
+        'multiplayer playtest',
+      )
+      : undefined;
     return {
       content: [{
         type: 'text',
@@ -4469,10 +4514,13 @@ export class RobloxStudioTools {
           wait,
           roles: wait.roles,
           state,
-          error: success ? undefined : wait.error ?? 'multiplayer_start_not_detected',
+          error: success ? undefined : startFailure?.error ?? wait.error ?? 'multiplayer_start_not_detected',
           message: success
             ? 'Multiplayer Studio test started and runtime peers detected.'
-            : 'Multiplayer Studio test start was requested, but MCP did not detect the required server/client peers before timeout.',
+            : startFailure?.message ??
+              'Multiplayer Studio test start was requested, but MCP did not detect the required server/client peers before timeout.',
+          studioError: startFailure?.studioError,
+          recoveryHint: startFailure?.recoveryHint,
           startedAt,
         }),
       }],

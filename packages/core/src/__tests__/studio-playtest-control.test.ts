@@ -6,6 +6,7 @@ import { build as esbuildBuild, type Plugin } from 'esbuild';
 interface TestHandlersModule {
   startPlaytest(request: Record<string, unknown>): Record<string, unknown>;
   stopPlaytest(request: Record<string, unknown>): Record<string, unknown>;
+  multiplayerTestState(request: Record<string, unknown>): Record<string, unknown>;
 }
 
 function repositoryRoot(): string {
@@ -31,7 +32,8 @@ const dependencies: Plugin = {
     build.onLoad({ filter: /.*/, namespace: 'studio-playtest' }, (args) => {
       if (args.path === 'services') {
         return {
-          contents: `export const HttpService = {};
+          contents: `let guid = 0;
+            export const HttpService = { GenerateGUID: () => 'guid-' + (++guid) };
             export const Players = { GetPlayers: () => [] };
             export const RunService = globalThis.__RUN_SERVICE__;`,
           loader: 'js',
@@ -57,15 +59,16 @@ function pluginModule(): Promise<string> {
   return bundledModule;
 }
 
-async function createHarness(editModeActive = false) {
+async function createHarness(editModeActive = false, testServiceSettings = { ExecuteWithStudioRun: false, NumberOfPlayers: 0 }) {
   const spawned: Array<() => void> = [];
   let now = 0;
   let onWait: () => void = () => undefined;
   const studioTestService = {
     EditModeActive: editModeActive,
-    ExecutePlayModeAsync: jest.fn(() => undefined),
-    ExecuteRunModeAsync: jest.fn(() => undefined),
+    ExecutePlayModeAsync: jest.fn((): unknown => undefined),
+    ExecuteRunModeAsync: jest.fn((): unknown => undefined),
   };
+  const testService = { ...testServiceSettings };
   const pluginSession = {
     prepareSoloTest: jest.fn(() => ({ token: 'topology-token', testArgs: { __mcpTopology: { instanceId: 'instance:aaa-111' } } })),
     finishTest: jest.fn(),
@@ -79,11 +82,12 @@ async function createHarness(editModeActive = false) {
   const context = vm.createContext({
     module: commonJsModule,
     exports: commonJsModule.exports,
-    __RUN_SERVICE__: { IsRunning: () => false },
+    __RUN_SERVICE__: { IsRunning: () => false, IsRunMode: () => false },
     __STOP_MONITOR__: stopMonitor,
     __PLUGIN_SESSION__: pluginSession,
     __PEER_ROLE__: { detect: () => 'edit' },
-    game: { GetService: () => studioTestService },
+    game: { GetService: (name: string) => (name === 'TestService' ? testService : studioTestService) },
+    tostring: (value: unknown) => (value instanceof Error ? value.message : String(value)),
     tick: () => now,
     task: {
       spawn: (callback: () => void) => { spawned.push(callback); },
@@ -247,5 +251,57 @@ describe('Studio playtest lifecycle control', () => {
     expect(harness.now).toBeGreaterThanOrEqual(10);
     expect(harness.now).toBeLessThanOrEqual(10.1);
     expect(harness.scheduledCount).toBe(1);
+  });
+
+  test.each([
+    [{ ExecuteWithStudioRun: true, NumberOfPlayers: 2 }, 'run', false],
+    [{ ExecuteWithStudioRun: true, NumberOfPlayers: 2 }, 'play', true],
+    [{ ExecuteWithStudioRun: false, NumberOfPlayers: 2 }, 'run', true],
+    [{ ExecuteWithStudioRun: true, NumberOfPlayers: 0 }, 'run', true],
+  ])('TestService %j with mode=%s starts=%s', async (settings, mode, starts) => {
+    const harness = await createHarness(true, settings);
+
+    const result = harness.handlers.startPlaytest({ mode });
+
+    if (starts) {
+      expect(result).toMatchObject({ success: true, testId: expect.any(String) });
+      expect(harness.scheduledCount).toBe(1);
+      return;
+    }
+    // Run would open a separate server and client windows that solo_playtest cannot track.
+    expect(result).toMatchObject({
+      success: false,
+      error: 'run_opens_multiplayer_session',
+      message: expect.stringMatching(/NumberOfPlayers is 2.*multiplayer_playtest/),
+      numberOfPlayers: 2,
+    });
+    expect(harness.pluginSession.prepareSoloTest).not.toHaveBeenCalled();
+    expect(harness.scheduledCount).toBe(0);
+  });
+
+  test('exposes the outcome of the latest solo start, including Studio refusals', async () => {
+    const harness = await createHarness(true);
+    const studioError = 'Failed to start the test because a previous one is still in progress.';
+    harness.studioTestService.ExecuteRunModeAsync.mockImplementation(() => { throw new Error(studioError); });
+
+    const started = harness.handlers.startPlaytest({ mode: 'run' });
+    expect(harness.handlers.multiplayerTestState({}).soloSession).toMatchObject({
+      phase: 'running', testId: started.testId, mode: 'run',
+    });
+
+    harness.finishExecution();
+
+    expect(harness.handlers.multiplayerTestState({}).soloSession).toMatchObject({
+      phase: 'failed', testId: started.testId, error: studioError,
+    });
+
+    // A later start replaces the recorded outcome.
+    harness.studioTestService.ExecuteRunModeAsync.mockImplementation(() => undefined);
+    const restarted = harness.handlers.startPlaytest({ mode: 'run' });
+    expect(restarted.testId).not.toBe(started.testId);
+    harness.finishExecution();
+    expect(harness.handlers.multiplayerTestState({}).soloSession).toMatchObject({
+      phase: 'completed', testId: restarted.testId, error: undefined,
+    });
   });
 });
