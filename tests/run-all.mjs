@@ -41,6 +41,7 @@ const FULL_TESTS = [
   'eval-context-routing.mjs',
   'runtime-bridge-lifecycle.mjs',
   'playtest-control-repro.mjs',
+  'playtest-start-refusal.mjs',
   'play-cycle-event-stream-regression.mjs',
   'micro-profiler-responsiveness.mjs',
   'micro-profiler-units-and-state.mjs',
