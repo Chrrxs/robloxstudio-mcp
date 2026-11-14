@@ -121,7 +121,9 @@ try {
 
     const older = startServer(fixturePackage(packageName, variant, assetName, OLD_VERSION), env);
     running.push(older);
-    await older.waitForLog(/primary mode/);
+    // Startup installs the plugin after binding and before serving stdio.
+    await older.waitForLog(/running on stdio/);
+    assert.match(older.stderr(), /primary mode/, `${packageName}: the first session owns the port`);
     assert.equal(installedVersion(destination), OLD_VERSION, `${packageName}: the port owner installs its plugin`);
 
     const newer = startServer(fixturePackage(packageName, variant, assetName, NEW_VERSION), env);
