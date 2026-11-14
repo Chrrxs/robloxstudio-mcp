@@ -111,6 +111,11 @@ export class ProxyBridgeService extends BridgeService {
     return this.initialRefresh;
   }
 
+  /** The port owner's version from its latest topology; undefined before one arrives. */
+  getPrimaryVersion(): string | undefined {
+    return this.primaryVersion;
+  }
+
   private authHeaders(extra?: Record<string, string>): Record<string, string> {
     const headers: Record<string, string> = { ...extra };
     if (this.authToken) headers['X-MCP-Auth'] = this.authToken;

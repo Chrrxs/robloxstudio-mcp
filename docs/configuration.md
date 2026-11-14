@@ -98,6 +98,15 @@ mismatched plugin rather than keeping an unsupported protocol pair connected.
 Restart the MCP server with `--auto-install-plugin`, then fully close and reopen
 Studio to load the matching bundled plugin.
 
+Studio connects only to the MCP server that owns the Studio port (58741 unless
+`ROBLOX_STUDIO_PORT` is set). Every other session forwards to that server, so
+only the port owner installs the plugin. After an upgrade, a new session that
+starts while an older session still owns the port keeps using the older server
+and its plugin, and logs `Port <port> is owned by MCP server v<old>`. Close
+every MCP client that runs the older version: the new session then takes the
+port and installs its plugin. `GET http://localhost:58741/health` reports the
+port owner's `serverVersion`.
+
 ## Host window capture
 
 `capture_screenshot` first asks Studio for the frame (StudioCaptureService, then

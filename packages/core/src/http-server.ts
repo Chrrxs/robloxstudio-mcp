@@ -1105,13 +1105,15 @@ export async function listenWithRetry(
         'code' in error &&
         error.code === 'EADDRINUSE'
       ) {
-        console.error(`Port ${port} in use, trying next...`);
+        if (i + 1 < maxAttempts) console.error(`Port ${port} in use, trying next...`);
         continue;
       }
       throw error;
     }
   }
-  throw new Error(`All ports ${startPort}-${startPort + maxAttempts - 1} are in use. Stop some MCP server instances and retry.`);
+  throw new Error(maxAttempts === 1
+    ? `Port ${startPort} is in use.`
+    : `All ports ${startPort}-${startPort + maxAttempts - 1} are in use. Stop some MCP server instances and retry.`);
 }
 
 function bindPort(app: express.Express, host: string, port: number): Promise<http.Server> {

@@ -52,7 +52,7 @@ describe('primary-only server startup', () => {
       tools: [],
     });
 
-    await expect(server.run()).rejects.toThrow(/All ports/);
+    await expect(server.run()).rejects.toThrow(`Port ${port} is in use.`);
 
     const errors = errorSpy.mock.calls.flat().join('\n');
     expect(errors).toContain('refusing proxy mode');

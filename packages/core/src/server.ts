@@ -14,6 +14,12 @@ export interface ServerConfig {
   name: string;
   version: string;
   tools: ToolDefinition[];
+  /**
+   * Installs this edition's Studio plugin. Runs only when this process owns the
+   * Studio port: the plugin connects to the port owner, which accepts only its
+   * own plugin version, so a forwarding session must not replace it.
+   */
+  installStudioPlugin?: () => Promise<void>;
 }
 
 export class RobloxStudioMCPServer {
@@ -82,6 +88,7 @@ export class RobloxStudioMCPServer {
       boundPort = result.port;
       console.error(`HTTP server listening on ${host}:${boundPort} for Studio plugin (primary mode)`);
       console.error(`Streamable HTTP MCP endpoint: http://localhost:${boundPort}/mcp`);
+      await this.installStudioPlugin();
     } catch (error) {
       await primaryApp?.cleanup().catch(() => {});
       if (process.env.ROBLOX_STUDIO_REQUIRE_PRIMARY === '1') {
@@ -99,6 +106,14 @@ export class RobloxStudioMCPServer {
       this.bridge = proxyBridge;
       this.tools = new RobloxStudioTools(this.bridge);
       console.error(`Port ${basePort} in use - entering proxy mode (forwarding to localhost:${basePort})`);
+      const primaryVersion = proxyBridge.getPrimaryVersion();
+      if (primaryVersion !== undefined && primaryVersion !== this.config.version) {
+        console.error(
+          `Port ${basePort} is owned by MCP server v${primaryVersion}; this v${this.config.version} session ` +
+          'forwards to it and leaves its Studio plugin installed. Close the older session to use ' +
+          `v${this.config.version}; this session takes the port and installs its plugin once it is free.`,
+        );
+      }
 
       // Periodically try to promote to primary if the port frees up.
       // Single-attempt bind for the same reason as the initial bind above —
@@ -113,6 +128,7 @@ export class RobloxStudioMCPServer {
       // timeout).
       const promotionIntervalMs = parseInt(process.env.ROBLOX_STUDIO_PROXY_PROMOTION_INTERVAL_MS || '5000');
       promotionInterval = setInterval(async () => {
+        let promoted = false;
         const candidateBridge = new BridgeService();
         const candidateTools = new RobloxStudioTools(candidateBridge);
         const candidateApp = createHttpServer(candidateTools, candidateBridge, this.allowedToolNames, this.config, security);
@@ -135,11 +151,13 @@ export class RobloxStudioMCPServer {
           primaryApp.setMCPServerActive(true);
           console.error(`Promoted from proxy to primary on port ${boundPort}`);
           if (promotionInterval) clearInterval(promotionInterval);
+          promoted = true;
           await oldTools.dispose();
         } catch {
           await candidateApp.cleanup().catch(() => {});
           // basePort still taken — discard the candidate, leave proxy bridge live.
         }
+        if (promoted) await this.installStudioPlugin();
       }, promotionIntervalMs);
     }
 
@@ -222,5 +240,15 @@ export class RobloxStudioMCPServer {
 
     process.stdin.on('end', shutdown);
     process.stdin.on('close', shutdown);
+  }
+
+  /** Never throws: a failed install must not cost this process the port it owns. */
+  private async installStudioPlugin(): Promise<void> {
+    if (!this.config.installStudioPlugin) return;
+    try {
+      await this.config.installStudioPlugin();
+    } catch (err) {
+      console.error(`[install-plugin] Auto-install skipped: ${err instanceof Error ? err.message : String(err)}`);
+    }
   }
 }
