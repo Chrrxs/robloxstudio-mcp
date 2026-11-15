@@ -71,6 +71,7 @@ const TEXT_RESULT_TOOLS = new Set(['get_roblox_docs']);
 const SIDE_EFFECTING_READ_TOOLS = new Set([
   'capture_micro_profiler',
   'capture_script_profiler',
+  'capture_video',
   'export_rbxm',
   'selection',
 ]);
@@ -342,6 +343,9 @@ export function serverInstructions(definitions: readonly ToolDefinition[]): stri
   }
   if (has('capture_screenshot', 'simulate_mouse_input')) {
     instructions.push('Capture a screenshot before sending mouse input so its pixel coordinates match the viewport.');
+  }
+  if (has('capture_video')) {
+    instructions.push('Use capture_video, not repeated capture_screenshot calls, to review motion such as cutscenes, tweens, or animations.');
   }
   if (has('selection', 'capture_screenshot')) {
     instructions.push(

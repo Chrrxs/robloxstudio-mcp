@@ -303,6 +303,7 @@ describe('Tool schema compatibility', () => {
       generate_model: 'generateModel',
       preview_asset: 'previewAsset',
       capture_screenshot: 'captureScreenshot',
+      capture_video: 'captureVideo',
       simulate_mouse_input: 'simulateMouseInput',
       simulate_keyboard_input: 'simulateKeyboardInput',
       get_memory_breakdown: 'getMemoryBreakdown',

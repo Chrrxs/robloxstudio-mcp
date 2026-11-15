@@ -159,6 +159,41 @@ For the Windows selector regression, run `npm run build -w packages/core` then
 It exercises the shipped selector with synthetic window entries, without
 enumerating or capturing any real windows.
 
+## Video recording
+
+Roblox has no engine API that gives a plugin the bytes of a video, so
+`capture_video` records the Studio window on the MCP host instead:
+
+- It needs Windows and FFmpeg 8.0 or newer with the `gfxcapture` source
+  (Windows Graphics Capture), for example `winget install Gyan.FFmpeg`. The
+  server runs `ffmpeg` from `PATH`, or the executable named by
+  `ROBLOX_STUDIO_FFMPEG`. It encodes H.264 with `libx264` when available, then
+  falls back to `h264_mf` or `mpeg4`.
+- Before recording, it locates the viewport with the same corner markers as the
+  `capture_screenshot` host fallback. It grabs those markers through the same
+  capture source as the recording, then removes them before recording starts.
+  The crop matches the recorded frames at any DPI scale. During a playtest it
+  records the client viewport.
+- Windows Graphics Capture reads the composited window, so recording continues
+  while Studio is behind other windows, but not while it is minimized. Studio
+  draws about 15 fps in the background, so bring it to the front for smooth
+  video.
+- A device-simulator viewport must use Fit to Window scaling (or simulation
+  must be stopped). Other scaling modes move the viewport once the markers are
+  removed.
+- `action=record` blocks for up to 30 seconds. `action=start` records until
+  `action=stop` or 5 minutes. Recordings without `output_path` go to
+  `<temp>/robloxstudio-mcp/videos`. Only the newest 20 there are kept.
+- Each result returns one JPEG storyboard of evenly spaced frames. Agents can
+  inspect motion without a video decoder. `action=storyboard` re-samples a span
+  of a saved video and needs only `ffmpeg`, on any platform.
+
+`capture_video` reads the Studio window, so `ROBLOX_STUDIO_HOST_CAPTURE=0` also
+disables it. The live regression `tests/capture-video.mjs` runs through
+`node scripts/studio-test-profile.mjs run -- tests/run-all.mjs --managed --test capture-video.mjs`.
+It needs FFmpeg on the Studio test account's `PATH`. The profile launcher does
+not forward `ROBLOX_STUDIO_FFMPEG`.
+
 ## Native Linux with Wine
 
 On native Linux (not WSL) the server can launch and manage the Windows Studio
@@ -225,7 +260,8 @@ under Wine.
 | `ROBLOX_STUDIO_AUTH_TOKEN` | Auto-generated token file | Explicit shared secret that overrides the token file. |
 | `ROBLOX_STUDIO_NO_AUTH` | Unset | Set to `1` or `true` to disable HTTP tool authentication. This is not recommended. |
 | `ROBLOX_STUDIO_ALLOWED_ORIGINS` | None | Comma-separated browser origins allowed to call the HTTP API cross-origin. |
-| `ROBLOX_STUDIO_HOST_CAPTURE` | Unset | Set to `0`, `false`, or `off` to disable the host window capture fallback for `capture_screenshot`. |
+| `ROBLOX_STUDIO_HOST_CAPTURE` | Unset | Set to `0`, `false`, or `off` to disable the host window capture fallback for `capture_screenshot` and `capture_video`. |
+| `ROBLOX_STUDIO_FFMPEG` | `ffmpeg` on `PATH` | FFmpeg 8.0+ executable used by `capture_video`. See [Video recording](#video-recording). |
 | `ROBLOX_OPEN_CLOUD_API_KEY` | None | Roblox Open Cloud key used by features such as audio preview, place version access, monetization, and experience settings. Required permissions depend on the tool. |
 | `MCP_PLUGINS_DIR` | Platform Studio Plugins folder | Override the destination used by plugin installation. |
 | `ROBLOX_STUDIO_EXE` | Auto-discovered on Windows, WSL, and macOS | Studio executable to launch. Required on native Linux with a Wine launcher, where it must be an existing `RobloxStudioBeta.exe` in the Wine prefix. |

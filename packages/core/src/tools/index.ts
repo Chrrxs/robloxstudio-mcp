@@ -45,6 +45,14 @@ import {
   prepareHostWindowCapture,
 } from '../host-capture.js';
 import type { HostCaptureResult, HostWindowIdentity, ViewportRect } from '../host-capture.js';
+import {
+  createFfmpegVideoBackend,
+  defaultVideoPath,
+  ffmpegCommand,
+  pruneDefaultVideos,
+  videoRecordingUnsupportedReason,
+} from '../video-recorder.js';
+import type { MediaInfo, VideoRecorderBackend, VideoRecordingExit, VideoRecordingProcess } from '../video-recorder.js';
 import { analyzeMicroProfilerCapture } from '../micro-profiler/analysis.js';
 import {
   CaptureTransferError,
@@ -135,6 +143,50 @@ function sameHostWindowIdentity(actual: HostWindowIdentity | undefined, expected
 // change without the window or viewport size changing (e.g. swapping two
 // panels of equal width), and re-locating the viewport costs one extra capture.
 const HOST_VIEWPORT_RECT_TTL_MS = 60_000;
+
+const VIDEO_ACTIONS = ['record', 'start', 'stop', 'storyboard'] as const;
+type VideoAction = typeof VIDEO_ACTIONS[number];
+const VIDEO_DEFAULT_DURATION_MS = 5_000;
+const VIDEO_MIN_DURATION_MS = 500;
+// action=record holds the tool call open; longer takes use start/stop.
+const VIDEO_MAX_DURATION_MS = 30_000;
+// action=start stops itself after this, so a forgotten stop cannot fill the disk.
+const VIDEO_START_MAX_DURATION_MS = 300_000;
+const VIDEO_DEFAULT_FPS = 30;
+const VIDEO_MAX_FPS = 60;
+const VIDEO_DEFAULT_STORYBOARD_FRAMES = 9;
+const VIDEO_MAX_STORYBOARD_FRAMES = 25;
+// Wide enough for legible 3-across tiles, small enough for a vision model's input.
+const VIDEO_STORYBOARD_MAX_WIDTH = 1536;
+const VIDEO_START_GRACE_MS = 750;
+
+type ActiveVideoRecording = {
+  instanceId: string;
+  targetRole: string;
+  outputPath: string;
+  ffmpegPath: string;
+  encoder: string;
+  fps: number;
+  maxDurationMs: number;
+  storyboardFrames: number;
+  startedAt: number;
+  process: VideoRecordingProcess;
+  exit?: VideoRecordingExit;
+};
+
+type VideoViewportLocation =
+  | { success: true; windowId: number; rect: ViewportRect; frameWidth: number; frameHeight: number }
+  | { success: false; error: string };
+
+function isVideoAction(value: unknown): value is VideoAction {
+  return typeof value === 'string' && (VIDEO_ACTIONS as readonly string[]).includes(value);
+}
+
+function clampedInteger(value: unknown, name: string, min: number, max: number, fallback: number): number {
+  if (value === undefined) return fallback;
+  if (typeof value !== 'number' || !Number.isFinite(value)) throw new Error(`${name} must be a number`);
+  return Math.min(max, Math.max(min, Math.floor(value)));
+}
 
 type ToolContent =
   | { type: 'text'; text: string }
@@ -348,6 +400,17 @@ function encodeImageFromRgbaResponse(
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// Resolves with the promise's value if it settles within ms, otherwise undefined.
+async function settledWithin<T>(promise: Promise<T>, ms: number): Promise<T | undefined> {
+  const timeout = Promise.withResolvers<undefined>();
+  const timer = setTimeout(() => timeout.resolve(undefined), ms);
+  try {
+    return await Promise.race([promise, timeout.promise]);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 function errorMessage(error: unknown): string {
@@ -1238,6 +1301,12 @@ export class RobloxStudioTools {
   private hostWindowCapture: HostWindowCaptureFn = captureStudioWindow;
   private hostViewportRects = new Map<string, HostViewportRectCacheEntry>();
   private viewportCaptureQueues = new Map<string, Promise<void>>();
+  // capture_video: the host recorder and the recordings started per Instance.
+  private videoRecorder: VideoRecorderBackend = createFfmpegVideoBackend();
+  private videoRecordings = new Map<string, ActiveVideoRecording>();
+  private videoStarting = new Set<string>();
+  // How long start waits for the encoder to fail fast before reporting success.
+  private videoStartGraceMs = VIDEO_START_GRACE_MS;
   // generate_model reference images, shared by retries under one operation ID.
   private readonly referenceUploads = new ReferenceUploads();
   // Paces chunks of a client capture copied through the client broker.
@@ -5776,8 +5845,13 @@ export class RobloxStudioTools {
     quality?: number,
     maxBytes: number = MAX_INLINE_IMAGE_BYTES,
   ): Promise<EncodedViewportCapture> {
+    return await this._withViewportQueue(instanceId, () => this._captureViewportImageNow(instanceId, targetRole, format, quality, maxBytes));
+  }
+
+  // Serializes viewport readers and marker transactions per Studio process.
+  private async _withViewportQueue<T>(instanceId: string, run: () => Promise<T>): Promise<T> {
     const previous = this.viewportCaptureQueues.get(instanceId) ?? Promise.resolve();
-    const capture = previous.then(() => this._captureViewportImageNow(instanceId, targetRole, format, quality, maxBytes));
+    const capture = previous.then(run);
     const settled = capture.then(() => undefined, () => undefined);
     this.viewportCaptureQueues.set(instanceId, settled);
     try {
@@ -6207,5 +6281,311 @@ export class RobloxStudioTools {
         },
       ],
     };
+  }
+
+  // capture_video records the viewport on the MCP host (see video-recorder.ts)
+  // and answers with the MP4 path plus a storyboard image the agent can read.
+  async captureVideo(request: Record<string, unknown> = {}, instance_id?: string) {
+    const action = request.action ?? 'record';
+    if (!isVideoAction(action)) {
+      throw new Error(`action must be one of ${VIDEO_ACTIONS.join(', ')}`);
+    }
+    if (action === 'storyboard') return await this._videoStoryboard(request);
+    for (const key of ['input_path', 'start_ms', 'end_ms']) {
+      if (request[key] !== undefined) throw new Error(`${key} is only used with action="storyboard"`);
+    }
+
+    if (action === 'stop') {
+      const recording = this._activeVideoRecording(instance_id);
+      const frames = clampedInteger(request.frames, 'frames', 0, VIDEO_MAX_STORYBOARD_FRAMES, recording.storyboardFrames);
+      this.videoRecordings.delete(recording.instanceId);
+      const exit = recording.exit ?? await recording.process.stop();
+      return await this._finishVideo(action, recording, exit, frames);
+    }
+
+    if (action === 'start' && request.duration_ms !== undefined) {
+      throw new Error(`duration_ms is only used with action="record"; action="start" records until action="stop" (at most ${VIDEO_START_MAX_DURATION_MS} ms)`);
+    }
+    const storyboardFrames = clampedInteger(request.frames, 'frames', 0, VIDEO_MAX_STORYBOARD_FRAMES, VIDEO_DEFAULT_STORYBOARD_FRAMES);
+    const fps = clampedInteger(request.fps, 'fps', 1, VIDEO_MAX_FPS, VIDEO_DEFAULT_FPS);
+    const durationMs = clampedInteger(request.duration_ms, 'duration_ms', VIDEO_MIN_DURATION_MS, VIDEO_MAX_DURATION_MS, VIDEO_DEFAULT_DURATION_MS);
+    // For record the encoder's own limit is only a backstop; record stops it on time.
+    const maxDurationMs = action === 'record' ? durationMs + 10_000 : VIDEO_START_MAX_DURATION_MS;
+    const outputPath = request.output_path;
+    if (outputPath !== undefined && (typeof outputPath !== 'string' || !outputPath.toLowerCase().endsWith('.mp4'))) {
+      throw new Error('output_path must be a path ending in .mp4');
+    }
+
+    const started = await this._startVideoRecording(instance_id, { fps, maxDurationMs, storyboardFrames, outputPath });
+    if (!started.ok) return this._textResult({ action, error: started.error });
+    const { recording, width, height } = started;
+
+    if (action === 'start') {
+      return this._textResult({
+        action,
+        recording: true,
+        target: recording.targetRole,
+        video: { path: recording.outputPath, fps, width, height, encoder: recording.encoder },
+        max_duration_ms: maxDurationMs,
+        message:
+          'Recording the Studio viewport. Trigger the scene now (for example with execute_luau, eval_client_runtime, ' +
+          `or simulated input), then call capture_video action="stop". It stops itself after ${maxDurationMs} ms.`,
+      });
+    }
+
+    const remaining = Math.max(0, recording.startedAt + durationMs - Date.now());
+    await settledWithin(recording.process.done, remaining);
+    if (this.videoRecordings.get(recording.instanceId) === recording) this.videoRecordings.delete(recording.instanceId);
+    const exit = recording.exit ?? await recording.process.stop();
+    return await this._finishVideo(action, recording, exit, storyboardFrames);
+  }
+
+  private _activeVideoRecording(instance_id?: string): ActiveVideoRecording {
+    if (instance_id !== undefined) {
+      const key = this.bridge.resolveConnectedInstanceId(instance_id) ?? instance_id;
+      const recording = this.videoRecordings.get(key) ?? this.videoRecordings.get(instance_id);
+      if (!recording) {
+        throw new Error(`No capture_video recording is active for instance_id "${instance_id}". Start one with action="start".`);
+      }
+      return recording;
+    }
+    const recordings = [...this.videoRecordings.values()];
+    if (recordings.length === 1) return recordings[0];
+    if (recordings.length === 0) throw new Error('No capture_video recording is active. Start one with action="start".');
+    throw new Error(`Several capture_video recordings are active (${recordings.map((r) => r.instanceId).join(', ')}); pass instance_id.`);
+  }
+
+  private async _startVideoRecording(
+    instance_id: string | undefined,
+    options: { fps: number; maxDurationMs: number; storyboardFrames: number; outputPath?: string },
+  ): Promise<{ ok: true; recording: ActiveVideoRecording; width: number; height: number } | { ok: false; error: string }> {
+    const unsupported = videoRecordingUnsupportedReason();
+    if (unsupported) return { ok: false, error: unsupported };
+    if (isHostCaptureDisabled()) {
+      return { ok: false, error: 'video recording reads the Studio window, and host window capture is disabled by ROBLOX_STUDIO_HOST_CAPTURE' };
+    }
+    const refresh = this.bridge.refreshTopologyForRouting();
+    if (refresh) await refresh;
+    const { instanceId, clientRole } = this._resolveRuntime(instance_id);
+    const targetRole = clientRole ?? 'edit';
+    const existing = this.videoRecordings.get(instanceId);
+    if (this.videoStarting.has(instanceId) || (existing && existing.exit === undefined)) {
+      return {
+        ok: false,
+        error: `A capture_video recording is already running for this Studio${existing ? ` (${existing.outputPath})` : ''}. Call action="stop" first.`,
+      };
+    }
+    this.videoStarting.add(instanceId);
+    try {
+      const probe = await this.videoRecorder.probe();
+      if (!probe.ok) return { ok: false, error: probe.error };
+      const outputPath = path.resolve(options.outputPath ?? defaultVideoPath());
+      await fs.promises.mkdir(path.dirname(outputPath), { recursive: true });
+      if (options.outputPath === undefined) await pruneDefaultVideos(path.dirname(outputPath));
+
+      const located = await this._withViewportQueue(instanceId, () => this._locateVideoViewport(instanceId, targetRole, probe.ffmpegPath));
+      if (!located.success) return { ok: false, error: `Could not locate the Studio viewport: ${located.error}` };
+
+      const encoderProcess = this.videoRecorder.start({
+        ffmpegPath: probe.ffmpegPath,
+        encoder: probe.encoder,
+        windowId: located.windowId,
+        crop: located.rect,
+        frameWidth: located.frameWidth,
+        frameHeight: located.frameHeight,
+        fps: options.fps,
+        maxDurationMs: options.maxDurationMs,
+        outputPath,
+      });
+      const recording: ActiveVideoRecording = {
+        instanceId,
+        targetRole,
+        outputPath,
+        ffmpegPath: probe.ffmpegPath,
+        encoder: probe.encoder,
+        fps: options.fps,
+        maxDurationMs: options.maxDurationMs,
+        storyboardFrames: options.storyboardFrames,
+        startedAt: Date.now(),
+        process: encoderProcess,
+      };
+      void encoderProcess.done.then((exit) => { recording.exit = exit; });
+      this.videoRecordings.set(instanceId, recording);
+      // A rejected window handle or encoder fails within moments; report it now
+      // rather than after the agent has played the whole scene.
+      const early = await settledWithin(encoderProcess.done, this.videoStartGraceMs);
+      if (early !== undefined) {
+        if (this.videoRecordings.get(instanceId) === recording) this.videoRecordings.delete(instanceId);
+        return {
+          ok: false,
+          error: early.ok ? 'ffmpeg stopped right after starting; nothing was recorded' : `Could not record the Studio window: ${early.error}`,
+        };
+      }
+      return { ok: true, recording, width: located.rect.width - (located.rect.width % 2), height: located.rect.height - (located.rect.height % 2) };
+    } finally {
+      this.videoStarting.delete(instanceId);
+    }
+  }
+
+  // Finds the Studio window and the viewport rect inside the frames the
+  // recorder will see. The markers are drawn and grabbed through the same
+  // capture source as the recording, so no DPI conversion is involved.
+  private async _locateVideoViewport(instanceId: string, targetRole: string, ffmpegPath: string): Promise<VideoViewportLocation> {
+    const window = await this.hostWindowCapture(this._hostCaptureTitleHint(instanceId));
+    if (!window.ok) return { success: false, error: window.error };
+    const windowId = window.capture.identity?.windowId;
+    if (windowId === undefined) return { success: false, error: 'the host window capture did not identify the Studio window' };
+
+    let prepared: ViewportMarkerResponse | undefined;
+    let result: VideoViewportLocation;
+    try {
+      prepared = await this._callViewportMarkers('prepare', targetRole, instanceId);
+      if (prepared.error || !prepared.captureId) {
+        result = { success: false, error: prepared.error ?? 'the Studio plugin could not prepare viewport markers (update the plugin)' };
+      } else if (prepared.viewportChanged) {
+        // prepare fitted a scaled simulated device to the window; finish restores
+        // the old scaling, which would move the viewport out from under the crop.
+        result = {
+          success: false,
+          error:
+            'device emulation is not using Fit to Window scaling, so the viewport would move once markers are removed. ' +
+            'Call set_device_simulator with scalingMode="FitToWindow" (or stopSimulation=true), then record again.',
+        };
+      } else {
+        result = await this._locateVideoViewportWithMarkers(instanceId, targetRole, prepared.captureId, ffmpegPath, windowId);
+      }
+    } catch (error) {
+      result = { success: false, error: errorMessage(error) };
+    } finally {
+      if (prepared?.captureId) {
+        try {
+          const restored = await this._callViewportMarkers('finish', targetRole, instanceId, prepared.captureId);
+          if (restored.error) result = { success: false, error: `could not restore the Studio viewport: ${restored.error}` };
+          else if (restored.stale || !restored.success) result = { success: false, error: 'the viewport marker transaction expired; retry' };
+        } catch (error) {
+          result = { success: false, error: `could not restore the Studio viewport: ${errorMessage(error)}` };
+        }
+      }
+    }
+    return result;
+  }
+
+  private async _locateVideoViewportWithMarkers(
+    instanceId: string,
+    targetRole: string,
+    captureId: string,
+    ffmpegPath: string,
+    windowId: number,
+  ): Promise<VideoViewportLocation> {
+    const shown = await this._callViewportMarkers('show', targetRole, instanceId, captureId);
+    if (shown.error || !shown.viewportWidth || !shown.viewportHeight) {
+      return { success: false, error: `could not draw viewport markers: ${shown.error ?? 'no viewport size reported'}` };
+    }
+    let frame: { width: number; height: number; rgba: Buffer } | undefined;
+    let grabError = 'no frame captured';
+    let hidden: ViewportMarkerResponse;
+    try {
+      frame = await this.videoRecorder.grabWindowFrame(ffmpegPath, windowId);
+    } catch (error) {
+      grabError = errorMessage(error);
+    } finally {
+      hidden = await this._callViewportMarkers('hide', targetRole, instanceId, captureId);
+    }
+    if (hidden.error) return { success: false, error: `could not hide viewport markers: ${hidden.error}` };
+    if (!frame) return { success: false, error: grabError };
+    const located = findViewportRect(frame.rgba, frame.width, frame.height, {
+      viewportWidth: shown.viewportWidth,
+      viewportHeight: shown.viewportHeight,
+      markerSize: shown.markerSize ?? 12,
+    });
+    if ('error' in located) return { success: false, error: located.error };
+    return { success: true, windowId, rect: located.rect, frameWidth: frame.width, frameHeight: frame.height };
+  }
+
+  private async _finishVideo(action: VideoAction, recording: ActiveVideoRecording, exit: VideoRecordingExit, frames: number) {
+    const video: Record<string, unknown> = { path: recording.outputPath, fps: recording.fps, encoder: recording.encoder };
+    const body: Record<string, unknown> = { action, target: recording.targetRole, video };
+    if (!exit.ok) return this._textResult({ ...body, error: `The recording failed: ${exit.error}` });
+    let info: MediaInfo;
+    try {
+      info = await this.videoRecorder.mediaInfo(recording.ffmpegPath, recording.outputPath);
+    } catch (error) {
+      return this._textResult({ ...body, error: errorMessage(error) });
+    }
+    const stats = await fs.promises.stat(recording.outputPath).catch(() => undefined);
+    Object.assign(video, {
+      duration_ms: Math.round(info.durationSeconds * 1000),
+      width: info.width,
+      height: info.height,
+      ...(stats ? { bytes: stats.size } : {}),
+    });
+    if (action === 'stop' && exit.reason === 'duration_limit') {
+      body.stopped_by = 'max_duration';
+      body.message = `The recording reached its ${recording.maxDurationMs} ms limit and stopped itself before action="stop".`;
+    }
+    return await this._videoResultWithStoryboard(body, recording.ffmpegPath, recording.outputPath, info, 0, info.durationSeconds, frames);
+  }
+
+  private async _videoStoryboard(request: Record<string, unknown>) {
+    const inputPath = request.input_path;
+    if (typeof inputPath !== 'string' || inputPath === '') {
+      throw new Error('input_path is required for action="storyboard": a video.path from an earlier capture_video result');
+    }
+    const frames = clampedInteger(request.frames, 'frames', 1, VIDEO_MAX_STORYBOARD_FRAMES, VIDEO_DEFAULT_STORYBOARD_FRAMES);
+    const resolved = path.resolve(inputPath);
+    const ffmpegPath = ffmpegCommand();
+    const info = await this.videoRecorder.mediaInfo(ffmpegPath, resolved);
+    const durationMs = Math.round(info.durationSeconds * 1000);
+    const startMs = clampedInteger(request.start_ms, 'start_ms', 0, durationMs, 0);
+    const endMs = clampedInteger(request.end_ms, 'end_ms', 0, durationMs, durationMs);
+    if (endMs <= startMs) {
+      throw new Error(`end_ms must be after start_ms within the ${durationMs} ms video`);
+    }
+    const body: Record<string, unknown> = {
+      action: 'storyboard',
+      video: { path: resolved, duration_ms: durationMs, width: info.width, height: info.height },
+      window_ms: { start: startMs, end: endMs },
+    };
+    return await this._videoResultWithStoryboard(body, ffmpegPath, resolved, info, startMs / 1000, endMs / 1000, frames);
+  }
+
+  private async _videoResultWithStoryboard(
+    body: Record<string, unknown>,
+    ffmpegPath: string,
+    inputPath: string,
+    info: MediaInfo,
+    startSeconds: number,
+    endSeconds: number,
+    frames: number,
+  ) {
+    if (frames <= 0) return this._textResult(body);
+    try {
+      const sheet = await this.videoRecorder.storyboard({
+        ffmpegPath, inputPath, info, startSeconds, endSeconds, frames, maxWidth: VIDEO_STORYBOARD_MAX_WIDTH,
+      });
+      if (sheet.jpeg.length > MAX_INLINE_IMAGE_BYTES) throw new Error(`the storyboard is ${sheet.jpeg.length} bytes, over the inline image limit`);
+      body.storyboard = {
+        frames: sheet.timesSeconds.length,
+        columns: sheet.columns,
+        rows: sheet.rows,
+        width: sheet.width,
+        height: sheet.height,
+        times_ms: sheet.timesSeconds.map((t) => Math.round(t * 1000)),
+      };
+      const guide =
+        `The image is a ${sheet.columns}x${sheet.rows} storyboard read left to right, top to bottom; storyboard.times_ms ` +
+        'gives each frame\'s time in the video. To inspect a span closely, call capture_video action="storyboard" ' +
+        'with input_path, start_ms, and end_ms instead of recording again.';
+      body.message = typeof body.message === 'string' ? `${body.message} ${guide}` : guide;
+      return {
+        content: [
+          { type: 'text', text: JSON.stringify(body) },
+          { type: 'image', data: sheet.jpeg.toString('base64'), mimeType: 'image/jpeg' },
+        ],
+      };
+    } catch (error) {
+      body.storyboard_error = errorMessage(error);
+      return this._textResult(body);
+    }
   }
 }

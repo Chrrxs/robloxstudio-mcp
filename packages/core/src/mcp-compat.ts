@@ -32,6 +32,12 @@ Tool descriptions explain selection. Input schemas explain arguments. This guide
 - Use action=view with a BasePart or Model path to frame it, or omit path to frame exactly one selected BasePart or Model. Empty, multiple, or unsupported selections require an explicit target or a changed selection. The original camera type is restored after framing, including on failure. The current viewing direction is preserved unless from or angleY overrides it. padding below 1 crops closer and above 1 pulls back.
 - For visual proof, change the instance, frame it with selection, then call capture_screenshot.
 
+## Video recording
+
+- Use capture_video instead of repeated capture_screenshot calls to review motion such as a cutscene, camera path, tween, or animation. action=record records for duration_ms (up to 30 s) and blocks. To record a moment you trigger with other tools, call action=start, trigger it (execute_luau, eval_client_runtime, or simulated input), then action=stop; a started recording stops itself after 5 minutes.
+- The result saves an MP4 at video.path and returns one storyboard image of evenly spaced frames, with each frame's time in storyboard.times_ms; frames sets how many (0 omits the image). Re-sample part of a saved video with action=storyboard, input_path, start_ms, and end_ms instead of recording again.
+- During a playtest the recording follows the client viewport, like capture_screenshot. It reads the Studio window on the MCP host through FFmpeg 8 or newer (Windows only), so it keeps recording behind other windows but not while Studio is minimized. Studio draws about 15 fps in the background, so bring Studio to the front for smooth playback.
+
 ## Script changes
 
 - Read the relevant source with get_script_source before changing it.

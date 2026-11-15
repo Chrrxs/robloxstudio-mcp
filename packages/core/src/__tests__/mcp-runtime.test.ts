@@ -306,14 +306,15 @@ describe('MCP v2 tool runtime', () => {
     const serialized = JSON.stringify(catalog);
     const inspectorCatalog = getReadOnlyTools().map(publicToolDefinition);
 
-    expect(catalog).toHaveLength(50);
+    expect(catalog).toHaveLength(51);
     // 51,000 admits operation_id on every recoverable Studio write and
-    // expected_revision(s) on script writes (about 1,600 characters).
-    expect(serialized.length).toBeLessThanOrEqual(51_000);
-    expect(catalog.filter((tool) => tool.outputSchema)).toHaveLength(49);
+    // expected_revision(s) on script writes (about 1,600 characters);
+    // 52,300 adds capture_video (about 1,200 characters).
+    expect(serialized.length).toBeLessThanOrEqual(52_300);
+    expect(catalog.filter((tool) => tool.outputSchema)).toHaveLength(50);
     expect(catalog.every((tool) => tool.description.length <= 120)).toBe(true);
-    expect(inspectorCatalog).toHaveLength(25);
-    expect(JSON.stringify(inspectorCatalog).length).toBeLessThanOrEqual(21_000);
+    expect(inspectorCatalog).toHaveLength(26);
+    expect(JSON.stringify(inspectorCatalog).length).toBeLessThanOrEqual(22_000);
     expect(byName.get('selection')?.outputSchema).toEqual({
       type: 'object',
       additionalProperties: true,
