@@ -734,10 +734,14 @@ async function runMatchingCase(artifact, managerArtifact, pluginsDir) {
   let fatalCloseError;
   let matchingBodyError;
   try {
+    // Only the server that owns the Studio port installs the plugin, so the
+    // edition under test starts first. The inspector has no manage_instance;
+    // a main manager started afterwards forwards to it and launches Studio.
+    client = await startClient(`${artifact.variant}-match`, artifact, { autoInstall: true });
+    assert(client.isPrimary(), `${artifact.variant} session owns the Studio port`);
     managerClient = artifact.variant === 'main'
       ? undefined
       : await startManagerForArtifact(`${artifact.variant}-match-manager`, managerArtifact);
-    client = await startClient(`${artifact.variant}-match`, artifact, { autoInstall: true });
     const launcher = managerClient ?? client;
 
     const installed = path.join(pluginsDir, artifact.asset);
@@ -799,10 +803,10 @@ async function runMismatchCase(artifact, managerArtifact, pluginsDir) {
   let fatalMismatchCloseError;
   let mismatchBodyError;
   try {
+    mismatchClient = await startClient(`${artifact.variant}-mismatch`, artifact, { autoInstall: false });
     mismatchManager = artifact.variant === 'main'
       ? undefined
       : await startManagerForArtifact(`${artifact.variant}-mismatch-manager`, managerArtifact);
-    mismatchClient = await startClient(`${artifact.variant}-mismatch`, artifact, { autoInstall: false });
     const mismatchLauncher = mismatchManager ?? mismatchClient;
 
     mismatchInstanceId = await launchManagedPlace(mismatchLauncher, { waitForConnection: false });
@@ -858,10 +862,11 @@ async function runMismatchCase(artifact, managerArtifact, pluginsDir) {
   let fatalRepairCloseError;
   let repairBodyError;
   try {
+    repairClient = await startClient(`${artifact.variant}-repair`, artifact, { autoInstall: true });
+    assert(repairClient.isPrimary(), `${artifact.variant} repair session owns the Studio port`);
     repairManager = artifact.variant === 'main'
       ? undefined
       : await startManagerForArtifact(`${artifact.variant}-repair-manager`, managerArtifact);
-    repairClient = await startClient(`${artifact.variant}-repair`, artifact, { autoInstall: true });
     const repairLauncher = repairManager ?? repairClient;
 
     assert(
