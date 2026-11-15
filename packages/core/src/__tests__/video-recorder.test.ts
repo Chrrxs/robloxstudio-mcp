@@ -7,13 +7,17 @@ import { StudioInstanceManager } from '../studio-instance-manager.js';
 import { RobloxStudioTools } from '../tools/index.js';
 import type { HostWindowCaptureFn } from '../tools/index.js';
 import { StudioHttpClient } from '../tools/studio-client.js';
+import { hostEnvironment } from '../host-capture.js';
 import {
+  ffmpegCommand,
+  ffmpegPathArgument,
   gfxcaptureCrop,
   grabFrameArgs,
   parseMediaInfo,
   pruneDefaultVideos,
   recordingArgs,
   stderrSummary,
+  videoRecordingUnsupportedReason,
   storyboardArgs,
   storyboardGrid,
   storyboardTimes,
@@ -100,6 +104,24 @@ describe('video recorder helpers', () => {
     ].join('\n');
     expect(parseMediaInfo(stderr)).toEqual({ durationSeconds: 62.93, width: 1356, height: 888 });
     expect(parseMediaInfo('clip.mp4: No such file or directory')).toBeUndefined();
+  });
+
+  test('uses the Windows ffmpeg.exe through interop on WSL', () => {
+    expect(ffmpegCommand({}, true)).toBe('ffmpeg.exe');
+    expect(ffmpegCommand({}, false)).toBe('ffmpeg');
+    expect(ffmpegCommand({ ROBLOX_STUDIO_FFMPEG: '/opt/ffmpeg.exe' }, true)).toBe('/opt/ffmpeg.exe');
+    expect(ffmpegPathArgument('/tmp/clip.mp4', false)).toBe('/tmp/clip.mp4');
+    expect(ffmpegPathArgument('clip.mp4', true)).toBe('clip.mp4');
+  });
+
+  test('supports Windows and WSL with Windows interop, not native Linux or macOS', () => {
+    const wsl = jest.spyOn(hostEnvironment, 'detectWslWindowsHost').mockReturnValue(true);
+    expect(videoRecordingUnsupportedReason('win32')).toBeUndefined();
+    expect(videoRecordingUnsupportedReason('linux')).toBeUndefined();
+    expect(videoRecordingUnsupportedReason('darwin')).toMatch(/only implemented on Windows and WSL/);
+    wsl.mockReturnValue(false);
+    expect(videoRecordingUnsupportedReason('linux')).toMatch(/this is linux/);
+    jest.restoreAllMocks();
   });
 
   test('summarizes the root cause of an ffmpeg failure', () => {
@@ -361,6 +383,15 @@ describe('capture_video tool', () => {
     expect(result.error).toMatch(/Fit to Window/);
     expect(events).toEqual(['prepare', 'finish']);
     expect(backend.started).toHaveLength(0);
+  });
+
+  test('records from WSL like from Windows', async () => {
+    Object.defineProperty(process, 'platform', { value: 'linux' });
+    jest.spyOn(hostEnvironment, 'detectWslWindowsHost').mockReturnValue(true);
+    const { tools, backend } = makeTools();
+    const started = textOf(await tools.captureVideo({ action: 'start', output_path: path.join(outputDirectory, 'a.mp4') }));
+    expect(started).toMatchObject({ recording: true, target: 'edit' });
+    expect(backend.started).toHaveLength(1);
   });
 
   test('fails before touching Studio when FFmpeg is unusable or the platform is unsupported', async () => {

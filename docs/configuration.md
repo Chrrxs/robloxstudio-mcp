@@ -128,6 +128,11 @@ the host OS and crops it to the viewport:
   one. Local-file titles, which show the absolute path, are matched by basename.
   Clean and cached captures verify the selected window handle and process ID;
   a missing or changed identity fails instead of switching to another client.
+- Under WSL, the server runs the same PowerShell helper through Windows interop
+  (`/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe`). It writes
+  the frame to a Linux temp file through its `\\wsl.localhost` path. WSL counts
+  as WSL with Windows interop when the kernel release names Microsoft/WSL and
+  that `powershell.exe` exists.
 - On macOS 14 or newer, ScreenCaptureKit captures only the selected Roblox Studio
   window. The MCP host must already have Screen Recording permission, and Xcode
   Command Line Tools must provide `xcrun swiftc`; when they are missing the tool
@@ -169,10 +174,16 @@ playtest, but it never begins a capture: `CaptureBegan` and the
 only by Roblox's own scripts in any case. So `capture_video` records the Studio
 window on the MCP host instead:
 
-- It needs Windows and FFmpeg, ideally 8.0 or newer with the `gfxcapture`
-  source (Windows Graphics Capture), for example `winget install Gyan.FFmpeg`.
-  The server runs `ffmpeg` from `PATH`, or the executable named by
-  `ROBLOX_STUDIO_FFMPEG`. It encodes H.264 with `libx264` when available, then
+- It needs Windows (or WSL with Windows interop) and FFmpeg, ideally 8.0 or
+  newer with the `gfxcapture` source (Windows Graphics Capture), for example
+  `winget install Gyan.FFmpeg`. The server runs `ffmpeg` from `PATH`, or the
+  executable named by `ROBLOX_STUDIO_FFMPEG`.
+- Under WSL it runs the Windows `ffmpeg.exe` through interop, because a Linux
+  ffmpeg cannot see Windows windows. It uses `ffmpeg.exe` from `PATH`, or
+  asks Windows PowerShell where `ffmpeg.exe` is when the server's `PATH` lacks
+  the Windows directories. Video paths are passed to it in their
+  `\\wsl.localhost` form, so recordings still land at the Linux path in the
+  result. It encodes H.264 with `libx264` when available, then
   falls back to `h264_mf` or `mpeg4`.
 - When `gfxcapture` is missing or cannot open the window, recording falls back
   to `gdigrab`. For example, a process started through secondary logon has no

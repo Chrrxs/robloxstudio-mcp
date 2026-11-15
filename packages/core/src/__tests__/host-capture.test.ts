@@ -1,9 +1,12 @@
 import {
   cropToViewport,
   findViewportRect,
+  hostEnvironment,
   isHostCaptureDisabled,
+  isHostCaptureSupported,
   hostCaptureUnsupportedReason,
   isUniformFrame,
+  windowsCaptureEnvironment,
 } from '../host-capture.js';
 import type { HostCaptureResult } from '../host-capture.js';
 import * as hostCaptureModule from '../host-capture.js';
@@ -175,11 +178,33 @@ describe('isHostCaptureDisabled', () => {
   });
 });
 
+describe('host capture on WSL', () => {
+  afterEach(() => jest.restoreAllMocks());
+
+  test('is supported on a Linux host only when it is WSL with Windows interop', () => {
+    jest.spyOn(hostEnvironment, 'detectWslWindowsHost').mockReturnValue(true);
+    expect(isHostCaptureSupported('linux')).toBe(true);
+    jest.spyOn(hostEnvironment, 'detectWslWindowsHost').mockReturnValue(false);
+    expect(isHostCaptureSupported('linux')).toBe(false);
+    expect(isHostCaptureSupported('win32')).toBe(true);
+  });
+
+  test('forwards the helper inputs to powershell.exe through WSLENV', () => {
+    const identity = { windowId: 5, processId: 6, bundleIdentifier: 'RobloxStudioBeta' };
+    const env = windowsCaptureEnvironment('Place', '/tmp/frame.bgra', identity, true, { WSLENV: 'ORCA_X/u', PATH: '/usr/bin' });
+    expect(env.WSLENV).toBe('ORCA_X/u:MCP_CAPTURE_TITLE_HINT/w:MCP_CAPTURE_OUT/pw:MCP_CAPTURE_EXPECTED_IDENTITY/w');
+    expect(env).toMatchObject({ MCP_CAPTURE_TITLE_HINT: 'Place', MCP_CAPTURE_OUT: '/tmp/frame.bgra', PATH: '/usr/bin' });
+    expect(windowsCaptureEnvironment('Place', 'C:\\t.bgra', undefined, false, {}).WSLENV).toBeUndefined();
+  });
+});
+
 describe('capture_screenshot host window fallback', () => {
   const platformDescriptor = Object.getOwnPropertyDescriptor(process, 'platform')!;
   beforeEach(() => {
     // Exercise the supported fallback independently of the test runner's OS.
     Object.defineProperty(process, 'platform', { value: 'win32' });
+    // A 'linux' platform means native Linux here, even when the runner is WSL.
+    jest.spyOn(hostEnvironment, 'detectWslWindowsHost').mockReturnValue(false);
     jest.replaceProperty(process, 'env', { ...process.env, ROBLOX_STUDIO_HOST_CAPTURE: '1' });
     // Capture tests use synthetic peers, never the user's managed Studio state.
     jest.spyOn(StudioInstanceManager.prototype, 'pendingLaunches').mockResolvedValue([]);

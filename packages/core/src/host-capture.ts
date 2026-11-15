@@ -60,12 +60,45 @@ export function isHostCaptureDisabled(env: NodeJS.ProcessEnv = process.env): boo
   return value === '0' || value === 'false' || value === 'off';
 }
 
+// WSL runs this server as a Linux process, but Studio is a Windows window: the
+// Windows helpers (powershell.exe, ffmpeg.exe) reach it through WSL interop.
+export const WSL_WINDOWS_POWERSHELL = '/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe';
+
+let detectedWslWindowsHost: boolean | undefined;
+
+function detectWslWindowsHost(): boolean {
+  if (detectedWslWindowsHost !== undefined) return detectedWslWindowsHost;
+  let release = '';
+  try {
+    release = fs.readFileSync('/proc/sys/kernel/osrelease', 'utf8');
+  } catch {
+    // Not Linux, or /proc is unavailable.
+  }
+  detectedWslWindowsHost = /microsoft|wsl/i.test(release) && fs.existsSync(WSL_WINDOWS_POWERSHELL);
+  return detectedWslWindowsHost;
+}
+
+// Injection seam: tests pin whether a Linux host is WSL with Windows interop.
+export const hostEnvironment = { detectWslWindowsHost };
+
+export function isWslWindowsHost(platform: NodeJS.Platform = process.platform): boolean {
+  return platform === 'linux' && hostEnvironment.detectWslWindowsHost();
+}
+
 export function isHostCaptureSupported(platform: NodeJS.Platform = process.platform): boolean {
-  return platform === 'win32' || platform === 'darwin';
+  return platform === 'win32' || platform === 'darwin' || isWslWindowsHost(platform);
 }
 
 export function hostCaptureUnsupportedReason(platform: NodeJS.Platform = process.platform): string {
-  return `host window capture is only implemented on Windows and macOS (this is ${platform})`;
+  return `host window capture is only implemented on Windows, WSL with Windows interop, and macOS (this is ${platform})`;
+}
+
+// Windows programs started from WSL receive only the variables WSLENV names.
+// `/w` limits an entry to WSL -> Windows launches; `/p` also translates a WSL
+// path into its Windows form.
+export function withWslEnv(env: NodeJS.ProcessEnv, entries: string[]): NodeJS.ProcessEnv {
+  const existing = (env.WSLENV ?? '').split(':').filter((entry) => entry.length > 0);
+  return { ...env, WSLENV: [...existing, ...entries].join(':') };
 }
 
 export async function prepareHostWindowCapture(): Promise<void> {
@@ -344,6 +377,7 @@ function parseWindowsCaptureReport(value: unknown, expectedIdentity?: HostWindow
 }
 
 function powershellPath(): string {
+  if (isWslWindowsHost()) return WSL_WINDOWS_POWERSHELL;
   const systemRoot = process.env.SystemRoot ?? process.env.windir;
   if (systemRoot) {
     const candidate = path.join(systemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
@@ -352,17 +386,35 @@ function powershellPath(): string {
   return 'powershell.exe';
 }
 
+export function windowsCaptureEnvironment(
+  titleHint: string | undefined,
+  outFile: string,
+  expectedIdentity: HostWindowIdentity | undefined,
+  wsl: boolean,
+  env: NodeJS.ProcessEnv = process.env,
+): NodeJS.ProcessEnv {
+  const captureEnv = {
+    ...env, MCP_CAPTURE_TITLE_HINT: titleHint ?? '', MCP_CAPTURE_OUT: outFile,
+    MCP_CAPTURE_EXPECTED_IDENTITY: expectedIdentity ? JSON.stringify(expectedIdentity) : '',
+  };
+  // From WSL the helper writes the frame to the Linux temp file through its
+  // \\wsl.localhost path, which WSLENV's /p translation supplies.
+  return wsl
+    ? withWslEnv(captureEnv, ['MCP_CAPTURE_TITLE_HINT/w', 'MCP_CAPTURE_OUT/pw', 'MCP_CAPTURE_EXPECTED_IDENTITY/w'])
+    : captureEnv;
+}
+
 function runWindowsCapture(titleHint: string | undefined, outFile: string, expectedIdentity?: HostWindowIdentity): Promise<unknown> {
   const { promise, resolve, reject } = Promise.withResolvers<unknown>();
   const encoded = Buffer.from(WINDOWS_CAPTURE_SCRIPT, 'utf16le').toString('base64');
+  const wsl = isWslWindowsHost();
   const child = spawn(
     powershellPath(),
     ['-NoProfile', '-NonInteractive', '-NoLogo', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', encoded],
     {
-      env: {
-        ...process.env, MCP_CAPTURE_TITLE_HINT: titleHint ?? '', MCP_CAPTURE_OUT: outFile,
-        MCP_CAPTURE_EXPECTED_IDENTITY: expectedIdentity ? JSON.stringify(expectedIdentity) : '',
-      },
+      env: windowsCaptureEnvironment(titleHint, outFile, expectedIdentity, wsl),
+      // A Windows program started from WSL cannot use a Linux working directory.
+      ...(wsl ? { cwd: '/mnt/c/Windows' } : {}),
       stdio: ['ignore', 'pipe', 'pipe'],
       windowsHide: true,
     },

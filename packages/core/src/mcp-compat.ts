@@ -36,7 +36,7 @@ Tool descriptions explain selection. Input schemas explain arguments. This guide
 
 - Use capture_video instead of repeated capture_screenshot calls to review motion such as a cutscene, camera path, tween, or animation. action=record records for duration_ms (up to 30 s) and blocks. To record a moment you trigger with other tools, call action=start, trigger it (execute_luau, eval_client_runtime, or simulated input), then action=stop; a started recording stops itself after 5 minutes.
 - The result saves an MP4 at video.path and returns one storyboard image of evenly spaced frames, with each frame's time in storyboard.times_ms; frames sets how many (0 omits the image). Re-sample part of a saved video with action=storyboard, input_path, start_ms, and end_ms instead of recording again.
-- During a playtest the recording follows the client viewport, like capture_screenshot. It reads the Studio window on the MCP host through FFmpeg 8 or newer (Windows only), so it keeps recording behind other windows but not while Studio is minimized. Studio draws about 15 fps in the background, so bring Studio to the front for smooth playback.
+- During a playtest the recording follows the client viewport, like capture_screenshot. It reads the Studio window on the MCP host through FFmpeg 8 or newer (Windows or WSL), so it keeps recording behind other windows but not while Studio is minimized. Studio draws about 15 fps in the background, so bring Studio to the front for smooth playback.
 
 ## Script changes
 
