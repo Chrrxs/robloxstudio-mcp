@@ -161,8 +161,13 @@ enumerating or capturing any real windows.
 
 ## Video recording
 
-Roblox has no engine API that gives a plugin the bytes of a video, so
-`capture_video` records the Studio window on the MCP host instead:
+Roblox has no engine API that gives a plugin the bytes of a video.
+`CaptureService:StartVideoCaptureAsync` reports `Success` in a Studio
+playtest, but it never begins a capture: `CaptureBegan` and the
+`onCaptureReady` callback never fire, and no file is written
+(`tests/capture-service-video-probe.mjs`). `VideoCapture.FilePath` is readable
+only by Roblox's own scripts in any case. So `capture_video` records the Studio
+window on the MCP host instead:
 
 - It needs Windows and FFmpeg, ideally 8.0 or newer with the `gfxcapture`
   source (Windows Graphics Capture), for example `winget install Gyan.FFmpeg`.
