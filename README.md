@@ -31,6 +31,7 @@ screenshots, memory reports, and profiler captures from each peer.
 - For large generated Luau, use the [verified chunk-staging workflow](docs/large-inputs.md): explicit instance routing, UTF-8 byte/hash readback, ownership-checked cleanup, and bounded recovery without blindly replaying mutations.
 - Use `selection` to inspect or update Studio selection and frame a part or model before capturing the viewport.
 - Capture the viewport with `capture_screenshot`, then send mouse or keyboard input. See [Configuration](docs/configuration.md#host-window-capture).
+- Record the viewport to MP4 with `capture_video` to review cutscenes, tweens, or animations. Each recording returns a storyboard image of evenly spaced frames. Requires Windows and FFmpeg 8+; see [Video recording](docs/configuration.md#video-recording).
 
 ### Inspect Creator Store assets
 

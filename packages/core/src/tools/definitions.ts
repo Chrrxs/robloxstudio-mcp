@@ -1586,6 +1586,53 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
       },
     }
   },
+  {
+    name: 'capture_video',
+    category: 'read',
+    description: 'Use to record the viewport as video to review motion such as cutscenes or animations, not repeated screenshots.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        action: {
+          type: 'string',
+          enum: ['record', 'start', 'stop', 'storyboard'],
+          description: 'record (default) waits duration_ms; start/stop wrap other calls.'
+        },
+        duration_ms: {
+          type: 'number',
+          description: 'action=record length; default 5000, max 30000.'
+        },
+        fps: {
+          type: 'number',
+          description: 'Frames per second, 1-60; default 30.'
+        },
+        output_path: {
+          type: 'string',
+          description: '.mp4 path; defaults to a kept temp file.'
+        },
+        frames: {
+          type: 'number',
+          description: 'Storyboard image frames, 0-25; default 9.'
+        },
+        input_path: {
+          type: 'string',
+          description: 'Video for action=storyboard: an earlier video.path.'
+        },
+        start_ms: {
+          type: 'number',
+          description: 'Storyboard span start; default 0.'
+        },
+        end_ms: {
+          type: 'number',
+          description: 'Storyboard span end; default the video end.'
+        },
+        instance_id: {
+          type: 'string',
+          description: 'Studio process ID when ambiguous.'
+        }
+      },
+    }
+  },
 
   // === Monetization ===
   {

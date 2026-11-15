@@ -76,15 +76,35 @@ const PROFILE_TEST_EXPECTATIONS = {
   RSMCP_EXPECT_HOST_CAPTURE: ['0', '1'],
 };
 
+// Absolute local Windows paths without traversal. The dedicated account must
+// be able to read them; the launcher never copies or creates anything there.
+const WINDOWS_ABSOLUTE_PATH = /^[A-Za-z]:\\(?:[^\\/:*?"<>|\r\n]+\\)*[^\\/:*?"<>|\r\n]+$/u;
+const PROFILE_TEST_PATHS = {
+  // capture_video's FFmpeg 8+ executable, since the account PATH may lack one.
+  ROBLOX_STUDIO_FFMPEG: { pattern: /\\ffmpeg\.exe$/iu, description: 'an absolute Windows path to ffmpeg.exe' },
+  // Where capture-video.mjs keeps its recordings; the snapshot is deleted after a pass.
+  RSMCP_CAPTURE_VIDEO_OUTPUT_DIR: { pattern: /$/u, description: 'an absolute Windows directory path' },
+};
+
 // The profile child rebuilds a fresh user environment, so caller variables
 // never reach suites. These test-expectation flags (they only select
-// assertions in capture-regressions.mjs) travel in the payload instead.
+// assertions in capture-regressions.mjs) and the capture_video paths above
+// travel in the payload instead.
 export function profileTestExpectations(source = {}) {
   const expectations = {};
   for (const [key, allowed] of Object.entries(PROFILE_TEST_EXPECTATIONS)) {
     const value = source[key];
     if (value === undefined) continue;
     if (!allowed.includes(value)) throw new Error(`${key} must be one of: ${allowed.join(', ')}.`);
+    expectations[key] = value;
+  }
+  for (const [key, { pattern, description }] of Object.entries(PROFILE_TEST_PATHS)) {
+    const value = source[key];
+    if (value === undefined) continue;
+    if (typeof value !== 'string' || !WINDOWS_ABSOLUTE_PATH.test(value) || !pattern.test(value) ||
+        value.split('\\').some((part) => part === '.' || part === '..')) {
+      throw new Error(`${key} must be ${description}.`);
+    }
     expectations[key] = value;
   }
   return expectations;
