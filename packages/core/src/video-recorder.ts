@@ -20,10 +20,11 @@
 // (for example one started through secondary logon) fails to set it up with
 // 0x80070424. gdigrab, which copies the window through GDI, is the fallback;
 // it reads the same client area and is tried with the same markers.
-import { spawn } from 'child_process';
+import { execFileSync, spawn } from 'child_process';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
+import { isWslWindowsHost, WSL_WINDOWS_POWERSHELL } from './host-capture.js';
 import type { ViewportRect } from './host-capture.js';
 
 export type VideoEncoder = 'libx264' | 'h264_mf' | 'mpeg4';
@@ -100,14 +101,38 @@ const MAX_GRAB_BYTES = 16384 * 16384 * 4;
 const STORYBOARD_PADDING = 4;
 const ENCODER_PREFERENCE: readonly VideoEncoder[] = ['libx264', 'h264_mf', 'mpeg4'];
 
-export function ffmpegCommand(env: NodeJS.ProcessEnv = process.env): string {
+// On WSL the Linux ffmpeg cannot see Windows windows; the Windows build runs
+// through interop instead.
+export function ffmpegCommand(env: NodeJS.ProcessEnv = process.env, wsl = isWslWindowsHost()): string {
   const configured = env.ROBLOX_STUDIO_FFMPEG?.trim();
-  return configured ? configured : 'ffmpeg';
+  if (configured) return configured;
+  return wsl ? 'ffmpeg.exe' : 'ffmpeg';
 }
 
 export function videoRecordingUnsupportedReason(platform: NodeJS.Platform = process.platform): string | undefined {
-  if (platform === 'win32') return undefined;
-  return `video recording is only implemented on Windows (this is ${platform}); use capture_screenshot instead`;
+  if (platform === 'win32' || isWslWindowsHost(platform)) return undefined;
+  return `video recording is only implemented on Windows and WSL with Windows interop (this is ${platform}); use capture_screenshot instead`;
+}
+
+// ffmpeg.exe started from WSL needs Windows paths; Linux paths map to \\wsl.localhost.
+export function ffmpegPathArgument(filePath: string, wsl = isWslWindowsHost()): string {
+  if (!wsl || !path.isAbsolute(filePath)) return filePath;
+  return execFileSync('wslpath', ['-w', filePath], { encoding: 'utf8' }).trim();
+}
+
+// The Windows PATH of the interop session can hold an ffmpeg.exe that the
+// server's Linux PATH does not, e.g. when an editor started it with a minimal
+// environment.
+function locateWindowsFfmpeg(): string | undefined {
+  try {
+    const source = execFileSync(WSL_WINDOWS_POWERSHELL, [
+      '-NoProfile', '-NonInteractive', '-Command', '(Get-Command ffmpeg.exe -ErrorAction SilentlyContinue).Source',
+    ], { encoding: 'utf8', cwd: '/mnt/c/Windows', timeout: PROBE_TIMEOUT_MS }).trim();
+    if (!source) return undefined;
+    return execFileSync('wslpath', ['-u', source], { encoding: 'utf8' }).trim();
+  } catch {
+    return undefined;
+  }
 }
 
 const DEFAULT_VIDEO_PREFIX = 'studio-video-';
@@ -408,7 +433,14 @@ export function createFfmpegVideoBackend(env: NodeJS.ProcessEnv = process.env): 
   return {
     async probe() {
       if (probed) return { ok: true, ...probed };
-      const ffmpegPath = ffmpegCommand(env);
+      let ffmpegPath = ffmpegCommand(env);
+      if (ffmpegPath === 'ffmpeg.exe' && isWslWindowsHost()) {
+        try {
+          await runFfmpeg(ffmpegPath, ['-hide_banner', '-version'], PROBE_TIMEOUT_MS);
+        } catch {
+          ffmpegPath = locateWindowsFfmpeg() ?? ffmpegPath;
+        }
+      }
       try {
         const sources: CaptureSource[] = [];
         const filter = await runFfmpeg(ffmpegPath, ['-hide_banner', '-h', 'filter=gfxcapture'], PROBE_TIMEOUT_MS);
@@ -451,12 +483,12 @@ export function createFfmpegVideoBackend(env: NodeJS.ProcessEnv = process.env): 
 
     start(options) {
       installExitHook();
-      return new FfmpegRecording(options, live);
+      return new FfmpegRecording({ ...options, outputPath: ffmpegPathArgument(options.outputPath) }, live);
     },
 
     async mediaInfo(ffmpegPath, inputPath) {
       // ffmpeg exits non-zero without an output file but still prints the header.
-      const result = await runFfmpeg(ffmpegPath, ['-hide_banner', '-i', inputPath], PROBE_TIMEOUT_MS);
+      const result = await runFfmpeg(ffmpegPath, ['-hide_banner', '-i', ffmpegPathArgument(inputPath)], PROBE_TIMEOUT_MS);
       const info = parseMediaInfo(result.stderr);
       if (!info) throw new Error(`could not read video ${inputPath}: ${stderrSummary(result.stderr) || 'no video stream'}`);
       return info;
@@ -469,7 +501,8 @@ export function createFfmpegVideoBackend(env: NodeJS.ProcessEnv = process.env): 
       const tileWidth = evenFloor(Math.min(info.width, available));
       const tileHeight = evenFloor(Math.round((info.height * tileWidth) / info.width));
       const times = storyboardTimes(options.startSeconds, options.endSeconds, options.frames, info.durationSeconds);
-      const result = await runFfmpeg(options.ffmpegPath, storyboardArgs(options, tileWidth, tileHeight, times), STORYBOARD_TIMEOUT_MS);
+      const input = { ...options, inputPath: ffmpegPathArgument(options.inputPath) };
+      const result = await runFfmpeg(options.ffmpegPath, storyboardArgs(input, tileWidth, tileHeight, times), STORYBOARD_TIMEOUT_MS);
       if (result.code !== 0 || result.stdout.length === 0) {
         throw new Error(`could not build the storyboard: ${stderrSummary(result.stderr) || `exit code ${result.code}`}`);
       }
