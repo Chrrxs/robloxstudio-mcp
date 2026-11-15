@@ -1,47 +1,87 @@
 #!/usr/bin/env node
 // Run through run-all.mjs --managed --test capture-video.mjs on Windows.
-// Requires FFmpeg 8.0+ (gfxcapture) on the Studio test account's machine or
-// user PATH: the profile launcher does not pass ROBLOX_STUDIO_FFMPEG through.
-// Records a scripted camera move during a solo playtest and checks the MP4,
-// the storyboard image, and storyboard re-sampling of the saved file.
+// Requires FFmpeg 8.0+ (gfxcapture) readable by the Studio test account: put
+// it on that account's PATH, or pass ROBLOX_STUDIO_FFMPEG=C:\...\ffmpeg.exe to
+// the profile launcher. Set RSMCP_CAPTURE_VIDEO_OUTPUT_DIR (a directory the
+// test account can write) to keep the recordings; otherwise they are deleted.
+//
+// Plays the dance emote on the local character, orbits a scripted camera
+// around it, records 30 s with action=record, then checks start/stop and
+// storyboard re-sampling of the saved file.
 import assert from 'node:assert/strict';
 import * as fs from 'node:fs';
+import * as path from 'node:path';
+import { setTimeout as delay } from 'node:timers/promises';
 import { McpClient, runTest, startPlaytestAndWait, safeStopPlaytest } from './lib/mcp-client.mjs';
 
-const CAMERA_MOVE = `
+const DANCE_SECONDS = 30;
+
+const DANCE = `
+local Players = game:GetService('Players')
+local RunService = game:GetService('RunService')
+local StarterGui = game:GetService('StarterGui')
+local player = Players.LocalPlayer
+local character = player.Character or player.CharacterAdded:Wait()
+local humanoid = character:WaitForChild('Humanoid')
+local root = character:WaitForChild('HumanoidRootPart')
+local animator = humanoid:WaitForChild('Animator')
+character:WaitForChild('Animate')
+task.wait(1)
+
+local method = 'none'
+local ok, played = pcall(function() return humanoid:PlayEmote('dance') end)
+if ok and played then
+  method = 'PlayEmote'
+else
+  local folder = character.Animate:FindFirstChild('dance')
+  local animation = folder and folder:FindFirstChildOfClass('Animation')
+  if animation then
+    local track = animator:LoadAnimation(animation)
+    track.Looped = true
+    track.Priority = Enum.AnimationPriority.Action
+    track:Play()
+    method = 'Animator'
+  end
+end
+
+pcall(function() StarterGui:SetCoreGuiEnabled(Enum.CoreGuiType.All, false) end)
 local camera = workspace.CurrentCamera
 camera.CameraType = Enum.CameraType.Scriptable
-local part = Instance.new('Part')
-part.Name = '__RSMCP_VideoSubject'
-part.Anchored = true
-part.Size = Vector3.new(8, 8, 8)
-part.Color = Color3.fromRGB(255, 80, 0)
-part.CFrame = CFrame.new(0, 20, 0)
-part.Parent = workspace
-camera.CFrame = CFrame.lookAt(Vector3.new(-40, 30, 0), part.Position)
-task.spawn(function()
-  local start = os.clock()
-  while os.clock() - start < 2.5 do
-    local t = (os.clock() - start) / 2.5
-    camera.CFrame = CFrame.lookAt(Vector3.new(-40 + 80 * t, 30, 40 * t), part.Position)
-    task.wait()
+local focus = root.Position + Vector3.new(0, 1, 0)
+local facing = Vector3.new(root.CFrame.LookVector.X, 0, root.CFrame.LookVector.Z).Unit
+local start = os.clock()
+local connection
+connection = RunService.RenderStepped:Connect(function()
+  local elapsed = os.clock() - start
+  if elapsed > ${DANCE_SECONDS + 15} or camera.CameraType ~= Enum.CameraType.Scriptable then
+    connection:Disconnect()
+    return
   end
+  -- One slow orbit over the take, gently rising and pulling in.
+  local angle = elapsed / ${DANCE_SECONDS} * math.pi * 2
+  local distance = 11 - 3 * math.sin(elapsed / ${DANCE_SECONDS} * math.pi)
+  local offset = CFrame.fromAxisAngle(Vector3.yAxis, angle):VectorToWorldSpace(facing * distance)
+  camera.CFrame = CFrame.lookAt(focus + offset + Vector3.new(0, 2 + math.sin(elapsed * 0.5), 0), focus)
 end)
-return true
+return method
 `;
 
 const CLEANUP = `
-local part = workspace:FindFirstChild('__RSMCP_VideoSubject')
-if part then part:Destroy() end
+pcall(function() game:GetService('StarterGui'):SetCoreGuiEnabled(Enum.CoreGuiType.All, true) end)
 workspace.CurrentCamera.CameraType = Enum.CameraType.Custom
 return true
 `;
 
-await runTest('capture_video records a playtest viewport', async ({ track }) => {
+await runTest('capture_video records a dancing character', async ({ track }) => {
   assert.equal(process.platform, 'win32', 'capture_video is Windows-only');
+  const keepDirectory = process.env.RSMCP_CAPTURE_VIDEO_OUTPUT_DIR;
+  if (keepDirectory) fs.mkdirSync(keepDirectory, { recursive: true });
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+  const outputPath = (name) => keepDirectory ? path.join(keepDirectory, `${stamp}-${name}.mp4`) : undefined;
+
   const client = track(new McpClient('capture-video', { startupTimeoutMs: 20000 }));
   await client.start(); await client.initialize();
-  const raw = async (args, timeoutMs = 120000) => {
+  const video = async (args, timeoutMs = 120000) => {
     const result = await client.rpc('tools/call', {
       name: 'capture_video', arguments: { instance_id: process.env.MCP_INSTANCE_ID, ...args },
     }, timeoutMs);
@@ -49,42 +89,56 @@ await runTest('capture_video records a playtest viewport', async ({ track }) => 
     const body = JSON.parse(result.content.find((item) => item.type === 'text').text);
     assert.equal(body.error, undefined, JSON.stringify(body));
     const image = result.content.find((item) => item.type === 'image');
+    let jpeg;
     if (image) {
       assert.equal(image.mimeType, 'image/jpeg');
-      const bytes = Buffer.from(image.data, 'base64');
-      assert.equal(bytes.subarray(0, 2).toString('hex'), 'ffd8');
+      jpeg = Buffer.from(image.data, 'base64');
+      assert.equal(jpeg.subarray(0, 2).toString('hex'), 'ffd8');
     }
-    return { body, image };
+    return { body, jpeg };
   };
 
+  // Simulator state persists across launches in the dedicated profile, and a
+  // scaled simulated device is refused by capture_video. Record the plain viewport.
+  let simulator = await client.callTool('get_device_simulator_state', { target: 'edit' });
+  if (simulator.isSimulating) {
+    await client.callTool('set_device_simulator', { target: 'edit', stopSimulation: true });
+    simulator = await client.callTool('get_device_simulator_state', { target: 'edit' });
+  }
+  assert.equal(simulator.isSimulating, false, 'Start with device simulation off');
+
   await startPlaytestAndWait(client);
-  const paths = [];
+  const recorded = [];
   try {
-    const started = await raw({ action: 'start', fps: 30 });
+    const dance = await client.callTool('eval_client_runtime', { target: 'client-1', code: DANCE }, 60000);
+    console.log(`dance started: ${JSON.stringify(dance)}`);
+
+    const take = await video({ action: 'record', duration_ms: DANCE_SECONDS * 1000, fps: 30, output_path: outputPath('dance') });
+    recorded.push(take.body.video.path);
+    assert.equal(take.body.target, 'client-1');
+    assert.ok(take.jpeg, 'record returns a storyboard image');
+    assert.ok(Math.abs(take.body.video.duration_ms - DANCE_SECONDS * 1000) < 1500, JSON.stringify(take.body.video));
+    assert.ok(fs.statSync(take.body.video.path).size > 100_000, 'MP4 has content');
+    assert.equal(take.body.storyboard.times_ms.length, 9);
+    if (keepDirectory) fs.writeFileSync(take.body.video.path.replace(/\.mp4$/u, '-storyboard.jpg'), take.jpeg);
+    console.log(`dance recorded: ${JSON.stringify(take.body.video)}`);
+
+    const started = await video({ action: 'start', output_path: outputPath('start-stop') });
     assert.equal(started.body.recording, true);
-    assert.equal(started.body.target, 'client-1');
-    paths.push(started.body.video.path);
-    await client.callTool('eval_client_runtime', { target: 'client-1', code: CAMERA_MOVE });
-    await new Promise((resolve) => setTimeout(resolve, 3000));
-    const stopped = await raw({ action: 'stop' });
-    assert.ok(stopped.image, 'stop returns a storyboard image');
-    assert.ok(fs.statSync(stopped.body.video.path).size > 10_000, 'MP4 has content');
+    recorded.push(started.body.video.path);
+    await delay(3000);
+    const stopped = await video({ action: 'stop', frames: 4 });
+    assert.ok(stopped.jpeg, 'stop returns a storyboard image');
     assert.ok(stopped.body.video.duration_ms >= 2500, JSON.stringify(stopped.body.video));
-    assert.equal(stopped.body.video.width, started.body.video.width);
-    assert.equal(stopped.body.storyboard.times_ms.length, 9);
-    console.log(`start/stop recorded ${JSON.stringify(stopped.body.video)}`);
+    assert.equal(stopped.body.storyboard.frames, 4);
 
-    const recorded = await raw({ action: 'record', duration_ms: 1500, frames: 4 });
-    paths.push(recorded.body.video.path);
-    assert.ok(Math.abs(recorded.body.video.duration_ms - 1500) < 600, JSON.stringify(recorded.body.video));
-    assert.equal(recorded.body.storyboard.frames, 4);
-
-    const sampled = await raw({ action: 'storyboard', input_path: stopped.body.video.path, start_ms: 500, end_ms: 1500, frames: 2 });
-    assert.ok(sampled.image);
-    assert.deepEqual(sampled.body.storyboard.times_ms, [750, 1250]);
+    const sampled = await video({ action: 'storyboard', input_path: take.body.video.path, start_ms: 10000, end_ms: 12000, frames: 2 });
+    assert.ok(sampled.jpeg);
+    assert.deepEqual(sampled.body.storyboard.times_ms, [10500, 11500]);
   } finally {
     await client.callTool('eval_client_runtime', { target: 'client-1', code: CLEANUP }).catch(() => {});
     await safeStopPlaytest(client);
-    for (const file of paths) fs.rmSync(file, { force: true });
+    if (!keepDirectory) for (const file of recorded) fs.rmSync(file, { force: true });
   }
+  if (keepDirectory) console.log(`Kept recordings in ${keepDirectory}`);
 });

@@ -52,7 +52,7 @@ import {
   pruneDefaultVideos,
   videoRecordingUnsupportedReason,
 } from '../video-recorder.js';
-import type { MediaInfo, VideoRecorderBackend, VideoRecordingExit, VideoRecordingProcess } from '../video-recorder.js';
+import type { CaptureSource, MediaInfo, VideoRecorderBackend, VideoRecordingExit, VideoRecordingProcess } from '../video-recorder.js';
 import { analyzeMicroProfilerCapture } from '../micro-profiler/analysis.js';
 import {
   CaptureTransferError,
@@ -166,6 +166,7 @@ type ActiveVideoRecording = {
   outputPath: string;
   ffmpegPath: string;
   encoder: string;
+  source: CaptureSource;
   fps: number;
   maxDurationMs: number;
   storyboardFrames: number;
@@ -175,7 +176,7 @@ type ActiveVideoRecording = {
 };
 
 type VideoViewportLocation =
-  | { success: true; windowId: number; rect: ViewportRect; frameWidth: number; frameHeight: number }
+  | { success: true; windowId: number; source: CaptureSource; rect: ViewportRect; frameWidth: number; frameHeight: number }
   | { success: false; error: string };
 
 function isVideoAction(value: unknown): value is VideoAction {
@@ -6325,7 +6326,7 @@ export class RobloxStudioTools {
         action,
         recording: true,
         target: recording.targetRole,
-        video: { path: recording.outputPath, fps, width, height, encoder: recording.encoder },
+        video: { path: recording.outputPath, fps, width, height, encoder: recording.encoder, source: recording.source },
         max_duration_ms: maxDurationMs,
         message:
           'Recording the Studio viewport. Trigger the scene now (for example with execute_luau, eval_client_runtime, ' +
@@ -6383,12 +6384,15 @@ export class RobloxStudioTools {
       await fs.promises.mkdir(path.dirname(outputPath), { recursive: true });
       if (options.outputPath === undefined) await pruneDefaultVideos(path.dirname(outputPath));
 
-      const located = await this._withViewportQueue(instanceId, () => this._locateVideoViewport(instanceId, targetRole, probe.ffmpegPath));
+      const located = await this._withViewportQueue(
+        instanceId, () => this._locateVideoViewport(instanceId, targetRole, probe.ffmpegPath, probe.sources),
+      );
       if (!located.success) return { ok: false, error: `Could not locate the Studio viewport: ${located.error}` };
 
       const encoderProcess = this.videoRecorder.start({
         ffmpegPath: probe.ffmpegPath,
         encoder: probe.encoder,
+        source: located.source,
         windowId: located.windowId,
         crop: located.rect,
         frameWidth: located.frameWidth,
@@ -6403,6 +6407,7 @@ export class RobloxStudioTools {
         outputPath,
         ffmpegPath: probe.ffmpegPath,
         encoder: probe.encoder,
+        source: located.source,
         fps: options.fps,
         maxDurationMs: options.maxDurationMs,
         storyboardFrames: options.storyboardFrames,
@@ -6430,7 +6435,12 @@ export class RobloxStudioTools {
   // Finds the Studio window and the viewport rect inside the frames the
   // recorder will see. The markers are drawn and grabbed through the same
   // capture source as the recording, so no DPI conversion is involved.
-  private async _locateVideoViewport(instanceId: string, targetRole: string, ffmpegPath: string): Promise<VideoViewportLocation> {
+  private async _locateVideoViewport(
+    instanceId: string,
+    targetRole: string,
+    ffmpegPath: string,
+    sources: CaptureSource[],
+  ): Promise<VideoViewportLocation> {
     const window = await this.hostWindowCapture(this._hostCaptureTitleHint(instanceId));
     if (!window.ok) return { success: false, error: window.error };
     const windowId = window.capture.identity?.windowId;
@@ -6452,7 +6462,7 @@ export class RobloxStudioTools {
             'Call set_device_simulator with scalingMode="FitToWindow" (or stopSimulation=true), then record again.',
         };
       } else {
-        result = await this._locateVideoViewportWithMarkers(instanceId, targetRole, prepared.captureId, ffmpegPath, windowId);
+        result = await this._locateVideoViewportWithMarkers(instanceId, targetRole, prepared.captureId, ffmpegPath, windowId, sources);
       }
     } catch (error) {
       result = { success: false, error: errorMessage(error) };
@@ -6476,34 +6486,46 @@ export class RobloxStudioTools {
     captureId: string,
     ffmpegPath: string,
     windowId: number,
+    sources: CaptureSource[],
   ): Promise<VideoViewportLocation> {
     const shown = await this._callViewportMarkers('show', targetRole, instanceId, captureId);
     if (shown.error || !shown.viewportWidth || !shown.viewportHeight) {
       return { success: false, error: `could not draw viewport markers: ${shown.error ?? 'no viewport size reported'}` };
     }
+    // The first source that can read the window records it: the marker frame
+    // and the recording must come from the same capture path.
     let frame: { width: number; height: number; rgba: Buffer } | undefined;
-    let grabError = 'no frame captured';
+    let source: CaptureSource | undefined;
+    const grabErrors: string[] = [];
     let hidden: ViewportMarkerResponse;
     try {
-      frame = await this.videoRecorder.grabWindowFrame(ffmpegPath, windowId);
-    } catch (error) {
-      grabError = errorMessage(error);
+      for (const candidate of sources) {
+        try {
+          frame = await this.videoRecorder.grabWindowFrame(ffmpegPath, windowId, candidate);
+          source = candidate;
+          break;
+        } catch (error) {
+          grabErrors.push(errorMessage(error));
+        }
+      }
     } finally {
       hidden = await this._callViewportMarkers('hide', targetRole, instanceId, captureId);
     }
     if (hidden.error) return { success: false, error: `could not hide viewport markers: ${hidden.error}` };
-    if (!frame) return { success: false, error: grabError };
+    if (!frame || !source) return { success: false, error: grabErrors.join('; ') || 'no capture source is available' };
     const located = findViewportRect(frame.rgba, frame.width, frame.height, {
       viewportWidth: shown.viewportWidth,
       viewportHeight: shown.viewportHeight,
       markerSize: shown.markerSize ?? 12,
     });
     if ('error' in located) return { success: false, error: located.error };
-    return { success: true, windowId, rect: located.rect, frameWidth: frame.width, frameHeight: frame.height };
+    return { success: true, windowId, source, rect: located.rect, frameWidth: frame.width, frameHeight: frame.height };
   }
 
   private async _finishVideo(action: VideoAction, recording: ActiveVideoRecording, exit: VideoRecordingExit, frames: number) {
-    const video: Record<string, unknown> = { path: recording.outputPath, fps: recording.fps, encoder: recording.encoder };
+    const video: Record<string, unknown> = {
+      path: recording.outputPath, fps: recording.fps, encoder: recording.encoder, source: recording.source,
+    };
     const body: Record<string, unknown> = { action, target: recording.targetRole, video };
     if (!exit.ok) return this._textResult({ ...body, error: `The recording failed: ${exit.error}` });
     let info: MediaInfo;

@@ -14,6 +14,12 @@
 // located once from the plugin's corner markers in a frame grabbed by the very
 // same source, so the crop and the recording share one coordinate space
 // whatever the DPI scale.
+//
+// WGC is not available everywhere: FFmpeg builds older than 8.0 lack
+// gfxcapture, and a process without the user's per-session capture service
+// (for example one started through secondary logon) fails to set it up with
+// 0x80070424. gdigrab, which copies the window through GDI, is the fallback;
+// it reads the same client area and is tried with the same markers.
 import { spawn } from 'child_process';
 import * as fs from 'fs';
 import * as os from 'os';
@@ -22,8 +28,11 @@ import type { ViewportRect } from './host-capture.js';
 
 export type VideoEncoder = 'libx264' | 'h264_mf' | 'mpeg4';
 
+// Preferred first.
+export type CaptureSource = 'gfxcapture' | 'gdigrab';
+
 export type VideoRecorderProbe =
-  | { ok: true; ffmpegPath: string; encoder: VideoEncoder }
+  | { ok: true; ffmpegPath: string; encoder: VideoEncoder; sources: CaptureSource[] }
   | { ok: false; error: string };
 
 export type VideoFrame = { width: number; height: number; rgba: Buffer };
@@ -33,6 +42,7 @@ export type MediaInfo = { durationSeconds: number; width: number; height: number
 export type StartVideoOptions = {
   ffmpegPath: string;
   encoder: VideoEncoder;
+  source: CaptureSource;
   windowId: number;
   // Viewport rect inside the captured window frame, and that frame's size.
   crop: ViewportRect;
@@ -76,7 +86,7 @@ export type Storyboard = {
 // Injection seam: tests stand in for FFmpeg and the host OS.
 export interface VideoRecorderBackend {
   probe(): Promise<VideoRecorderProbe>;
-  grabWindowFrame(ffmpegPath: string, windowId: number): Promise<VideoFrame>;
+  grabWindowFrame(ffmpegPath: string, windowId: number, source: CaptureSource): Promise<VideoFrame>;
   start(options: StartVideoOptions): VideoRecordingProcess;
   mediaInfo(ffmpegPath: string, inputPath: string): Promise<MediaInfo>;
   storyboard(options: StoryboardOptions): Promise<Storyboard>;
@@ -210,9 +220,11 @@ function evenFloor(value: number): number {
   return Math.max(2, value - (value % 2));
 }
 
+export type SourceCrop = { left: number; top: number; right: number; bottom: number; width: number; height: number };
+
 // Rounds the crop down to even dimensions (yuv420p needs them) and expresses
-// it as gfxcapture's per-edge crop.
-export function gfxcaptureCrop(crop: ViewportRect, frameWidth: number, frameHeight: number) {
+// it both per edge (gfxcapture) and as a rect (gdigrab's crop filter).
+export function gfxcaptureCrop(crop: ViewportRect, frameWidth: number, frameHeight: number): SourceCrop {
   const left = Math.max(0, Math.min(frameWidth - 2, Math.floor(crop.x)));
   const top = Math.max(0, Math.min(frameHeight - 2, Math.floor(crop.y)));
   const width = evenFloor(Math.min(Math.floor(crop.width), frameWidth - left));
@@ -233,20 +245,31 @@ function encoderArgs(encoder: VideoEncoder): string[] {
   return ['-c:v', 'mpeg4', '-q:v', '3', '-pix_fmt', 'yuv420p'];
 }
 
+// The input half of an ffmpeg command that reads the window's client area,
+// optionally cropped, as frames of pixelFormat labelled [v].
+function sourceGraph(source: CaptureSource, windowId: number, fps: number, pixelFormat: string, crop?: SourceCrop): string[] {
+  if (source === 'gdigrab') {
+    const cropFilter = crop ? `crop=${crop.width}:${crop.height}:${crop.left}:${crop.top},` : '';
+    const filter = `${cropFilter}format=${pixelFormat}[v]`;
+    return [
+      '-f', 'gdigrab', '-framerate', String(fps), '-draw_mouse', '0', '-i', `hwnd=${windowId}`,
+      '-filter_complex', `[0:v]${filter}`,
+    ];
+  }
+  const options = [`gfxcapture=hwnd=${windowId}`, 'capture_cursor=0', `max_framerate=${fps}`];
+  if (crop) {
+    options.push(`crop_left=${crop.left}`, `crop_top=${crop.top}`, `crop_right=${crop.right}`, `crop_bottom=${crop.bottom}`);
+  }
+  // hwdownload yields bgra; a second format converts when another is asked for.
+  const convert = pixelFormat === 'bgra' ? '' : `,format=${pixelFormat}`;
+  return ['-filter_complex', `${options.join(':')},hwdownload,format=bgra${convert}[v]`];
+}
+
 export function recordingArgs(options: StartVideoOptions): string[] {
   const crop = gfxcaptureCrop(options.crop, options.frameWidth, options.frameHeight);
-  const source = [
-    `gfxcapture=hwnd=${options.windowId}`,
-    'capture_cursor=0',
-    `max_framerate=${options.fps}`,
-    `crop_left=${crop.left}`,
-    `crop_top=${crop.top}`,
-    `crop_right=${crop.right}`,
-    `crop_bottom=${crop.bottom}`,
-  ].join(':');
   return [
     '-hide_banner', '-nostats', '-loglevel', 'error', '-y',
-    '-filter_complex', `${source},hwdownload,format=bgra[v]`,
+    ...sourceGraph(options.source, options.windowId, options.fps, 'bgra', crop),
     '-map', '[v]',
     '-t', (options.maxDurationMs / 1000).toFixed(3),
     // WGC delivers a frame only when the window changes; constant frame rate
@@ -255,6 +278,15 @@ export function recordingArgs(options: StartVideoOptions): string[] {
     ...encoderArgs(options.encoder),
     '-movflags', '+faststart',
     options.outputPath,
+  ];
+}
+
+export function grabFrameArgs(source: CaptureSource, windowId: number): string[] {
+  return [
+    // Info level prints the output frame size; errors are filtered from it on failure.
+    '-hide_banner', '-nostats', '-loglevel', 'info',
+    ...sourceGraph(source, windowId, 30, 'rgba'),
+    '-map', '[v]', '-frames:v', '1', '-f', 'rawvideo', '-',
   ];
 }
 
@@ -361,7 +393,7 @@ class FfmpegRecording implements VideoRecordingProcess {
 }
 
 export function createFfmpegVideoBackend(env: NodeJS.ProcessEnv = process.env): VideoRecorderBackend {
-  let probed: { ffmpegPath: string; encoder: VideoEncoder } | undefined;
+  let probed: { ffmpegPath: string; encoder: VideoEncoder; sources: CaptureSource[] } | undefined;
   const live = new Set<FfmpegRecording>();
   let exitHookInstalled = false;
   const installExitHook = () => {
@@ -378,11 +410,15 @@ export function createFfmpegVideoBackend(env: NodeJS.ProcessEnv = process.env): 
       if (probed) return { ok: true, ...probed };
       const ffmpegPath = ffmpegCommand(env);
       try {
+        const sources: CaptureSource[] = [];
         const filter = await runFfmpeg(ffmpegPath, ['-hide_banner', '-h', 'filter=gfxcapture'], PROBE_TIMEOUT_MS);
-        if (!filter.stdout.toString('utf8').includes('gfxcapture')) {
+        if (filter.stdout.toString('utf8').includes('Filter gfxcapture')) sources.push('gfxcapture');
+        const demuxer = await runFfmpeg(ffmpegPath, ['-hide_banner', '-h', 'demuxer=gdigrab'], PROBE_TIMEOUT_MS);
+        if (demuxer.stdout.toString('utf8').includes('Demuxer gdigrab')) sources.push('gdigrab');
+        if (sources.length === 0) {
           return {
             ok: false,
-            error: `ffmpeg (${ffmpegPath}) has no gfxcapture source (Windows Graphics Capture). ${FFMPEG_INSTALL_HINT}`,
+            error: `ffmpeg (${ffmpegPath}) can capture neither through gfxcapture (Windows Graphics Capture) nor gdigrab. ${FFMPEG_INSTALL_HINT}`,
           };
         }
         const encoders = (await runFfmpeg(ffmpegPath, ['-hide_banner', '-encoders'], PROBE_TIMEOUT_MS)).stdout.toString('utf8');
@@ -390,24 +426,20 @@ export function createFfmpegVideoBackend(env: NodeJS.ProcessEnv = process.env): 
         if (!encoder) {
           return { ok: false, error: `ffmpeg (${ffmpegPath}) has none of the ${ENCODER_PREFERENCE.join(', ')} video encoders. ${FFMPEG_INSTALL_HINT}` };
         }
-        probed = { ffmpegPath, encoder };
+        probed = { ffmpegPath, encoder, sources };
         return { ok: true, ...probed };
       } catch (error) {
         return { ok: false, error: error instanceof Error ? error.message : String(error) };
       }
     },
 
-    async grabWindowFrame(ffmpegPath, windowId) {
-      const result = await runFfmpeg(ffmpegPath, [
-        '-hide_banner', '-nostats', '-loglevel', 'info',
-        '-filter_complex', `gfxcapture=hwnd=${windowId}:capture_cursor=0,hwdownload,format=bgra,format=rgba`,
-        '-frames:v', '1', '-f', 'rawvideo', '-',
-      ], GRAB_TIMEOUT_MS, MAX_GRAB_BYTES);
+    async grabWindowFrame(ffmpegPath, windowId, source) {
+      const result = await runFfmpeg(ffmpegPath, grabFrameArgs(source, windowId), GRAB_TIMEOUT_MS, MAX_GRAB_BYTES);
       const output = /Output #0[\s\S]*?Video:\s*rawvideo[^\n]*?,\s*(\d+)x(\d+)/.exec(result.stderr);
       if (result.code !== 0 || !output) {
         // This run logs at info level for the frame size; report only its errors.
         const errors = result.stderr.split(/\r?\n/).filter((line) => /fail|error|invalid|cannot|unable/i.test(line)).join('\n');
-        throw new Error(`could not capture the Studio window with ffmpeg: ${stderrSummary(errors) || `exit code ${result.code}`}`);
+        throw new Error(`could not capture the Studio window with ffmpeg ${source}: ${stderrSummary(errors) || `exit code ${result.code}`}`);
       }
       const width = Number(output[1]);
       const height = Number(output[2]);

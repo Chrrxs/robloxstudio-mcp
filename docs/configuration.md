@@ -164,11 +164,16 @@ enumerating or capturing any real windows.
 Roblox has no engine API that gives a plugin the bytes of a video, so
 `capture_video` records the Studio window on the MCP host instead:
 
-- It needs Windows and FFmpeg 8.0 or newer with the `gfxcapture` source
-  (Windows Graphics Capture), for example `winget install Gyan.FFmpeg`. The
-  server runs `ffmpeg` from `PATH`, or the executable named by
+- It needs Windows and FFmpeg, ideally 8.0 or newer with the `gfxcapture`
+  source (Windows Graphics Capture), for example `winget install Gyan.FFmpeg`.
+  The server runs `ffmpeg` from `PATH`, or the executable named by
   `ROBLOX_STUDIO_FFMPEG`. It encodes H.264 with `libx264` when available, then
   falls back to `h264_mf` or `mpeg4`.
+- When `gfxcapture` is missing or cannot open the window, recording falls back
+  to `gdigrab`. For example, a process started through secondary logon has no
+  per-user capture service and fails with `0x80070424`. `gdigrab` copies the
+  same client area through GDI. The result's `video.source` names the path
+  used.
 - Before recording, it locates the viewport with the same corner markers as the
   `capture_screenshot` host fallback. It grabs those markers through the same
   capture source as the recording, then removes them before recording starts.
@@ -191,8 +196,11 @@ Roblox has no engine API that gives a plugin the bytes of a video, so
 `capture_video` reads the Studio window, so `ROBLOX_STUDIO_HOST_CAPTURE=0` also
 disables it. The live regression `tests/capture-video.mjs` runs through
 `node scripts/studio-test-profile.mjs run -- tests/run-all.mjs --managed --test capture-video.mjs`.
-It needs FFmpeg on the Studio test account's `PATH`. The profile launcher does
-not forward `ROBLOX_STUDIO_FFMPEG`.
+It needs an FFmpeg the Studio test account can read. Use one on that account's
+`PATH`, or pass `ROBLOX_STUDIO_FFMPEG=C:\...\ffmpeg.exe` to the profile
+launcher. Set `RSMCP_CAPTURE_VIDEO_OUTPUT_DIR` to a directory that account can
+write to keep the recordings. The snapshot is deleted after a passing run.
+Under the test account, recording uses `gdigrab`.
 
 ## Native Linux with Wine
 

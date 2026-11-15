@@ -9,6 +9,7 @@ import type { HostWindowCaptureFn } from '../tools/index.js';
 import { StudioHttpClient } from '../tools/studio-client.js';
 import {
   gfxcaptureCrop,
+  grabFrameArgs,
   parseMediaInfo,
   pruneDefaultVideos,
   recordingArgs,
@@ -18,6 +19,7 @@ import {
   storyboardTimes,
 } from '../video-recorder.js';
 import type {
+  CaptureSource,
   MediaInfo,
   StartVideoOptions,
   Storyboard,
@@ -37,7 +39,7 @@ describe('video recorder helpers', () => {
 
   test('records the cropped window at a constant frame rate with a duration backstop', () => {
     const args = recordingArgs({
-      ffmpegPath: 'ffmpeg', encoder: 'libx264', windowId: 1184600,
+      ffmpegPath: 'ffmpeg', encoder: 'libx264', source: 'gfxcapture', windowId: 1184600,
       crop: { x: 10, y: 20, width: 300, height: 200 }, frameWidth: 400, frameHeight: 260,
       fps: 30, maxDurationMs: 120_000, outputPath: 'out.mp4',
     });
@@ -49,6 +51,21 @@ describe('video recorder helpers', () => {
     expect(args.slice(args.indexOf('-fps_mode'), args.indexOf('-fps_mode') + 4)).toEqual(['-fps_mode', 'cfr', '-r', '30']);
     expect(args).toContain('libx264');
     expect(args[args.length - 1]).toBe('out.mp4');
+  });
+
+  test('gdigrab reads the window through GDI and crops with a filter', () => {
+    const args = recordingArgs({
+      ffmpegPath: 'ffmpeg', encoder: 'libx264', source: 'gdigrab', windowId: 77,
+      crop: { x: 10, y: 20, width: 301, height: 200 }, frameWidth: 400, frameHeight: 260,
+      fps: 30, maxDurationMs: 5_000, outputPath: 'out.mp4',
+    });
+    expect(args.slice(0, args.indexOf('-map'))).toEqual([
+      '-hide_banner', '-nostats', '-loglevel', 'error', '-y',
+      '-f', 'gdigrab', '-framerate', '30', '-draw_mouse', '0', '-i', 'hwnd=77',
+      '-filter_complex', '[0:v]crop=300:200:10:20,format=bgra[v]',
+    ]);
+    expect(grabFrameArgs('gdigrab', 77)).toContain('[0:v]format=rgba[v]');
+    expect(grabFrameArgs('gfxcapture', 77)).toContain('gfxcapture=hwnd=77:capture_cursor=0:max_framerate=30,hwdownload,format=bgra,format=rgba[v]');
   });
 
   test('samples the middle of equal slices and stays inside the video', () => {
@@ -159,19 +176,21 @@ class FakeRecording implements VideoRecordingProcess {
 }
 
 class FakeBackend implements VideoRecorderBackend {
-  probeResult: VideoRecorderProbe = { ok: true, ffmpegPath: 'ffmpeg-test', encoder: 'libx264' };
+  probeResult: VideoRecorderProbe = { ok: true, ffmpegPath: 'ffmpeg-test', encoder: 'libx264', sources: ['gfxcapture', 'gdigrab'] };
+  failingSources = new Set<CaptureSource>();
   markersShown: () => boolean = () => false;
   started: StartVideoOptions[] = [];
   recordings: FakeRecording[] = [];
   storyboards: StoryboardOptions[] = [];
-  grabbedWindows: number[] = [];
+  grabbedWindows: Array<[number, CaptureSource]> = [];
   info: MediaInfo = { durationSeconds: 3, width: 300, height: 120 };
   failOnStart?: VideoRecordingExit;
 
   async probe() { return this.probeResult; }
 
-  async grabWindowFrame(_ffmpegPath: string, windowId: number) {
-    this.grabbedWindows.push(windowId);
+  async grabWindowFrame(_ffmpegPath: string, windowId: number, source: CaptureSource) {
+    this.grabbedWindows.push([windowId, source]);
+    if (this.failingSources.has(source)) throw new Error(`${source} cannot read the window`);
     return windowFrame(400, 200, { x: 50, y: 30, width: 300, height: 120 }, this.markersShown());
   }
 
@@ -273,10 +292,10 @@ describe('capture_video tool', () => {
     expect(events).toEqual(['prepare', 'show', 'hide', 'finish']);
     expect(new Set(peers)).toEqual(new Set(['client-session']));
     expect(markers.shown).toBe(false);
-    expect(backend.grabbedWindows).toEqual([777]);
+    expect(backend.grabbedWindows).toEqual([[777, 'gfxcapture']]);
     expect(backend.started).toHaveLength(1);
     expect(backend.started[0]).toMatchObject({
-      windowId: 777, crop: { x: 50, y: 30, width: 300, height: 120 }, frameWidth: 400, frameHeight: 200, fps: 60, outputPath,
+      source: 'gfxcapture', windowId: 777, crop: { x: 50, y: 30, width: 300, height: 120 }, frameWidth: 400, frameHeight: 200, fps: 60, outputPath,
     });
 
     const stopped = await tools.captureVideo({ action: 'stop' });
@@ -290,6 +309,23 @@ describe('capture_video tool', () => {
     expect(body.storyboard.times_ms[0]).toBe(167);
     expect(stopped.content[1]).toEqual({ type: 'image', data: Buffer.from('jpeg-bytes').toString('base64'), mimeType: 'image/jpeg' });
     await expect(tools.captureVideo({ action: 'stop' })).rejects.toThrow(/No capture_video recording is active/);
+  });
+
+  test('falls back to gdigrab when Windows Graphics Capture cannot read the window', async () => {
+    const { tools, backend, markers } = makeTools();
+    backend.failingSources.add('gfxcapture');
+    const started = textOf(await tools.captureVideo({ action: 'start', output_path: path.join(outputDirectory, 'a.mp4') }));
+    expect(started.video.source).toBe('gdigrab');
+    expect(backend.grabbedWindows).toEqual([[777, 'gfxcapture'], [777, 'gdigrab']]);
+    expect(backend.started[0]).toMatchObject({ source: 'gdigrab', crop: { x: 50, y: 30, width: 300, height: 120 } });
+    expect(markers.shown).toBe(false);
+
+    backend.failingSources.add('gdigrab');
+    await tools.captureVideo({ action: 'stop' });
+    const failed = textOf(await tools.captureVideo({ action: 'start', output_path: path.join(outputDirectory, 'b.mp4') }));
+    expect(failed.error).toBe(
+      'Could not locate the Studio viewport: gfxcapture cannot read the window; gdigrab cannot read the window',
+    );
   });
 
   test('refuses a second start while recording', async () => {

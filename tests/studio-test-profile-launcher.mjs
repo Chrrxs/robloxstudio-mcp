@@ -112,10 +112,17 @@ assert.equal(inherited.MCP_INSTANCE_ID, 'personal-studio', 'normalizing the chil
   assert.deepEqual(profileTestExpectations({ RSMCP_EXPECT_STUDIO_CAPTURE: 'disabled', RSMCP_EXPECT_HOST_CAPTURE: '1', RSMCP_OTHER: 'x' }),
     { RSMCP_EXPECT_STUDIO_CAPTURE: 'disabled', RSMCP_EXPECT_HOST_CAPTURE: '1' });
   assert.throws(() => profileTestExpectations({ RSMCP_EXPECT_HOST_CAPTURE: 'yes' }), /must be one of: 0, 1/);
+  assert.deepEqual(profileTestExpectations({
+    ROBLOX_STUDIO_FFMPEG: 'C:\\ProgramData\\tools\\ffmpeg.exe', RSMCP_CAPTURE_VIDEO_OUTPUT_DIR: 'D:\\videos',
+  }), { ROBLOX_STUDIO_FFMPEG: 'C:\\ProgramData\\tools\\ffmpeg.exe', RSMCP_CAPTURE_VIDEO_OUTPUT_DIR: 'D:\\videos' });
+  for (const ffmpeg of ['ffmpeg.exe', 'C:\\tools\\ffprobe.exe', 'C:\\tools\\..\\ffmpeg.exe', '\\\\server\\share\\ffmpeg.exe', '/usr/bin/ffmpeg']) {
+    assert.throws(() => profileTestExpectations({ ROBLOX_STUDIO_FFMPEG: ffmpeg }), /ROBLOX_STUDIO_FFMPEG must be an absolute Windows path to ffmpeg\.exe/);
+  }
+  assert.throws(() => profileTestExpectations({ RSMCP_CAPTURE_VIDEO_OUTPUT_DIR: 'videos' }), /absolute Windows directory path/);
   let suiteEnv;
   await runTestProfilePayload({
     ...invocation, mode: 'run', repo: 'C:\\fixture', command: ['tests/run-all.mjs'],
-    testExpectations: { RSMCP_EXPECT_STUDIO_CAPTURE: 'enabled', RSMCP_EXPECT_HOST_CAPTURE: '1' },
+    testExpectations: { RSMCP_EXPECT_STUDIO_CAPTURE: 'enabled', RSMCP_EXPECT_HOST_CAPTURE: '1', ROBLOX_STUDIO_FFMPEG: 'C:\\tools\\ffmpeg.exe' },
   }, {
     identity,
     runSafely: async (_env, operation) => operation(),
@@ -124,6 +131,7 @@ assert.equal(inherited.MCP_INSTANCE_ID, 'personal-studio', 'normalizing the chil
   });
   assert.equal(suiteEnv.RSMCP_EXPECT_STUDIO_CAPTURE, 'enabled');
   assert.equal(suiteEnv.RSMCP_EXPECT_HOST_CAPTURE, '1');
+  assert.equal(suiteEnv.ROBLOX_STUDIO_FFMPEG, 'C:\\tools\\ffmpeg.exe');
   await assert.rejects(runTestProfilePayload({
     ...invocation, mode: 'run', repo: 'C:\\fixture', command: [], resetSafetyReason: 'x', testExpectations: { RSMCP_EXPECT_HOST_CAPTURE: '1' },
   }, { identity, runSafely: async () => assert.fail(), execute: async () => 0, resetSafety: async () => {} }), /only to a suite run/);
