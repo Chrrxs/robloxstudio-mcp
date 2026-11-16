@@ -338,6 +338,9 @@ export function serverInstructions(definitions: readonly ToolDefinition[]): stri
       'Start solo_playtest or multiplayer_playtest before targeting a live server or client. Read runtime output with get_runtime_logs.',
     );
   }
+  if (has('eval_server_runtime', 'eval_client_runtime')) {
+    instructions.push('Pass wait_until to eval_server_runtime or eval_client_runtime instead of sleeping until game state changes.');
+  }
   if (has('search_assets', 'preview_asset', 'insert_asset')) {
     instructions.push('Search and preview untrusted Creator Store assets before inserting them.');
   }

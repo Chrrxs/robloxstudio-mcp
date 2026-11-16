@@ -487,6 +487,36 @@ function roleOrder(role: string): number {
   return client ? 2 + Number(client[1]) : Number.MAX_SAFE_INTEGER;
 }
 
+/** eval_*_runtime wait_until polling. */
+export interface RuntimeWaitOptions {
+  wait_until?: string;
+  timeout_s?: number;
+  poll_ms?: number;
+}
+
+const DEFAULT_WAIT_TIMEOUT_S = 20;
+const MAX_WAIT_TIMEOUT_S = 600;
+const DEFAULT_WAIT_POLL_MS = 250;
+const WAIT_COMPILE_ERROR = /\b(Expected|Incomplete statement|Malformed number|Unfinished string)\b/;
+const PLAYTEST_NOT_RUNNING_ERROR = 'eval_*_runtime requires a running playtest.';
+
+// Runs the condition as a function body (an expression gains `return (...)`),
+// keeping it on line 1 so Luau error lines match the caller's text. The reply
+// is "T" or "F" for truthiness followed by the value as text.
+export function buildWaitProbe(condition: string): string {
+  const body = /\breturn\b/.test(condition) ? condition : `return (${condition}\n)`;
+  return `local __mcp_value = (function() ${body}
+end)()
+local __mcp_shown
+if type(__mcp_value) == "table" then
+\tlocal ok, encoded = pcall(function() return game:GetService("HttpService"):JSONEncode(__mcp_value) end)
+\t__mcp_shown = if ok then encoded else tostring(__mcp_value)
+else
+\t__mcp_shown = tostring(__mcp_value)
+end
+return (if __mcp_value then "T" else "F") .. __mcp_shown`;
+}
+
 function asRecord(value: unknown): Record<string, unknown> | undefined {
   return value !== null && typeof value === 'object' && !Array.isArray(value)
     ? value as Record<string, unknown>
@@ -2489,40 +2519,100 @@ export class RobloxStudioTools {
     };
   }
 
-  async evalServerRuntime(code: string, instance_id?: string, operation_id?: string) {
-    if (!code) {
-      throw new Error('Code is required for eval_server_runtime');
+  async evalServerRuntime(code: string | undefined, instance_id?: string, operation_id?: string, wait: RuntimeWaitOptions = {}) {
+    if (!code && wait.wait_until === undefined) {
+      throw new Error('eval_server_runtime requires code or wait_until');
     }
-    const response = await this._callSingle('/api/eval-runtime', { code }, 'server', instance_id, undefined, undefined, operation_id);
-    return {
-      content: [
-        {
-          type: 'text',
-          text: JSON.stringify(response)
-        }
-      ]
-    };
+    return this._evalRuntime('eval_server_runtime', 'server', code, instance_id, operation_id, wait);
   }
 
-  async evalClientRuntime(code: string, target?: string, instance_id?: string, operation_id?: string) {
-    if (!code) {
-      throw new Error('Code is required for eval_client_runtime');
+  async evalClientRuntime(code: string | undefined, target?: string, instance_id?: string, operation_id?: string, wait: RuntimeWaitOptions = {}) {
+    if (!code && wait.wait_until === undefined) {
+      throw new Error('eval_client_runtime requires code or wait_until');
     }
     if (target && !target.startsWith('client-')) {
       throw new Error(`eval_client_runtime requires target=client-N (got: ${target})`);
     }
-    const response = await this._callSingle(
-      '/api/eval-runtime', { code }, { requested: target, fallback: 'client-1', accepts: isClientRole },
-      instance_id, undefined, undefined, operation_id,
+    return this._evalRuntime(
+      'eval_client_runtime', { requested: target, fallback: 'client-1', accepts: isClientRole }, code, instance_id, operation_id, wait,
     );
-    return {
-      content: [
-        {
-          type: 'text',
-          text: JSON.stringify(response)
+  }
+
+  // operation_id binds the one run of `code`; wait_until probes repeat, so they never carry it.
+  private async _evalRuntime(
+    tool: string,
+    target: string | TargetChoice,
+    code: string | undefined,
+    instance_id: string | undefined,
+    operation_id: string | undefined,
+    wait: RuntimeWaitOptions,
+  ) {
+    const condition = wait.wait_until;
+    if (condition === undefined) {
+      return this._textResult(await this._callSingle('/api/eval-runtime', { code }, target, instance_id, undefined, undefined, operation_id));
+    }
+    if (typeof condition !== 'string' || !condition.trim()) {
+      throw new Error(`${tool} wait_until must be a non-empty Luau expression or code block`);
+    }
+    const timeoutS = wait.timeout_s ?? DEFAULT_WAIT_TIMEOUT_S;
+    if (typeof timeoutS !== 'number' || !Number.isFinite(timeoutS) || timeoutS <= 0 || timeoutS > MAX_WAIT_TIMEOUT_S) {
+      throw new Error(`${tool} timeout_s must be a number above 0 and at most ${MAX_WAIT_TIMEOUT_S}`);
+    }
+    const pollMs = wait.poll_ms ?? DEFAULT_WAIT_POLL_MS;
+    if (!Number.isInteger(pollMs) || pollMs < 50 || pollMs > 10_000) {
+      throw new Error(`${tool} poll_ms must be an integer from 50 to 10000`);
+    }
+    const role = typeof target === 'string' ? target : target.requested ?? target.fallback;
+    const startedAt = Date.now();
+    const deadline = startedAt + timeoutS * 1000;
+    const finish = (body: Record<string, unknown>) => this._textResult({ ...body, elapsed_ms: Date.now() - startedAt });
+    let codeResult: Record<string, unknown> = {};
+    if (code) {
+      const response = await this._callSingle('/api/eval-runtime', { code }, target, instance_id, undefined, undefined, operation_id);
+      if (response.ok !== true) {
+        return finish({ ...response, satisfied: false, polls: 0, error: `code failed, so wait_until was not polled: ${String(response.error ?? 'unknown error')}` });
+      }
+      codeResult = { code_result: response.result, code_output: response.output };
+    }
+    const probe = buildWaitProbe(condition);
+    let polls = 0;
+    let lastValue: string | undefined;
+    let lastError: string | undefined;
+    for (;;) {
+      polls += 1;
+      try {
+        const response = await this._callSingle('/api/eval-runtime', { code: probe }, target, instance_id, Math.max(1_000, Math.min(10_000, deadline - Date.now())));
+        const reply = response.ok === true && typeof response.result === 'string' ? response.result : undefined;
+        if (reply !== undefined && (reply.startsWith('T') || reply.startsWith('F'))) {
+          lastValue = reply.slice(1);
+          lastError = undefined;
+          if (reply.startsWith('T')) return finish({ ...codeResult, satisfied: true, value: lastValue, polls });
+        } else {
+          lastError = String(response.error ?? `unexpected eval reply: ${JSON.stringify(response)}`);
+          if (WAIT_COMPILE_ERROR.test(lastError)) {
+            return finish({ ...codeResult, satisfied: false, polls, error: `wait_until does not compile: ${lastError}` });
+          }
+          if (response.error === PLAYTEST_NOT_RUNNING_ERROR) {
+            return finish({ ...codeResult, satisfied: false, polls, error: `The playtest stopped while waiting: ${lastError}` });
+          }
         }
-      ]
-    };
+      } catch (error) {
+        if (error instanceof RoutingFailure) {
+          return finish({ ...codeResult, satisfied: false, polls, value: lastValue, error: `The ${role} peer is gone, so wait_until cannot finish: ${error.message}` });
+        }
+        lastError = errorMessage(error);
+      }
+      if (Date.now() + pollMs >= deadline) break;
+      await sleep(pollMs);
+    }
+    return finish({
+      ...codeResult,
+      satisfied: false,
+      polls,
+      value: lastValue,
+      lastError,
+      error: `wait_until timed out after ${timeoutS}s: the condition never became truthy.`,
+    });
   }
 
   async setNetworkProfile(profile: string, target?: string, overrides?: Record<string, unknown>, instance_id?: string) {

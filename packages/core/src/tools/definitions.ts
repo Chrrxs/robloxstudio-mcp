@@ -433,34 +433,57 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
   {
     name: 'eval_server_runtime',
     category: 'write',
-    description: 'Use to run Luau in the live server VM with its require cache.',
+    description: 'Use to run Luau in the live server VM with its require cache, or to wait until a server condition holds.',
     inputSchema: {
       type: 'object',
       properties: {
         operation_id: OPERATION_ID_PROPERTY,
         code: {
           type: 'string',
-          description: 'Luau code; return a value to include it in the result.'
+          description: 'Luau to run first; return a value to see it.'
+        },
+        wait_until: {
+          type: 'string',
+          description: 'Luau condition polled until truthy.'
+        },
+        timeout_s: {
+          type: 'number',
+          description: 'Wait limit in seconds; default 20.'
+        },
+        poll_ms: {
+          type: 'integer',
+          description: 'Poll interval in ms; default 250.'
         },
         instance_id: {
           type: 'string',
           description: 'Studio process ID when ambiguous.'
         }
-      },
-      required: ['code']
+      }
     }
   },
   {
     name: 'eval_client_runtime',
     category: 'write',
-    description: 'Use to run Luau in a live client VM with its require cache.',
+    description: 'Use to run Luau in a live client VM with its require cache, or to wait until a client condition holds.',
     inputSchema: {
       type: 'object',
       properties: {
         operation_id: OPERATION_ID_PROPERTY,
         code: {
           type: 'string',
-          description: 'Luau code; return a value to include it in the result.'
+          description: 'Luau to run first; return a value to see it.'
+        },
+        wait_until: {
+          type: 'string',
+          description: 'Luau condition polled until truthy.'
+        },
+        timeout_s: {
+          type: 'number',
+          description: 'Wait limit in seconds; default 20.'
+        },
+        poll_ms: {
+          type: 'integer',
+          description: 'Poll interval in ms; default 250.'
         },
         target: {
           type: 'string',
@@ -470,8 +493,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
           type: 'string',
           description: 'Studio process ID when ambiguous.'
         }
-      },
-      required: ['code']
+      }
     }
   },
 
