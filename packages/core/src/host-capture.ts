@@ -18,14 +18,28 @@
 // expects — without guessing at Studio's dock layout or the DPI scale.
 // On macOS, ScreenCaptureKit captures only the selected Studio window after
 // verifying existing Screen Recording permission and its stable window identity.
+// On Linux, Studio runs under Wine on an X display; host-capture-linux.ts finds
+// that display from the Studio process and grabs the window through Xlib. Under
+// Wine none of Studio's own capture paths read the play viewport reliably, so
+// Linux tries the host grab first and Studio's capture only as the fallback.
 import { spawn } from 'child_process';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { captureMacStudioWindow, prepareMacHostCapture } from './host-capture-macos.js';
+import { captureLinuxStudioWindow } from './host-capture-linux.js';
 
-// macOS uses the app bundle ID; Windows uses the verified executable name.
+// macOS uses the app bundle ID; Windows uses the verified executable name;
+// Linux uses `x11` plus the X display name.
 export type HostWindowIdentity = { windowId: number; processId: number; bundleIdentifier: string };
+
+// Linux only: processId is the Studio process that owns the target viewport
+// (its X display is searched first); accept picks among several Studio windows
+// on a display, e.g. the separate server and client windows of a multiplayer test.
+export type HostCaptureOptions = {
+  processId?: number;
+  accept?: (capture: HostWindowCapture) => boolean;
+};
 
 export type HostWindowCapture = {
   width: number;
@@ -86,11 +100,16 @@ export function isWslWindowsHost(platform: NodeJS.Platform = process.platform): 
 }
 
 export function isHostCaptureSupported(platform: NodeJS.Platform = process.platform): boolean {
-  return platform === 'win32' || platform === 'darwin' || isWslWindowsHost(platform);
+  return platform === 'win32' || platform === 'darwin' || platform === 'linux';
+}
+
+// Native Linux (not WSL) runs Studio under Wine, where the host grab is the reliable path.
+export function isHostCapturePreferred(platform: NodeJS.Platform = process.platform, env: NodeJS.ProcessEnv = process.env): boolean {
+  return platform === 'linux' && !isWslWindowsHost(platform) && !isHostCaptureDisabled(env);
 }
 
 export function hostCaptureUnsupportedReason(platform: NodeJS.Platform = process.platform): string {
-  return `host window capture is only implemented on Windows, WSL with Windows interop, and macOS (this is ${platform})`;
+  return `host window capture is only implemented on Windows, WSL with Windows interop, macOS and Linux/X11 (this is ${platform})`;
 }
 
 // Windows programs started from WSL receive only the variables WSLENV names.
@@ -149,7 +168,12 @@ export function findViewportRect(
     }
   }
   if (maxX < 0) {
-    return { error: 'no viewport markers were visible in the Studio window capture' };
+    // The grab reads the window's own pixels, so other windows on top do not
+    // matter; a Studio tab in front of the place viewport does.
+    return {
+      error: 'no viewport markers were visible in the Studio window capture (if a script or plugin tab such as ' +
+        "UI Labs is in front of the place's viewport tab, select the place tab and retry)",
+    };
   }
 
   const rect = { x: minX, y: minY, width: maxX - minX + 1, height: maxY - minY + 1 };
@@ -460,7 +484,11 @@ function runWindowsCapture(titleHint: string | undefined, outFile: string, expec
 
 // Captures the Studio window (the client area on Windows) as RGBA. `titleHint` is the place
 // name shown in the window title (used to pick among several open places).
-export async function captureStudioWindow(titleHint?: string, expectedIdentity?: HostWindowIdentity): Promise<HostCaptureResult> {
+export async function captureStudioWindow(
+  titleHint?: string,
+  expectedIdentity?: HostWindowIdentity,
+  options?: HostCaptureOptions,
+): Promise<HostCaptureResult> {
   if (isHostCaptureDisabled()) {
     return { ok: false, error: 'host window capture is disabled by ROBLOX_STUDIO_HOST_CAPTURE' };
   }
@@ -468,6 +496,7 @@ export async function captureStudioWindow(titleHint?: string, expectedIdentity?:
     return { ok: false, error: hostCaptureUnsupportedReason() };
   }
   if (process.platform === 'darwin') return captureMacStudioWindow(titleHint, expectedIdentity);
+  if (process.platform === 'linux' && !isWslWindowsHost()) return captureLinuxStudioWindow(titleHint, expectedIdentity, options);
   const outFile = path.join(os.tmpdir(), `robloxstudio-mcp-capture-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}.bgra`);
   try {
     const report = parseWindowsCaptureReport(await runWindowsCapture(titleHint, outFile, expectedIdentity), expectedIdentity);

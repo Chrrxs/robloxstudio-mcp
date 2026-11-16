@@ -79,6 +79,12 @@ function readRegistryEvents(registryDir: string): Record<string, unknown>[] {
 }
 
 describe('Smoke', () => {
+  // Synthetic peers: keep capture on the Studio-first path on every OS
+  // (Linux would otherwise try the X11 window of a managed Studio first).
+  let hostFirst: jest.SpyInstance;
+  beforeEach(() => { hostFirst = jest.spyOn(hostCapture, 'isHostCapturePreferred').mockReturnValue(false); });
+  afterEach(() => hostFirst.mockRestore());
+
   test('sanitized Codex environment still detects a WSL host with working Windows interop', () => {
     const kernelVersion = process.platform === 'linux' && fs.existsSync('/proc/version')
       ? fs.readFileSync('/proc/version', 'utf8')

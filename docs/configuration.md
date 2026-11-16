@@ -142,6 +142,23 @@ the host OS and crops it to the viewport:
   windows, or a changed window identity produce an error instead of capturing
   another window. Local-file window titles containing an absolute path are
   matched by basename; multiple matches are still rejected.
+- On native Linux, where Studio runs under Wine (see
+  [Native Linux with Wine](#native-linux-with-wine)), the server grabs the
+  Studio window from its X display. It reads `DISPLAY` and `XAUTHORITY` from the
+  Studio process's environment, so the server needs no display of its own, and
+  maps windows to Studio processes with `xprop` (package `x11-utils`). A small
+  `python3` helper reads the window through `libX11`; with a compositor running
+  it reads the window's own pixels through `libXcomposite`, so other windows on
+  top do not matter, and without one it reads the visible part of the window.
+  Because Studio's own capture of the play viewport fails or comes back black
+  under Wine, the window grab comes first for a Studio this server launched,
+  and Studio's capture is the fallback. A Studio that another server launched
+  is grabbed when StudioCaptureService is unavailable, before CaptureService;
+  every display that runs Studio is searched, and later captures of that Studio
+  go to the window first. When several Studio windows share a display (a
+  multiplayer test), the window that shows the viewport markers is used. A
+  minimized window, or a script or plugin tab in front of the place's viewport
+  tab, cannot be captured; the tool says so.
 - Other platforms report that host capture is unavailable and return Studio's
   original result or error.
 
@@ -272,8 +289,8 @@ current user's processes are listed. The start time is converted to a UTC time
 using a boot-time reference saved for each boot in the registry directory, so
 identities still match after a broker restart even if the system clock was
 stepped. `close` sends SIGTERM to that exact process, then SIGKILL if it is still
-running. Sign-in settling before close and host window capture are not available
-under Wine.
+running. Sign-in settling before close is not available under Wine. Host window
+capture works (see [Host window capture](#host-window-capture)).
 
 ## Environment variables
 
