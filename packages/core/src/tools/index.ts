@@ -189,7 +189,10 @@ type ActiveVideoRecording = {
 };
 
 type VideoViewportLocation =
-  | { success: true; windowId: number; source: CaptureSource; rect: ViewportRect; frameWidth: number; frameHeight: number }
+  | {
+    success: true; windowId: number; x11Session?: HostWindowIdentity['x11Session']; source: CaptureSource;
+    rect: ViewportRect; frameWidth: number; frameHeight: number;
+  }
   | { success: false; error: string };
 
 function isVideoAction(value: unknown): value is VideoAction {
@@ -6804,6 +6807,7 @@ export class RobloxStudioTools {
         encoder: probe.encoder,
         source: located.source,
         windowId: located.windowId,
+        x11Session: located.x11Session,
         crop: located.rect,
         frameWidth: located.frameWidth,
         frameHeight: located.frameHeight,
@@ -6851,10 +6855,13 @@ export class RobloxStudioTools {
     ffmpegPath: string,
     sources: CaptureSource[],
   ): Promise<VideoViewportLocation> {
-    const window = await this.hostWindowCapture(this._hostCaptureTitleHint(instanceId));
+    // processId only matters on Linux: it names the Studio whose X display holds the window.
+    const window = await this.hostWindowCapture(this._hostCaptureTitleHint(instanceId), undefined, {
+      processId: await this._hostCaptureProcessId(instanceId),
+    });
     if (!window.ok) return { success: false, error: window.error };
-    const windowId = window.capture.identity?.windowId;
-    if (windowId === undefined) return { success: false, error: 'the host window capture did not identify the Studio window' };
+    const identity = window.capture.identity;
+    if (identity === undefined) return { success: false, error: 'the host window capture did not identify the Studio window' };
 
     let prepared: ViewportMarkerResponse | undefined;
     let result: VideoViewportLocation;
@@ -6872,7 +6879,7 @@ export class RobloxStudioTools {
             'Call set_device_simulator with scalingMode="FitToWindow" (or stopSimulation=true), then record again.',
         };
       } else {
-        result = await this._locateVideoViewportWithMarkers(instanceId, targetRole, prepared.captureId, ffmpegPath, windowId, sources);
+        result = await this._locateVideoViewportWithMarkers(instanceId, targetRole, prepared.captureId, ffmpegPath, identity, sources);
       }
     } catch (error) {
       result = { success: false, error: errorMessage(error) };
@@ -6895,7 +6902,7 @@ export class RobloxStudioTools {
     targetRole: string,
     captureId: string,
     ffmpegPath: string,
-    windowId: number,
+    identity: HostWindowIdentity,
     sources: CaptureSource[],
   ): Promise<VideoViewportLocation> {
     const shown = await this._callViewportMarkers('show', targetRole, instanceId, captureId);
@@ -6911,7 +6918,7 @@ export class RobloxStudioTools {
     try {
       for (const candidate of sources) {
         try {
-          frame = await this.videoRecorder.grabWindowFrame(ffmpegPath, windowId, candidate);
+          frame = await this.videoRecorder.grabWindowFrame(ffmpegPath, identity.windowId, candidate, identity.x11Session);
           source = candidate;
           break;
         } catch (error) {
@@ -6929,7 +6936,10 @@ export class RobloxStudioTools {
       markerSize: shown.markerSize ?? 12,
     });
     if ('error' in located) return { success: false, error: located.error };
-    return { success: true, windowId, source, rect: located.rect, frameWidth: frame.width, frameHeight: frame.height };
+    return {
+      success: true, windowId: identity.windowId, x11Session: identity.x11Session, source,
+      rect: located.rect, frameWidth: frame.width, frameHeight: frame.height,
+    };
   }
 
   private async _finishVideo(action: VideoAction, recording: ActiveVideoRecording, exit: VideoRecordingExit, frames: number) {

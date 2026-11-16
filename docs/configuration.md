@@ -198,10 +198,11 @@ playtest, but it never begins a capture: `CaptureBegan` and the
 only by Roblox's own scripts in any case. So `capture_video` records the Studio
 window on the MCP host instead:
 
-- It needs Windows (or WSL with Windows interop) and FFmpeg, ideally 8.0 or
-  newer with the `gfxcapture` source (Windows Graphics Capture), for example
-  `winget install Gyan.FFmpeg`. The server runs `ffmpeg` from `PATH`, or the
-  executable named by `ROBLOX_STUDIO_FFMPEG`.
+- It needs Windows, WSL with Windows interop, or native Linux with an X server,
+  plus FFmpeg. On Windows use FFmpeg 8.0 or newer with the `gfxcapture` source
+  (Windows Graphics Capture), for example `winget install Gyan.FFmpeg`. The
+  server runs `ffmpeg` from `PATH`, or the executable named by
+  `ROBLOX_STUDIO_FFMPEG`.
 - Under WSL it runs the Windows `ffmpeg.exe` through interop, because a Linux
   ffmpeg cannot see Windows windows. It uses `ffmpeg.exe` from `PATH`, or
   asks Windows PowerShell where `ffmpeg.exe` is when the server's `PATH` lacks
@@ -214,6 +215,13 @@ window on the MCP host instead:
   per-user capture service and fails with `0x80070424`. `gdigrab` copies the
   same client area through GDI. The result's `video.source` names the path
   used.
+- On native Linux, where Studio runs under Wine, it records with FFmpeg's
+  `x11grab` device (included in most distribution builds, for example
+  `sudo apt install ffmpeg`). It records the Studio window on the X display
+  that the screenshot path found in the Studio process, with that display's
+  `XAUTHORITY`. `x11grab` copies the window's area of the screen, so any window
+  that covers Studio, or part of it, appears in the recording. Keep Studio
+  uncovered while it records.
 - Before recording, it locates the viewport with the same corner markers as the
   `capture_screenshot` host fallback. It grabs those markers through the same
   capture source as the recording, then removes them before recording starts.
@@ -309,7 +317,7 @@ capture works (see [Host window capture](#host-window-capture)).
 | `ROBLOX_STUDIO_NO_AUTH` | Unset | Set to `1` or `true` to disable HTTP tool authentication. This is not recommended. |
 | `ROBLOX_STUDIO_ALLOWED_ORIGINS` | None | Comma-separated browser origins allowed to call the HTTP API cross-origin. |
 | `ROBLOX_STUDIO_HOST_CAPTURE` | Unset | Set to `0`, `false`, or `off` to disable the host window capture fallback for `capture_screenshot` and `capture_video`. |
-| `ROBLOX_STUDIO_FFMPEG` | `ffmpeg` on `PATH` | FFmpeg 8.0+ executable used by `capture_video`. See [Video recording](#video-recording). |
+| `ROBLOX_STUDIO_FFMPEG` | `ffmpeg` on `PATH` | FFmpeg executable used by `capture_video` (8.0+ on Windows). See [Video recording](#video-recording). |
 | `ROBLOX_OPEN_CLOUD_API_KEY` | None | Roblox Open Cloud key used by features such as audio preview, place version access, monetization, and experience settings. Required permissions depend on the tool. |
 | `MCP_PLUGINS_DIR` | Platform Studio Plugins folder | Override the destination used by plugin installation. |
 | `ROBLOX_STUDIO_EXE` | Auto-discovered on Windows, WSL, and macOS | Studio executable to launch. Required on native Linux with a Wine launcher, where it must be an existing `RobloxStudioBeta.exe` in the Wine prefix. |

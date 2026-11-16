@@ -20,17 +20,25 @@
 // (for example one started through secondary logon) fails to set it up with
 // 0x80070424. gdigrab, which copies the window through GDI, is the fallback;
 // it reads the same client area and is tried with the same markers.
+//
+// On native Linux Studio runs under Wine on an X display, and FFmpeg's
+// x11grab device reads the Studio's X11 window there, with the DISPLAY and
+// XAUTHORITY the Linux host capture found in the Studio process. x11grab copies
+// the window's area of the screen, so windows covering Studio show up in the
+// recording (the still captures read the composited window instead).
 import { execFileSync, spawn } from 'child_process';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { isWslWindowsHost, WSL_WINDOWS_POWERSHELL } from './host-capture.js';
 import type { ViewportRect } from './host-capture.js';
+import type { X11Session } from './host-capture-linux.js';
 
 export type VideoEncoder = 'libx264' | 'h264_mf' | 'mpeg4';
 
-// Preferred first.
-export type CaptureSource = 'gfxcapture' | 'gdigrab';
+// Preferred first. gfxcapture and gdigrab are Windows (and WSL) sources;
+// x11grab is the only one on native Linux.
+export type CaptureSource = 'gfxcapture' | 'gdigrab' | 'x11grab';
 
 export type VideoRecorderProbe =
   | { ok: true; ffmpegPath: string; encoder: VideoEncoder; sources: CaptureSource[] }
@@ -45,6 +53,8 @@ export type StartVideoOptions = {
   encoder: VideoEncoder;
   source: CaptureSource;
   windowId: number;
+  // x11grab only: the X display (and its cookie) that shows the window.
+  x11Session?: X11Session;
   // Viewport rect inside the captured window frame, and that frame's size.
   crop: ViewportRect;
   frameWidth: number;
@@ -87,7 +97,7 @@ export type Storyboard = {
 // Injection seam: tests stand in for FFmpeg and the host OS.
 export interface VideoRecorderBackend {
   probe(): Promise<VideoRecorderProbe>;
-  grabWindowFrame(ffmpegPath: string, windowId: number, source: CaptureSource): Promise<VideoFrame>;
+  grabWindowFrame(ffmpegPath: string, windowId: number, source: CaptureSource, x11Session?: X11Session): Promise<VideoFrame>;
   start(options: StartVideoOptions): VideoRecordingProcess;
   mediaInfo(ffmpegPath: string, inputPath: string): Promise<MediaInfo>;
   storyboard(options: StoryboardOptions): Promise<Storyboard>;
@@ -109,9 +119,23 @@ export function ffmpegCommand(env: NodeJS.ProcessEnv = process.env, wsl = isWslW
   return wsl ? 'ffmpeg.exe' : 'ffmpeg';
 }
 
+function isNativeLinux(platform: NodeJS.Platform = process.platform): boolean {
+  return platform === 'linux' && !isWslWindowsHost(platform);
+}
+
 export function videoRecordingUnsupportedReason(platform: NodeJS.Platform = process.platform): string | undefined {
-  if (platform === 'win32' || isWslWindowsHost(platform)) return undefined;
-  return `video recording is only implemented on Windows and WSL with Windows interop (this is ${platform}); use capture_screenshot instead`;
+  if (platform === 'win32' || platform === 'linux') return undefined;
+  return `video recording is only implemented on Windows, WSL with Windows interop and Linux/X11 (this is ${platform}); use capture_screenshot instead`;
+}
+
+// ffmpeg reads the window on the Studio's X display, with that display's cookie.
+// An inherited XAUTHORITY belongs to another display, so it is dropped when the
+// Studio has none.
+export function x11grabEnv(session: X11Session, base: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { ...base, DISPLAY: session.display };
+  if (session.xauthority) env.XAUTHORITY = session.xauthority;
+  else delete env.XAUTHORITY;
+  return env;
 }
 
 // ffmpeg.exe started from WSL needs Windows paths; Linux paths map to \\wsl.localhost.
@@ -181,15 +205,26 @@ export async function pruneDefaultVideos(
   }
 }
 
-const FFMPEG_INSTALL_HINT =
-  'Install FFmpeg 8.0 or newer (for example `winget install Gyan.FFmpeg`) and restart the MCP server, ' +
-  'or point ROBLOX_STUDIO_FFMPEG at ffmpeg.exe.';
+function ffmpegInstallHint(nativeLinux = isNativeLinux()): string {
+  if (nativeLinux) {
+    return 'Install FFmpeg with the x11grab device (for example `sudo apt install ffmpeg`) and restart the MCP server, ' +
+      'or point ROBLOX_STUDIO_FFMPEG at ffmpeg.';
+  }
+  return 'Install FFmpeg 8.0 or newer (for example `winget install Gyan.FFmpeg`) and restart the MCP server, ' +
+    'or point ROBLOX_STUDIO_FFMPEG at ffmpeg.exe.';
+}
 
 type RunResult = { code: number | null; stdout: Buffer; stderr: string };
 
-function runFfmpeg(ffmpegPath: string, args: string[], timeoutMs: number, maxStdoutBytes = 64 * 1024 * 1024): Promise<RunResult> {
+function runFfmpeg(
+  ffmpegPath: string,
+  args: string[],
+  timeoutMs: number,
+  maxStdoutBytes = 64 * 1024 * 1024,
+  env: NodeJS.ProcessEnv = process.env,
+): Promise<RunResult> {
   const { promise, resolve, reject } = Promise.withResolvers<RunResult>();
-  const child = spawn(ffmpegPath, args, { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
+  const child = spawn(ffmpegPath, args, { env, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
   const chunks: Buffer[] = [];
   let stdoutBytes = 0;
   let stderr = '';
@@ -219,7 +254,7 @@ function runFfmpeg(ffmpegPath: string, args: string[], timeoutMs: number, maxStd
   });
   child.on('error', (error: NodeJS.ErrnoException) => {
     finish(() => reject(error.code === 'ENOENT'
-      ? new Error(`ffmpeg was not found (${ffmpegPath}). ${FFMPEG_INSTALL_HINT}`)
+      ? new Error(`ffmpeg was not found (${ffmpegPath}). ${ffmpegInstallHint()}`)
       : new Error(`could not start ffmpeg (${ffmpegPath}): ${error.message}`)));
   });
   child.on('close', (code) => {
@@ -272,14 +307,25 @@ function encoderArgs(encoder: VideoEncoder): string[] {
 
 // The input half of an ffmpeg command that reads the window's client area,
 // optionally cropped, as frames of pixelFormat labelled [v].
-function sourceGraph(source: CaptureSource, windowId: number, fps: number, pixelFormat: string, crop?: SourceCrop): string[] {
-  if (source === 'gdigrab') {
+function sourceGraph(
+  source: CaptureSource,
+  windowId: number,
+  fps: number,
+  pixelFormat: string,
+  crop?: SourceCrop,
+  x11Session?: X11Session,
+): string[] {
+  if (source === 'gdigrab' || source === 'x11grab') {
     const cropFilter = crop ? `crop=${crop.width}:${crop.height}:${crop.left}:${crop.top},` : '';
     const filter = `${cropFilter}format=${pixelFormat}[v]`;
-    return [
-      '-f', 'gdigrab', '-framerate', String(fps), '-draw_mouse', '0', '-i', `hwnd=${windowId}`,
-      '-filter_complex', `[0:v]${filter}`,
-    ];
+    let input: string[];
+    if (source === 'gdigrab') {
+      input = ['-f', 'gdigrab', '-framerate', String(fps), '-draw_mouse', '0', '-i', `hwnd=${windowId}`];
+    } else {
+      if (!x11Session) throw new Error('x11grab needs the X display that shows the Studio window');
+      input = ['-f', 'x11grab', '-window_id', String(windowId), '-draw_mouse', '0', '-framerate', String(fps), '-i', x11Session.display];
+    }
+    return [...input, '-filter_complex', `[0:v]${filter}`];
   }
   const options = [`gfxcapture=hwnd=${windowId}`, 'capture_cursor=0', `max_framerate=${fps}`];
   if (crop) {
@@ -294,7 +340,7 @@ export function recordingArgs(options: StartVideoOptions): string[] {
   const crop = gfxcaptureCrop(options.crop, options.frameWidth, options.frameHeight);
   return [
     '-hide_banner', '-nostats', '-loglevel', 'error', '-y',
-    ...sourceGraph(options.source, options.windowId, options.fps, 'bgra', crop),
+    ...sourceGraph(options.source, options.windowId, options.fps, 'bgra', crop, options.x11Session),
     '-map', '[v]',
     '-t', (options.maxDurationMs / 1000).toFixed(3),
     // WGC delivers a frame only when the window changes; constant frame rate
@@ -306,11 +352,11 @@ export function recordingArgs(options: StartVideoOptions): string[] {
   ];
 }
 
-export function grabFrameArgs(source: CaptureSource, windowId: number): string[] {
+export function grabFrameArgs(source: CaptureSource, windowId: number, x11Session?: X11Session): string[] {
   return [
     // Info level prints the output frame size; errors are filtered from it on failure.
     '-hide_banner', '-nostats', '-loglevel', 'info',
-    ...sourceGraph(source, windowId, 30, 'rgba'),
+    ...sourceGraph(source, windowId, 30, 'rgba', undefined, x11Session),
     '-map', '[v]', '-frames:v', '1', '-f', 'rawvideo', '-',
   ];
 }
@@ -368,7 +414,8 @@ class FfmpegRecording implements VideoRecordingProcess {
   constructor(options: StartVideoOptions, live: Set<FfmpegRecording>) {
     const { promise, resolve } = Promise.withResolvers<VideoRecordingExit>();
     this.done = promise;
-    this.child = spawn(options.ffmpegPath, recordingArgs(options), { stdio: ['pipe', 'ignore', 'pipe'], windowsHide: true });
+    const env = options.source === 'x11grab' && options.x11Session ? x11grabEnv(options.x11Session) : process.env;
+    this.child = spawn(options.ffmpegPath, recordingArgs(options), { env, stdio: ['pipe', 'ignore', 'pipe'], windowsHide: true });
     live.add(this);
     let stderr = '';
     this.child.stderr?.setEncoding('utf8');
@@ -382,7 +429,7 @@ class FfmpegRecording implements VideoRecordingProcess {
       resolve({
         ok: false,
         error: error.code === 'ENOENT'
-          ? `ffmpeg was not found (${options.ffmpegPath}). ${FFMPEG_INSTALL_HINT}`
+          ? `ffmpeg was not found (${options.ffmpegPath}). ${ffmpegInstallHint()}`
           : `could not start ffmpeg: ${error.message}`,
       });
     });
@@ -443,20 +490,28 @@ export function createFfmpegVideoBackend(env: NodeJS.ProcessEnv = process.env): 
       }
       try {
         const sources: CaptureSource[] = [];
-        const filter = await runFfmpeg(ffmpegPath, ['-hide_banner', '-h', 'filter=gfxcapture'], PROBE_TIMEOUT_MS);
-        if (filter.stdout.toString('utf8').includes('Filter gfxcapture')) sources.push('gfxcapture');
-        const demuxer = await runFfmpeg(ffmpegPath, ['-hide_banner', '-h', 'demuxer=gdigrab'], PROBE_TIMEOUT_MS);
-        if (demuxer.stdout.toString('utf8').includes('Demuxer gdigrab')) sources.push('gdigrab');
+        const nativeLinux = isNativeLinux();
+        if (nativeLinux) {
+          const demuxer = await runFfmpeg(ffmpegPath, ['-hide_banner', '-h', 'demuxer=x11grab'], PROBE_TIMEOUT_MS);
+          if (demuxer.stdout.toString('utf8').includes('Demuxer x11grab')) sources.push('x11grab');
+        } else {
+          const filter = await runFfmpeg(ffmpegPath, ['-hide_banner', '-h', 'filter=gfxcapture'], PROBE_TIMEOUT_MS);
+          if (filter.stdout.toString('utf8').includes('Filter gfxcapture')) sources.push('gfxcapture');
+          const demuxer = await runFfmpeg(ffmpegPath, ['-hide_banner', '-h', 'demuxer=gdigrab'], PROBE_TIMEOUT_MS);
+          if (demuxer.stdout.toString('utf8').includes('Demuxer gdigrab')) sources.push('gdigrab');
+        }
         if (sources.length === 0) {
           return {
             ok: false,
-            error: `ffmpeg (${ffmpegPath}) can capture neither through gfxcapture (Windows Graphics Capture) nor gdigrab. ${FFMPEG_INSTALL_HINT}`,
+            error: nativeLinux
+              ? `ffmpeg (${ffmpegPath}) has no x11grab input device. ${ffmpegInstallHint(true)}`
+              : `ffmpeg (${ffmpegPath}) can capture neither through gfxcapture (Windows Graphics Capture) nor gdigrab. ${ffmpegInstallHint(false)}`,
           };
         }
         const encoders = (await runFfmpeg(ffmpegPath, ['-hide_banner', '-encoders'], PROBE_TIMEOUT_MS)).stdout.toString('utf8');
         const encoder = ENCODER_PREFERENCE.find((name) => new RegExp(`^\\s*V\\S*\\s+${name}\\s`, 'm').test(encoders));
         if (!encoder) {
-          return { ok: false, error: `ffmpeg (${ffmpegPath}) has none of the ${ENCODER_PREFERENCE.join(', ')} video encoders. ${FFMPEG_INSTALL_HINT}` };
+          return { ok: false, error: `ffmpeg (${ffmpegPath}) has none of the ${ENCODER_PREFERENCE.join(', ')} video encoders. ${ffmpegInstallHint(nativeLinux)}` };
         }
         probed = { ffmpegPath, encoder, sources };
         return { ok: true, ...probed };
@@ -465,8 +520,9 @@ export function createFfmpegVideoBackend(env: NodeJS.ProcessEnv = process.env): 
       }
     },
 
-    async grabWindowFrame(ffmpegPath, windowId, source) {
-      const result = await runFfmpeg(ffmpegPath, grabFrameArgs(source, windowId), GRAB_TIMEOUT_MS, MAX_GRAB_BYTES);
+    async grabWindowFrame(ffmpegPath, windowId, source, x11Session) {
+      const env = source === 'x11grab' && x11Session ? x11grabEnv(x11Session) : process.env;
+      const result = await runFfmpeg(ffmpegPath, grabFrameArgs(source, windowId, x11Session), GRAB_TIMEOUT_MS, MAX_GRAB_BYTES, env);
       const output = /Output #0[\s\S]*?Video:\s*rawvideo[^\n]*?,\s*(\d+)x(\d+)/.exec(result.stderr);
       if (result.code !== 0 || !output) {
         // This run logs at info level for the frame size; report only its errors.
