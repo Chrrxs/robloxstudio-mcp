@@ -179,6 +179,8 @@ describe('eval_*_runtime wait_until', () => {
   });
 
   test('spreads long waits so one wait sends at most 120 probes', async () => {
+    // The whole wait fits one response here; this client allows long calls.
+    jest.replaceProperty(process, 'env', { ...process.env, ROBLOX_STUDIO_MCP_RESPONSE_BUDGET_MS: '400000' });
     const { tools, request } = setup(() => ({ bridge: 'ok', ok: true, result: 'Ffalse', output: [] }));
     const pending = tools.evalServerRuntime(undefined, 'instance:solo', undefined, { wait_until: 'false', timeout_s: 300, poll_ms: 50 });
     await jest.advanceTimersByTimeAsync(300_000);
@@ -199,5 +201,78 @@ describe('eval_*_runtime wait_until', () => {
     const { tools, request } = setup(() => ({}));
     await expect(tools.evalServerRuntime(undefined, 'instance:solo', undefined, wait)).rejects.toThrow(error);
     expect(request).not.toHaveBeenCalled();
+  });
+
+  test('a wait past the response budget returns pending; repeats join it and get_request_status returns the result', async () => {
+    jest.replaceProperty(process, 'env', { ...process.env, ROBLOX_STUDIO_MCP_RESPONSE_BUDGET_MS: '1000' });
+    let flipped = false;
+    const { tools } = setup(() => ({ bridge: 'ok', ok: true, result: flipped ? 'Ttrue' : 'Ffalse' }));
+    const wait = { wait_until: 'workspace:GetAttribute("flip")', timeout_s: 30 };
+
+    const first = tools.evalServerRuntime(undefined, 'instance:solo', undefined, wait);
+    await jest.advanceTimersByTimeAsync(1000);
+    const pending = parse(await first);
+    expect(pending).toMatchObject({ state: 'pending', tool: 'eval_server_runtime', action: 'wait_until', requestId: expect.stringMatching(/^eval_server_runtime-/) });
+
+    const repeat = tools.evalServerRuntime(undefined, 'instance:solo', undefined, wait);
+    await jest.advanceTimersByTimeAsync(1000);
+    expect(parse(await repeat)).toMatchObject({ state: 'pending', requestId: pending.requestId, joinedRunningCall: true });
+
+    flipped = true;
+    const status = tools.getRequestStatus(pending.requestId, 5000);
+    await jest.advanceTimersByTimeAsync(500);
+    const result = await status;
+    expect(parse(result)).toMatchObject({ requestId: pending.requestId, state: 'completed', outcome: 'result' });
+    expect(JSON.parse(result.content[1].text ?? '{}')).toMatchObject({ satisfied: true, value: 'true' });
+  });
+
+  test('a get_request_status wait is capped by the response budget', async () => {
+    jest.replaceProperty(process, 'env', { ...process.env, ROBLOX_STUDIO_MCP_RESPONSE_BUDGET_MS: '1000' });
+    const { tools } = setup(() => ({ bridge: 'ok', ok: true, result: 'Ffalse' }));
+    const first = tools.evalServerRuntime(undefined, 'instance:solo', undefined, { wait_until: 'false', timeout_s: 30 });
+    await jest.advanceTimersByTimeAsync(1000);
+    const { requestId } = parse(await first);
+
+    let settled = false;
+    const status = tools.getRequestStatus(requestId, 20_000).finally(() => { settled = true; });
+    await jest.advanceTimersByTimeAsync(1000);
+    expect(settled).toBe(true);
+    expect(parse(await status)).toMatchObject({ requestId, state: 'pending' });
+  });
+});
+
+describe('playtest lifecycle response budget', () => {
+  beforeEach(() => {
+    jest.useFakeTimers();
+    jest.spyOn(StudioInstanceManager.prototype, 'pendingLaunches').mockResolvedValue([]);
+    jest.replaceProperty(process, 'env', { ...process.env, ROBLOX_STUDIO_MCP_RESPONSE_BUDGET_MS: '1000' });
+  });
+  afterEach(() => {
+    jest.useRealTimers();
+    jest.restoreAllMocks();
+  });
+
+  test('a slow solo_playtest stop returns pending, a repeat joins it without a second stop, and the status returns the result', async () => {
+    const stop = Promise.withResolvers<Reply>();
+    const { bridge, tools, request } = setup((endpoint) => endpoint === '/api/stop-playtest' ? stop.promise : {});
+
+    const first = tools.soloPlaytest('stop', undefined, undefined, 'instance:solo');
+    await jest.advanceTimersByTimeAsync(1000);
+    const pending = parse(await first);
+    expect(pending).toMatchObject({ state: 'pending', tool: 'solo_playtest', action: 'stop', requestId: expect.stringMatching(/^solo_playtest-/) });
+
+    const repeat = tools.soloPlaytest('stop', undefined, undefined, 'instance:solo');
+    await jest.advanceTimersByTimeAsync(1000);
+    expect(parse(await repeat)).toMatchObject({ state: 'pending', requestId: pending.requestId, joinedRunningCall: true });
+    expect(request.mock.calls.filter(([endpoint]) => endpoint === '/api/stop-playtest')).toHaveLength(1);
+
+    bridge.unregisterPeer('peer:server');
+    bridge.unregisterPeer('peer:client-1');
+    stop.resolve({ success: true });
+    const status = tools.getRequestStatus(pending.requestId, 5000);
+    await jest.advanceTimersByTimeAsync(1000);
+    const result = await status;
+    expect(parse(result)).toMatchObject({ requestId: pending.requestId, state: 'completed', outcome: 'result', tool: 'solo_playtest', action: 'stop' });
+    expect(JSON.parse(result.content[1].text ?? '{}')).toEqual({ success: true, action: 'stop', message: 'Playtest stopped.' });
   });
 });

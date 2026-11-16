@@ -1309,7 +1309,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
   {
     name: 'get_request_status',
     category: 'read',
-    description: 'Use to check, await, or recover a retained Studio operation.',
+    description: 'Use to check, await, or recover a retained Studio operation or a pending tool call.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -1317,13 +1317,13 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
           type: 'string',
           minLength: 1,
           maxLength: MAX_OPERATION_ID_LENGTH,
-          description: 'Caller operation ID or request ID from a server error.'
+          description: 'Operation ID, request ID from an error, or a pending requestId.'
         },
         wait_ms: {
           type: 'integer',
           minimum: 0,
           maximum: MAX_OPERATION_WAIT_MS,
-          description: 'Max ms to await settlement; never cancels.'
+          description: 'Max ms to await settlement, capped at the response budget (default 25000); never cancels.'
         }
       },
       required: ['request_id']

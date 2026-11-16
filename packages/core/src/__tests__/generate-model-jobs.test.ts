@@ -60,6 +60,7 @@ describe('generate_model jobs', () => {
   afterEach(() => {
     bridge.clearAllPendingRequests();
     jest.useRealTimers();
+    jest.restoreAllMocks();
   });
 
   test('async mode returns a job ID before generation finishes and a status wait retrieves the result', async () => {
@@ -117,6 +118,8 @@ describe('generate_model jobs', () => {
     // Retrying while generation is still running reports the same job.
     expect(parse(await tools.generateModel({ prompt: 'crate', async: true, operation_id: 'late-job' }, 'instance:jobs')))
       .toMatchObject({ requestId: 'late-job', state: 'timed_out' });
+    // A status wait is capped by the response budget; this client allows long calls.
+    jest.replaceProperty(process, 'env', { ...process.env, ROBLOX_STUDIO_MCP_RESPONSE_BUDGET_MS: '120000' });
     const waited = tools.getRequestStatus('late-job', 120_000);
     await jest.advanceTimersByTimeAsync(30_000);
     expect(bridge.settleTransportResponse('edit', 'late-job', MODEL)).toBe('accepted');

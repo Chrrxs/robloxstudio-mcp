@@ -62,6 +62,10 @@ Read output with get_runtime_logs. Reuse nextCursor as cursor for one Instance, 
 - totalDropped sums lifetime eviction counts from successfully read Peers. It counts messages evicted, not messages missed by this caller, and may decrease when Peers fail, disconnect, or reload.
 - For successfully read Peers, nextCursor advances past all captured entries, including those omitted by filter or tail. It is a continuation watermark, not pagination through omitted results; continuing from it will not return those entries.
 
+## Long calls and pending results
+
+MCP clients abandon a call after their own timeout, and the caller then cannot tell what happened. solo_playtest start and stop, multiplayer_playtest start, add_players, leave_client and end, and wait_until therefore answer within a 25 second response budget (ROBLOX_STUDIO_MCP_RESPONSE_BUDGET_MS). Work still running then returns state "pending" with a requestId and keeps running. Call get_request_status with that request_id and wait_ms up to 25000 until state is "completed"; the original result follows the status item. Do not repeat the call: an identical call while it runs joins the same job instead of starting the playtest twice. Finished results stay available for five minutes in the same server process.
+
 ## Simulation and input
 
 - Inspect current settings with get_simulation_state before changing them.

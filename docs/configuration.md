@@ -291,6 +291,7 @@ under Wine.
 | `ROBLOX_STUDIO_EXE` | Auto-discovered on Windows, WSL, and macOS | Studio executable to launch. Required on native Linux with a Wine launcher, where it must be an existing `RobloxStudioBeta.exe` in the Wine prefix. |
 | `ROBLOX_STUDIO_WINE_LAUNCHER` | Unset | Native Linux only: executable that `exec`s Wine on Studio. See [Native Linux with Wine](#native-linux-with-wine). |
 | `ROBLOX_STUDIO_WINE_START_TIMEOUT_MS` | `60000` | Native Linux with Wine only: how long an authorized launch may take to become `RobloxStudioBeta.exe`, from 1 to 150000 ms. |
+| `ROBLOX_STUDIO_MCP_RESPONSE_BUDGET_MS` | `25000` | Longest a playtest lifecycle call or `wait_until` holds its response, from 1000 to 3600000 ms. Work still running then returns `state: "pending"` with a `requestId` for `get_request_status`. Raise it if your MCP client allows longer calls. |
 
 Creator Store audio preview requires the `legacy-asset:manage` scope (Legacy
 Assets → manage in the API key settings); `asset:read` alone returns 403. See
