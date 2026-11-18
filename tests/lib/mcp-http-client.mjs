@@ -1,4 +1,10 @@
 import { withStudioTestToolLaunch } from '../../scripts/studio-test-safety.mjs';
+import {
+  collectedToolResult,
+  isPendingToolCall,
+  MAX_STATUS_WAIT_MS,
+  PENDING_COLLECT_MARGIN_MS,
+} from './pending-tool-call.mjs';
 
 export class McpHttpToolError extends Error {
   constructor(message, {
@@ -59,8 +65,29 @@ export async function callMcpHttpTool(
   if (!Number.isInteger(timeoutMs) || timeoutMs < 1) {
     throw new Error(`Invalid MCP HTTP timeout ${timeoutMs}`);
   }
-  return withStudioTestToolLaunch(toolName, args, env, () =>
-    requestMcpHttpTool(toolName, args, { port, env, timeoutMs }));
+  return withStudioTestToolLaunch(toolName, args, env, async () => {
+    const deadline = Date.now() + timeoutMs;
+    let body = await requestMcpHttpTool(toolName, args, { port, env, timeoutMs });
+    // A long call answers {state:"pending", requestId} once the server's response
+    // budget runs out and keeps running; collect it within the caller's timeout.
+    while (isPendingToolCall(toolName, body)) {
+      const remainingMs = deadline - Date.now();
+      const waitMs = Math.min(remainingMs - PENDING_COLLECT_MARGIN_MS, MAX_STATUS_WAIT_MS);
+      if (waitMs <= 0) {
+        throw new McpHttpToolError(`MCP HTTP tool ${toolName} still pending after ${timeoutMs}ms`, { responseReceived: true, body });
+      }
+      // A collected thrown error carries an error string, so this request throws as the original would.
+      const status = await requestMcpHttpTool('get_request_status', { request_id: body.requestId, wait_ms: waitMs }, { port, env, timeoutMs: remainingMs });
+      body = collectedToolResult(toolName, { body: status, isError: false }).body;
+      if (!isPendingToolCall(toolName, body) && typeof body?.error === 'string' && body.error) {
+        throw new McpHttpToolError(
+          `MCP HTTP tool ${toolName} failed: ${body.message ?? body.error}`,
+          { responseReceived: true, status: 200, body },
+        );
+      }
+    }
+    return body;
+  });
 }
 
 async function requestMcpHttpTool(toolName, args, { port, env, timeoutMs }) {

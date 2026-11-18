@@ -1,4 +1,5 @@
 import { BridgeService, RoutingFailure } from '../bridge-service.js';
+import { normalizeToolResult } from '../mcp-runtime.js';
 import { RobloxStudioTools, buildWaitProbe } from '../tools/index.js';
 import { StudioHttpClient } from '../tools/studio-client.js';
 import { StudioInstanceManager } from '../studio-instance-manager.js';
@@ -222,8 +223,27 @@ describe('eval_*_runtime wait_until', () => {
     const status = tools.getRequestStatus(pending.requestId, 5000);
     await jest.advanceTimersByTimeAsync(500);
     const result = await status;
-    expect(parse(result)).toMatchObject({ requestId: pending.requestId, state: 'completed', outcome: 'result' });
-    expect(JSON.parse(result.content[1].text ?? '{}')).toMatchObject({ satisfied: true, value: 'true' });
+    expect(result.content).toHaveLength(1);
+    expect(parse(result)).toMatchObject({ requestId: pending.requestId, state: 'settled', outcome: 'result', result: { satisfied: true, value: 'true' } });
+    expect(normalizeToolResult(result, 'modern').isError).toBeUndefined();
+  });
+
+  test('a call that names client-1 does not join a running wait that omitted target', async () => {
+    jest.replaceProperty(process, 'env', { ...process.env, ROBLOX_STUDIO_MCP_RESPONSE_BUDGET_MS: '1000' });
+    const { tools } = setup(() => ({ bridge: 'ok', ok: true, result: 'Ffalse' }));
+    const wait = { wait_until: 'false', timeout_s: 30 };
+
+    const omitted = tools.evalClientRuntime(undefined, undefined, 'instance:solo', undefined, wait);
+    await jest.advanceTimersByTimeAsync(1000);
+    const first = parse(await omitted);
+    const named = tools.evalClientRuntime(undefined, 'client-1', 'instance:solo', undefined, wait);
+    await jest.advanceTimersByTimeAsync(1000);
+    const second = parse(await named);
+
+    expect(first).toMatchObject({ state: 'pending' });
+    expect(second).toMatchObject({ state: 'pending' });
+    expect(second.joinedRunningCall).toBeUndefined();
+    expect(second.requestId).not.toBe(first.requestId);
   });
 
   test('a get_request_status wait is capped by the response budget', async () => {
@@ -237,7 +257,9 @@ describe('eval_*_runtime wait_until', () => {
     const status = tools.getRequestStatus(requestId, 20_000).finally(() => { settled = true; });
     await jest.advanceTimersByTimeAsync(1000);
     expect(settled).toBe(true);
-    expect(parse(await status)).toMatchObject({ requestId, state: 'pending' });
+    const body = parse(await status);
+    expect(body).toMatchObject({ requestId, state: 'pending', waitCappedMs: 1000 });
+    expect(body.next).toContain('wait_ms up to 1000');
   });
 });
 
@@ -272,7 +294,63 @@ describe('playtest lifecycle response budget', () => {
     const status = tools.getRequestStatus(pending.requestId, 5000);
     await jest.advanceTimersByTimeAsync(1000);
     const result = await status;
-    expect(parse(result)).toMatchObject({ requestId: pending.requestId, state: 'completed', outcome: 'result', tool: 'solo_playtest', action: 'stop' });
-    expect(JSON.parse(result.content[1].text ?? '{}')).toEqual({ success: true, action: 'stop', message: 'Playtest stopped.' });
+    expect(parse(result)).toMatchObject({ requestId: pending.requestId, state: 'settled', outcome: 'result', tool: 'solo_playtest', action: 'stop' });
+    expect(parse(result).result).toEqual({ success: true, action: 'stop', message: 'Playtest stopped.' });
+  });
+
+  test('a multiplayer_playtest start past the budget returns pending and its result is collectable', async () => {
+    const start = Promise.withResolvers<{ content: Array<{ type: string; text: string }> }>();
+    const { tools } = setup(() => ({}));
+    const startSpy = jest.spyOn(tools, 'multiplayerTestStart').mockReturnValue(start.promise);
+
+    const first = tools.multiplayerPlaytest('start', 2, undefined, undefined, undefined, undefined, 'instance:solo');
+    await jest.advanceTimersByTimeAsync(1000);
+    const pending = parse(await first);
+    expect(pending).toMatchObject({ state: 'pending', tool: 'multiplayer_playtest', action: 'start', requestId: expect.stringMatching(/^multiplayer_playtest-/) });
+
+    start.resolve({ content: [{ type: 'text', text: JSON.stringify({ success: true, ready: true, multiplayerGroupId: 'group-1', roles: ['server', 'client-1', 'client-2'] }) }] });
+    const result = await tools.getRequestStatus(pending.requestId, 1000);
+    expect(parse(result)).toMatchObject({
+      requestId: pending.requestId,
+      state: 'settled',
+      outcome: 'result',
+      result: { success: true, action: 'start', multiplayerGroupId: 'group-1' },
+    });
+    expect(normalizeToolResult(result, 'modern').isError).toBeUndefined();
+    expect(startSpy).toHaveBeenCalledTimes(1);
+  });
+
+  test('a collected failed result reads as an error, as the direct result would', async () => {
+    const start = Promise.withResolvers<{ content: Array<{ type: string; text: string }> }>();
+    const { tools } = setup(() => ({}));
+    jest.spyOn(tools, 'multiplayerTestStart').mockReturnValue(start.promise);
+
+    const first = tools.multiplayerPlaytest('start', 2, undefined, undefined, undefined, undefined, 'instance:solo');
+    await jest.advanceTimersByTimeAsync(1000);
+    const { requestId } = parse(await first);
+
+    start.resolve({ content: [{ type: 'text', text: JSON.stringify({ success: false, error: 'studio_refused', message: 'No.' }) }] });
+    const result = await tools.getRequestStatus(requestId, 1000);
+    expect(parse(result)).toMatchObject({ state: 'settled', outcome: 'result', result: { success: false, error: 'studio_refused' } });
+    const normalized = normalizeToolResult(result, 'modern');
+    expect(normalized.isError).toBe(true);
+    expect(normalized.structuredContent).toMatchObject({ requestId, result: { success: false } });
+  });
+
+  test('a collected thrown error reads as an error', async () => {
+    const start = Promise.withResolvers<{ content: Array<{ type: string; text: string }> }>();
+    const { tools } = setup(() => ({}));
+    jest.spyOn(tools, 'multiplayerTestStart').mockReturnValue(start.promise);
+
+    const first = tools.multiplayerPlaytest('start', 2, undefined, undefined, undefined, undefined, 'instance:solo');
+    await jest.advanceTimersByTimeAsync(1000);
+    const { requestId } = parse(await first);
+
+    jest.spyOn(console, 'error').mockImplementation(() => {});
+    start.reject(new Error('Studio went away'));
+    const result = await tools.getRequestStatus(requestId, 1000);
+    expect(result.content).toHaveLength(1);
+    expect(parse(result)).toMatchObject({ requestId, state: 'settled', outcome: 'error', error: 'tool_failed', message: 'Studio went away' });
+    expect(normalizeToolResult(result, 'modern').isError).toBe(true);
   });
 });

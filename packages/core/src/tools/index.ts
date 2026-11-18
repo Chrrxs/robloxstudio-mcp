@@ -77,6 +77,7 @@ import {
 import type { PaceCaptureChunk } from '../micro-profiler/capture.js';
 import { createHash, randomUUID } from 'crypto';
 import { ReferenceUploadError, ReferenceUploads } from './reference-uploads.js';
+import { publicToolErrorBody } from '../mcp-runtime.js';
 import type { ReferenceUploadAttempt, ReferenceUploadCheckpoint, ReferenceUploadProgress, ReferenceUploadView } from './reference-uploads.js';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -1510,7 +1511,8 @@ export class RobloxStudioTools {
       tool: job.tool,
       action: job.action,
       elapsedMs: Date.now() - job.startedAt,
-      next: `Still running. Call get_request_status with request_id="${job.id}" and wait_ms up to ${responseBudgetMs()} to collect the result. Do not repeat the ${job.tool} call.`,
+      // get_request_status rejects wait_ms above MAX_OPERATION_WAIT_MS, so never suggest more.
+      next: `Still running. Call get_request_status with request_id="${job.id}" and wait_ms up to ${Math.min(responseBudgetMs(), MAX_OPERATION_WAIT_MS)} to collect the result. Do not repeat the ${job.tool} call.`,
     };
   }
 
@@ -2702,8 +2704,10 @@ export class RobloxStudioTools {
     if (!Number.isInteger(pollMs) || pollMs < 50 || pollMs > 10_000) {
       throw new Error(`${tool} poll_ms must be an integer from 50 to 10000`);
     }
-    const role = typeof target === 'string' ? target : target.requested ?? target.fallback;
-    return this._withinResponseBudget(tool, 'wait_until', [instance_id, role, code, condition, timeoutS, pollMs, operation_id], async () => {
+    // Key on the target as the caller passed it: an omitted target routes by
+    // instance_id, so it can reach a different peer than an explicit client-N.
+    const requestedTarget = typeof target === 'string' ? target : target.requested;
+    return this._withinResponseBudget(tool, 'wait_until', [instance_id, requestedTarget, code, condition, timeoutS, pollMs, operation_id], async () => {
       const intervalMs = Math.max(pollMs, Math.ceil(timeoutS * 1000 / MAX_WAIT_PROBES));
       const startedAt = Date.now();
       const deadline = startedAt + timeoutS * 1000;
@@ -5044,25 +5048,39 @@ export class RobloxStudioTools {
     if (wait_ms !== undefined && (!Number.isInteger(wait_ms) || wait_ms < 0 || wait_ms > MAX_OPERATION_WAIT_MS)) {
       throw new Error(`wait_ms must be an integer from 0 to ${MAX_OPERATION_WAIT_MS}`);
     }
-    // One status call must also answer inside the client's timeout.
+    // One status call must also answer inside the client's timeout, so a longer
+    // wait_ms is cut to the response budget; waitCappedMs reports the wait used.
     const waitMs = Math.min(wait_ms ?? 0, responseBudgetMs());
+    const capped = wait_ms !== undefined && wait_ms > waitMs ? { waitCappedMs: waitMs } : {};
     const job = this.toolJobs.get(request_id);
     if (job) {
       const outcome = await this._awaitToolJob(job, waitMs, signal);
-      if (!outcome) return this._textResult(this._toolJobPending(job));
+      if (!outcome) return this._textResult({ ...this._toolJobPending(job), ...capped });
       const status = {
         requestId: job.id,
-        state: 'completed',
+        state: 'settled',
         tool: job.tool,
         action: job.action,
         elapsedMs: (job.settledAt ?? Date.now()) - job.startedAt,
       };
-      if ('error' in outcome) return this._textResult({ ...status, outcome: 'error', error: errorMessage(outcome.error) });
+      // One JSON item with the result nested: MCP clients read success, error and
+      // structuredContent from the first JSON text item, so a collected result
+      // must flag a failure the same way the direct call would have.
+      if ('error' in outcome) {
+        return { content: [{ type: 'text', text: JSON.stringify({ ...publicToolErrorBody(job.tool, outcome.error), ...status, outcome: 'error' }) }], isError: true };
+      }
+      const text = outcome.result.content.find((item) => item.type === 'text')?.text;
+      let result: unknown = text;
+      try {
+        if (text !== undefined) result = JSON.parse(text);
+      } catch {
+        // Not JSON: return the text as it is.
+      }
+      const inner = result && typeof result === 'object' && !Array.isArray(result) ? result as Record<string, unknown> : {};
+      const failed = inner.success === false || (typeof inner.error === 'string' && inner.error.length > 0);
       return {
-        content: [
-          { type: 'text', text: JSON.stringify({ ...status, outcome: 'result', message: `The ${job.tool} result follows.` }) },
-          ...outcome.result.content,
-        ],
+        content: [{ type: 'text', text: JSON.stringify({ ...status, outcome: 'result', result }) }],
+        ...(failed ? { isError: true } : {}),
       };
     }
     const deadline = Date.now() + waitMs;
@@ -5072,24 +5090,24 @@ export class RobloxStudioTools {
       await this.referenceUploads.waitForPreparation(request_id, waitMs, signal);
       const preparation = this.referenceUploads.view(request_id);
       if (preparation && preparation.stage !== 'dispatched') {
-        return this._textResult(this._preparationStatus(request_id, preparation));
+        return this._textResult({ ...this._preparationStatus(request_id, preparation), ...capped });
       }
     }
     const remainingMs = Math.max(0, deadline - Date.now());
-    return this._operationStatusResult(request_id, await this.bridge.getRequestStatusEverywhere(request_id, remainingMs, signal));
+    return this._operationStatusResult(request_id, await this.bridge.getRequestStatusEverywhere(request_id, remainingMs, signal), capped);
   }
 
-  private _requestStatusResult(requestId: string, status: RequestStatus | undefined) {
-    return this._textResult(status ? { ...status } : unretainedStatus(requestId));
+  private _requestStatusResult(requestId: string, status: RequestStatus | undefined, extra: Record<string, unknown> = {}) {
+    return this._textResult(status ? { ...status, ...extra } : { ...unretainedStatus(requestId), ...extra });
   }
 
   // A bridge status, plus the reference-image preparation and an overall phase
   // when this server prepared the operation for generate_model.
-  private _operationStatusResult(requestId: string, status: RequestStatus | undefined) {
+  private _operationStatusResult(requestId: string, status: RequestStatus | undefined, extra: Record<string, unknown> = {}) {
     const preparation = this.referenceUploads.view(requestId);
-    if (!preparation) return this._requestStatusResult(requestId, status);
-    if (!status) return this._textResult({ ...unretainedStatus(requestId), preparation });
-    return this._textResult({ ...status, phase: generationPhase(status), preparation });
+    if (!preparation) return this._requestStatusResult(requestId, status, extra);
+    if (!status) return this._textResult({ ...unretainedStatus(requestId), preparation, ...extra });
+    return this._textResult({ ...status, phase: generationPhase(status), preparation, ...extra });
   }
 
   // A generate_model job that has not reached the bridge, shaped like a request
