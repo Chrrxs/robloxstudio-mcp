@@ -316,14 +316,23 @@ describe('HTTP Server', () => {
     test('multiplayer handler forwards only supported start arguments', async () => {
       const multiplayerPlaytest = jest.fn(async () => ({ content: [] }));
       const fakeTools = { multiplayerPlaytest } as unknown as RobloxStudioTools;
+      const { signal } = new AbortController();
 
       await TOOL_HANDLERS.multiplayer_playtest(fakeTools, {
         action: 'start',
         numPlayers: 2,
         timeout: 5,
+        ready_timeout_s: 30,
         instance_id: 'place:test',
-      });
-      expect(multiplayerPlaytest).toHaveBeenLastCalledWith('start', 2, undefined, undefined, undefined, 5, 'place:test');
+      }, { signal });
+      expect(multiplayerPlaytest).toHaveBeenLastCalledWith('start', 2, undefined, undefined, undefined, 5, 'place:test', 30, signal);
+    });
+
+    test('solo_playtest handler forwards ready_timeout_s and the cancellation signal', async () => {
+      const soloPlaytest = jest.fn(async () => ({ content: [] }));
+      const { signal } = new AbortController();
+      await TOOL_HANDLERS.solo_playtest({ soloPlaytest } as unknown as RobloxStudioTools, { action: 'start', ready_timeout_s: 45 }, { signal });
+      expect(soloPlaytest).toHaveBeenLastCalledWith('start', undefined, undefined, undefined, 45, signal);
     });
 
     test('runtime eval handlers forward the wait options and cancellation signal', async () => {

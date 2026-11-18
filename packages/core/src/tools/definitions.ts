@@ -678,11 +678,15 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
         mode: {
           type: 'string',
           enum: ['play', 'run'],
-          description: 'Required for action="start".'
+          description: 'start mode; default play.'
+        },
+        ready_timeout_s: {
+          type: 'number',
+          description: 'Seconds start waits for peers to answer eval; default 90.'
         },
         timeout: {
           type: 'number',
-          description: 'Wait in seconds; start defaults to 60 and stop to 15.'
+          description: 'Stop wait in seconds, default 15; start aliases ready_timeout_s.'
         },
         instance_id: {
           type: 'string',
@@ -993,9 +997,13 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
         value: {
           description: 'JSON value returned by end to the edit process.'
         },
+        ready_timeout_s: {
+          type: 'number',
+          description: 'Seconds start waits for peers to answer eval; default 90.'
+        },
         timeout: {
           type: 'number',
-          description: 'Wait in seconds; defaults to 30.'
+          description: 'Wait in seconds; defaults to 30; start aliases ready_timeout_s.'
         },
         instance_id: {
           type: 'string',
