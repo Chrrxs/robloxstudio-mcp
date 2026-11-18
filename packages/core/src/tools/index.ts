@@ -189,7 +189,10 @@ type ActiveVideoRecording = {
 };
 
 type VideoViewportLocation =
-  | { success: true; windowId: number; source: CaptureSource; rect: ViewportRect; frameWidth: number; frameHeight: number }
+  | {
+    success: true; windowId: number; x11Session?: HostWindowIdentity['x11Session']; source: CaptureSource;
+    rect: ViewportRect; frameWidth: number; frameHeight: number;
+  }
   | { success: false; error: string };
 
 function isVideoAction(value: unknown): value is VideoAction {
@@ -6961,6 +6964,7 @@ export class RobloxStudioTools {
         encoder: probe.encoder,
         source: located.source,
         windowId: located.windowId,
+        x11Session: located.x11Session,
         crop: located.rect,
         frameWidth: located.frameWidth,
         frameHeight: located.frameHeight,
@@ -7008,10 +7012,21 @@ export class RobloxStudioTools {
     ffmpegPath: string,
     sources: CaptureSource[],
   ): Promise<VideoViewportLocation> {
-    const window = await this.hostWindowCapture(this._hostCaptureTitleHint(instanceId));
-    if (!window.ok) return { success: false, error: window.error };
-    const windowId = window.capture.identity?.windowId;
-    if (windowId === undefined) return { success: false, error: 'the host window capture did not identify the Studio window' };
+    // Windows and WSL identify the window up front (their helper rejects
+    // ambiguous matches). On native Linux several Studio windows can share a
+    // display (a multiplayer test), so the window is chosen once the markers
+    // are shown, by which one shows them; no markers are drawn without a
+    // Studio on an X display.
+    let identity: HostWindowIdentity | undefined;
+    if (isNativeLinuxHost()) {
+      const unavailable = linuxHostCaptureUnavailableReason();
+      if (unavailable !== undefined) return { success: false, error: unavailable };
+    } else {
+      const window = await this.hostWindowCapture(this._hostCaptureTitleHint(instanceId));
+      if (!window.ok) return { success: false, error: window.error };
+      identity = window.capture.identity;
+      if (identity === undefined) return { success: false, error: 'the host window capture did not identify the Studio window' };
+    }
 
     let prepared: ViewportMarkerResponse | undefined;
     let result: VideoViewportLocation;
@@ -7029,7 +7044,7 @@ export class RobloxStudioTools {
             'Call set_device_simulator with scalingMode="FitToWindow" (or stopSimulation=true), then record again.',
         };
       } else {
-        result = await this._locateVideoViewportWithMarkers(instanceId, targetRole, prepared.captureId, ffmpegPath, windowId, sources);
+        result = await this._locateVideoViewportWithMarkers(instanceId, targetRole, prepared.captureId, ffmpegPath, identity, sources);
       }
     } catch (error) {
       result = { success: false, error: errorMessage(error) };
@@ -7052,41 +7067,54 @@ export class RobloxStudioTools {
     targetRole: string,
     captureId: string,
     ffmpegPath: string,
-    windowId: number,
+    preidentified: HostWindowIdentity | undefined,
     sources: CaptureSource[],
   ): Promise<VideoViewportLocation> {
     const shown = await this._callViewportMarkers('show', targetRole, instanceId, captureId);
     if (shown.error || !shown.viewportWidth || !shown.viewportHeight) {
       return { success: false, error: `could not draw viewport markers: ${shown.error ?? 'no viewport size reported'}` };
     }
+    const markerHint = { viewportWidth: shown.viewportWidth, viewportHeight: shown.viewportHeight, markerSize: shown.markerSize ?? 12 };
     // The first source that can read the window records it: the marker frame
     // and the recording must come from the same capture path.
+    let identity = preidentified;
     let frame: { width: number; height: number; rgba: Buffer } | undefined;
     let source: CaptureSource | undefined;
     const grabErrors: string[] = [];
     let hidden: ViewportMarkerResponse;
     try {
-      for (const candidate of sources) {
-        try {
-          frame = await this.videoRecorder.grabWindowFrame(ffmpegPath, windowId, candidate);
-          source = candidate;
-          break;
-        } catch (error) {
-          grabErrors.push(errorMessage(error));
+      if (identity === undefined) {
+        // Native Linux: the Studio window that shows the markers, as for screenshots.
+        const window = await this.hostWindowCapture(this._hostCaptureTitleHint(instanceId), undefined, {
+          processId: await this._hostCaptureProcessId(instanceId),
+          accept: (capture) => !('error' in findViewportRect(capture.rgba, capture.width, capture.height, markerHint)),
+        });
+        if (!window.ok) grabErrors.push(window.error);
+        else if (window.capture.identity === undefined) grabErrors.push('the host window capture did not identify the Studio window');
+        else identity = window.capture.identity;
+      }
+      if (identity !== undefined) {
+        for (const candidate of sources) {
+          try {
+            frame = await this.videoRecorder.grabWindowFrame(ffmpegPath, identity.windowId, candidate, identity.x11Session);
+            source = candidate;
+            break;
+          } catch (error) {
+            grabErrors.push(errorMessage(error));
+          }
         }
       }
     } finally {
       hidden = await this._callViewportMarkers('hide', targetRole, instanceId, captureId);
     }
     if (hidden.error) return { success: false, error: `could not hide viewport markers: ${hidden.error}` };
-    if (!frame || !source) return { success: false, error: grabErrors.join('; ') || 'no capture source is available' };
-    const located = findViewportRect(frame.rgba, frame.width, frame.height, {
-      viewportWidth: shown.viewportWidth,
-      viewportHeight: shown.viewportHeight,
-      markerSize: shown.markerSize ?? 12,
-    });
+    if (!identity || !frame || !source) return { success: false, error: grabErrors.join('; ') || 'no capture source is available' };
+    const located = findViewportRect(frame.rgba, frame.width, frame.height, markerHint);
     if ('error' in located) return { success: false, error: located.error };
-    return { success: true, windowId, source, rect: located.rect, frameWidth: frame.width, frameHeight: frame.height };
+    return {
+      success: true, windowId: identity.windowId, x11Session: identity.x11Session, source,
+      rect: located.rect, frameWidth: frame.width, frameHeight: frame.height,
+    };
   }
 
   private async _finishVideo(action: VideoAction, recording: ActiveVideoRecording, exit: VideoRecordingExit, frames: number) {

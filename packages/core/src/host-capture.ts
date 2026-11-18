@@ -28,10 +28,12 @@ import * as os from 'os';
 import * as path from 'path';
 import { captureMacStudioWindow, prepareMacHostCapture } from './host-capture-macos.js';
 import { captureLinuxStudioWindow, hasLinuxStudioX11Session, LINUX_NO_STUDIO_DISPLAY_ERROR } from './host-capture-linux.js';
+import type { X11Session } from './host-capture-linux.js';
 
 // macOS uses the app bundle ID; Windows uses the verified executable name;
-// Linux uses `x11` plus the X display name.
-export type HostWindowIdentity = { windowId: number; processId: number; bundleIdentifier: string };
+// Linux uses `x11` plus the X display name, and carries that display and its
+// cookie (x11Session) so the video recorder can open the window there.
+export type HostWindowIdentity = { windowId: number; processId: number; bundleIdentifier: string; x11Session?: X11Session };
 
 // Linux only: processId is the Studio process that owns the target viewport
 // (its X display is searched first); accept picks among several Studio windows

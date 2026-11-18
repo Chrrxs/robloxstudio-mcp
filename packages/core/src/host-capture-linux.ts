@@ -356,7 +356,9 @@ export function decodeWindowGrab(data: Buffer): DecodedWindowGrab {
 async function grabWindow(window: LinuxStudioWindow, deps: LinuxHostCaptureDeps): Promise<HostWindowCapture> {
   const output = await deps.runXTool('python3', ['-c', GRAB_SCRIPT, `0x${window.windowId.toString(16)}`], window.session, MAX_GRAB_BYTES);
   const { width, height, rgba } = decodeWindowGrab(output);
-  const identity: HostWindowIdentity = { windowId: window.windowId, processId: window.processId, bundleIdentifier: `x11${window.session.display}` };
+  const identity: HostWindowIdentity = {
+    windowId: window.windowId, processId: window.processId, bundleIdentifier: `x11${window.session.display}`, x11Session: window.session,
+  };
   return { width, height, rgba, title: window.title, identity };
 }
 

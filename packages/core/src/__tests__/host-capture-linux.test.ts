@@ -127,7 +127,10 @@ describe('captureLinuxStudioWindow', () => {
     );
     const result = await captureLinuxStudioWindow('Place', undefined, { processId: 100 }, deps);
     if (!result.ok) throw new Error(result.error);
-    expect(result.capture.identity).toEqual({ windowId: 0x40, processId: 100, bundleIdentifier: 'x11:124' });
+    // The identity carries the Studio's display and cookie for the video recorder.
+    expect(result.capture.identity).toEqual({
+      windowId: 0x40, processId: 100, bundleIdentifier: 'x11:124', x11Session: { display: ':124', xauthority: '/tmp/a' },
+    });
     expect([...result.capture.rgba.subarray(0, 4)]).toEqual([9, 8, 7, 255]);
     expect(calls.every((call) => JSON.stringify(call.session) === JSON.stringify({ display: ':124', xauthority: '/tmp/a' }))).toBe(true);
     expect(calls.filter((call) => call.executable === 'python3').map((call) => call.args[2])).toEqual(['0x20', '0x40']);
@@ -147,14 +150,14 @@ describe('captureLinuxStudioWindow', () => {
   test('a stale display of an orphaned Studio does not block a live one', async () => {
     const { deps } = fakeHost({ 7: studio('DISPLAY=:99\0'), 8: studio('DISPLAY=:124\0') }, { ':124': [{ id: 0x5, pid: 8, title: 'Place' }] }, [':99']);
     const result = await captureLinuxStudioWindow(undefined, undefined, { processId: 7 }, deps);
-    expect(result.ok && result.capture.identity).toEqual({ windowId: 0x5, processId: 8, bundleIdentifier: 'x11:124' });
+    expect(result.ok && result.capture.identity).toEqual({ windowId: 0x5, processId: 8, bundleIdentifier: 'x11:124', x11Session: { display: ':124' } });
   });
 
   test('re-grabs an identified window directly and refuses a changed owner or display', async () => {
     const host = fakeHost({ 100: studio('DISPLAY=:124\0') }, { ':124': [{ id: 0x40, pid: 100, title: 'Place' }] });
     const identity = { windowId: 0x40, processId: 100, bundleIdentifier: 'x11:124' };
     const again = await captureLinuxStudioWindow('Place', identity, {}, host.deps);
-    expect(again.ok && again.capture.identity).toEqual(identity);
+    expect(again.ok && again.capture.identity).toEqual({ ...identity, x11Session: { display: ':124' } });
     expect(host.calls.some((call) => call.args[0] === '-root')).toBe(false);
 
     for (const changed of [{ ...identity, processId: 101 }, { ...identity, bundleIdentifier: 'x11:5' }, { ...identity, windowId: 0x41 }]) {
