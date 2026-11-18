@@ -598,6 +598,35 @@ describe('HTTP Server', () => {
       });
       expect(bridge.getInstances()).toEqual([]);
 
+      // Retries refresh one entry instead of growing the list.
+      await request(versionedApp).post('/ready').send({ ...READY_BODY, pluginVersion: '1.9.0' }).expect(426);
+      const rejectedHealth = await request(versionedApp).get('/health').expect(200);
+      expect(rejectedHealth.body.pluginConnected).toBe(false);
+      expect(rejectedHealth.body.versionRejections).toEqual([
+        expect.objectContaining({
+          instanceId: READY_BODY.instanceId,
+          role: READY_BODY.role,
+          placeName: READY_BODY.placeName,
+          pluginVersion: '1.9.0',
+          pluginVariant: READY_BODY.pluginVariant,
+          serverVersion: '2.0.0',
+          rejectedAt: expect.any(Number),
+          hint: expect.stringMatching(/^Studio plugin v1\.9\.0 ≠ server v2\.0\.0; restart the MCP server that owns port \d+/),
+        }),
+      ]);
+      expect(rejectedHealth.body.versionRejections[0]).not.toHaveProperty('peerId');
+      const topology = await request(versionedApp).get('/topology').expect(200);
+      expect(topology.body.versionRejections).toHaveLength(1);
+      const connected = JSON.parse((await tools.getConnectedInstances()).content[0].text);
+      expect(connected.rejectedInstances).toEqual([
+        expect.objectContaining({
+          instanceId: READY_BODY.instanceId,
+          pluginVersion: '1.9.0',
+          serverVersion: '2.0.0',
+          hint: expect.stringContaining('restart the MCP server that owns port'),
+        }),
+      ]);
+
       await request(versionedApp).post('/ready').send({
         ...READY_BODY,
         pluginVersion: '2.0.0',
@@ -612,7 +641,8 @@ describe('HTTP Server', () => {
         pluginVariant: 'main',
         serverVersion: '2.0.0',
       });
-      expect(health.body).not.toHaveProperty('versionMismatch');
+      expect(health.body.versionRejections).toEqual([]);
+      expect(JSON.parse((await tools.getConnectedInstances()).content[0].text)).not.toHaveProperty('rejectedInstances');
     });
 
     test('rejects /ready when the server has no version contract', async () => {

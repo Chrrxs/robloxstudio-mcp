@@ -1,3 +1,4 @@
+import * as DeviceScreen from "../DeviceScreen";
 import * as RenderMonitor from "../RenderMonitor";
 
 const CaptureService = game.GetService("CaptureService");
@@ -311,7 +312,7 @@ function captureStudioFrame(wantPng: boolean): unknown | undefined {
 	if (!bufferOk) return { error: `StudioCaptureService:GetBuffer failed: ${tostring(captureBuffer)}` };
 
 	const resolution = capture.Resolution;
-	return {
+	const result: Record<string, unknown> = {
 		success: true,
 		encoding: wantPng ? "png" : "rgba8",
 		source: "StudioCaptureService",
@@ -321,6 +322,19 @@ function captureStudioFrame(wantPng: boolean): unknown | undefined {
 		nativeHeight: nativeH,
 		data: encodeBase64(captureBuffer as buffer),
 	};
+	return withScreenSize(result);
+}
+
+// Under the Device Simulator the full device screen (input space) differs from
+// the viewport and each capture path renders it differently; the server
+// resamples the image to this size. Must run in the DataModel being rendered.
+function withScreenSize<T extends object>(result: T): T {
+	const screen = DeviceScreen.squeezedScreenSize();
+	if (screen === undefined) return result;
+	const record = result as Record<string, unknown>;
+	record.screenWidth = screen.width;
+	record.screenHeight = screen.height;
+	return result;
 }
 
 // Studio-only capture endpoint. Reports `unavailable` (instead of an error) so
@@ -338,7 +352,8 @@ function captureStudio(requestData: Record<string, unknown>): unknown {
 function captureScreenshotData(): unknown {
 	const cap = doCaptureScreenshot();
 	if ("error" in cap) return cap;
-	return readContentToBase64(cap.contentId);
+	const result = readContentToBase64(cap.contentId);
+	return typeIs(result, "table") && !("error" in result) ? withScreenSize(result) : result;
 }
 
 function captureScreenshot(): unknown {
@@ -346,8 +361,10 @@ function captureScreenshot(): unknown {
 }
 
 // Play-mode step 1 (run on the CLIENT): capture only, return the temp id.
+// The edit DM that reads the pixels cannot measure the client's screen.
 function captureBegin(): unknown {
-	return doCaptureScreenshot();
+	const cap = doCaptureScreenshot();
+	return "error" in cap ? cap : withScreenSize(cap);
 }
 
 // Play-mode step 2 (run on EDIT): read pixels from a temp id captured elsewhere.
@@ -357,7 +374,7 @@ function captureRead(requestData: Record<string, unknown>): unknown {
 	return readContentToBase64(contentId);
 }
 
-// Viewport corner markers for the host-side window capture fallback.
+// Viewport edge markers for the host-side window capture fallback.
 //
 // Roblox's own capture APIs can be unavailable for the play viewport:
 // StudioCaptureService reports CanCaptureScreenshot() == false in the play
@@ -366,10 +383,13 @@ function captureRead(requestData: Record<string, unknown>): unknown {
 // there on some Studio builds (observed with the Vulkan renderer). When that
 // happens the MCP server grabs the whole Studio window through the host OS
 // instead and needs to know where the 3D viewport sits inside that window.
-// Four small magenta squares pinned to the viewport corners give it an exact,
-// DPI-independent answer; the server hides them again before the real capture.
+// Four small magenta squares pinned to the middle of the viewport's edges give
+// it an exact, DPI-independent answer; the server hides them again before the
+// real capture. Edge midpoints, not corners: simulated devices with rounded
+// screens (iPad presets) mask the viewport corners.
 const MARKER_GUI_NAME = "__MCPCaptureMarkers";
 const MARKER_SIZE = 12;
+const MARKER_LAYOUT = "edges";
 const MARKER_COLOR = Color3.fromRGB(255, 0, 255);
 // Safety net: the server always hides the markers itself, but if it dies
 // mid-capture the viewport must not stay decorated.
@@ -576,10 +596,10 @@ function showMarkers(captureId: unknown): unknown {
 	gui.ResetOnSpawn = false;
 	gui.ZIndexBehavior = Enum.ZIndexBehavior.Global;
 
-	const corners: Array<[number, number]> = [[0, 0], [1, 0], [0, 1], [1, 1]];
-	for (const [x, y] of corners) {
+	const edges: Array<[number, number]> = [[0, 0.5], [1, 0.5], [0.5, 0], [0.5, 1]];
+	for (const [x, y] of edges) {
 		const frame = new Instance("Frame");
-		frame.Name = `Corner${x}${y}`;
+		frame.Name = `Edge${x}${y}`;
 		frame.AnchorPoint = new Vector2(x, y);
 		frame.Position = UDim2.fromScale(x, y);
 		frame.Size = UDim2.fromOffset(MARKER_SIZE, MARKER_SIZE);
@@ -606,7 +626,7 @@ function showMarkers(captureId: unknown): unknown {
 		gui.Destroy();
 		return { error: "No CurrentCamera after rendering viewport markers." };
 	}
-	return { success: true, ...renderedSize, markerSize: MARKER_SIZE, framesRendered };
+	return { success: true, ...renderedSize, markerSize: MARKER_SIZE, markerLayout: MARKER_LAYOUT, framesRendered };
 }
 
 // prepare temporarily fits a simulated viewport; finish restores it after the
@@ -634,7 +654,7 @@ function captureMarkers(requestData: Record<string, unknown>): unknown {
 	if (action === "query") {
 		const size = viewportSize();
 		if (size === undefined) return { error: "No CurrentCamera; cannot read viewport size." };
-		return { success: true, ...size, markerSize: MARKER_SIZE };
+		return { success: true, ...size, markerSize: MARKER_SIZE, markerLayout: MARKER_LAYOUT };
 	}
 	return { error: `capture-markers action must be "prepare", "finish", "show", "hide" or "query" (got ${tostring(action)})` };
 }

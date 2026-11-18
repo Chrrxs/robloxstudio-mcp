@@ -1291,15 +1291,30 @@ function resolveStudioExeFromVersions(root: string): string {
   // version can start the same interrupted update again.
   const exe = candidates[0];
   const installationDir = path.dirname(exe);
-  const hasIncompleteDownload = readdirSync(installationDir).some((name) => /\.crdownload$/i.test(name));
   const settings = statSync(path.join(installationDir, 'AppSettings.xml'), { throwIfNoEntry: false });
-  if (hasIncompleteDownload || !settings?.isFile() || settings.size === 0) {
-    const reason = hasIncompleteDownload
-      ? 'an unfinished .crdownload download is present'
+  const settingsComplete = settings !== undefined && settings.isFile() && settings.size > 0;
+  const exeModifiedMs = statSync(exe).mtimeMs;
+  // The bootstrapper creates an empty marker when an update starts and does not
+  // always remove it. An empty marker older than both the executable and
+  // AppSettings.xml (written last) is left over from an install that finished.
+  const unfinishedDownloads = readdirSync(installationDir)
+    .filter((name) => /\.crdownload$/i.test(name))
+    .filter((name) => {
+      const marker = statSync(path.join(installationDir, name), { throwIfNoEntry: false });
+      if (!marker) return false;
+      const stale = settingsComplete && marker.isFile() && marker.size === 0 &&
+        marker.mtimeMs < exeModifiedMs && marker.mtimeMs < settings.mtimeMs;
+      return !stale;
+    });
+  if (unfinishedDownloads.length > 0 || !settingsComplete) {
+    const reason = unfinishedDownloads.length > 0
+      ? `an unfinished download is present (${unfinishedDownloads.slice(0, 3).join(', ')}; non-empty or newer than RobloxStudioBeta.exe/AppSettings.xml)`
       : 'AppSettings.xml is missing, empty, or not a regular file';
     throw new Error(
       `Roblox Studio installation/update is incomplete at ${installationDir}: ${reason}. ` +
-      'Complete the installation/update or reinstall Roblox Studio under the owning Windows account before launching.',
+      'Complete the installation/update or reinstall Roblox Studio under the owning Windows account before launching. ' +
+      'If this installation is known to work, pass studio_executable to manage_instance launch, or set ROBLOX_STUDIO_EXE ' +
+      'for the MCP server that owns the Studio port.',
     );
   }
   return exe;

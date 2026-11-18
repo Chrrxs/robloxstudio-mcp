@@ -35,6 +35,8 @@ import type {
 	TransportUpdate,
 } from "../types";
 
+TestHandlers.setClientProxyDescriber(ClientBroker.describeClientProxies);
+
 let assignedRole: string | undefined;
 let lastReadyPlaceKey: string | undefined;
 

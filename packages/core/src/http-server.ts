@@ -8,7 +8,7 @@ import { toNodeHandler } from '@modelcontextprotocol/node';
 import { MAX_SCRIPT_EDITS, RobloxStudioTools } from './tools/index.js';
 import type { ScriptEdit } from './tools/index.js';
 import { BridgeService, isValidOperationId, MAX_OPERATION_WAIT_MS, MultiplayerGroupInUseError, PRIMARY_PROXY_FEATURES, RequestFailure, RoutingFailure } from './bridge-service.js';
-import type { PublicStudioInstance, PublicStudioPeer, RegisterPeerResult } from './bridge-service.js';
+import type { PluginVersionRejection, PublicStudioInstance, PublicStudioPeer, RegisterPeerResult } from './bridge-service.js';
 import type { ToolDefinition } from './tools/definitions.js';
 import { createToolHttpHandler, normalizeToolResult, publicToolErrorBody } from './mcp-runtime.js';
 import type { ToolInvocationContext } from './mcp-runtime.js';
@@ -409,7 +409,6 @@ export function createHttpServer(tools: RobloxStudioTools, bridge: BridgeService
   let lastMCPActivity = 0;
   let mcpServerStartTime = 0;
   const proxyInstances = new Set<string>();
-  const rejectedVersionPeers = new Set<string>();
   const studioTransport = new WebSocketStudioTransport(bridge);
   const transportTokens = new Map<string, string>();
   const boundServers = new Set<http.Server>();
@@ -653,6 +652,12 @@ export function createHttpServer(tools: RobloxStudioTools, bridge: BridgeService
       activeWebSockets: studioTransport.activeSocketCount,
       studioSocketCapacity: MAX_ACTIVE_STUDIO_SOCKETS,
       streamableHttp: !!serverConfig,
+      // Passive callers never see peer IDs; only the instance needs naming.
+      versionRejections: bridge.getVersionRejections().map((rejection) => {
+        const passive: Partial<PluginVersionRejection> = { ...rejection };
+        delete passive.peerId;
+        return passive;
+      }),
     });
   });
 
@@ -733,9 +738,21 @@ export function createHttpServer(tools: RobloxStudioTools, bridge: BridgeService
       return;
     }
     if (pluginVersion !== serverVersion) {
-      if (!rejectedVersionPeers.has(peerId)) {
-        if (rejectedVersionPeers.size >= 256) rejectedVersionPeers.clear();
-        rejectedVersionPeers.add(peerId);
+      const alreadyRejected = bridge.getVersionRejections()
+        .some((rejection) => rejection.peerId === peerId && rejection.instanceId === instanceId);
+      bridge.recordVersionRejection({
+        peerId,
+        instanceId,
+        role,
+        placeId,
+        placeName,
+        dataModelName,
+        pluginVersion,
+        pluginVariant,
+        serverVersion,
+        port: req.socket.localPort,
+      });
+      if (!alreadyRejected) {
         console.error(
           `[plugin-version-rejected] Studio plugin v${pluginVersion} (${pluginVariant}) ` +
           `does not match MCP server v${serverVersion} for ${instanceId}/${role}`,
@@ -932,6 +949,7 @@ export function createHttpServer(tools: RobloxStudioTools, bridge: BridgeService
       ...bridge.getTopologySnapshot(),
       serverVersion: serverConfig?.version,
       proxyFeatures: PRIMARY_PROXY_FEATURES,
+      versionRejections: bridge.getVersionRejections(),
     });
   });
 

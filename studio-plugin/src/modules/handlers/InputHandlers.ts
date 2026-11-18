@@ -13,23 +13,27 @@
 // input would hit interactive CoreGui.
 //
 // Verified live on a play client: move and scroll reach game scripts with
-// the device simulator stopped. Under touch device emulation the client has
-// no mouse: clicks arrive as Touch, scroll still works, but moves never reach
-// the game, so we reject move there instead of returning a false success.
+// the device simulator stopped. Under touch device emulation clicks arrive as
+// Touch and scroll still works, but moves never reach the game, so we reject
+// move there instead of returning a false success. Emulation does not always
+// clear MouseEnabled (it stays true when the simulator was on before the
+// playtest), so a simulated device with TouchEnabled counts too. TouchEnabled
+// alone does not: real touchscreen laptops have a working mouse.
 //
 // SendMouseDelta is deliberately NOT exposed. It only works while the cursor
 // is locked (MouseBehavior.LockCenter), and on desktop Studio holds that lock
 // by pinning and hiding the user's real OS cursor — an unacceptable takeover
 // of the host's input.
 //
-// Coordinate space: SendMouseButton coordinates are viewport pixels matching
-// what capture_screenshot returns (window space, origin at the top-left of the
-// rendered viewport). Pass screenshot pixel coordinates straight through. Note
-// that UserInputService reports input positions in GUI space, which is offset
-// from this by GuiService:GetGuiInset() (~58px on the Y axis) — irrelevant for
-// callers who pick coordinates off a screenshot, which is why we do not
-// translate here.
+// Coordinate space: SendMouseButton coordinates are full-screen pixels with
+// the origin at the top-left of the rendered screen. capture_screenshot
+// returns that grid (under the Device Simulator it is resampled to the full
+// device screen, safe-area insets included), so screenshot pixel coordinates
+// pass straight through. UserInputService reports input positions in GUI
+// space, offset by GuiService:GetGuiInset() (~58px on the Y axis) and any safe
+// area inset: irrelevant for callers who pick coordinates off a screenshot.
 
+import * as DeviceScreen from "../DeviceScreen";
 import * as RenderMonitor from "../RenderMonitor";
 
 const UserInputService = game.GetService("UserInputService");
@@ -67,7 +71,7 @@ const MOUSE_TYPE_MAP: Record<string, Enum.UserInputType> = {
 
 const NO_MOUSE_ERROR =
 	"This client has no mouse (touch device emulation is active), so cursor movement never reaches the game. " +
-	"Stop it with set_device_simulator stopSimulation=true, then retry.";
+	'Use action="click" (delivered as Touch), or stop emulation with set_device_simulator stopSimulation=true and retry.';
 
 const RELEASE_RETRY_NOTE = " The release will be re-sent when the window renders again.";
 
@@ -120,7 +124,12 @@ function simulateMouseInput(requestData: Record<string, unknown>) {
 	const notRendering = RenderMonitor.notRenderingReason();
 	if (notRendering !== undefined && action !== "mouseUp") return { error: notRendering };
 
-	if (action === "move" && !UserInputService.MouseEnabled) {
+	if (
+		action === "move" &&
+		(!UserInputService.MouseEnabled ||
+			(UserInputService.TouchEnabled &&
+				(DeviceScreen.isDeviceSimulating() || DeviceScreen.isScaled(DeviceScreen.measureScreenScale()))))
+	) {
 		return { error: NO_MOUSE_ERROR };
 	}
 

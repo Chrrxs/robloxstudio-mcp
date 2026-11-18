@@ -94,6 +94,9 @@ timeout, and a Studio that finished signing in closes without delay.
 
 The Studio plugin and MCP server must have the same version. `/ready` rejects a
 mismatched plugin rather than keeping an unsupported protocol pair connected.
+Rejections from the last 10 minutes are listed under `rejectedInstances` in
+`get_connected_instances` and `versionRejections` in `/health`, and a
+`manage_instance launch` that times out for this reason says so.
 
 Restart the MCP server with `--auto-install-plugin`, then fully close and reopen
 Studio to load the matching bundled plugin.
@@ -118,7 +121,8 @@ whether the Studio window is focused. When the frame is a single colour, or
 Studio's capture errors outright, the server captures the Studio window through
 the host OS and crops it to the viewport:
 
-- The plugin briefly pins four magenta squares to the viewport corners so the
+- The plugin briefly pins four magenta squares to the middle of the viewport's
+  edges (not the corners, which rounded simulated device screens hide) so the
   crop is exact under any dock layout or DPI scale; they are removed before the
   final capture, and the located position is reused for 60 seconds.
 - On Windows the capture uses `PrintWindow(PW_RENDERFULLCONTENT)` via
@@ -227,7 +231,7 @@ window on the MCP host instead:
   on-screen, not minimized and the same size while it records: when FFmpeg can
   no longer read the window, the recording stops early and the tool reports a
   failure.
-- Before recording, it locates the viewport with the same corner markers as the
+- Before recording, it locates the viewport with the same edge markers as the
   `capture_screenshot` host fallback. It grabs those markers through the same
   capture source as the recording, then removes them before recording starts.
   The crop matches the recorded frames at any DPI scale. During a playtest it
@@ -239,6 +243,9 @@ window on the MCP host instead:
 - A device-simulator viewport must use Fit to Window scaling (or simulation
   must be stopped). Other scaling modes move the viewport once the markers are
   removed.
+- When no capture source shows the four markers, the error lists the
+  marker-coloured blobs it found, and the frame is saved as a PNG under
+  `<temp>/robloxstudio-mcp/capture-diagnostics` (newest 5 kept).
 - `action=record` blocks for up to 30 seconds. `action=start` records until
   `action=stop` or 5 minutes. Recordings without `output_path` go to
   `<temp>/robloxstudio-mcp/videos`. Only the newest 20 there are kept.

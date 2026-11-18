@@ -45,9 +45,11 @@ import {
   isNativeLinuxHost,
   isUniformFrame,
   linuxHostCaptureUnavailableReason,
+  locateViewportInFrame,
   prepareHostWindowCapture,
+  saveViewportMarkerFrame,
 } from '../host-capture.js';
-import type { HostCaptureOptions, HostCaptureResult, HostWindowIdentity, ViewportRect } from '../host-capture.js';
+import type { HostCaptureOptions, HostCaptureResult, HostWindowIdentity, ViewportMarkerHint, ViewportRect } from '../host-capture.js';
 import { composeContactSheet, type ContactSheet } from '../contact-sheet.js';
 import {
   createFfmpegVideoBackend,
@@ -94,6 +96,7 @@ export interface ScriptEdit {
 }
 
 export const MAX_SCRIPT_EDITS = 100;
+const PLUGIN_CONNECTION_TIMEOUT_REASON = 'Studio launched, but the MCP plugin did not connect before timeout.';
 
 type RawImageCaptureResponse = {
   success?: boolean;
@@ -105,6 +108,8 @@ type RawImageCaptureResponse = {
   height?: number;
   nativeWidth?: number;
   nativeHeight?: number;
+  screenWidth?: number;
+  screenHeight?: number;
   data?: string;
   instancePath?: string;
   instanceName?: string;
@@ -130,6 +135,7 @@ type ViewportMarkerResponse = {
   viewportWidth?: number;
   viewportHeight?: number;
   markerSize?: number;
+  markerLayout?: string;
 };
 
 type HostViewportCaptureResult =
@@ -137,7 +143,14 @@ type HostViewportCaptureResult =
   | { success: false; error: string };
 
 // One viewport frame before encoding; hostNote explains how it was captured.
-type RawViewportCaptureOk = { success: true; response: RawImageCaptureResponse; hostNote: string; studioFastPathUnavailable?: string };
+type RawViewportCaptureOk = {
+  success: true;
+  response: RawImageCaptureResponse;
+  hostNote: string;
+  studioFastPathUnavailable?: string;
+  // Set when a Device Simulator capture was resampled to the full device screen.
+  deviceScreen?: { width: number; height: number };
+};
 type RawViewportCapture = RawViewportCaptureOk | { success: false; error: string; studioFastPathUnavailable?: string };
 
 // `atMs` is when the frame was taken, relative to the first frame.
@@ -425,6 +438,44 @@ function encodeImageFromRgbaResponse(
   return {
     buffer: rgbaToJpeg(rgbaBuffer, response.width, response.height, quality),
     mimeType: 'image/jpeg',
+  };
+}
+
+// Under the Device Simulator the plugin reports the full device screen, the
+// space VirtualInput reads (safe-area insets included). StudioCaptureService
+// squeezes that screen into the viewport size and CaptureService returns it
+// unsqueezed but smaller, so either image is resampled to the screen size.
+// A plugin-side transport downscale (width < nativeWidth) is kept in proportion,
+// with nativeWidth/Height becoming the screen size so the downscale message
+// maps back to screen pixels. Returns undefined when nothing needs resampling.
+function resampleCaptureToDeviceScreen(response: RawImageCaptureResponse): RawImageCaptureResponse | undefined {
+  const { screenWidth, screenHeight, width, height, data } = response;
+  if (!screenWidth || !screenHeight || !width || !height || !data || response.source === 'host-window') return undefined;
+  const targetWidth = Math.max(1, Math.round(screenWidth * width / (response.nativeWidth ?? width)));
+  const targetHeight = Math.max(1, Math.round(screenHeight * height / (response.nativeHeight ?? height)));
+
+  let source: { width: number; height: number; rgba: Buffer };
+  if (response.encoding === 'png') {
+    source = decodePngBase64ToRgba(data);
+  } else {
+    source = { width, height, rgba: Buffer.from(data, 'base64') };
+    if (source.rgba.length !== width * height * 4) {
+      throw new Error(`raw capture is ${source.rgba.length} bytes, expected ${width * height * 4} for ${width}x${height}`);
+    }
+  }
+  const resampled = cropToViewport(
+    source.rgba, source.width, source.height,
+    { x: 0, y: 0, width: source.width, height: source.height },
+    targetWidth, targetHeight,
+  );
+  return {
+    ...response,
+    encoding: 'rgba8',
+    width: resampled.width,
+    height: resampled.height,
+    nativeWidth: screenWidth,
+    nativeHeight: screenHeight,
+    data: resampled.rgba.toString('base64'),
   };
 }
 
@@ -1213,6 +1264,13 @@ error("Unsupported network simulation operation: " .. tostring(operation), 0)
 `.trim();
 }
 
+// Only for captures resampled into the simulated device screen.
+function deviceScreenNote(screen?: { width: number; height: number }): string {
+  if (screen === undefined) return '';
+  return ` Device Simulator: the image covers the full ${screen.width}x${screen.height} device screen ` +
+    `(safe-area insets included), the same space simulate_mouse_input uses, so coordinates read off it work directly.`;
+}
+
 function normalizeDeviceSimulatorResolution(value: unknown): { width: number; height: number } | undefined {
   if (value === undefined) return undefined;
   if (typeof value !== 'object' || value === null || Array.isArray(value)) {
@@ -1461,6 +1519,8 @@ error("Unsupported device simulator operation: " .. tostring(opts.operation), 0)
 
 const isClientRole = (role: string): boolean => /^client-\d+$/.test(role);
 const isRuntimeRole = (role: string): boolean => role === 'server' || isClientRole(role);
+// Matches the plugin broker's BRIDGE_STALE_SECONDS: ten missed heartbeats.
+const CLIENT_BRIDGE_STALE_MS = 10_000;
 const anyRole = (): boolean => true;
 // Targets that address a whole scope rather than one Peer.
 const SCOPE_WIDE_TARGETS: ReadonlySet<string> = new Set(['all', 'all-clients', 'edit-and-clients']);
@@ -4047,7 +4107,10 @@ export class RobloxStudioTools {
   }
 
 
-  private _matchesManagedLaunch(record: ManagedStudioInstance, instance: PublicStudioPeer): boolean {
+  private _matchesManagedLaunch(
+    record: ManagedStudioInstance,
+    instance: Pick<PublicStudioPeer, 'placeId' | 'placeName' | 'dataModelName'>,
+  ): boolean {
     if (record.source === 'published_place') {
       return record.placeId !== undefined && instance.placeId === record.placeId;
     }
@@ -4107,6 +4170,17 @@ export class RobloxStudioTools {
     return undefined;
   }
 
+  // The instance manager only knows the plugin never registered; a version
+  // rejection recorded during the launch window is the actionable cause.
+  private _managedFailureReason(record: ManagedStudioInstance): string | undefined {
+    if (record.failureReason !== PLUGIN_CONNECTION_TIMEOUT_REASON) return record.failureReason;
+    const rejection = this.bridge.getVersionRejections()
+      .filter((candidate) => candidate.role === 'edit' && candidate.rejectedAt >= record.launchedAt - 1000)
+      .filter((candidate) => this._matchesManagedLaunch(record, candidate))
+      .at(-1);
+    return rejection ? `Studio connected but was rejected: ${rejection.hint}` : record.failureReason;
+  }
+
   private _managedStatus(record: ManagedStudioInstance): Record<string, unknown> {
     const connected = record.instanceId
       ? this.bridge.getPublicPeers().filter((peer) => peer.instanceId === record.instanceId)
@@ -4146,7 +4220,7 @@ export class RobloxStudioTools {
       failed_at: record.failedAt ? new Date(record.failedAt).toISOString() : undefined,
       exited_at: record.exitedAt ? new Date(record.exitedAt).toISOString() : undefined,
       exit_code: record.exitCode,
-      failure_reason: record.failureReason,
+      failure_reason: this._managedFailureReason(record),
       connected: connected.length > 0,
       roles: connected.map((instance) => instance.role).sort(),
     };
@@ -4408,7 +4482,7 @@ export class RobloxStudioTools {
     const connected = await this._waitForManagedEditConnection(record, beforeKeys, timeoutMs);
     if (!connected) {
       if (record.state === 'launching') {
-        await this.instanceManager.markFailed(record, 'Studio launched, but the MCP plugin did not connect before timeout.');
+        await this.instanceManager.markFailed(record, PLUGIN_CONNECTION_TIMEOUT_REASON);
       }
       if (record.closedAt === undefined) {
         try {
@@ -4419,7 +4493,7 @@ export class RobloxStudioTools {
       }
       return this._textResult({
         ...this._managedStatus(record),
-        error: record.failureReason ?? 'Studio launched, but the MCP plugin did not connect before timeout.',
+        error: this._managedFailureReason(record) ?? PLUGIN_CONNECTION_TIMEOUT_REASON,
       });
     }
 
@@ -4675,6 +4749,68 @@ export class RobloxStudioTools {
     };
   }
 
+  // The client Peers the server plugin still brokers, or undefined from a plugin
+  // that does not report them.
+  private _brokeredClients(serverState: unknown) {
+    if (serverState === null || typeof serverState !== 'object' || !('clients' in serverState)) return undefined;
+    const clients = serverState.clients;
+    if (!Array.isArray(clients)) return undefined;
+    return clients.flatMap((client: unknown) => {
+      if (client === null || typeof client !== 'object' || !('peerId' in client) || typeof client.peerId !== 'string') return [];
+      return [{
+        peerId: client.peerId,
+        role: 'role' in client && typeof client.role === 'string' ? client.role : undefined,
+        playerPresent: !('playerPresent' in client) || client.playerPresent !== false,
+        heartbeatAgeMs: 'heartbeatAgeMs' in client && typeof client.heartbeatAgeMs === 'number' ? client.heartbeatAgeMs : undefined,
+      }];
+    });
+  }
+
+  // The server stops brokering a client as soon as its Player leaves, but the
+  // proxy's disconnect notice can lag or be lost, and the Peer would then linger
+  // until expiry. Drop such clients now. A client that registered after the state
+  // request began can be missing from that snapshot while it joins, so only
+  // clients connected before it count.
+  private async _pruneDepartedClients(
+    instanceId: string,
+    serverState: StudioToolResponse | undefined,
+    requestedAt: number,
+  ): Promise<string[]> {
+    const clients = this._brokeredClients(serverState);
+    const server = this._peerForRoleInScope(instanceId, 'server');
+    if (!clients || !server) return [];
+    const brokered = new Set(clients.filter((client) => client.playerPresent).map((client) => client.peerId));
+    const departed = this.bridge.getPeersInScope(instanceId).filter((peer) =>
+      isClientRole(peer.role) &&
+      peer.transportPeerId === server.transportPeerId &&
+      peer.instanceId !== server.instanceId &&
+      peer.connectedAt < requestedAt &&
+      !brokered.has(peer.peerId));
+    for (const peer of departed) await this.bridge.unregisterInstanceIdEverywhere(peer.instanceId);
+    return departed.map((peer) => peer.peerId);
+  }
+
+  // After a failed leave request, asks the server whether the client's Player is
+  // still there; if not, forgets the client so the role does not linger.
+  private async _clientAlreadyLeft(scopeInstanceId: string, clientPeerId: string): Promise<boolean> {
+    const refresh = this.bridge.refreshTopologyForRouting();
+    if (refresh) await refresh;
+    const peer = this.bridge.getPeersInScope(scopeInstanceId).find((candidate) => candidate.peerId === clientPeerId);
+    if (!peer) return true;
+    const server = this._peerForRoleInScope(scopeInstanceId, 'server');
+    if (!server || server.instanceId === peer.instanceId || server.transportPeerId !== peer.transportPeerId) return false;
+    let serverState: StudioToolResponse;
+    try {
+      serverState = await this._requestPeer('/api/multiplayer-test-state', {}, server.peerId, 5000);
+    } catch {
+      return false;
+    }
+    const clients = this._brokeredClients(serverState);
+    if (!clients || clients.some((entry) => entry.peerId === clientPeerId && entry.playerPresent)) return false;
+    await this.bridge.unregisterInstanceIdEverywhere(peer.instanceId);
+    return true;
+  }
+
   private async _buildMultiplayerState(instanceId: string): Promise<Record<string, unknown>> {
     const refresh = this.bridge.refreshTopologyForRouting();
     if (refresh) await refresh;
@@ -4708,11 +4844,18 @@ export class RobloxStudioTools {
     }
 
     if (server) {
+      const requestedAt = Date.now();
       try {
         serverState = await this._request('/api/multiplayer-test-state', {}, instanceId, 'server');
         body.server = serverState;
       } catch (err) {
         body.server = { error: err instanceof Error ? err.message : String(err) };
+      }
+      const departed = await this._pruneDepartedClients(instanceId, serverState, requestedAt);
+      if (departed.length > 0) {
+        const remaining = peers.filter((peer) => !departed.includes(peer.peerId));
+        body.peers = remaining;
+        body.peerCount = remaining.length;
       }
     }
 
@@ -4830,12 +4973,24 @@ export class RobloxStudioTools {
               ? [peer.role]
               : [])
         : [];
+      // The server reports each client's bridge heartbeat age; a silent bridge
+      // usually means the client's Studio process is gone, while its Player
+      // stays on the server until the engine's connection timeout.
+      const unresponsiveClients = (this._brokeredClients(state.server) ?? []).flatMap((client) =>
+        client.playerPresent && client.role !== undefined && roles.includes(client.role) &&
+        (client.heartbeatAgeMs ?? 0) > CLIENT_BRIDGE_STALE_MS
+          ? [client.role]
+          : []);
       return {
         phase: state.phase,
         multiplayerGroupId: typeof state.multiplayerGroupId === 'string' ? state.multiplayerGroupId : undefined,
         roles,
         playerCount: typeof state.playerCount === 'number' ? state.playerCount : undefined,
         error: typeof state.error === 'string' ? state.error : undefined,
+        ...(unresponsiveClients.length > 0 ? {
+          unresponsiveClients,
+          hint: 'These clients\' MCP bridges sent no heartbeat for over 10 s: their Studio process may have exited or be frozen. leave_client removes them.',
+        } : {}),
       };
     };
 
@@ -4936,7 +5091,9 @@ export class RobloxStudioTools {
       return this._textResult(body.success === true && body.left === true ? {
         success: true,
         action,
-        message: 'Client left.',
+        message: typeof body.message === 'string' && (body.alreadyLeft === true || body.removedByServer === true)
+          ? body.message
+          : 'Client left.',
         roles: Array.isArray(body.roles) ? body.roles : undefined,
       } : {
         success: false,
@@ -5127,12 +5284,33 @@ export class RobloxStudioTools {
       candidate.instanceIds.includes(clientTarget.instanceId)
     );
     const scopeInstanceId = group?.controllerInstanceId ?? clientTarget.instanceId;
-    const response = await this._requestPeer(
-      '/api/multiplayer-test-leave-client',
-      {},
-      clientTarget.targetPeerId,
-    );
-    if (response?.error) {
+    let response: StudioToolResponse | undefined;
+    let requestFailed = false;
+    let requestError: unknown;
+    try {
+      response = await this._requestPeer(
+        '/api/multiplayer-test-leave-client',
+        {},
+        clientTarget.targetPeerId,
+      );
+    } catch (error) {
+      // The client's proxy can disconnect while the request is pending.
+      requestFailed = true;
+      requestError = error;
+    }
+    if (requestFailed || response?.error) {
+      // A client whose Player already left cannot answer; that is not a failure to leave.
+      if (await this._clientAlreadyLeft(scopeInstanceId, clientTarget.targetPeerId)) {
+        return this._textResult({
+          success: true,
+          left: true,
+          alreadyLeft: true,
+          message: `${clientTarget.role} had already left (its Player is no longer in the server); removed it.`,
+          roles: this._rolesForScope(scopeInstanceId),
+          state: await this._buildMultiplayerState(scopeInstanceId),
+        });
+      }
+      if (requestFailed) throw requestError;
       return { content: [{ type: 'text', text: JSON.stringify(response) }] };
     }
     const wait = await this._waitForRuntimeRoles(
@@ -5223,9 +5401,20 @@ export class RobloxStudioTools {
   async getConnectedInstances() {
     const refresh = this.bridge.refreshTopologyForRouting();
     if (refresh) await refresh;
+    const rejectedInstances = this.bridge.getVersionRejections().map((rejection) => ({
+      instanceId: rejection.instanceId,
+      role: rejection.role,
+      placeName: rejection.placeName,
+      pluginVersion: rejection.pluginVersion,
+      pluginVariant: rejection.pluginVariant,
+      serverVersion: rejection.serverVersion,
+      rejectedAt: new Date(rejection.rejectedAt).toISOString(),
+      hint: rejection.hint,
+    }));
     return this._textResult({
       instances: this.bridge.getConnectedInstances(),
       multiplayerGroups: this.bridge.getConnectedMultiplayerGroups(),
+      ...(rejectedInstances.length > 0 ? { rejectedInstances } : {}),
     });
   }
 
@@ -6454,13 +6643,22 @@ export class RobloxStudioTools {
         // the client to get the rbxtemp:// id, then read it back in the edit DM —
         // the rbxtemp handle is process-scoped and the edit/plugin identity is
         // allowed to promote it into a readable EditableImage.
-        const begin = await this._callSingle('/api/capture-begin', {}, targetRole, instanceId) as { contentId?: string; error?: string };
+        const begin = await this._callSingle('/api/capture-begin', {}, targetRole, instanceId) as {
+          contentId?: string;
+          error?: string;
+          screenWidth?: number;
+          screenHeight?: number;
+        };
         if (begin.error) {
           response = { error: begin.error };
         } else if (!begin.contentId) {
           response = { error: 'Screenshot capture failed: no content id returned from client.' };
         } else {
           response = await this._callSingle('/api/capture-read', { contentId: begin.contentId }, 'edit', instanceId) as RawImageCaptureResponse;
+          // Only the client DM can measure its simulated screen; the edit DM reads pixels.
+          if (!response.error && begin.screenWidth && begin.screenHeight) {
+            response = { ...response, screenWidth: begin.screenWidth, screenHeight: begin.screenHeight };
+          }
         }
       } else {
         // Edit mode: capture and read back in the same (edit) context.
@@ -6522,10 +6720,24 @@ export class RobloxStudioTools {
       }
       return { success: false, error: text, studioFastPathUnavailable };
     }
+    let deviceScreen: { width: number; height: number } | undefined;
+    try {
+      const resampled = resampleCaptureToDeviceScreen(response);
+      if (resampled) {
+        deviceScreen = { width: resampled.nativeWidth ?? 0, height: resampled.nativeHeight ?? 0 };
+        response = resampled;
+      }
+    } catch (error) {
+      return {
+        success: false,
+        error: `Could not resample the screenshot to the simulated device screen: ${error instanceof Error ? error.message : String(error)}`,
+        studioFastPathUnavailable,
+      };
+    }
     if (response.width === undefined || response.height === undefined) {
       return { success: false, error: 'Screenshot response missing dimensions.', studioFastPathUnavailable };
     }
-    return { success: true, response, hostNote, studioFastPathUnavailable };
+    return { success: true, response, hostNote, studioFastPathUnavailable, ...(deviceScreen ? { deviceScreen } : {}) };
   }
 
   private _encodeViewportCapture(
@@ -6534,7 +6746,7 @@ export class RobloxStudioTools {
     quality: number | undefined,
     maxBytes: number,
   ): EncodedViewportCapture {
-    const { response, hostNote, studioFastPathUnavailable } = raw;
+    const { response, hostNote, studioFastPathUnavailable, deviceScreen } = raw;
     const q = quality === undefined ? 92 : Math.max(1, Math.min(100, Math.floor(quality)));
     const w = response.width;
     const h = response.height;
@@ -6606,7 +6818,8 @@ export class RobloxStudioTools {
           `coordinates ((0,0) at the top-left).`
         : `Screenshot ${w}x${h}px (${fmt}${fmt === 'jpeg' ? ` q${usedQ}` : ''})${note}. ` +
           `For simulate_mouse_input, x/y are pixel coordinates in this exact image with (0,0) at the ` +
-          `top-left; it is not downscaled, so use coordinates as you read them off the image.`) + hostNote;
+          `top-left; it is not downscaled, so use coordinates as you read them off the image.`) +
+      deviceScreenNote(deviceScreen) + hostNote;
 
     return {
       success: true,
@@ -6788,10 +7001,11 @@ export class RobloxStudioTools {
     }
     if (shown.error) return { success: false, error: `could not draw viewport markers: ${shown.error}` };
     const markerSize = shown.markerSize ?? 12;
-    const markerHint = {
+    const markerHint: ViewportMarkerHint = {
       viewportWidth: shown.viewportWidth ?? viewportWidth,
       viewportHeight: shown.viewportHeight ?? viewportHeight,
       markerSize,
+      markerLayout: shown.markerLayout === 'edges' ? 'edges' : 'corners',
     };
 
     let markerGrab: HostCaptureResult;
@@ -6807,7 +7021,7 @@ export class RobloxStudioTools {
     if (hidden.error) return { success: false, error: `could not hide viewport markers: ${hidden.error}` };
     if (!markerGrab.ok) return { success: false, error: markerGrab.error };
 
-    const located = findViewportRect(markerGrab.capture.rgba, markerGrab.capture.width, markerGrab.capture.height, markerHint);
+    const located = locateViewportInFrame(markerGrab.capture.rgba, markerGrab.capture.width, markerGrab.capture.height, markerHint, 'window');
     if ('error' in located) return { success: false, error: located.error };
 
     const cleanGrab = await this.hostWindowCapture(titleHint, markerGrab.capture.identity, { processId });
@@ -7211,13 +7425,19 @@ export class RobloxStudioTools {
     if (shown.error || !shown.viewportWidth || !shown.viewportHeight) {
       return { success: false, error: `could not draw viewport markers: ${shown.error ?? 'no viewport size reported'}` };
     }
-    const markerHint = { viewportWidth: shown.viewportWidth, viewportHeight: shown.viewportHeight, markerSize: shown.markerSize ?? 12 };
-    // The first source that can read the window records it: the marker frame
-    // and the recording must come from the same capture path.
+    // Each source that can read the window is tried until its frame shows the
+    // markers: the marker frame and the recording must come from the same
+    // capture path, and one path can miss markers another sees.
+    const markerHint: ViewportMarkerHint = {
+      viewportWidth: shown.viewportWidth,
+      viewportHeight: shown.viewportHeight,
+      markerSize: shown.markerSize ?? 12,
+      markerLayout: shown.markerLayout === 'edges' ? 'edges' : 'corners',
+    };
     let identity = preidentified;
-    let frame: { width: number; height: number; rgba: Buffer } | undefined;
-    let source: CaptureSource | undefined;
-    const grabErrors: string[] = [];
+    let found: { source: CaptureSource; rect: ViewportRect; frameWidth: number; frameHeight: number } | undefined;
+    // Grab errors stay strings; unread frames are saved once the markers are gone.
+    const failures: Array<string | { source: CaptureSource; frame: { width: number; height: number; rgba: Buffer }; error: string }> = [];
     let hidden: ViewportMarkerResponse;
     try {
       if (identity === undefined) {
@@ -7226,31 +7446,45 @@ export class RobloxStudioTools {
           processId: await this._hostCaptureProcessId(instanceId),
           accept: (capture) => !('error' in findViewportRect(capture.rgba, capture.width, capture.height, markerHint)),
         });
-        if (!window.ok) grabErrors.push(window.error);
-        else if (window.capture.identity === undefined) grabErrors.push('the host window capture did not identify the Studio window');
+        if (!window.ok) failures.push(window.error);
+        else if (window.capture.identity === undefined) failures.push('the host window capture did not identify the Studio window');
         else identity = window.capture.identity;
       }
       if (identity !== undefined) {
         for (const candidate of sources) {
+          let frame: { width: number; height: number; rgba: Buffer };
           try {
             frame = await this.videoRecorder.grabWindowFrame(ffmpegPath, identity.windowId, candidate, identity.x11Session);
-            source = candidate;
-            break;
           } catch (error) {
-            grabErrors.push(errorMessage(error));
+            failures.push(errorMessage(error));
+            continue;
           }
+          const located = findViewportRect(frame.rgba, frame.width, frame.height, markerHint);
+          if ('rect' in located) {
+            found = { source: candidate, rect: located.rect, frameWidth: frame.width, frameHeight: frame.height };
+            break;
+          }
+          failures.push({ source: candidate, frame, error: located.error });
         }
       }
     } finally {
       hidden = await this._callViewportMarkers('hide', targetRole, instanceId, captureId);
     }
     if (hidden.error) return { success: false, error: `could not hide viewport markers: ${hidden.error}` };
-    if (!identity || !frame || !source) return { success: false, error: grabErrors.join('; ') || 'no capture source is available' };
-    const located = findViewportRect(frame.rgba, frame.width, frame.height, markerHint);
-    if ('error' in located) return { success: false, error: located.error };
+    if (identity && found) return { success: true, windowId: identity.windowId, x11Session: identity.x11Session, ...found };
+    if (failures.every((failure) => typeof failure === 'string')) {
+      return { success: false, error: failures.join('; ') || 'no capture source is available' };
+    }
+    const reasons = failures.map((failure) => {
+      if (typeof failure === 'string') return failure;
+      const saved = saveViewportMarkerFrame(failure.frame.rgba, failure.frame.width, failure.frame.height, failure.source);
+      return `${failure.source} frame: ${failure.error}${saved ? `; marker frame saved to ${saved}` : ''}`;
+    }).join('; ');
     return {
-      success: true, windowId: identity.windowId, x11Session: identity.x11Session, source,
-      rect: located.rect, frameWidth: frame.width, frameHeight: frame.height,
+      success: false,
+      error:
+        `${reasons}. capture_screenshot reads the window another way and may still work. Keep the Studio viewport visible and ` +
+        'uncovered; with a simulated device, try a larger Studio window, another device, or set_device_simulator stopSimulation=true, then record again.',
     };
   }
 

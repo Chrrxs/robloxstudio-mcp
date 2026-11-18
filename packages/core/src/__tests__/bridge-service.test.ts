@@ -28,6 +28,34 @@ describe('BridgeService', () => {
     jest.useRealTimers();
   });
 
+  describe('plugin version rejections', () => {
+    const rejection = (instanceId: string, peerId = `${instanceId}-peer`) => ({
+      peerId, instanceId, role: 'edit', placeId: 0, placeName: 'Old.rbxl', dataModelName: 'Old.rbxl',
+      pluginVersion: '3.4.4', pluginVariant: 'main', serverVersion: '3.5.0', port: 58741,
+    });
+
+    test('dedupes per instance and peer, caps the list, and expires old entries', () => {
+      bridge.recordVersionRejection(rejection('instance:a'), 1_000);
+      bridge.recordVersionRejection(rejection('instance:a'), 2_000);
+      expect(bridge.getVersionRejections(2_000)).toEqual([expect.objectContaining({ instanceId: 'instance:a', rejectedAt: 2_000 })]);
+
+      for (let index = 0; index < 40; index++) bridge.recordVersionRejection(rejection(`instance:${index}`), 3_000);
+      const capped = bridge.getVersionRejections(3_000);
+      expect(capped).toHaveLength(32);
+      expect(capped.map((entry) => entry.instanceId)).not.toContain('instance:a');
+      expect(capped.at(-1)?.instanceId).toBe('instance:39');
+
+      expect(bridge.getVersionRejections(3_000 + 10 * 60_000 + 1)).toEqual([]);
+    });
+
+    test('clears an instance rejection once it registers successfully', () => {
+      bridge.recordVersionRejection(rejection('instance:a'));
+      bridge.recordVersionRejection(rejection('instance:b'));
+      register(bridge, { peerId: 'instance:a-peer', instanceId: 'instance:a', role: 'edit' });
+      expect(bridge.getVersionRejections().map((entry) => entry.instanceId)).toEqual(['instance:b']);
+    });
+  });
+
   describe('Peer and Instance topology', () => {
     test('aggregates Peers by opaque process Instance ID', () => {
       register(bridge, {

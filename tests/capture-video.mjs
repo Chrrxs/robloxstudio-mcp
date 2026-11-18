@@ -85,8 +85,13 @@ await runTest('capture_video records a dancing character', async ({ track }) => 
     const result = await client.rpc('tools/call', {
       name: 'capture_video', arguments: { instance_id: process.env.MCP_INSTANCE_ID, ...args },
     }, timeoutMs);
-    assert.notEqual(result.isError, true, JSON.stringify(result));
     const body = JSON.parse(result.content.find((item) => item.type === 'text').text);
+    // The saved marker frame lives in the test account's temp; keep a copy for diagnosis.
+    const savedFrame = typeof body.error === 'string' ? /marker frame saved to (.+?\.png)/.exec(body.error)?.[1] : undefined;
+    if (savedFrame && keepDirectory) {
+      fs.copyFileSync(savedFrame.replace(/\\\\/g, '\\'), path.join(keepDirectory, `${stamp}-${path.win32.basename(savedFrame)}`));
+    }
+    assert.notEqual(result.isError, true, JSON.stringify(result));
     assert.equal(body.error, undefined, JSON.stringify(body));
     const image = result.content.find((item) => item.type === 'image');
     let jpeg;
@@ -135,9 +140,23 @@ await runTest('capture_video records a dancing character', async ({ track }) => 
     const sampled = await video({ action: 'storyboard', input_path: take.body.video.path, start_ms: 10000, end_ms: 12000, frames: 2 });
     assert.ok(sampled.jpeg);
     assert.deepEqual(sampled.body.storyboard.times_ms, [10500, 11500]);
+
+    // Issue #183: an iPad preset fitted to the window must record, not fail on
+    // a marker-coloured strip in the frame.
+    await client.callTool('set_device_simulator', {
+      target: 'client-1', deviceId: 'ipad_10th_generation', orientation: 'LandscapeRight', scalingMode: 'FitToWindow',
+    });
+    await delay(1500);
+    const ipad = await video({ action: 'record', duration_ms: 3000, fps: 10, frames: 1, output_path: outputPath('ipad-fit') });
+    recorded.push(ipad.body.video.path);
+    assert.ok(ipad.body.video.duration_ms >= 2500, JSON.stringify(ipad.body.video));
+    const aspect = ipad.body.video.width / ipad.body.video.height;
+    assert.ok(Math.abs(aspect - 1180 / 820) < 0.05, `iPad landscape aspect, got ${JSON.stringify(ipad.body.video)}`);
+    console.log(`iPad FitToWindow recorded: ${JSON.stringify(ipad.body.video)}`);
   } finally {
     await client.callTool('eval_client_runtime', { target: 'client-1', code: CLEANUP }).catch(() => {});
     await safeStopPlaytest(client);
+    await client.callTool('set_device_simulator', { target: 'edit', stopSimulation: true }).catch(() => {});
     if (!keepDirectory) for (const file of recorded) fs.rmSync(file, { force: true });
   }
   if (keepDirectory) console.log(`Kept recordings in ${keepDirectory}`);
