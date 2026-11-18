@@ -40,6 +40,65 @@ import type {
 // Real platform, before tests override process.platform: the fake ffmpeg is a shell script.
 const linuxOnly = process.platform === 'linux' ? test : test.skip;
 
+describe('ffmpeg x11grab runs', () => {
+  const platformDescriptor = Object.getOwnPropertyDescriptor(process, 'platform')!;
+  const x11Session = { display: ':118' };
+  let directory: string;
+
+  beforeEach(() => {
+    directory = fs.mkdtempSync(path.join(os.tmpdir(), 'video-x11grab-'));
+    Object.defineProperty(process, 'platform', { value: 'linux' });
+    jest.spyOn(hostEnvironment, 'detectWslWindowsHost').mockReturnValue(false);
+  });
+
+  afterEach(() => {
+    jest.restoreAllMocks();
+    Object.defineProperty(process, 'platform', platformDescriptor);
+    fs.rmSync(directory, { recursive: true, force: true });
+  });
+
+  // A stand-in ffmpeg that prints `stderr` and exits 0, as x11grab does when
+  // the window goes away.
+  function fakeFfmpeg(name: string, stderr: string[]): string {
+    const ffmpegPath = path.join(directory, name);
+    fs.writeFileSync(ffmpegPath, ['#!/bin/sh', ...stderr.map((line) => `echo '${line}' >&2`), 'exit 0', ''].join('\n'), { mode: 0o755 });
+    return ffmpegPath;
+  }
+
+  const cutShort = [
+    '[x11grab @ 0x5654f56884c0] Cannot get the image data event_error: response_type:0 error_code:8 sequence:77',
+    '[in#0/x11grab @ 0x5654f56883c0] Error during demuxing: Permission denied',
+  ];
+
+  function record(ffmpegPath: string, source: CaptureSource) {
+    return createFfmpegVideoBackend({}).start({
+      ffmpegPath, encoder: 'libx264', source, windowId: 7, x11Session, crop: { x: 0, y: 0, width: 100, height: 100 },
+      frameWidth: 100, frameHeight: 100, fps: 30, maxDurationMs: 1000, outputPath: path.join(directory, 'out.mp4'),
+    }).done;
+  }
+
+  linuxOnly('reports a recording that x11grab cut short as a failure, despite exit code 0', async () => {
+    expect(await record(fakeFfmpeg('cut', cutShort), 'x11grab')).toEqual({
+      ok: false,
+      error: 'ffmpeg stopped reading the Studio window (minimized, resized or moved off-screen?): Cannot get the image data ' +
+        'event_error: response_type:0 error_code:8 sequence:77 | Error during demuxing: Permission denied',
+    });
+    expect(await record(fakeFfmpeg('clean', []), 'x11grab')).toEqual({ ok: true, reason: 'duration_limit' });
+  });
+
+  linuxOnly('includes ffmpeg errors when the marker grab returns no bytes', async () => {
+    const ffmpegPath = fakeFfmpeg('grab', [
+      'Output #0, rawvideo, to \'pipe:\':',
+      '  Stream #0:0: Video: rawvideo (RGBA / 0x41424752), rgba(pc, gbr/unknown/unknown, progressive), 400x200, q=2-31',
+      ...cutShort,
+    ]);
+    await expect(createFfmpegVideoBackend({}).grabWindowFrame(ffmpegPath, 7, 'x11grab', x11Session)).rejects.toThrow(
+      'ffmpeg returned 0 bytes for a 400x200 frame: Cannot get the image data event_error: response_type:0 error_code:8 sequence:77 | ' +
+      'Error during demuxing: Permission denied',
+    );
+  });
+});
+
 describe('video recorder helpers', () => {
   test('crops to even dimensions expressed per edge', () => {
     expect(gfxcaptureCrop({ x: 401, y: 170, width: 1357, height: 889 }, 2138, 1360)).toEqual({
@@ -120,15 +179,24 @@ describe('video recorder helpers', () => {
       fs.rmSync(directory, { recursive: true, force: true });
     });
 
-    // A stand-in ffmpeg that logs its arguments and answers the probe's queries.
-    function fakeFfmpeg(x11grab: boolean): { ffmpegPath: string; calls: () => string[] } {
-      const ffmpegPath = path.join(directory, x11grab ? 'ffmpeg' : 'ffmpeg-no-x11grab');
+    // A stand-in ffmpeg that logs its arguments and answers the probe's queries,
+    // as a current build or one missing what the recording needs.
+    type FakeBuild = 'current' | 'no-x11grab' | 'pre-4.4' | 'pre-5.1';
+    function fakeFfmpeg(build: FakeBuild = 'current'): { ffmpegPath: string; calls: () => string[] } {
+      const ffmpegPath = path.join(directory, `ffmpeg-${build}`);
       const log = path.join(directory, 'calls.log');
+      const x11grab = build === 'no-x11grab'
+        ? `echo "Unknown format 'x11grab'."`
+        : `printf 'Demuxer x11grab [X11 screen capture, using XCB]:\\nxcbgrab indev AVOptions:\\n${build === 'pre-4.4' ? '' : '  -window_id         <int>        .D......... Window to capture.\\n'}  -x                 <int>        .D......... Initial x coordinate.\\n'`;
+      const long = build === 'pre-5.1'
+        ? "printf -- '-vsync              set video sync method globally\\n'"
+        : "printf -- '-vsync              set video sync method globally; deprecated, use -fps_mode\\n-fps_mode           set framerate mode for matching video streams; overrides vsync\\n'";
       fs.writeFileSync(ffmpegPath, [
         '#!/bin/sh',
         `echo "$*" >> '${log}'`,
         'case "$*" in',
-        x11grab ? '  *demuxer=x11grab*) echo "Demuxer x11grab [X11 screen capture, using XCB]:" ;;' : '  *demuxer=x11grab*) echo "Unknown format \'x11grab\'." ;;',
+        `  *demuxer=x11grab*) ${x11grab} ;;`,
+        `  *'-h long'*) ${long} ;;`,
         "  *-encoders*) printf ' V....D libx264              libx264 H.264 / AVC\\n V....D mpeg4                MPEG-4 part 2\\n' ;;",
         'esac',
         '',
@@ -139,24 +207,34 @@ describe('video recorder helpers', () => {
     linuxOnly('finds x11grab and libx264 on native Linux without probing the Windows sources', async () => {
       Object.defineProperty(process, 'platform', { value: 'linux' });
       jest.spyOn(hostEnvironment, 'detectWslWindowsHost').mockReturnValue(false);
-      const { ffmpegPath, calls } = fakeFfmpeg(true);
+      const { ffmpegPath, calls } = fakeFfmpeg();
       const probe = await createFfmpegVideoBackend({ ROBLOX_STUDIO_FFMPEG: ffmpegPath }).probe();
       expect(probe).toEqual({ ok: true, ffmpegPath, encoder: 'libx264', sources: ['x11grab'] });
-      expect(calls()).toEqual(['-hide_banner -h demuxer=x11grab', '-hide_banner -encoders']);
+      expect(calls()).toEqual(['-hide_banner -h demuxer=x11grab', '-hide_banner -h long', '-hide_banner -encoders']);
     });
 
     linuxOnly('explains an ffmpeg without x11grab on native Linux', async () => {
       Object.defineProperty(process, 'platform', { value: 'linux' });
       jest.spyOn(hostEnvironment, 'detectWslWindowsHost').mockReturnValue(false);
-      const { ffmpegPath } = fakeFfmpeg(false);
+      const { ffmpegPath } = fakeFfmpeg('no-x11grab');
       const probe = await createFfmpegVideoBackend({ ROBLOX_STUDIO_FFMPEG: ffmpegPath }).probe();
-      expect(probe).toEqual({ ok: false, error: expect.stringMatching(/has no x11grab input device\. Install FFmpeg with the x11grab device/) });
+      expect(probe).toEqual({ ok: false, error: expect.stringMatching(/has no x11grab input device\. FFmpeg 5\.1 or newer with x11grab is required/) });
+    });
+
+    // x11grab's -window_id arrived in FFmpeg 4.4 and -fps_mode in 5.1; older
+    // distribution builds would fail only once recording starts.
+    linuxOnly.each(['pre-4.4', 'pre-5.1'] as const)('rejects an FFmpeg build that cannot run the recording (%s)', async (build) => {
+      Object.defineProperty(process, 'platform', { value: 'linux' });
+      jest.spyOn(hostEnvironment, 'detectWslWindowsHost').mockReturnValue(false);
+      const { ffmpegPath } = fakeFfmpeg(build);
+      const probe = await createFfmpegVideoBackend({ ROBLOX_STUDIO_FFMPEG: ffmpegPath }).probe();
+      expect(probe).toEqual({ ok: false, error: expect.stringMatching(/is too old.*FFmpeg 5\.1 or newer with x11grab is required/) });
     });
 
     linuxOnly('keeps probing the Windows sources on WSL', async () => {
       Object.defineProperty(process, 'platform', { value: 'linux' });
       jest.spyOn(hostEnvironment, 'detectWslWindowsHost').mockReturnValue(true);
-      const { ffmpegPath, calls } = fakeFfmpeg(true);
+      const { ffmpegPath, calls } = fakeFfmpeg();
       const probe = await createFfmpegVideoBackend({ ROBLOX_STUDIO_FFMPEG: ffmpegPath }).probe();
       expect(probe).toEqual({ ok: false, error: expect.stringContaining('neither through gfxcapture') });
       expect(calls()).toEqual(['-hide_banner -h filter=gfxcapture', '-hide_banner -h demuxer=gdigrab']);
@@ -488,10 +566,15 @@ describe('capture_video tool', () => {
     expect(backend.started).toHaveLength(1);
   });
 
-  test('records native Linux through x11grab on the X display of the registered Studio', async () => {
+  function nativeLinux(studioDisplay = true) {
     Object.defineProperty(process, 'platform', { value: 'linux' });
     jest.spyOn(hostEnvironment, 'detectWslWindowsHost').mockReturnValue(false);
+    jest.spyOn(hostEnvironment, 'hasLinuxStudioDisplay').mockReturnValue(studioDisplay);
     jest.spyOn(StudioInstanceManager.prototype, 'get').mockResolvedValue({ nativeProcessId: 4242 } as never);
+  }
+
+  test('records native Linux through x11grab on the X display of the registered Studio', async () => {
+    nativeLinux();
     const x11Session = { display: ':118', xauthority: '/tmp/xauth_118' };
     const { tools, backend, hostCapture } = makeTools({
       identity: { windowId: 0x1200007, processId: 4242, bundleIdentifier: 'x11:118', x11Session },
@@ -499,12 +582,47 @@ describe('capture_video tool', () => {
     backend.probeResult = { ok: true, ffmpegPath: 'ffmpeg', encoder: 'libx264', sources: ['x11grab'] };
     const started = textOf(await tools.captureVideo({ action: 'start', output_path: path.join(outputDirectory, 'a.mp4') }));
     expect(started).toMatchObject({ recording: true, target: 'edit', video: { source: 'x11grab', width: 300, height: 120 } });
-    expect(hostCapture).toHaveBeenCalledWith('TestPlace', undefined, { processId: 4242 });
+    expect(hostCapture).toHaveBeenCalledWith('TestPlace', undefined, { processId: 4242, accept: expect.any(Function) });
     expect(backend.grabbedWindows).toEqual([[0x1200007, 'x11grab']]);
     expect(backend.grabbedSessions).toEqual([x11Session]);
     expect(backend.started[0]).toMatchObject({
       source: 'x11grab', windowId: 0x1200007, x11Session, crop: { x: 50, y: 30, width: 300, height: 120 }, frameWidth: 400, frameHeight: 200,
     });
+  });
+
+  test('on native Linux records the Studio window that shows the markers', async () => {
+    nativeLinux();
+    const { tools, backend, hostCapture, markers, events } = makeTools();
+    backend.probeResult = { ok: true, ffmpegPath: 'ffmpeg', encoder: 'libx264', sources: ['x11grab'] };
+    // Multiplayer: the server and a client window share one display; only
+    // the target's window shows the markers.
+    const window = (windowId: number, withMarkers: boolean) => ({
+      ...windowFrame(400, 200, { x: 50, y: 30, width: 300, height: 120 }, withMarkers),
+      title: 'TestPlace - Roblox Studio',
+      identity: { windowId, processId: windowId, bundleIdentifier: 'x11:1', x11Session: { display: ':1' } },
+    });
+    const markersAtGrab: boolean[] = [];
+    hostCapture.mockImplementation(async (_titleHint, _identity, options) => {
+      markersAtGrab.push(markers.shown);
+      const candidates = [window(0x10, false), window(0x20, markers.shown)];
+      return { ok: true, capture: candidates.find((capture) => options?.accept?.(capture)) ?? candidates[0] };
+    });
+    const started = textOf(await tools.captureVideo({ action: 'start', output_path: path.join(outputDirectory, 'a.mp4') }));
+    expect(started).toMatchObject({ recording: true, video: { source: 'x11grab' } });
+    expect(markersAtGrab).toEqual([true]);
+    expect(events).toEqual(['prepare', 'show', 'hide', 'finish']);
+    expect(backend.grabbedWindows).toEqual([[0x20, 'x11grab']]);
+    expect(backend.started[0]).toMatchObject({ windowId: 0x20, x11Session: { display: ':1' } });
+  });
+
+  test('on native Linux without a Studio on an X display, draws no markers', async () => {
+    nativeLinux(false);
+    const { tools, backend, hostCapture, request } = makeTools();
+    backend.probeResult = { ok: true, ffmpegPath: 'ffmpeg', encoder: 'libx264', sources: ['x11grab'] };
+    const result = textOf(await tools.captureVideo({ action: 'start', output_path: path.join(outputDirectory, 'a.mp4') }));
+    expect(result.error).toContain('no running Roblox Studio process exposes an X11 DISPLAY');
+    expect(request).not.toHaveBeenCalled();
+    expect(hostCapture).not.toHaveBeenCalled();
   });
 
   test('fails before touching Studio when FFmpeg is unusable or the platform is unsupported', async () => {

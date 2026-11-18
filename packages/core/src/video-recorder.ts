@@ -207,7 +207,7 @@ export async function pruneDefaultVideos(
 
 function ffmpegInstallHint(nativeLinux = isNativeLinux()): string {
   if (nativeLinux) {
-    return 'Install FFmpeg with the x11grab device (for example `sudo apt install ffmpeg`) and restart the MCP server, ' +
+    return 'FFmpeg 5.1 or newer with x11grab is required: install it (for example `sudo apt install ffmpeg`) and restart the MCP server, ' +
       'or point ROBLOX_STUDIO_FFMPEG at ffmpeg.';
   }
   return 'Install FFmpeg 8.0 or newer (for example `winget install Gyan.FFmpeg`) and restart the MCP server, ' +
@@ -435,11 +435,18 @@ class FfmpegRecording implements VideoRecordingProcess {
     });
     this.child.on('close', (code) => {
       live.delete(this);
+      const detail = stderrSummary(stderr);
+      // x11grab exits 0 when the window is unmapped, shrunk or moved off-screen
+      // mid-recording ("Cannot get the image data"), leaving a cut-short clip.
+      // A clean run at -loglevel error prints nothing, so any output is that.
+      if (code === 0 && options.source === 'x11grab' && detail) {
+        resolve({ ok: false, error: `ffmpeg stopped reading the Studio window (minimized, resized or moved off-screen?): ${detail}` });
+        return;
+      }
       if (code === 0) {
         resolve({ ok: true, reason: this.stopRequested ? 'stopped' : 'duration_limit' });
         return;
       }
-      const detail = stderrSummary(stderr);
       resolve({ ok: false, error: `ffmpeg exited with code ${code}${detail ? `: ${detail}` : ''}` });
     });
   }
@@ -492,8 +499,17 @@ export function createFfmpegVideoBackend(env: NodeJS.ProcessEnv = process.env): 
         const sources: CaptureSource[] = [];
         const nativeLinux = isNativeLinux();
         if (nativeLinux) {
-          const demuxer = await runFfmpeg(ffmpegPath, ['-hide_banner', '-h', 'demuxer=x11grab'], PROBE_TIMEOUT_MS);
-          if (demuxer.stdout.toString('utf8').includes('Demuxer x11grab')) sources.push('x11grab');
+          // Distribution builds can be old: x11grab's -window_id needs FFmpeg
+          // 4.4 and the recording's -fps_mode 5.1, so check both options.
+          const demuxer = (await runFfmpeg(ffmpegPath, ['-hide_banner', '-h', 'demuxer=x11grab'], PROBE_TIMEOUT_MS)).stdout.toString('utf8');
+          if (!demuxer.includes('Demuxer x11grab')) {
+            return { ok: false, error: `ffmpeg (${ffmpegPath}) has no x11grab input device. ${ffmpegInstallHint(true)}` };
+          }
+          const options = (await runFfmpeg(ffmpegPath, ['-hide_banner', '-h', 'long'], PROBE_TIMEOUT_MS)).stdout.toString('utf8');
+          if (!/^\s*-window_id\s/m.test(demuxer) || !/^-fps_mode\s/m.test(options)) {
+            return { ok: false, error: `ffmpeg (${ffmpegPath}) is too old: its x11grab lacks -window_id or it lacks -fps_mode. ${ffmpegInstallHint(true)}` };
+          }
+          sources.push('x11grab');
         } else {
           const filter = await runFfmpeg(ffmpegPath, ['-hide_banner', '-h', 'filter=gfxcapture'], PROBE_TIMEOUT_MS);
           if (filter.stdout.toString('utf8').includes('Filter gfxcapture')) sources.push('gfxcapture');
@@ -503,9 +519,7 @@ export function createFfmpegVideoBackend(env: NodeJS.ProcessEnv = process.env): 
         if (sources.length === 0) {
           return {
             ok: false,
-            error: nativeLinux
-              ? `ffmpeg (${ffmpegPath}) has no x11grab input device. ${ffmpegInstallHint(true)}`
-              : `ffmpeg (${ffmpegPath}) can capture neither through gfxcapture (Windows Graphics Capture) nor gdigrab. ${ffmpegInstallHint(false)}`,
+            error: `ffmpeg (${ffmpegPath}) can capture neither through gfxcapture (Windows Graphics Capture) nor gdigrab. ${ffmpegInstallHint(false)}`,
           };
         }
         const encoders = (await runFfmpeg(ffmpegPath, ['-hide_banner', '-encoders'], PROBE_TIMEOUT_MS)).stdout.toString('utf8');
@@ -524,15 +538,17 @@ export function createFfmpegVideoBackend(env: NodeJS.ProcessEnv = process.env): 
       const env = source === 'x11grab' && x11Session ? x11grabEnv(x11Session) : process.env;
       const result = await runFfmpeg(ffmpegPath, grabFrameArgs(source, windowId, x11Session), GRAB_TIMEOUT_MS, MAX_GRAB_BYTES, env);
       const output = /Output #0[\s\S]*?Video:\s*rawvideo[^\n]*?,\s*(\d+)x(\d+)/.exec(result.stderr);
+      // This run logs at info level for the frame size; report only its errors.
+      const errors = stderrSummary(result.stderr.split(/\r?\n/).filter((line) => /fail|error|invalid|cannot|unable/i.test(line)).join('\n'));
       if (result.code !== 0 || !output) {
-        // This run logs at info level for the frame size; report only its errors.
-        const errors = result.stderr.split(/\r?\n/).filter((line) => /fail|error|invalid|cannot|unable/i.test(line)).join('\n');
-        throw new Error(`could not capture the Studio window with ffmpeg ${source}: ${stderrSummary(errors) || `exit code ${result.code}`}`);
+        throw new Error(`could not capture the Studio window with ffmpeg ${source}: ${errors || `exit code ${result.code}`}`);
       }
       const width = Number(output[1]);
       const height = Number(output[2]);
       if (result.stdout.length !== width * height * 4) {
-        throw new Error(`ffmpeg returned ${result.stdout.length} bytes for a ${width}x${height} frame`);
+        // An empty frame (x11grab could not read an unmapped window) says why only on stderr.
+        const why = result.stdout.length === 0 && errors ? `: ${errors}` : '';
+        throw new Error(`ffmpeg returned ${result.stdout.length} bytes for a ${width}x${height} frame${why}`);
       }
       return { width, height, rgba: result.stdout };
     },
