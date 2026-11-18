@@ -314,12 +314,14 @@ describe('MCP v2 tool runtime', () => {
     // eval tools (about 660 characters); 53,000 adds pending tool calls and the
     // response-budget cap to get_request_status (about 80 characters);
     // 53,257 adds playtest ready_timeout_s and notes that start's timeout
-    // aliases it (257 characters).
-    expect(serialized.length).toBeLessThanOrEqual(53_257);
+    // aliases it (257 characters); 53,552 adds capture_screenshot frames,
+    // interval_ms and grid (295 characters).
+    expect(serialized.length).toBeLessThanOrEqual(53_552);
     expect(catalog.filter((tool) => tool.outputSchema)).toHaveLength(50);
     expect(catalog.every((tool) => tool.description.length <= 120)).toBe(true);
     expect(inspectorCatalog).toHaveLength(26);
-    expect(JSON.stringify(inspectorCatalog).length).toBeLessThanOrEqual(22_000);
+    // 22,300 admits the sequence options on the read-only capture_screenshot.
+    expect(JSON.stringify(inspectorCatalog).length).toBeLessThanOrEqual(22_300);
     expect(byName.get('selection')?.outputSchema).toEqual({
       type: 'object',
       additionalProperties: true,

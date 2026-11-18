@@ -1604,7 +1604,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
   {
     name: 'capture_screenshot',
     category: 'read',
-    description: 'Use to capture the Studio viewport or map input coordinates.',
+    description: 'Use to capture the Studio viewport, a frame sequence or contact sheet, or map input coordinates.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -1616,6 +1616,18 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
         quality: {
           type: 'number',
           description: 'JPEG quality 1-100; defaults to 92. Ignored for png.'
+        },
+        frames: {
+          type: 'integer',
+          description: 'Frames to capture, 1-16; default 1.'
+        },
+        interval_ms: {
+          type: 'integer',
+          description: 'Gap between frames in ms; default 500.'
+        },
+        grid: {
+          type: 'boolean',
+          description: 'Return the frames as one numbered contact sheet.'
         },
         instance_id: {
           type: 'string',

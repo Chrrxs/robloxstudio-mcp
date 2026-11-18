@@ -353,7 +353,7 @@ export function serverInstructions(definitions: readonly ToolDefinition[]): stri
     instructions.push('Capture a screenshot before sending mouse input so its pixel coordinates match the viewport.');
   }
   if (has('capture_video')) {
-    instructions.push('Use capture_video, not repeated capture_screenshot calls, to review motion such as cutscenes, tweens, or animations.');
+    instructions.push('Use capture_video, not repeated capture_screenshot calls, to review motion such as cutscenes, tweens, or animations where it can record; a capture_screenshot contact sheet (frames with grid) is a cheap short sample that works everywhere.');
   }
   if (has('selection', 'capture_screenshot')) {
     instructions.push(

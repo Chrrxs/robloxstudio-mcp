@@ -350,6 +350,17 @@ describe('HTTP Server', () => {
       expect(evalClientRuntime).toHaveBeenLastCalledWith('return 1', 'client-2', undefined, undefined, wait, signal);
     });
 
+    test('capture_screenshot handler forwards the sequence options', async () => {
+      const captureScreenshot = jest.fn(async () => ({ content: [] }));
+      const fakeTools = { captureScreenshot } as unknown as RobloxStudioTools;
+
+      await TOOL_HANDLERS.capture_screenshot(fakeTools, { frames: 4, interval_ms: 250, grid: true });
+
+      expect(captureScreenshot).toHaveBeenLastCalledWith(undefined, undefined, undefined, {
+        frames: 4, interval_ms: 250, grid: true,
+      });
+    });
+
     test('selection handler forwards the lifecycle action and options together', async () => {
       const selection = jest.fn(async () => ({ content: [] }));
       const fakeTools = { selection } as unknown as RobloxStudioTools;
