@@ -40,11 +40,14 @@ import {
   findViewportRect,
   hostCaptureUnsupportedReason,
   isHostCaptureDisabled,
+  isHostCapturePreferred,
   isHostCaptureSupported,
+  isNativeLinuxHost,
   isUniformFrame,
+  linuxHostCaptureUnavailableReason,
   prepareHostWindowCapture,
 } from '../host-capture.js';
-import type { HostCaptureResult, HostWindowIdentity, ViewportRect } from '../host-capture.js';
+import type { HostCaptureOptions, HostCaptureResult, HostWindowIdentity, ViewportRect } from '../host-capture.js';
 import {
   createFfmpegVideoBackend,
   defaultVideoPath,
@@ -132,8 +135,17 @@ type HostViewportCaptureResult =
   | { success: true; response: RawImageCaptureResponse }
   | { success: false; error: string };
 
+// One viewport frame before encoding; hostNote explains how it was captured.
+type RawViewportCapture =
+  | { success: true; response: RawImageCaptureResponse; hostNote: string; studioFastPathUnavailable?: string }
+  | { success: false; error: string; studioFastPathUnavailable?: string };
+
 // Injection seam so tests can stand in for the host OS helper.
-export type HostWindowCaptureFn = (titleHint?: string, expectedIdentity?: HostWindowIdentity) => Promise<HostCaptureResult>;
+export type HostWindowCaptureFn = (
+  titleHint?: string,
+  expectedIdentity?: HostWindowIdentity,
+  options?: HostCaptureOptions,
+) => Promise<HostCaptureResult>;
 
 function sameHostWindowIdentity(actual: HostWindowIdentity | undefined, expected: HostWindowIdentity): boolean {
   return actual?.windowId === expected.windowId && actual.processId === expected.processId
@@ -1410,6 +1422,9 @@ export class RobloxStudioTools {
   private hostWindowCapture: HostWindowCaptureFn = captureStudioWindow;
   private hostViewportRects = new Map<string, HostViewportRectCacheEntry>();
   private viewportCaptureQueues = new Map<string, Promise<void>>();
+  // Linux: the Studio process behind each Instance. Registry lookups expire; a
+  // process found through its window does not.
+  private hostCaptureProcessIds = new Map<string, { processId?: number; cachedAt: number; discovered?: boolean }>();
   // capture_video: the host recorder and the recordings started per Instance.
   private videoRecorder: VideoRecorderBackend = createFfmpegVideoBackend();
   private videoRecordings = new Map<string, ActiveVideoRecording>();
@@ -6178,15 +6193,21 @@ export class RobloxStudioTools {
     }
   }
 
-  private async _captureViewportImageNow(
+  // One unencoded viewport frame, from Studio or from the host window.
+  private async _captureViewportRawNow(
     instanceId: string,
     targetRole: string,
-    format?: string,
-    quality?: number,
-    maxBytes: number = MAX_INLINE_IMAGE_BYTES,
-  ): Promise<EncodedViewportCapture> {
-    const fmt: 'jpeg' | 'png' = format === 'png' ? 'png' : 'jpeg';
-    const q = quality === undefined ? 92 : Math.max(1, Math.min(100, Math.floor(quality)));
+    fmt: 'jpeg' | 'png',
+  ): Promise<RawViewportCapture> {
+    // Native Linux runs Studio under Wine, where Studio's own capture of the
+    // play viewport fails or comes back black. When the Studio process is
+    // known, grab its X11 window first and use Studio's capture as the fallback.
+    let hostFirstError: string | undefined;
+    if (isHostCapturePreferred() && await this._hostCaptureProcessId(instanceId) !== undefined) {
+      const host = await this._captureViewportFromHostWindow(instanceId, targetRole);
+      if (host.success) return { success: true, response: host.response, hostNote: '' };
+      hostFirstError = host.error;
+    }
 
     // Fast path: StudioCaptureService (Studio-only, FFlag-gated) reads the
     // framebuffer directly — no CaptureService callback, no EditableImage
@@ -6216,6 +6237,15 @@ export class RobloxStudioTools {
       (response.error?.includes('/api/capture-studio') ?? false);
     const studioFastPathUnavailable = studioFastPathMissing ? response.unavailable ?? response.error : undefined;
 
+    if (studioFastPathMissing && hostFirstError === undefined && isHostCapturePreferred()) {
+      // A Studio this server did not launch has no known process, so it skips
+      // the host-first grab above. Grab its window before falling back to
+      // CaptureService, which hands Wine play clients black frames; every
+      // Studio display is searched and the viewport markers pick the window.
+      const host = await this._captureViewportFromHostWindow(instanceId, targetRole);
+      if (host.success) return { success: true, response: host.response, hostNote: '', studioFastPathUnavailable };
+      hostFirstError = host.error;
+    }
     if (studioFastPathMissing) {
       if (targetRole.startsWith('client-')) {
         // Play mode. The running game VM can trigger CaptureScreenshot but can't
@@ -6256,7 +6286,15 @@ export class RobloxStudioTools {
       response = { ...response, error: `Could not decode Studio's screenshot: ${error instanceof Error ? error.message : String(error)}` };
       hostReason = `Studio's capture failed (${response.error})`;
     }
-    if (hostReason !== undefined) {
+    if (hostFirstError !== undefined) {
+      if (response.error) {
+        response = { ...response, error: `${response.error} Host window capture failed first: ${hostFirstError}.` };
+      } else {
+        hostNote = hostReason === undefined
+          ? ` Host window capture failed (${hostFirstError}), so this came from Studio's ${response.source ?? 'capture'}.`
+          : ` Warning: host window capture failed (${hostFirstError}) and ${hostReason}, so this image may be blank.`;
+      }
+    } else if (hostReason !== undefined) {
       const host = await this._captureViewportFromHostWindow(instanceId, targetRole);
       if (host.success) {
         response = host.response;
@@ -6283,7 +6321,21 @@ export class RobloxStudioTools {
       }
       return { success: false, error: text, studioFastPathUnavailable };
     }
+    return { success: true, response, hostNote, studioFastPathUnavailable };
+  }
 
+  private async _captureViewportImageNow(
+    instanceId: string,
+    targetRole: string,
+    format?: string,
+    quality?: number,
+    maxBytes: number = MAX_INLINE_IMAGE_BYTES,
+  ): Promise<EncodedViewportCapture> {
+    const fmt: 'jpeg' | 'png' = format === 'png' ? 'png' : 'jpeg';
+    const raw = await this._captureViewportRawNow(instanceId, targetRole, fmt);
+    if (!raw.success) return raw;
+    const { response, hostNote, studioFastPathUnavailable } = raw;
+    const q = quality === undefined ? 92 : Math.max(1, Math.min(100, Math.floor(quality)));
     const w = response.width;
     const h = response.height;
     if (w === undefined || h === undefined) {
@@ -6394,6 +6446,31 @@ export class RobloxStudioTools {
     return await this._callSingle('/api/capture-markers', { action, ...(captureId ? { captureId } : {}) }, targetRole, instanceId) as ViewportMarkerResponse;
   }
 
+  // Linux only: the managed Studio process that owns the viewport, so the X11
+  // grab searches its display first. Multiplayer client instances are not
+  // managed; their group's controller runs on the same display. Cached as long
+  // as a located viewport, because the lookup snapshots processes.
+  private async _hostCaptureProcessId(instanceId: string): Promise<number | undefined> {
+    // WSL grabs through the Windows helper, which takes no process hint.
+    if (!isNativeLinuxHost()) return undefined;
+    const cached = this.hostCaptureProcessIds.get(instanceId);
+    if (cached && (cached.discovered || Date.now() - cached.cachedAt < HOST_VIEWPORT_RECT_TTL_MS)) return cached.processId;
+    const controller = this.bridge.getMultiplayerGroups()
+      .find((group) => group.instanceIds.includes(instanceId))?.controllerInstanceId;
+    let processId: number | undefined;
+    for (const candidate of [instanceId, controller]) {
+      if (candidate === undefined || processId !== undefined) continue;
+      try {
+        const record = await this.instanceManager.get(candidate);
+        if (record && record.closedAt === undefined) processId = record.nativeProcessId;
+      } catch {
+        // Without a hint every Studio display is searched; capture still works.
+      }
+    }
+    this.hostCaptureProcessIds.set(instanceId, { processId, cachedAt: Date.now() });
+    return processId;
+  }
+
   // Always restore the simulator, including failures and cached window grabs.
   private async _captureViewportFromHostWindow(
     instanceId: string,
@@ -6407,6 +6484,8 @@ export class RobloxStudioTools {
     if (!isHostCaptureSupported()) {
       return { success: false, error: hostCaptureUnsupportedReason() };
     }
+    const linuxUnavailable = linuxHostCaptureUnavailableReason();
+    if (linuxUnavailable !== undefined) return { success: false, error: linuxUnavailable };
     // Cold Swift compilation must finish before the plugin starts its bounded
     // marker transaction. Injected backends need no host helper preparation.
     if (this.hostWindowCapture === captureStudioWindow) {
@@ -6416,6 +6495,8 @@ export class RobloxStudioTools {
         return { success: false, error: `could not prepare host capture: ${error instanceof Error ? error.message : String(error)}` };
       }
     }
+    // The registry lookup (a process snapshot) overlaps the plugin round trip.
+    const processIdLookup = this._hostCaptureProcessId(instanceId);
     let prepared: ViewportMarkerResponse | undefined;
     let result: HostViewportCaptureResult;
     try {
@@ -6424,7 +6505,7 @@ export class RobloxStudioTools {
         result = { success: false, error: prepared.error ?? 'the Studio plugin could not prepare host capture (update the plugin)' };
       } else {
         if (prepared.viewportChanged) this.hostViewportRects.delete(`${instanceId}|${targetRole}`);
-        result = await this._capturePreparedViewportFromHostWindow(instanceId, targetRole, prepared);
+        result = await this._capturePreparedViewportFromHostWindow(instanceId, targetRole, prepared, await processIdLookup);
       }
     } catch (error) {
       result = { success: false, error: `host capture failed: ${error instanceof Error ? error.message : String(error)}` };
@@ -6447,10 +6528,13 @@ export class RobloxStudioTools {
   // of `targetRole`. The plugin pins magenta markers to the viewport corners
   // so the crop is exact regardless of Studio's dock layout or DPI scale; the
   // located rect is cached briefly so repeated captures cost one window grab.
+  // On Linux the markers also pick the right window when several Studio
+  // windows share a display (multiplayer server and clients).
   private async _capturePreparedViewportFromHostWindow(
     instanceId: string,
     targetRole: string,
     prepared: ViewportMarkerResponse,
+    processId?: number,
   ): Promise<HostViewportCaptureResult> {
     const titleHint = this._hostCaptureTitleHint(instanceId);
     const cacheKey = `${instanceId}|${targetRole}`;
@@ -6481,7 +6565,7 @@ export class RobloxStudioTools {
       cached.viewportWidth === viewportWidth &&
       cached.viewportHeight === viewportHeight
     ) {
-      const grab = await this.hostWindowCapture(titleHint, cached.identity);
+      const grab = await this.hostWindowCapture(titleHint, cached.identity, { processId });
       if (!grab.ok) return { success: false, error: grab.error };
       if (cached.identity !== undefined && !sameHostWindowIdentity(grab.capture.identity, cached.identity)) {
         return { success: false, error: 'the Studio window identity changed since locating the viewport; retry the capture' };
@@ -6504,25 +6588,29 @@ export class RobloxStudioTools {
     }
     if (shown.error) return { success: false, error: `could not draw viewport markers: ${shown.error}` };
     const markerSize = shown.markerSize ?? 12;
+    const markerHint = {
+      viewportWidth: shown.viewportWidth ?? viewportWidth,
+      viewportHeight: shown.viewportHeight ?? viewportHeight,
+      markerSize,
+    };
 
     let markerGrab: HostCaptureResult;
     let hidden: ViewportMarkerResponse;
     try {
-      markerGrab = await this.hostWindowCapture(titleHint);
+      markerGrab = await this.hostWindowCapture(titleHint, undefined, {
+        processId,
+        accept: (capture) => !('error' in findViewportRect(capture.rgba, capture.width, capture.height, markerHint)),
+      });
     } finally {
       hidden = await this._callViewportMarkers('hide', targetRole, instanceId, prepared.captureId);
     }
     if (hidden.error) return { success: false, error: `could not hide viewport markers: ${hidden.error}` };
     if (!markerGrab.ok) return { success: false, error: markerGrab.error };
 
-    const located = findViewportRect(markerGrab.capture.rgba, markerGrab.capture.width, markerGrab.capture.height, {
-      viewportWidth: shown.viewportWidth ?? viewportWidth,
-      viewportHeight: shown.viewportHeight ?? viewportHeight,
-      markerSize,
-    });
+    const located = findViewportRect(markerGrab.capture.rgba, markerGrab.capture.width, markerGrab.capture.height, markerHint);
     if ('error' in located) return { success: false, error: located.error };
 
-    const cleanGrab = await this.hostWindowCapture(titleHint, markerGrab.capture.identity);
+    const cleanGrab = await this.hostWindowCapture(titleHint, markerGrab.capture.identity, { processId });
     if (!cleanGrab.ok) return { success: false, error: cleanGrab.error };
     if (markerGrab.capture.identity !== undefined && !sameHostWindowIdentity(cleanGrab.capture.identity, markerGrab.capture.identity)) {
       return { success: false, error: 'the Studio window identity changed while locating the viewport; retry the capture' };
@@ -6540,6 +6628,12 @@ export class RobloxStudioTools {
       viewportHeight,
       cachedAt: Date.now(),
     });
+    // A Studio missing from the registry is named by the window that showed
+    // its markers, so later captures go host-first.
+    const windowProcessId = markerGrab.capture.identity?.processId;
+    if (processId === undefined && windowProcessId !== undefined) {
+      this.hostCaptureProcessIds.set(instanceId, { processId: windowProcessId, cachedAt: Date.now(), discovered: true });
+    }
     return {
       success: true,
       response: this._hostResponseFromCrop(cleanGrab.capture.rgba, cleanGrab.capture.width, cleanGrab.capture.height, located.rect, viewportWidth, viewportHeight),

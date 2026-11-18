@@ -3,12 +3,14 @@ import {
   findViewportRect,
   hostEnvironment,
   isHostCaptureDisabled,
+  isHostCapturePreferred,
   isHostCaptureSupported,
   hostCaptureUnsupportedReason,
   isUniformFrame,
   windowsCaptureEnvironment,
 } from '../host-capture.js';
 import type { HostCaptureResult } from '../host-capture.js';
+import { LINUX_NO_STUDIO_DISPLAY_ERROR } from '../host-capture-linux.js';
 import * as hostCaptureModule from '../host-capture.js';
 import { BridgeService } from '../bridge-service.js';
 import { RobloxStudioTools } from '../tools/index.js';
@@ -181,11 +183,17 @@ describe('isHostCaptureDisabled', () => {
 describe('host capture on WSL', () => {
   afterEach(() => jest.restoreAllMocks());
 
-  test('is supported on a Linux host only when it is WSL with Windows interop', () => {
+  test('is supported on WSL with Windows interop and on native Linux (X11), where only native Linux prefers it', () => {
     jest.spyOn(hostEnvironment, 'detectWslWindowsHost').mockReturnValue(true);
     expect(isHostCaptureSupported('linux')).toBe(true);
+    expect(isHostCapturePreferred('linux', {})).toBe(false);
     jest.spyOn(hostEnvironment, 'detectWslWindowsHost').mockReturnValue(false);
-    expect(isHostCaptureSupported('linux')).toBe(false);
+    const studioDisplay = jest.spyOn(hostEnvironment, 'hasLinuxStudioDisplay').mockReturnValue(true);
+    expect(isHostCaptureSupported('linux')).toBe(true);
+    expect(isHostCapturePreferred('linux', {})).toBe(true);
+    // Without a Studio on an X display, Studio's own capture stays first.
+    studioDisplay.mockReturnValue(false);
+    expect(isHostCapturePreferred('linux', {})).toBe(false);
     expect(isHostCaptureSupported('win32')).toBe(true);
   });
 
@@ -205,6 +213,7 @@ describe('capture_screenshot host window fallback', () => {
     Object.defineProperty(process, 'platform', { value: 'win32' });
     // A 'linux' platform means native Linux here, even when the runner is WSL.
     jest.spyOn(hostEnvironment, 'detectWslWindowsHost').mockReturnValue(false);
+    jest.spyOn(hostEnvironment, 'hasLinuxStudioDisplay').mockReturnValue(true);
     jest.replaceProperty(process, 'env', { ...process.env, ROBLOX_STUDIO_HOST_CAPTURE: '1' });
     // Capture tests use synthetic peers, never the user's managed Studio state.
     jest.spyOn(StudioInstanceManager.prototype, 'pendingLaunches').mockResolvedValue([]);
@@ -262,15 +271,22 @@ describe('capture_screenshot host window fallback', () => {
     return { tools, request };
   }
 
-  test.each(['linux', 'disabled'] as const)('does not prepare markers or scaling when host capture is %s', async (mode) => {
+  // 'linux' is native Linux with no Studio on an X display (a container, a
+  // remote server, WSL whose interop detection failed).
+  test.each(['linux', 'freebsd', 'disabled'] as const)('does not prepare markers or scaling when host capture is %s', async (mode) => {
     if (mode === 'disabled') process.env.ROBLOX_STUDIO_HOST_CAPTURE = '0';
     else Object.defineProperty(process, 'platform', { value: mode });
+    if (mode === 'linux') jest.spyOn(hostEnvironment, 'hasLinuxStudioDisplay').mockReturnValue(false);
     const hostCapture = jest.fn(async (): Promise<HostCaptureResult> => ({ ok: false, error: 'must not run' }));
     const { tools, request } = makeTools(hostCapture, studioThatReturnsBlackPlayFrames({ shown: false }));
 
     const result = await tools.captureScreenshot('instance:test', 'png');
     const text = JSON.parse((result.content[0] as { text: string }).text);
-    expect(text.message).toContain(mode === 'disabled' ? 'disabled by ROBLOX_STUDIO_HOST_CAPTURE' : hostCaptureUnsupportedReason(mode));
+    expect(text.message).toContain({
+      linux: LINUX_NO_STUDIO_DISPLAY_ERROR,
+      freebsd: hostCaptureUnsupportedReason('freebsd'),
+      disabled: 'disabled by ROBLOX_STUDIO_HOST_CAPTURE',
+    }[mode]);
     expect(text.message).toContain('may be blank');
     expect(text.source).toBe('CaptureService');
     expect(text.studioFastPathUnavailable).toBe('StudioCaptureService cannot capture this DataModel right now');
@@ -355,7 +371,7 @@ describe('capture_screenshot host window fallback', () => {
   });
 
   test('preserves a capture-begin error and fast-path reason when host capture is unsupported', async () => {
-    Object.defineProperty(process, 'platform', { value: 'linux' });
+    Object.defineProperty(process, 'platform', { value: 'freebsd' });
     const hostCapture = jest.fn(async (): Promise<HostCaptureResult> => ({ ok: false, error: 'must not run' }));
     const { tools, request } = makeTools(hostCapture, async (endpoint) => {
       if (endpoint === '/api/capture-studio') return { unavailable: 'Client capture unavailable' };
@@ -365,7 +381,7 @@ describe('capture_screenshot host window fallback', () => {
     const result = await tools.captureScreenshot('instance:test', 'png');
     const text = JSON.parse((result.content[0] as { text: string }).text);
     expect(text.error).toContain('Screenshot callback timed out');
-    expect(text.error).toContain(hostCaptureUnsupportedReason('linux'));
+    expect(text.error).toContain(hostCaptureUnsupportedReason('freebsd'));
     expect(text.studioFastPathUnavailable).toBe('Client capture unavailable');
     expect(hostCapture).not.toHaveBeenCalled();
     expect(request.mock.calls.some(([endpoint]) => endpoint === '/api/capture-markers')).toBe(false);
@@ -400,6 +416,31 @@ describe('capture_screenshot host window fallback', () => {
     for (const call of request.mock.calls.filter(([endpoint]) => endpoint === '/api/capture-markers')) {
       expect(call[2]).toBe('client-session');
     }
+  });
+
+  test('on Linux grabs the window of a Studio missing from the registry, then goes host-first', async () => {
+    Object.defineProperty(process, 'platform', { value: 'linux' });
+    jest.spyOn(StudioInstanceManager.prototype, 'get').mockResolvedValue(undefined);
+    const markerState = { shown: false };
+    const hintedProcessIds: Array<number | undefined> = [];
+    const hostCapture: HostWindowCaptureFn = async (_titleHint, _identity, options) => {
+      hintedProcessIds.push(options?.processId);
+      return { ok: true, capture: { width: 400, height: 200, title: 't', identity: windowIdentity, rgba: studioWindow(400, 200, viewport, markerState.shown) } };
+    };
+    const { tools, request } = makeTools(hostCapture, studioThatReturnsBlackPlayFrames(markerState));
+    const capture = async () => {
+      const [summary] = (await tools.captureScreenshot('instance:test', 'png')).content;
+      if (!('text' in summary) || typeof summary.text !== 'string') throw new Error('Expected a text summary');
+      return JSON.parse(summary.text);
+    };
+
+    expect(await capture()).toMatchObject({ source: 'host-window', width: 300, height: 120, studioFastPathUnavailable: 'StudioCaptureService cannot capture this DataModel right now' });
+    expect(request.mock.calls.map(([endpoint]) => endpoint)).not.toContain('/api/capture-begin');
+
+    request.mockClear();
+    expect((await capture()).source).toBe('host-window');
+    expect(request.mock.calls.map(([endpoint]) => endpoint)).not.toContain('/api/capture-studio');
+    expect(hintedProcessIds.at(-1)).toBe(windowIdentity.processId);
   });
 
   test('replaces a successful but black StudioCaptureService PNG with the host viewport', async () => {
@@ -648,7 +689,7 @@ describe('capture_screenshot host window fallback', () => {
     const second = await tools.captureScreenshot('instance:test', 'png');
     expect(JSON.parse((second.content[0] as { text: string }).text).source).toBe('host-window');
     expect(hostCapture.mock.calls).toEqual([
-      ['TestPlace'], ['TestPlace', windowIdentity], ['TestPlace', windowIdentity],
+      ['TestPlace', undefined, { accept: expect.any(Function) }], ['TestPlace', windowIdentity, {}], ['TestPlace', windowIdentity, {}],
     ]);
     expect(request.mock.calls.filter(([endpoint]) => endpoint === '/api/capture-markers')
       .map(([, data]) => (data as { action: string }).action)).toEqual(['prepare', 'query', 'finish']);
@@ -677,7 +718,7 @@ describe('capture_screenshot host window fallback', () => {
     expect(text.source).toBe('CaptureService');
     expect(text.message).toContain('window identity changed');
     expect(text.message).toContain('may be blank');
-    expect(hostCapture.mock.calls[mismatchAt - 1]).toEqual(['TestPlace', windowIdentity]);
+    expect(hostCapture.mock.calls[mismatchAt - 1]).toEqual(['TestPlace', windowIdentity, {}]);
     expect(markerState.shown).toBe(false);
     const image = result.content.find((item) => 'data' in item);
     if (!image || !('data' in image) || typeof image.data !== 'string') throw new Error('Expected original blank frame');
@@ -687,7 +728,7 @@ describe('capture_screenshot host window fallback', () => {
     request.mockClear();
     const retry = await tools.captureScreenshot('instance:test', 'png');
     expect(JSON.parse((retry.content[0] as { text: string }).text).source).toBe('host-window');
-    expect(hostCapture.mock.calls[mismatchAt]).toEqual(['TestPlace']);
+    expect(hostCapture.mock.calls[mismatchAt]).toEqual(['TestPlace', undefined, { accept: expect.any(Function) }]);
     expect(request.mock.calls.filter(([endpoint]) => endpoint === '/api/capture-markers')
       .map(([, data]) => (data as { action: string }).action)).toEqual(['prepare', 'query', 'show', 'hide', 'finish']);
   });
