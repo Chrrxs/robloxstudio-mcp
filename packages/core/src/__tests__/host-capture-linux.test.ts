@@ -1,12 +1,16 @@
+import * as os from 'os';
+import * as path from 'path';
 import {
   captureLinuxStudioWindow,
   decodeWindowGrab,
+  hasLinuxStudioX11Session,
   parseClientList,
   parseWindowProperties,
+  runBoundedXTool,
   x11SessionFromEnviron,
 } from '../host-capture-linux.js';
 import type { LinuxHostCaptureDeps, X11Session } from '../host-capture-linux.js';
-import { isHostCapturePreferred, isHostCaptureSupported } from '../host-capture.js';
+import { hostEnvironment, isHostCapturePreferred, isHostCaptureSupported } from '../host-capture.js';
 
 type Rgb = [number, number, number];
 
@@ -23,16 +27,21 @@ function grabOutput(width: number, height: number, rgb: Rgb, padding = 0): Buffe
 }
 
 type FakeWindow = { id: number; pid?: number; title: string; hidden?: boolean; size?: [number, number]; rgb?: Rgb };
-type FakeProcess = { cmdline: string; environ?: string };
+type FakeProcess = { cmdline: string; environ?: string; uid?: number };
+const OWN_UID = process.getuid?.() ?? 1000;
 
 // /proc and the X tools of a fake host: processes by pid, windows by display.
 function fakeHost(processes: Record<number, FakeProcess>, displays: Record<string, FakeWindow[]>, broken: string[] = []) {
   const calls: Array<{ executable: string; args: string[]; session: X11Session }> = [];
+  const reads: string[] = [];
   const deps: LinuxHostCaptureDeps = {
     readFile: (file) => {
-      const match = /^\/proc\/(\d+)\/(environ|cmdline)$/.exec(file);
+      const match = /^\/proc\/(\d+)\/(environ|cmdline|status)$/.exec(file);
       const process = match ? processes[Number(match[1])] : undefined;
-      const value = match?.[2] === 'environ' ? process?.environ : process?.cmdline;
+      reads.push(file);
+      const value = match?.[2] === 'status'
+        ? (process ? `Name:\tx\nUid:\t${process.uid ?? OWN_UID}\t0\t0\t0\n` : undefined)
+        : match?.[2] === 'environ' ? process?.environ : process?.cmdline;
       if (value === undefined) throw new Error(`ENOENT ${file}`);
       return Buffer.from(value);
     },
@@ -57,7 +66,7 @@ function fakeHost(processes: Record<number, FakeProcess>, displays: Record<strin
       return grabOutput(width, height, window.rgb ?? [10, 20, 30]);
     },
   };
-  return { deps, calls };
+  return { deps, calls, reads };
 }
 
 const studio = (environ: string): FakeProcess => ({ cmdline: 'C:\\Program Files\\Roblox\\RobloxStudioBeta.exe\0-task\0', environ });
@@ -161,8 +170,48 @@ describe('captureLinuxStudioWindow', () => {
   });
 });
 
+const linuxOnly = process.platform === 'linux' ? test : test.skip;
+
+describe('runBoundedXTool', () => {
+  // startx/xinit keep the cookie in ~/.Xauthority and Studio then has no
+  // XAUTHORITY; the minimal child environment has no HOME to find it from.
+  linuxOnly('passes the display and an explicit cookie path, defaulting to ~/.Xauthority', async () => {
+    const env = (await runBoundedXTool('env', [], { display: ':9' }, 64 * 1024)).toString('utf8').split('\n');
+    expect(env).toContain('DISPLAY=:9');
+    expect(env).toContain(`XAUTHORITY=${path.join(os.homedir(), '.Xauthority')}`);
+    expect(env.some((line) => line.startsWith('HOME='))).toBe(false);
+    const explicit = (await runBoundedXTool('env', [], { display: ':9', xauthority: '/tmp/cookie' }, 64 * 1024)).toString('utf8');
+    expect(explicit).toContain('XAUTHORITY=/tmp/cookie\n');
+  });
+});
+
+describe('Linux Studio process discovery', () => {
+  test('ignores other users\' Studio processes and never reads their environment', async () => {
+    const other = { ...studio('DISPLAY=:5\0'), uid: OWN_UID + 1 };
+    const host = fakeHost({ 200: other, 201: { cmdline: '/opt/RobloxStudioBeta.exe.sh\0', environ: 'DISPLAY=:6\0' } }, { ':5': [{ id: 0x1, pid: 200, title: 'Place' }] });
+    expect(hasLinuxStudioX11Session(host.deps)).toBe(false);
+    const result = await captureLinuxStudioWindow('Place', undefined, { processId: 200 }, host.deps);
+    expect(result).toEqual({ ok: false, error: expect.stringContaining('no running Roblox Studio process exposes an X11 DISPLAY') });
+    expect(host.reads).not.toContain('/proc/200/environ');
+    expect(host.reads).not.toContain('/proc/200/cmdline');
+    expect(host.calls).toEqual([]);
+  });
+
+  test('finds a Studio session with an X display without running any X tool', () => {
+    const host = fakeHost({ 1: { cmdline: '/sbin/init\0', environ: 'DISPLAY=:0\0' }, 100: studio('DISPLAY=:1\0') }, {});
+    expect(hasLinuxStudioX11Session(host.deps)).toBe(true);
+    expect(hasLinuxStudioX11Session(fakeHost({ 100: studio('HOME=/h\0') }, {}).deps)).toBe(false);
+    expect(host.calls).toEqual([]);
+  });
+});
+
 describe('Linux host capture selection', () => {
+  afterEach(() => jest.restoreAllMocks());
+
   test('is supported on Linux and preferred there unless disabled', () => {
+    // Native Linux with a Studio on an X display, even when the runner is WSL.
+    jest.spyOn(hostEnvironment, 'detectWslWindowsHost').mockReturnValue(false);
+    jest.spyOn(hostEnvironment, 'hasLinuxStudioDisplay').mockReturnValue(true);
     expect(isHostCaptureSupported('linux')).toBe(true);
     expect(isHostCapturePreferred('linux', {})).toBe(true);
     expect(isHostCapturePreferred('linux', { ROBLOX_STUDIO_HOST_CAPTURE: '0' })).toBe(false);

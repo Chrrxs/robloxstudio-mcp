@@ -5,12 +5,14 @@
 // window's composited pixmap (see GRAB_SCRIPT).
 import { spawn } from 'child_process';
 import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
+import { isWineStudioCommand, realUidFromStatus } from './studio-wine.js';
 import type { HostCaptureOptions, HostCaptureResult, HostWindowCapture, HostWindowIdentity } from './host-capture.js';
 
 const X_TOOL_TIMEOUT_MS = 10_000;
 const MAX_XPROP_OUTPUT_BYTES = 256 * 1024;
 const MAX_GRAB_BYTES = 256 * 1024 * 1024;
-const STUDIO_EXECUTABLE = /robloxstudiobeta\.exe/i;
 // Studio opens small helper windows; the main window is far larger.
 const MIN_STUDIO_WINDOW_EDGE = 200;
 
@@ -44,7 +46,23 @@ export function x11SessionFromEnviron(environ: Buffer): X11Session | undefined {
   return display ? { display, ...(xauthority ? { xauthority } : {}) } : undefined;
 }
 
+export const LINUX_NO_STUDIO_DISPLAY_ERROR =
+  'no running Roblox Studio process exposes an X11 DISPLAY; Linux host capture needs Studio running under Wine on an X server';
+
+// Only this user's processes are read, as in listWineStudioProcesses: another
+// user's Studio is never ours to capture, and its environment is not ours to read.
+function ownedByCurrentUser(pid: number, deps: LinuxHostCaptureDeps): boolean {
+  const uid = process.getuid?.();
+  if (uid === undefined) return true;
+  try {
+    return realUidFromStatus(deps.readFile(`/proc/${pid}/status`).toString('utf8')) === uid;
+  } catch {
+    return false;
+  }
+}
+
 function processSession(pid: number, deps: LinuxHostCaptureDeps): X11Session | undefined {
+  if (!ownedByCurrentUser(pid, deps)) return undefined;
   try {
     return x11SessionFromEnviron(deps.readFile(`/proc/${pid}/environ`));
   } catch {
@@ -53,9 +71,9 @@ function processSession(pid: number, deps: LinuxHostCaptureDeps): X11Session | u
 }
 
 function isStudioProcess(pid: number, deps: LinuxHostCaptureDeps): boolean {
+  if (!ownedByCurrentUser(pid, deps)) return false;
   try {
-    const argv0 = deps.readFile(`/proc/${pid}/cmdline`).toString('utf8').split('\0')[0] ?? '';
-    return STUDIO_EXECUTABLE.test(argv0);
+    return isWineStudioCommand(deps.readFile(`/proc/${pid}/cmdline`).toString('utf8').split('\0')[0] || undefined);
   } catch {
     return false;
   }
@@ -64,8 +82,13 @@ function isStudioProcess(pid: number, deps: LinuxHostCaptureDeps): boolean {
 export function runBoundedXTool(executable: string, args: string[], session: X11Session, maxBytes: number): Promise<Buffer> {
   const { promise, resolve, reject } = Promise.withResolvers<Buffer>();
   // A minimal environment: the X tools need only the display and its cookie.
-  const env: NodeJS.ProcessEnv = { PATH: process.env.PATH ?? '/usr/bin:/bin', DISPLAY: session.display };
-  if (session.xauthority) env.XAUTHORITY = session.xauthority;
+  // Without XAUTHORITY, Xlib looks for $HOME/.Xauthority (startx/xinit), and
+  // HOME is not passed; the processes belong to this user, so it is our home.
+  const env: NodeJS.ProcessEnv = {
+    PATH: process.env.PATH ?? '/usr/bin:/bin',
+    DISPLAY: session.display,
+    XAUTHORITY: session.xauthority ?? path.join(os.homedir(), '.Xauthority'),
+  };
   const child = spawn(executable, args, { env, stdio: ['ignore', 'pipe', 'pipe'] });
   const chunks: Buffer[] = [];
   let size = 0;
@@ -164,7 +187,7 @@ async function studioWindowsOnSession(
 // header line, then the raw ZPixmap rows.
 const GRAB_SCRIPT = String.raw`
 import ctypes, json, sys
-from ctypes import POINTER, Structure, byref, c_char_p, c_int, c_uint, c_ulong, c_void_p
+from ctypes import POINTER, Structure, byref, c_char_p, c_int, c_long, c_uint, c_ulong, c_void_p
 class XImage(Structure):
     _fields_ = [('width', c_int), ('height', c_int), ('xoffset', c_int), ('format', c_int), ('data', c_void_p),
                 ('byte_order', c_int), ('bitmap_unit', c_int), ('bitmap_bit_order', c_int), ('bitmap_pad', c_int),
@@ -228,6 +251,20 @@ except OSError:
 if not image:
     del errors[:]
     source = 'screen'
+    # The root window shows whatever is on screen there; an unmapped Studio
+    # (minimized, other workspace) would yield other windows' pixels.
+    class XWindowAttributes(Structure):
+        _fields_ = [('x', c_int), ('y', c_int), ('width', c_int), ('height', c_int), ('border_width', c_int), ('depth', c_int),
+                    ('visual', c_void_p), ('root', c_ulong), ('cls', c_int), ('bit_gravity', c_int), ('win_gravity', c_int),
+                    ('backing_store', c_int), ('backing_planes', c_ulong), ('backing_pixel', c_ulong), ('save_under', c_int),
+                    ('colormap', c_ulong), ('map_installed', c_int), ('map_state', c_int), ('all_event_masks', c_long),
+                    ('your_event_mask', c_long), ('do_not_propagate_mask', c_long), ('override_redirect', c_int), ('screen', c_void_p)]
+    x11.XGetWindowAttributes.argtypes = [c_void_p, c_ulong, POINTER(XWindowAttributes)]
+    attributes = XWindowAttributes()
+    if not x11.XGetWindowAttributes(display, window, byref(attributes)) or errors:
+        fail(3, 'the window closed')
+    if attributes.map_state != 2:  # IsViewable: the window and all its ancestors are mapped
+        fail(6, 'Studio window is not visible on screen (minimized or on another workspace?) and the display has no compositor')
     ax = c_int(); ay = c_int(); rw = c_uint(); rh = c_uint()
     x11.XTranslateCoordinates(display, window, root.value, 0, 0, byref(ax), byref(ay), byref(child))
     x11.XGetGeometry(display, root.value, byref(c_ulong()), byref(gx), byref(gy), byref(rw), byref(rh), byref(border), byref(depth))
@@ -336,6 +373,17 @@ function candidateSessions(processId: number | undefined, deps: LinuxHostCapture
   return { sessions, studioPids };
 }
 
+// Cheap pre-check (a /proc scan, no X round trip): whether any Studio session
+// with an X display exists, so callers skip the plugin's marker transaction
+// (simulator fit, magenta markers) when no window grab could run.
+export function hasLinuxStudioX11Session(deps: LinuxHostCaptureDeps = DEFAULT_DEPS): boolean {
+  try {
+    return candidateSessions(undefined, deps).sessions.length > 0;
+  } catch {
+    return false;
+  }
+}
+
 // Captures one Studio window. With expectedIdentity it re-grabs exactly that
 // window. Otherwise windows of options.processId come first, then windows whose
 // title contains titleHint; options.accept picks among several (the caller
@@ -366,9 +414,7 @@ export async function captureLinuxStudioWindow(
 
     const { sessions, studioPids } = candidateSessions(options.processId, deps);
     if (options.processId !== undefined) studioPids.add(options.processId);
-    if (sessions.length === 0) {
-      return { ok: false, error: 'no running Roblox Studio process exposes an X11 DISPLAY; Linux host capture needs Studio running under Wine on an X server' };
-    }
+    if (sessions.length === 0) return { ok: false, error: LINUX_NO_STUDIO_DISPLAY_ERROR };
     const studioProcess = (pid: number) => studioPids.has(pid) || isStudioProcess(pid, deps);
     const rank = (window: LinuxStudioWindow) =>
       (window.processId === options.processId ? 0 : 2) + (titleHint && window.title.includes(titleHint) ? 0 : 1);

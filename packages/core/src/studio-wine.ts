@@ -149,6 +149,11 @@ function readArgv0(procRoot: string, pid: number): string | undefined {
 
 // The real UID from status, not the /proc/<pid> owner, which becomes root for
 // non-dumpable processes.
+export function realUidFromStatus(content: string): number | undefined {
+  const match = /^Uid:\s+(\d+)/mu.exec(content);
+  return match ? Number(match[1]) : undefined;
+}
+
 function readRealUid(procRoot: string, pid: number): number | undefined {
   let content: string;
   try {
@@ -157,9 +162,9 @@ function readRealUid(procRoot: string, pid: number): number | undefined {
     if (isMissingProcessError(error)) return undefined;
     throw error;
   }
-  const match = /^Uid:\s+(\d+)/mu.exec(content);
-  if (!match) throw new Error(`Malformed ${procRoot}/${pid}/status.`);
-  return Number(match[1]);
+  const uid = realUidFromStatus(content);
+  if (uid === undefined) throw new Error(`Malformed ${procRoot}/${pid}/status.`);
+  return uid;
 }
 
 function readLiveBootTime(procRoot: string): bigint {

@@ -156,9 +156,16 @@ the host OS and crops it to the viewport:
   is grabbed when StudioCaptureService is unavailable, before CaptureService;
   every display that runs Studio is searched, and later captures of that Studio
   go to the window first. When several Studio windows share a display (a
-  multiplayer test), the window that shows the viewport markers is used. A
-  minimized window, or a script or plugin tab in front of the place's viewport
-  tab, cannot be captured; the tool says so.
+  multiplayer test), the window that shows the viewport markers is used. Only
+  the current user's Studio processes are considered. The Studio window must be
+  visible: a minimized window or one on another workspace cannot be captured
+  (without a compositor its on-screen part is read, so it must also not hang
+  off the screen), and neither can a script or plugin tab in front of the
+  place's viewport tab; the tool says so. When no Studio process exposes an X
+  display (a container or remote server), Studio's own capture is used and the
+  viewport markers are never shown. Studio started through a Flatpak-sandboxed
+  launcher (for example Vinegar) is not supported: its Wine process runs in the
+  sandbox, out of the server's reach.
 - Other platforms report that host capture is unavailable and return Studio's
   original result or error.
 

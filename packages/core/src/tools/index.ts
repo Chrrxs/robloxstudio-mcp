@@ -42,7 +42,9 @@ import {
   isHostCaptureDisabled,
   isHostCapturePreferred,
   isHostCaptureSupported,
+  isNativeLinuxHost,
   isUniformFrame,
+  linuxHostCaptureUnavailableReason,
   prepareHostWindowCapture,
 } from '../host-capture.js';
 import type { HostCaptureOptions, HostCaptureResult, HostWindowIdentity, ViewportRect } from '../host-capture.js';
@@ -6133,7 +6135,8 @@ export class RobloxStudioTools {
   // managed; their group's controller runs on the same display. Cached as long
   // as a located viewport, because the lookup snapshots processes.
   private async _hostCaptureProcessId(instanceId: string): Promise<number | undefined> {
-    if (process.platform !== 'linux') return undefined;
+    // WSL grabs through the Windows helper, which takes no process hint.
+    if (!isNativeLinuxHost()) return undefined;
     const cached = this.hostCaptureProcessIds.get(instanceId);
     if (cached && (cached.discovered || Date.now() - cached.cachedAt < HOST_VIEWPORT_RECT_TTL_MS)) return cached.processId;
     const controller = this.bridge.getMultiplayerGroups()
@@ -6165,6 +6168,8 @@ export class RobloxStudioTools {
     if (!isHostCaptureSupported()) {
       return { success: false, error: hostCaptureUnsupportedReason() };
     }
+    const linuxUnavailable = linuxHostCaptureUnavailableReason();
+    if (linuxUnavailable !== undefined) return { success: false, error: linuxUnavailable };
     // Cold Swift compilation must finish before the plugin starts its bounded
     // marker transaction. Injected backends need no host helper preparation.
     if (this.hostWindowCapture === captureStudioWindow) {

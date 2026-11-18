@@ -10,6 +10,7 @@ import {
   windowsCaptureEnvironment,
 } from '../host-capture.js';
 import type { HostCaptureResult } from '../host-capture.js';
+import { LINUX_NO_STUDIO_DISPLAY_ERROR } from '../host-capture-linux.js';
 import * as hostCaptureModule from '../host-capture.js';
 import { BridgeService } from '../bridge-service.js';
 import { RobloxStudioTools } from '../tools/index.js';
@@ -187,8 +188,12 @@ describe('host capture on WSL', () => {
     expect(isHostCaptureSupported('linux')).toBe(true);
     expect(isHostCapturePreferred('linux', {})).toBe(false);
     jest.spyOn(hostEnvironment, 'detectWslWindowsHost').mockReturnValue(false);
+    const studioDisplay = jest.spyOn(hostEnvironment, 'hasLinuxStudioDisplay').mockReturnValue(true);
     expect(isHostCaptureSupported('linux')).toBe(true);
     expect(isHostCapturePreferred('linux', {})).toBe(true);
+    // Without a Studio on an X display, Studio's own capture stays first.
+    studioDisplay.mockReturnValue(false);
+    expect(isHostCapturePreferred('linux', {})).toBe(false);
     expect(isHostCaptureSupported('win32')).toBe(true);
   });
 
@@ -208,6 +213,7 @@ describe('capture_screenshot host window fallback', () => {
     Object.defineProperty(process, 'platform', { value: 'win32' });
     // A 'linux' platform means native Linux here, even when the runner is WSL.
     jest.spyOn(hostEnvironment, 'detectWslWindowsHost').mockReturnValue(false);
+    jest.spyOn(hostEnvironment, 'hasLinuxStudioDisplay').mockReturnValue(true);
     jest.replaceProperty(process, 'env', { ...process.env, ROBLOX_STUDIO_HOST_CAPTURE: '1' });
     // Capture tests use synthetic peers, never the user's managed Studio state.
     jest.spyOn(StudioInstanceManager.prototype, 'pendingLaunches').mockResolvedValue([]);
@@ -265,15 +271,22 @@ describe('capture_screenshot host window fallback', () => {
     return { tools, request };
   }
 
-  test.each(['freebsd', 'disabled'] as const)('does not prepare markers or scaling when host capture is %s', async (mode) => {
+  // 'linux' is native Linux with no Studio on an X display (a container, a
+  // remote server, WSL whose interop detection failed).
+  test.each(['linux', 'freebsd', 'disabled'] as const)('does not prepare markers or scaling when host capture is %s', async (mode) => {
     if (mode === 'disabled') process.env.ROBLOX_STUDIO_HOST_CAPTURE = '0';
     else Object.defineProperty(process, 'platform', { value: mode });
+    if (mode === 'linux') jest.spyOn(hostEnvironment, 'hasLinuxStudioDisplay').mockReturnValue(false);
     const hostCapture = jest.fn(async (): Promise<HostCaptureResult> => ({ ok: false, error: 'must not run' }));
     const { tools, request } = makeTools(hostCapture, studioThatReturnsBlackPlayFrames({ shown: false }));
 
     const result = await tools.captureScreenshot('instance:test', 'png');
     const text = JSON.parse((result.content[0] as { text: string }).text);
-    expect(text.message).toContain(mode === 'disabled' ? 'disabled by ROBLOX_STUDIO_HOST_CAPTURE' : hostCaptureUnsupportedReason(mode));
+    expect(text.message).toContain({
+      linux: LINUX_NO_STUDIO_DISPLAY_ERROR,
+      freebsd: hostCaptureUnsupportedReason('freebsd'),
+      disabled: 'disabled by ROBLOX_STUDIO_HOST_CAPTURE',
+    }[mode]);
     expect(text.message).toContain('may be blank');
     expect(text.source).toBe('CaptureService');
     expect(text.studioFastPathUnavailable).toBe('StudioCaptureService cannot capture this DataModel right now');

@@ -27,7 +27,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { captureMacStudioWindow, prepareMacHostCapture } from './host-capture-macos.js';
-import { captureLinuxStudioWindow } from './host-capture-linux.js';
+import { captureLinuxStudioWindow, hasLinuxStudioX11Session, LINUX_NO_STUDIO_DISPLAY_ERROR } from './host-capture-linux.js';
 
 // macOS uses the app bundle ID; Windows uses the verified executable name;
 // Linux uses `x11` plus the X display name.
@@ -92,11 +92,24 @@ function detectWslWindowsHost(): boolean {
   return detectedWslWindowsHost;
 }
 
-// Injection seam: tests pin whether a Linux host is WSL with Windows interop.
-export const hostEnvironment = { detectWslWindowsHost };
+// Injection seams: tests pin whether a Linux host is WSL with Windows interop,
+// and whether a native Linux host runs a Studio on an X display.
+export const hostEnvironment = { detectWslWindowsHost, hasLinuxStudioDisplay: () => hasLinuxStudioX11Session() };
 
 export function isWslWindowsHost(platform: NodeJS.Platform = process.platform): boolean {
   return platform === 'linux' && hostEnvironment.detectWslWindowsHost();
+}
+
+// Native Linux (not WSL): Studio runs under Wine and is grabbed through X11.
+export function isNativeLinuxHost(platform: NodeJS.Platform = process.platform): boolean {
+  return platform === 'linux' && !isWslWindowsHost(platform);
+}
+
+// Native Linux without a Studio on an X display (a container, a remote
+// server, WSL whose interop detection failed) cannot grab any window, so the
+// caller must not start the plugin's marker transaction for it.
+export function linuxHostCaptureUnavailableReason(platform: NodeJS.Platform = process.platform): string | undefined {
+  return isNativeLinuxHost(platform) && !hostEnvironment.hasLinuxStudioDisplay() ? LINUX_NO_STUDIO_DISPLAY_ERROR : undefined;
 }
 
 export function isHostCaptureSupported(platform: NodeJS.Platform = process.platform): boolean {
@@ -105,7 +118,7 @@ export function isHostCaptureSupported(platform: NodeJS.Platform = process.platf
 
 // Native Linux (not WSL) runs Studio under Wine, where the host grab is the reliable path.
 export function isHostCapturePreferred(platform: NodeJS.Platform = process.platform, env: NodeJS.ProcessEnv = process.env): boolean {
-  return platform === 'linux' && !isWslWindowsHost(platform) && !isHostCaptureDisabled(env);
+  return isNativeLinuxHost(platform) && !isHostCaptureDisabled(env) && hostEnvironment.hasLinuxStudioDisplay();
 }
 
 export function hostCaptureUnsupportedReason(platform: NodeJS.Platform = process.platform): string {
@@ -496,7 +509,7 @@ export async function captureStudioWindow(
     return { ok: false, error: hostCaptureUnsupportedReason() };
   }
   if (process.platform === 'darwin') return captureMacStudioWindow(titleHint, expectedIdentity);
-  if (process.platform === 'linux' && !isWslWindowsHost()) return captureLinuxStudioWindow(titleHint, expectedIdentity, options);
+  if (isNativeLinuxHost()) return captureLinuxStudioWindow(titleHint, expectedIdentity, options);
   const outFile = path.join(os.tmpdir(), `robloxstudio-mcp-capture-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}.bgra`);
   try {
     const report = parseWindowsCaptureReport(await runWindowsCapture(titleHint, outFile, expectedIdentity), expectedIdentity);
