@@ -309,8 +309,10 @@ describe('MCP v2 tool runtime', () => {
     expect(catalog).toHaveLength(51);
     // 51,000 admits operation_id on every recoverable Studio write and
     // expected_revision(s) on script writes (about 1,600 characters);
-    // 52,300 adds capture_video (about 1,200 characters).
-    expect(serialized.length).toBeLessThanOrEqual(52_300);
+    // 52,300 adds capture_video (about 1,200 characters);
+    // 52,900 adds wait_until with bounded timeout_s and poll_ms on the runtime
+    // eval tools (about 660 characters).
+    expect(serialized.length).toBeLessThanOrEqual(52_900);
     expect(catalog.filter((tool) => tool.outputSchema)).toHaveLength(50);
     expect(catalog.every((tool) => tool.description.length <= 120)).toBe(true);
     expect(inspectorCatalog).toHaveLength(26);
