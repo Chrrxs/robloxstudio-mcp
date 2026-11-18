@@ -68,6 +68,14 @@ Read output with get_runtime_logs. Reuse nextCursor as cursor for one Instance, 
 
 MCP clients abandon a call after their own timeout, and the caller then cannot tell what happened. solo_playtest start and stop, multiplayer_playtest start, add_players, leave_client and end, and wait_until therefore answer within a 25 second response budget (ROBLOX_STUDIO_MCP_RESPONSE_BUDGET_MS). Work still running then returns state "pending" with a requestId and keeps running. Call get_request_status with that request_id and wait_ms up to 25000 until state is "settled"; its result field holds the original result, or outcome is "error" when the call failed. Do not repeat the call: an identical call while it runs joins the same job instead of starting the playtest twice. Finished results stay available for five minutes in the same server process.
 
+## Screenshots
+
+capture_screenshot returns the 3D viewport for the edit view or, during a playtest, the client view.
+
+- frames=N with interval_ms (default 500) captures a timed sequence: at most 16 frames within 20 seconds. grid=true returns them as one numbered contact sheet; without grid each frame is a separate image. The text item lists each frame's atMs offset.
+- To review motion, use capture_video where it can record (FFmpeg on the MCP host); it captures real motion. A contact sheet is a cheap short sample that works everywhere.
+- Take simulate_mouse_input coordinates from a single-frame capture, never from a contact sheet.
+
 ## Simulation and input
 
 - Inspect current settings with get_simulation_state before changing them.

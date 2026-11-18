@@ -348,7 +348,11 @@ export const TOOL_HANDLERS: Record<string, ToolHandler> = {
     body.maxAudioPreviews,
   ),
   upload_asset: (tools, body) => tools.uploadAsset(body.filePath, body.assetType, body.displayName, body.description, body.userId, body.groupId),
-  capture_screenshot: (tools, body) => tools.captureScreenshot(body.instance_id, body.format, body.quality),
+  capture_screenshot: (tools, body) => tools.captureScreenshot(body.instance_id, body.format, body.quality, {
+    frames: body.frames,
+    interval_ms: body.interval_ms,
+    grid: body.grid,
+  }),
   capture_video: (tools, body) => tools.captureVideo({
     action: body.action,
     duration_ms: body.duration_ms,

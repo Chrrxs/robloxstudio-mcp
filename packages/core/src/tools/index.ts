@@ -48,6 +48,7 @@ import {
   prepareHostWindowCapture,
 } from '../host-capture.js';
 import type { HostCaptureOptions, HostCaptureResult, HostWindowIdentity, ViewportRect } from '../host-capture.js';
+import { composeContactSheet, type ContactSheet } from '../contact-sheet.js';
 import {
   createFfmpegVideoBackend,
   defaultVideoPath,
@@ -136,9 +137,15 @@ type HostViewportCaptureResult =
   | { success: false; error: string };
 
 // One viewport frame before encoding; hostNote explains how it was captured.
-type RawViewportCapture =
-  | { success: true; response: RawImageCaptureResponse; hostNote: string; studioFastPathUnavailable?: string }
+type RawViewportCaptureOk = { success: true; response: RawImageCaptureResponse; hostNote: string; studioFastPathUnavailable?: string };
+type RawViewportCapture = RawViewportCaptureOk | { success: false; error: string; studioFastPathUnavailable?: string };
+
+// `atMs` is when the frame was taken, relative to the first frame.
+type ViewportFramesCapture =
+  | { success: true; frames: Array<{ capture: RawViewportCaptureOk; atMs: number }> }
   | { success: false; error: string; studioFastPathUnavailable?: string };
+
+export type ScreenshotSequenceOptions = { frames?: number; interval_ms?: number; grid?: boolean };
 
 // Injection seam so tests can stand in for the host OS helper.
 export type HostWindowCaptureFn = (
@@ -210,7 +217,7 @@ type ToolContent =
   | { type: 'image'; data: string; mimeType: string }
   | { type: 'audio'; data: string; mimeType: string };
 
-type EncodedViewportCapture = {
+type EncodedViewportImage = {
   success: true;
   width: number;
   height: number;
@@ -222,7 +229,9 @@ type EncodedViewportCapture = {
   message: string;
   source?: string;
   studioFastPathUnavailable?: string;
-} | {
+};
+
+type EncodedViewportCapture = EncodedViewportImage | {
   success: false;
   error: string;
   studioFastPathUnavailable?: string;
@@ -264,6 +273,10 @@ type StudioToolResponse = Record<string, unknown> & {
 };
 
 const MAX_INLINE_IMAGE_BYTES = 6_000_000;
+const MAX_SCREENSHOT_FRAMES = 16;
+const DEFAULT_SCREENSHOT_INTERVAL_MS = 500;
+const MAX_SCREENSHOT_INTERVAL_MS = 5_000;
+const MAX_SCREENSHOT_SEQUENCE_MS = 20_000;
 const MAX_MATRIX_IMAGE_BYTES = 8_000_000;
 const DEFAULT_ASSET_AUDIO_PREVIEWS = 3;
 const MAX_ASSET_AUDIO_PREVIEWS = 5;
@@ -6337,7 +6350,33 @@ export class RobloxStudioTools {
     quality?: number,
     maxBytes: number = MAX_INLINE_IMAGE_BYTES,
   ): Promise<EncodedViewportCapture> {
-    return await this._withViewportQueue(instanceId, () => this._captureViewportImageNow(instanceId, targetRole, format, quality, maxBytes));
+    const fmt: 'jpeg' | 'png' = format === 'png' ? 'png' : 'jpeg';
+    return await this._withViewportQueue(instanceId, async () => {
+      const raw = await this._captureViewportRawNow(instanceId, targetRole, fmt === 'png' ? 'png' : 'rgba8');
+      return raw.success ? this._encodeViewportCapture(raw, fmt, quality, maxBytes) : raw;
+    });
+  }
+
+  // Captures `count` frames `intervalMs` apart. The caller holds the viewport
+  // queue, so no other capture or marker transaction runs in between.
+  private async _captureViewportFramesNow(
+    instanceId: string,
+    targetRole: string,
+    encoding: 'png' | 'rgba8',
+    count: number,
+    intervalMs: number,
+  ): Promise<ViewportFramesCapture> {
+    const startedAt = Date.now();
+    const frames: Array<{ capture: RawViewportCaptureOk; atMs: number }> = [];
+    for (let index = 0; index < count; index++) {
+      const wait = startedAt + index * intervalMs - Date.now();
+      if (wait > 0) await sleep(wait);
+      const atMs = Date.now() - startedAt;
+      const capture = await this._captureViewportRawNow(instanceId, targetRole, encoding);
+      if (!capture.success) return { ...capture, error: `frame ${index + 1} of ${count}: ${capture.error}` };
+      frames.push({ capture, atMs });
+    }
+    return { success: true, frames };
   }
 
   // Serializes viewport readers and marker transactions per Studio process.
@@ -6354,10 +6393,12 @@ export class RobloxStudioTools {
   }
 
   // One unencoded viewport frame, from Studio or from the host window.
+  // `encoding` only picks what Studio's fast path returns; the host window and
+  // the CaptureService fallbacks always answer with raw RGBA.
   private async _captureViewportRawNow(
     instanceId: string,
     targetRole: string,
-    fmt: 'jpeg' | 'png',
+    encoding: 'png' | 'rgba8',
   ): Promise<RawViewportCapture> {
     // Native Linux runs Studio under Wine, where Studio's own capture of the
     // play viewport fails or comes back black. When the Studio process is
@@ -6383,7 +6424,7 @@ export class RobloxStudioTools {
     // rendering peer: 'edit' when idle, 'client-N' during a playtest.
     let response = await this._callSingle(
       '/api/capture-studio',
-      { encoding: fmt === 'png' ? 'png' : 'rgba8' },
+      { encoding },
       targetRole,
       instanceId,
     ) as RawImageCaptureResponse;
@@ -6481,19 +6522,18 @@ export class RobloxStudioTools {
       }
       return { success: false, error: text, studioFastPathUnavailable };
     }
+    if (response.width === undefined || response.height === undefined) {
+      return { success: false, error: 'Screenshot response missing dimensions.', studioFastPathUnavailable };
+    }
     return { success: true, response, hostNote, studioFastPathUnavailable };
   }
 
-  private async _captureViewportImageNow(
-    instanceId: string,
-    targetRole: string,
-    format?: string,
-    quality?: number,
-    maxBytes: number = MAX_INLINE_IMAGE_BYTES,
-  ): Promise<EncodedViewportCapture> {
-    const fmt: 'jpeg' | 'png' = format === 'png' ? 'png' : 'jpeg';
-    const raw = await this._captureViewportRawNow(instanceId, targetRole, fmt);
-    if (!raw.success) return raw;
+  private _encodeViewportCapture(
+    raw: RawViewportCaptureOk,
+    fmt: 'jpeg' | 'png',
+    quality: number | undefined,
+    maxBytes: number,
+  ): EncodedViewportCapture {
     const { response, hostNote, studioFastPathUnavailable } = raw;
     const q = quality === undefined ? 92 : Math.max(1, Math.min(100, Math.floor(quality)));
     const w = response.width;
@@ -6821,35 +6861,132 @@ export class RobloxStudioTools {
     };
   }
 
-  async captureScreenshot(instance_id?: string, format?: string, quality?: number) {
+  async captureScreenshot(instance_id?: string, format?: string, quality?: number, sequence: ScreenshotSequenceOptions = {}) {
+    const frames = sequence.frames ?? 1;
+    if (!Number.isInteger(frames) || frames < 1 || frames > MAX_SCREENSHOT_FRAMES) {
+      throw new Error(`frames must be an integer from 1 to ${MAX_SCREENSHOT_FRAMES}`);
+    }
+    const intervalMs = sequence.interval_ms ?? DEFAULT_SCREENSHOT_INTERVAL_MS;
+    if (!Number.isInteger(intervalMs) || intervalMs < 0 || intervalMs > MAX_SCREENSHOT_INTERVAL_MS) {
+      throw new Error(`interval_ms must be an integer from 0 to ${MAX_SCREENSHOT_INTERVAL_MS}`);
+    }
+    if ((frames - 1) * intervalMs > MAX_SCREENSHOT_SEQUENCE_MS) {
+      throw new Error(`frames x interval_ms spans ${(frames - 1) * intervalMs}ms; keep (frames - 1) * interval_ms within ${MAX_SCREENSHOT_SEQUENCE_MS}ms`);
+    }
+    const fmt: 'jpeg' | 'png' = format === 'png' ? 'png' : 'jpeg';
     const refresh = this.bridge.refreshTopologyForRouting();
     if (refresh) await refresh;
     const { instanceId, clientRole } = this._resolveRuntime(instance_id);
-    const capture = await this._captureViewportImage(instanceId, clientRole ?? 'edit', format, quality);
-    if (!capture.success) {
-      return this._textResult({ error: capture.error, studioFastPathUnavailable: capture.studioFastPathUnavailable });
+    const targetRole = clientRole ?? 'edit';
+
+    if (frames === 1 && !sequence.grid) {
+      const capture = await this._captureViewportImage(instanceId, targetRole, fmt, quality);
+      if (!capture.success) {
+        return this._textResult({ error: capture.error, studioFastPathUnavailable: capture.studioFastPathUnavailable });
+      }
+      return {
+        content: [
+          {
+            type: 'text',
+            text: JSON.stringify({
+              width: capture.width,
+              height: capture.height,
+              format: capture.format,
+              mimeType: capture.mimeType,
+              ...(capture.quality === undefined ? {} : { quality: capture.quality }),
+              message: capture.message,
+              source: capture.source,
+              studioFastPathUnavailable: capture.studioFastPathUnavailable,
+            }),
+          },
+          {
+            type: 'image',
+            data: capture.data,
+            mimeType: capture.mimeType,
+          },
+        ],
+      };
     }
 
+    // A contact sheet is built from raw RGBA frames: Studio-encoded PNGs would
+    // have to be decoded again, and that decoder downsizes large images. The
+    // sheet is re-encoded in the requested format anyway.
+    const encoding = sequence.grid || fmt === 'jpeg' ? 'rgba8' : 'png';
+    const captured = await this._withViewportQueue(instanceId, () =>
+      this._captureViewportFramesNow(instanceId, targetRole, encoding, frames, intervalMs));
+    if (!captured.success) {
+      return this._textResult({ error: captured.error, studioFastPathUnavailable: captured.studioFastPathUnavailable });
+    }
+    const timeline = captured.frames.map(({ capture, atMs }, index) => ({
+      frame: index + 1,
+      atMs,
+      width: capture.response.width,
+      height: capture.response.height,
+      source: capture.response.source,
+    }));
+    const notes = [...new Set(captured.frames.map(({ capture }) => capture.hostNote).filter(Boolean))].join('');
+    const studioFastPathUnavailable = captured.frames.find(({ capture }) => capture.studioFastPathUnavailable)?.capture.studioFastPathUnavailable;
+
+    if (sequence.grid) {
+      let sheet: ContactSheet;
+      try {
+        sheet = composeContactSheet(captured.frames.map(({ capture }) => (
+          { width: capture.response.width ?? 0, height: capture.response.height ?? 0, rgba: Buffer.from(capture.response.data ?? '', 'base64') })));
+      } catch (error) {
+        return this._textResult({ error: `Could not compose the contact sheet: ${errorMessage(error)}` });
+      }
+      const encoded = this._encodeViewportCapture({
+        success: true,
+        response: { encoding: 'rgba8', source: 'contact-sheet', width: sheet.width, height: sheet.height, data: sheet.rgba.toString('base64') },
+        hostNote: '',
+      }, fmt, quality, MAX_INLINE_IMAGE_BYTES);
+      if (!encoded.success) return this._textResult({ error: encoded.error });
+      return {
+        content: [
+          {
+            type: 'text',
+            text: JSON.stringify({
+              frames: timeline,
+              grid: { columns: sheet.columns, rows: sheet.rows, width: sheet.width, height: sheet.height, tileWidth: sheet.tileWidth, tileHeight: sheet.tileHeight },
+              format: encoded.format,
+              mimeType: encoded.mimeType,
+              ...(encoded.quality === undefined ? {} : { quality: encoded.quality }),
+              message:
+                `Contact sheet of ${frames} frames ${intervalMs}ms apart: ${sheet.columns}x${sheet.rows} tiles of ` +
+                `${sheet.tileWidth}x${sheet.tileHeight}px, numbered left to right then top to bottom${encoded.note}. Tiles are ` +
+                'scaled, so take simulate_mouse_input coordinates from a single-frame capture, not from this sheet.' + notes,
+              studioFastPathUnavailable,
+            }),
+          },
+          { type: 'image', data: encoded.data, mimeType: encoded.mimeType },
+        ],
+      };
+    }
+
+    // Separate images share the inline budget.
+    const budget = Math.floor(MAX_INLINE_IMAGE_BYTES / frames);
+    const images: EncodedViewportImage[] = [];
+    for (const [index, { capture }] of captured.frames.entries()) {
+      // Host-capture notes are reported once for the whole sequence below.
+      const encoded = this._encodeViewportCapture({ ...capture, hostNote: '' }, fmt, quality, budget);
+      if (!encoded.success) {
+        return this._textResult({ error: `frame ${index + 1} of ${frames}: ${encoded.error} Pass grid: true to get one contact sheet instead.` });
+      }
+      images.push(encoded);
+    }
     return {
       content: [
         {
           type: 'text',
           text: JSON.stringify({
-            width: capture.width,
-            height: capture.height,
-            format: capture.format,
-            mimeType: capture.mimeType,
-            ...(capture.quality === undefined ? {} : { quality: capture.quality }),
-            message: capture.message,
-            source: capture.source,
-            studioFastPathUnavailable: capture.studioFastPathUnavailable,
+            frames: timeline,
+            format: fmt,
+            mimeType: images[0].mimeType,
+            message: `${frames} frames ${intervalMs}ms apart follow in order. Frame 1: ${images[0].message}` + notes,
+            studioFastPathUnavailable,
           }),
         },
-        {
-          type: 'image',
-          data: capture.data,
-          mimeType: capture.mimeType,
-        },
+        ...images.map((image) => ({ type: 'image' as const, data: image.data, mimeType: image.mimeType })),
       ],
     };
   }
