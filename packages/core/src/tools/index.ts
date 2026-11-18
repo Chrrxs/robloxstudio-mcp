@@ -77,6 +77,7 @@ import {
 import type { PaceCaptureChunk } from '../micro-profiler/capture.js';
 import { createHash, randomUUID } from 'crypto';
 import { ReferenceUploadError, ReferenceUploads } from './reference-uploads.js';
+import { publicToolErrorBody } from '../mcp-runtime.js';
 import type { ReferenceUploadAttempt, ReferenceUploadCheckpoint, ReferenceUploadProgress, ReferenceUploadView } from './reference-uploads.js';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -485,6 +486,36 @@ function roleOrder(role: string): number {
   if (role === 'server') return 1;
   const client = /^client-(\d+)$/.exec(role);
   return client ? 2 + Number(client[1]) : Number.MAX_SAFE_INTEGER;
+}
+
+// Budgeted tools (playtest lifecycle, wait_until) answer with text items only.
+type ToolCallResult = { content: Array<{ type: string; text: string }> };
+
+type ToolJobOutcome = { result: ToolCallResult } | { error: unknown };
+
+// A long tool call that outlived its response budget; get_request_status collects it.
+type ToolJob = {
+  id: string;
+  key: string;
+  tool: string;
+  action: string;
+  startedAt: number;
+  done: Promise<void>;
+  settledAt?: number;
+  outcome?: ToolJobOutcome;
+};
+
+const TOOL_JOB_RETENTION_MS = 5 * 60_000;
+const DEFAULT_RESPONSE_BUDGET_MS = 25_000;
+
+// MCP clients give up on a call after their own timeout and then report an
+// unknown outcome. Long calls therefore answer within this budget: work still
+// running returns a request id and get_request_status delivers the result.
+export function responseBudgetMs(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = Number(env.ROBLOX_STUDIO_MCP_RESPONSE_BUDGET_MS);
+  return Number.isFinite(raw) && raw > 0
+    ? Math.min(3_600_000, Math.max(1_000, Math.floor(raw)))
+    : DEFAULT_RESPONSE_BUDGET_MS;
 }
 
 /** eval_*_runtime wait_until polling. */
@@ -1389,6 +1420,8 @@ export class RobloxStudioTools {
   private readonly referenceUploads = new ReferenceUploads();
   // Paces chunks of a client capture copied through the client broker.
   private captureChunkPace: PaceCaptureChunk = idleAsLongAsRead;
+  // Long calls that outlived the response budget, by request id.
+  private readonly toolJobs = new Map<string, ToolJob>();
 
   constructor(bridge: BridgeService) {
     this.client = new StudioHttpClient(bridge);
@@ -1420,6 +1453,67 @@ export class RobloxStudioTools {
 
   private _textResult(body: Record<string, unknown>) {
     return { content: [{ type: 'text', text: JSON.stringify(body) }] };
+  }
+
+  // Runs `run` but answers within the response budget. A call still running then
+  // returns a pending request id; an identical call (same key) while it runs
+  // joins it instead of starting the work again.
+  private async _withinResponseBudget(
+    tool: string,
+    action: string,
+    args: unknown[],
+    run: () => Promise<ToolCallResult>,
+  ): Promise<ToolCallResult> {
+    const now = Date.now();
+    for (const [id, job] of this.toolJobs) {
+      if (job.settledAt !== undefined && now - job.settledAt > TOOL_JOB_RETENTION_MS) this.toolJobs.delete(id);
+    }
+    const key = JSON.stringify([tool, action, ...args]);
+    let job = [...this.toolJobs.values()].find((candidate) => candidate.key === key && candidate.outcome === undefined);
+    const joined = job !== undefined;
+    if (!job) {
+      const created: ToolJob = { id: `${tool}-${randomUUID()}`, key, tool, action, startedAt: now, done: Promise.resolve() };
+      created.done = run().then(
+        (result) => { created.outcome = { result }; },
+        (error: unknown) => { created.outcome = { error }; },
+      ).finally(() => { created.settledAt = Date.now(); });
+      this.toolJobs.set(created.id, created);
+      job = created;
+    }
+    const outcome = await this._awaitToolJob(job, responseBudgetMs());
+    if (!outcome) return this._textResult({ ...this._toolJobPending(job), ...(joined ? { joinedRunningCall: true } : {}) });
+    // A result delivered within the budget is not kept; a joined caller leaves it for the first.
+    if (!joined) this.toolJobs.delete(job.id);
+    if ('error' in outcome) throw outcome.error;
+    return outcome.result;
+  }
+
+  private async _awaitToolJob(job: ToolJob, waitMs: number, signal?: AbortSignal): Promise<ToolJobOutcome | undefined> {
+    if (job.outcome || waitMs <= 0 || signal?.aborted) return job.outcome;
+    const timer = Promise.withResolvers<void>();
+    const handle = setTimeout(timer.resolve, waitMs);
+    const abort = () => timer.resolve();
+    signal?.addEventListener('abort', abort, { once: true });
+    try {
+      await Promise.race([job.done, timer.promise]);
+    } finally {
+      clearTimeout(handle);
+      signal?.removeEventListener('abort', abort);
+    }
+    return job.outcome;
+  }
+
+  private _toolJobPending(job: ToolJob): Record<string, unknown> {
+    return {
+      requestId: job.id,
+      state: 'pending',
+      outcome: 'pending',
+      tool: job.tool,
+      action: job.action,
+      elapsedMs: Date.now() - job.startedAt,
+      // get_request_status rejects wait_ms above MAX_OPERATION_WAIT_MS, so never suggest more.
+      next: `Still running. Call get_request_status with request_id="${job.id}" and wait_ms up to ${Math.min(responseBudgetMs(), MAX_OPERATION_WAIT_MS)} to collect the result. Do not repeat the ${job.tool} call.`,
+    };
   }
 
   async getRobloxSkills(action: string, name?: string) {
@@ -2594,7 +2688,7 @@ export class RobloxStudioTools {
     operation_id: string | undefined,
     wait: RuntimeWaitOptions,
     signal: AbortSignal | undefined,
-  ) {
+  ): Promise<ToolCallResult> {
     const condition = wait.wait_until;
     if (condition === undefined) {
       return this._textResult(await this._callSingle('/api/eval-runtime', { code }, target, instance_id, undefined, undefined, operation_id));
@@ -2610,82 +2704,87 @@ export class RobloxStudioTools {
     if (!Number.isInteger(pollMs) || pollMs < 50 || pollMs > 10_000) {
       throw new Error(`${tool} poll_ms must be an integer from 50 to 10000`);
     }
-    const intervalMs = Math.max(pollMs, Math.ceil(timeoutS * 1000 / MAX_WAIT_PROBES));
-    const startedAt = Date.now();
-    const deadline = startedAt + timeoutS * 1000;
-    const finish = (body: Record<string, unknown>) => this._textResult({ ...body, elapsed_ms: Date.now() - startedAt });
-    // Once a request has been routed, a later routing failure means the peer
-    // left mid-wait; before that it is the caller's targeting error.
-    let routedRole: string | undefined;
-    const send = (data: { code: string }, timeoutMs?: number, requestSignal?: AbortSignal, operationId?: string) =>
-      this._withSinglePeer(target, instance_id, requestSignal, (targetPeerId) => {
-        routedRole = this.bridge.getPeerById(targetPeerId)?.role
-          ?? (typeof target === 'string' ? target : target.requested ?? target.fallback);
-        return this._requestPeer('/api/eval-runtime', data, targetPeerId, timeoutMs, requestSignal, operationId);
-      });
-    let codeResult: Record<string, unknown> = {};
-    if (code) {
-      const response = await send({ code }, undefined, undefined, operation_id);
-      if (response.ok !== true) {
-        return finish({ ...response, satisfied: false, polls: 0, error: `code failed, so wait_until was not polled: ${String(response.error ?? 'unknown error')}` });
+    // Key on the target as the caller passed it: an omitted target routes by
+    // instance_id, so it can reach a different peer than an explicit client-N.
+    const requestedTarget = typeof target === 'string' ? target : target.requested;
+    return this._withinResponseBudget(tool, 'wait_until', [instance_id, requestedTarget, code, condition, timeoutS, pollMs, operation_id], async () => {
+      const intervalMs = Math.max(pollMs, Math.ceil(timeoutS * 1000 / MAX_WAIT_PROBES));
+      const startedAt = Date.now();
+      const deadline = startedAt + timeoutS * 1000;
+      const finish = (body: Record<string, unknown>) => this._textResult({ ...body, elapsed_ms: Date.now() - startedAt });
+      // Once a request has been routed, a later routing failure means the peer
+      // left mid-wait; before that it is the caller's targeting error.
+      let routedRole: string | undefined;
+      const send = (data: { code: string }, timeoutMs?: number, requestSignal?: AbortSignal, operationId?: string) =>
+        this._withSinglePeer(target, instance_id, requestSignal, (targetPeerId) => {
+          routedRole = this.bridge.getPeerById(targetPeerId)?.role
+            ?? (typeof target === 'string' ? target : target.requested ?? target.fallback);
+          return this._requestPeer('/api/eval-runtime', data, targetPeerId, timeoutMs, requestSignal, operationId);
+        });
+      let codeResult: Record<string, unknown> = {};
+      if (code) {
+        const response = await send({ code }, undefined, undefined, operation_id);
+        if (response.ok !== true) {
+          return finish({ ...response, satisfied: false, polls: 0, error: `code failed, so wait_until was not polled: ${String(response.error ?? 'unknown error')}` });
+        }
+        codeResult = { code_result: response.result, code_output: response.output };
       }
-      codeResult = { code_result: response.result, code_output: response.output };
-    }
-    // The expression form runs first, so `return` inside a string, a comment, or
-    // a nested function stays part of the expression. Text that only loads as a
-    // block switches to the block form for the rest of the wait.
-    let form: WaitProbeForm = 'expression';
-    let probe = buildWaitProbe(condition, form);
-    let polls = 0;
-    let lastValue: string | undefined;
-    let lastError: string | undefined;
-    for (;;) {
-      signal?.throwIfAborted();
-      polls += 1;
-      try {
-        const response = await send({ code: probe }, Math.max(1_000, Math.min(10_000, deadline - Date.now())), signal);
-        const reply = response.ok === true && typeof response.result === 'string' ? response.result : undefined;
-        if (reply !== undefined && (reply.startsWith('T') || reply.startsWith('F'))) {
-          lastValue = reply.slice(1);
-          lastError = undefined;
-          if (reply.startsWith('T')) return finish({ ...codeResult, satisfied: true, value: lastValue, polls });
-        } else {
-          lastError = String(response.error ?? `unexpected eval reply: ${JSON.stringify(response)}`);
-          if (response.error === PLAYTEST_NOT_RUNNING_ERROR) {
-            return finish({ ...codeResult, satisfied: false, polls, error: `The playtest stopped while waiting: ${lastError}` });
-          }
-          if (isWaitLoadFailure(response)) {
-            if (form === 'expression' && /\breturn\b/.test(condition)) {
-              form = 'block';
-              probe = buildWaitProbe(condition, form);
-              continue;
+      // The expression form runs first, so `return` inside a string, a comment, or
+      // a nested function stays part of the expression. Text that only loads as a
+      // block switches to the block form for the rest of the wait.
+      let form: WaitProbeForm = 'expression';
+      let probe = buildWaitProbe(condition, form);
+      let polls = 0;
+      let lastValue: string | undefined;
+      let lastError: string | undefined;
+      for (;;) {
+        signal?.throwIfAborted();
+        polls += 1;
+        try {
+          const response = await send({ code: probe }, Math.max(1_000, Math.min(10_000, deadline - Date.now())), signal);
+          const reply = response.ok === true && typeof response.result === 'string' ? response.result : undefined;
+          if (reply !== undefined && (reply.startsWith('T') || reply.startsWith('F'))) {
+            lastValue = reply.slice(1);
+            lastError = undefined;
+            if (reply.startsWith('T')) return finish({ ...codeResult, satisfied: true, value: lastValue, polls });
+          } else {
+            lastError = String(response.error ?? `unexpected eval reply: ${JSON.stringify(response)}`);
+            if (response.error === PLAYTEST_NOT_RUNNING_ERROR) {
+              return finish({ ...codeResult, satisfied: false, polls, error: `The playtest stopped while waiting: ${lastError}` });
             }
-            return finish({ ...codeResult, satisfied: false, polls, error: `wait_until does not compile: ${lastError}` });
+            if (isWaitLoadFailure(response)) {
+              if (form === 'expression' && /\breturn\b/.test(condition)) {
+                form = 'block';
+                probe = buildWaitProbe(condition, form);
+                continue;
+              }
+              return finish({ ...codeResult, satisfied: false, polls, error: `wait_until does not compile: ${lastError}` });
+            }
+            // Waiting again would only cancel the same yield again.
+            if (lastError.includes(WAIT_YIELD_ERROR)) {
+              return finish({ ...codeResult, satisfied: false, polls, value: lastValue, error: lastError });
+            }
           }
-          // Waiting again would only cancel the same yield again.
-          if (lastError.includes(WAIT_YIELD_ERROR)) {
-            return finish({ ...codeResult, satisfied: false, polls, value: lastValue, error: lastError });
+        } catch (error) {
+          if (signal?.aborted) throw error;
+          if (error instanceof RoutingFailure) {
+            if (routedRole === undefined) throw error;
+            return finish({ ...codeResult, satisfied: false, polls, value: lastValue, error: `The ${routedRole} peer is gone, so wait_until cannot finish: ${error.message}` });
           }
+          lastError = errorMessage(error);
         }
-      } catch (error) {
-        if (signal?.aborted) throw error;
-        if (error instanceof RoutingFailure) {
-          if (routedRole === undefined) throw error;
-          return finish({ ...codeResult, satisfied: false, polls, value: lastValue, error: `The ${routedRole} peer is gone, so wait_until cannot finish: ${error.message}` });
-        }
-        lastError = errorMessage(error);
+        if (polls >= MAX_WAIT_PROBES || Date.now() + intervalMs >= deadline) break;
+        await sleepUnlessAborted(intervalMs, signal);
       }
-      if (polls >= MAX_WAIT_PROBES || Date.now() + intervalMs >= deadline) break;
-      await sleepUnlessAborted(intervalMs, signal);
-    }
-    signal?.throwIfAborted();
-    return finish({
-      ...codeResult,
-      satisfied: false,
-      polls,
-      value: lastValue,
-      lastError,
-      error: `wait_until timed out after ${timeoutS}s: the condition never became truthy.`,
+      signal?.throwIfAborted();
+      return finish({
+        ...codeResult,
+        satisfied: false,
+        polls,
+        value: lastValue,
+        lastError,
+        error: `wait_until timed out after ${timeoutS}s: the condition never became truthy.`,
+      });
     });
   }
 
@@ -4228,45 +4327,49 @@ export class RobloxStudioTools {
       if (mode !== 'play' && mode !== 'run') {
         throw new Error('solo_playtest action=start requires mode=play|run');
       }
-      const body = this._parseTextResult(await this.startPlaytest(mode, undefined, instance_id, timeout));
-      if (body.success === true && body.runtimeReady !== false) {
+      return this._withinResponseBudget('solo_playtest', action, [instance_id, mode, timeout], async () => {
+        const body = this._parseTextResult(await this.startPlaytest(mode, undefined, instance_id, timeout));
+        if (body.success === true && body.runtimeReady !== false) {
+          return this._textResult({
+            success: true,
+            action,
+            message: 'Playtest started.',
+            roles: Array.isArray(body.roles) ? body.roles : undefined,
+          });
+        }
         return this._textResult({
-          success: true,
+          // Keep lifecycle diagnostics on failures; only successful responses are brief.
+          ...body,
+          success: false,
           action,
-          message: 'Playtest started.',
+          error: body.error ?? 'start_failed',
+          message: body.success === true
+            ? 'Playtest did not become ready before timeout.'
+            : body.message ?? 'Playtest did not start.',
           roles: Array.isArray(body.roles) ? body.roles : undefined,
         });
-      }
-      return this._textResult({
-        // Keep lifecycle diagnostics on failures; only successful responses are brief.
-        ...body,
-        success: false,
-        action,
-        error: body.error ?? 'start_failed',
-        message: body.success === true
-          ? 'Playtest did not become ready before timeout.'
-          : body.message ?? 'Playtest did not start.',
-        roles: Array.isArray(body.roles) ? body.roles : undefined,
       });
     }
 
-    const body = this._parseTextResult(await this.stopPlaytest(instance_id, timeout));
-    if (body.success === true && body.runtimeStopped !== false) {
+    return this._withinResponseBudget('solo_playtest', action, [instance_id, timeout], async () => {
+      const body = this._parseTextResult(await this.stopPlaytest(instance_id, timeout));
+      if (body.success === true && body.runtimeStopped !== false) {
+        return this._textResult({
+          success: true,
+          action,
+          message: 'Playtest stopped.',
+        });
+      }
       return this._textResult({
-        success: true,
+        ...body,
+        success: false,
         action,
-        message: 'Playtest stopped.',
+        error: body.error ?? 'stop_failed',
+        message: body.message ?? 'Playtest did not stop.',
+        roles: Array.isArray(body.roles) ? body.roles : undefined,
+        requiresBuiltInMcp: body.requiresBuiltInMcp === true ? true : undefined,
+        recoveryHint: typeof body.recoveryHint === 'string' ? body.recoveryHint : undefined,
       });
-    }
-    return this._textResult({
-      ...body,
-      success: false,
-      action,
-      error: body.error ?? 'stop_failed',
-      message: body.message ?? 'Playtest did not stop.',
-      roles: Array.isArray(body.roles) ? body.roles : undefined,
-      requiresBuiltInMcp: body.requiresBuiltInMcp === true ? true : undefined,
-      recoveryHint: typeof body.recoveryHint === 'string' ? body.recoveryHint : undefined,
     });
   }
 
@@ -4581,6 +4684,20 @@ export class RobloxStudioTools {
       });
     }
 
+    return this._withinResponseBudget('multiplayer_playtest', action, [instance_id, numPlayers, target, testArgs, value, timeout], () =>
+      this._multiplayerPlaytestAction(action, numPlayers, target, testArgs, value, timeout, instance_id));
+  }
+
+  // start, add_players, leave_client and end, run under the response budget.
+  private async _multiplayerPlaytestAction(
+    action: string,
+    numPlayers: number | undefined,
+    target: string | undefined,
+    testArgs: unknown,
+    value: unknown,
+    timeout: number | undefined,
+    instance_id: string | undefined,
+  ): Promise<ToolCallResult> {
     if (action === 'start') {
       const body = this._parseTextResult(await this.multiplayerTestStart(numPlayers as number, testArgs, timeout, instance_id));
       const stateValue = body.state;
@@ -4931,31 +5048,66 @@ export class RobloxStudioTools {
     if (wait_ms !== undefined && (!Number.isInteger(wait_ms) || wait_ms < 0 || wait_ms > MAX_OPERATION_WAIT_MS)) {
       throw new Error(`wait_ms must be an integer from 0 to ${MAX_OPERATION_WAIT_MS}`);
     }
-    const deadline = Date.now() + (wait_ms ?? 0);
+    // One status call must also answer inside the client's timeout, so a longer
+    // wait_ms is cut to the response budget; waitCappedMs reports the wait used.
+    const waitMs = Math.min(wait_ms ?? 0, responseBudgetMs());
+    const capped = wait_ms !== undefined && wait_ms > waitMs ? { waitCappedMs: waitMs } : {};
+    const job = this.toolJobs.get(request_id);
+    if (job) {
+      const outcome = await this._awaitToolJob(job, waitMs, signal);
+      if (!outcome) return this._textResult({ ...this._toolJobPending(job), ...capped });
+      const status = {
+        requestId: job.id,
+        state: 'settled',
+        tool: job.tool,
+        action: job.action,
+        elapsedMs: (job.settledAt ?? Date.now()) - job.startedAt,
+      };
+      // One JSON item with the result nested: MCP clients read success, error and
+      // structuredContent from the first JSON text item, so a collected result
+      // must flag a failure the same way the direct call would have.
+      if ('error' in outcome) {
+        return { content: [{ type: 'text', text: JSON.stringify({ ...publicToolErrorBody(job.tool, outcome.error), ...status, outcome: 'error' }) }], isError: true };
+      }
+      const text = outcome.result.content.find((item) => item.type === 'text')?.text;
+      let result: unknown = text;
+      try {
+        if (text !== undefined) result = JSON.parse(text);
+      } catch {
+        // Not JSON: return the text as it is.
+      }
+      const inner = result && typeof result === 'object' && !Array.isArray(result) ? result as Record<string, unknown> : {};
+      const failed = inner.success === false || (typeof inner.error === 'string' && inner.error.length > 0);
+      return {
+        content: [{ type: 'text', text: JSON.stringify({ ...status, outcome: 'result', result }) }],
+        ...(failed ? { isError: true } : {}),
+      };
+    }
+    const deadline = Date.now() + waitMs;
     // A generate_model job may still be preparing its reference image here,
     // before the bridge holds any record of it.
     if (this.referenceUploads.view(request_id)) {
-      await this.referenceUploads.waitForPreparation(request_id, wait_ms ?? 0, signal);
+      await this.referenceUploads.waitForPreparation(request_id, waitMs, signal);
       const preparation = this.referenceUploads.view(request_id);
       if (preparation && preparation.stage !== 'dispatched') {
-        return this._textResult(this._preparationStatus(request_id, preparation));
+        return this._textResult({ ...this._preparationStatus(request_id, preparation), ...capped });
       }
     }
     const remainingMs = Math.max(0, deadline - Date.now());
-    return this._operationStatusResult(request_id, await this.bridge.getRequestStatusEverywhere(request_id, remainingMs, signal));
+    return this._operationStatusResult(request_id, await this.bridge.getRequestStatusEverywhere(request_id, remainingMs, signal), capped);
   }
 
-  private _requestStatusResult(requestId: string, status: RequestStatus | undefined) {
-    return this._textResult(status ? { ...status } : unretainedStatus(requestId));
+  private _requestStatusResult(requestId: string, status: RequestStatus | undefined, extra: Record<string, unknown> = {}) {
+    return this._textResult(status ? { ...status, ...extra } : { ...unretainedStatus(requestId), ...extra });
   }
 
   // A bridge status, plus the reference-image preparation and an overall phase
   // when this server prepared the operation for generate_model.
-  private _operationStatusResult(requestId: string, status: RequestStatus | undefined) {
+  private _operationStatusResult(requestId: string, status: RequestStatus | undefined, extra: Record<string, unknown> = {}) {
     const preparation = this.referenceUploads.view(requestId);
-    if (!preparation) return this._requestStatusResult(requestId, status);
-    if (!status) return this._textResult({ ...unretainedStatus(requestId), preparation });
-    return this._textResult({ ...status, phase: generationPhase(status), preparation });
+    if (!preparation) return this._requestStatusResult(requestId, status, extra);
+    if (!status) return this._textResult({ ...unretainedStatus(requestId), preparation, ...extra });
+    return this._textResult({ ...status, phase: generationPhase(status), preparation, ...extra });
   }
 
   // A generate_model job that has not reached the bridge, shaped like a request

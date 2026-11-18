@@ -62,6 +62,10 @@ Read output with get_runtime_logs. Reuse nextCursor as cursor for one Instance, 
 - totalDropped sums lifetime eviction counts from successfully read Peers. It counts messages evicted, not messages missed by this caller, and may decrease when Peers fail, disconnect, or reload.
 - For successfully read Peers, nextCursor advances past all captured entries, including those omitted by filter or tail. It is a continuation watermark, not pagination through omitted results; continuing from it will not return those entries.
 
+## Long calls and pending results
+
+MCP clients abandon a call after their own timeout, and the caller then cannot tell what happened. solo_playtest start and stop, multiplayer_playtest start, add_players, leave_client and end, and wait_until therefore answer within a 25 second response budget (ROBLOX_STUDIO_MCP_RESPONSE_BUDGET_MS). Work still running then returns state "pending" with a requestId and keeps running. Call get_request_status with that request_id and wait_ms up to 25000 until state is "settled"; its result field holds the original result, or outcome is "error" when the call failed. Do not repeat the call: an identical call while it runs joins the same job instead of starting the playtest twice. Finished results stay available for five minutes in the same server process.
+
 ## Simulation and input
 
 - Inspect current settings with get_simulation_state before changing them.
@@ -96,7 +100,7 @@ Studio must allow third-party asset loading for public third-party previews and 
 
 generate_model stages generated content under ServerStorage for review. upload_asset sends an explicit local file to the chosen Roblox user or group.
 
-generate_model with async=true returns a job status with its requestId before generation finishes. Check it, wait for it, or read its result with get_request_status (wait_ms waits for completion). The job stays on the Studio instance that started it. A disconnected caller or an ended wait never cancels it, and no tool can cancel a running generation. Pass operation_id so a retry with identical arguments joins the same job instead of generating a second model. With image_path or image_base64, the status adds phase (uploading, generating, completed, failed, or unknown when a wait ended without a result) and preparation; a retry reuses the uploaded image, and an upload whose outcome is unknown is never repeated. Results stay available for five minutes after the job finishes (or after timeout_ms passes without a result), within the current server session; large results can be evicted sooner.
+generate_model with async=true returns a job status with its requestId before generation finishes. Check it, wait for it, or read its result with get_request_status (wait_ms waits for completion, up to the response budget per check). The job stays on the Studio instance that started it. A disconnected caller or an ended wait never cancels it, and no tool can cancel a running generation. Pass operation_id so a retry with identical arguments joins the same job instead of generating a second model. With image_path or image_base64, the status adds phase (uploading, generating, completed, failed, or unknown when a wait ended without a result) and preparation; a retry reuses the uploaded image, and an upload whose outcome is unknown is never repeated. Results stay available for five minutes after the job finishes (or after timeout_ms passes without a result), within the current server session; large results can be evicted sooner.
 
 ## Monetization
 

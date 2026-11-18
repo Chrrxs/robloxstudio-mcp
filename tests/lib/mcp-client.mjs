@@ -16,6 +16,12 @@ import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
 import { testBasePort } from './test-port.mjs';
 import { withStudioTestToolLaunch } from '../../scripts/studio-test-safety.mjs';
+import {
+  collectedToolResult,
+  isPendingToolCall,
+  MAX_STATUS_WAIT_MS,
+  PENDING_COLLECT_MARGIN_MS,
+} from './pending-tool-call.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 export const REPO_ROOT = resolve(__dirname, '..', '..');
@@ -45,6 +51,18 @@ const ROUTED_TOOLS = new Set([
 ]);
 
 let confirmedAutoAssignedPrimary;
+
+function parseToolCallResult(name, res) {
+  const text = res?.content?.[0]?.text;
+  if (text == null) {
+    throw new Error(`Tool ${name} returned no text content: ${JSON.stringify(res)}`);
+  }
+  try {
+    return { body: JSON.parse(text), isError: res.isError === true };
+  } catch {
+    return { body: text, isError: res.isError === true };
+  }
+}
 
 function hasLiveConfirmedPrimary() {
   const client = confirmedAutoAssignedPrimary;
@@ -225,16 +243,23 @@ export class McpClient {
     return withStudioTestToolLaunch(name, routedArgs, { ...process.env, ...this.env }, async () => {
       // Timing-sensitive tests measure RPC latency, not intentional admission wait.
       onDispatch?.();
-      const res = await this.rpc('tools/call', { name, arguments: routedArgs }, timeoutMs);
-      const text = res?.content?.[0]?.text;
-      if (text == null) {
-        throw new Error(`Tool ${name} returned no text content: ${JSON.stringify(res)}`);
+      const deadline = Date.now() + timeoutMs;
+      let result = parseToolCallResult(name, await this.rpc('tools/call', { name, arguments: routedArgs }, timeoutMs));
+      // A long call answers {state:"pending", requestId} once the server's response
+      // budget runs out and keeps running; collect it within the caller's timeout.
+      while (isPendingToolCall(name, result.body)) {
+        const remainingMs = deadline - Date.now();
+        const waitMs = Math.min(remainingMs - PENDING_COLLECT_MARGIN_MS, MAX_STATUS_WAIT_MS);
+        if (waitMs <= 0) {
+          throw new Error(`Tool ${name} still pending after ${timeoutMs}ms: ${JSON.stringify(result.body)}`);
+        }
+        const status = parseToolCallResult('get_request_status', await this.rpc('tools/call', {
+          name: 'get_request_status',
+          arguments: { request_id: result.body.requestId, wait_ms: waitMs },
+        }, remainingMs));
+        result = collectedToolResult(name, status);
       }
-      try {
-        return { body: JSON.parse(text), isError: res.isError === true };
-      } catch {
-        return { body: text, isError: res.isError === true };
-      }
+      return result;
     });
   }
 

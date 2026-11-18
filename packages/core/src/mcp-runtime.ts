@@ -319,7 +319,7 @@ export function serverInstructions(definitions: readonly ToolDefinition[]): stri
   }
   if (has('get_request_status', 'execute_luau', 'set_properties')) {
     instructions.push(
-      'Supply a unique operation_id to any Studio write tool that accepts one when retry safety matters. After a timeout, query get_request_status with that ID before retrying; pass wait_ms to wait for a late result. Ending that wait never cancels the operation. Identical arguments reuse a retained outcome; changed arguments are rejected. Recovery and deduplication are bounded to the current server session and five-minute retention window; result payloads may be evicted earlier. Unknown status does not mean unexecuted, and cancellation cannot roll back mutations. For script writes, expected_revision from the last read also refuses a repeated or stale write after that window.',
+      'Supply a unique operation_id to any Studio write tool that accepts one when retry safety matters. After a timeout, query get_request_status with that ID before retrying; pass wait_ms to wait for a late result, up to the response budget per check. Ending that wait never cancels the operation. Identical arguments reuse a retained outcome; changed arguments are rejected. Recovery and deduplication are bounded to the current server session and five-minute retention window; result payloads may be evicted earlier. Unknown status does not mean unexecuted, and cancellation cannot roll back mutations. For script writes, expected_revision from the last read also refuses a repeated or stale write after that window.',
       'Request stages are queued, dispatched, executing (plugin handler entered), and response_delivery (handler returned or admission rejected). executionOutcome is separate from waiter state and delivery outcome; handler observations do not prove user Luau instructions ran. A waiter timeout is not an execution deadline or rollback. Neither missing progress nor connection loss proves completion.',
     );
   }
@@ -340,6 +340,11 @@ export function serverInstructions(definitions: readonly ToolDefinition[]): stri
   }
   if (has('eval_server_runtime', 'eval_client_runtime')) {
     instructions.push('Pass wait_until to eval_server_runtime or eval_client_runtime instead of sleeping until game state changes.');
+  }
+  if (has('get_request_status', 'solo_playtest')) {
+    instructions.push(
+      'A long call that returns state=pending with a requestId keeps running: collect its result with get_request_status, never by repeating the call.',
+    );
   }
   if (has('search_assets', 'preview_asset', 'insert_asset')) {
     instructions.push('Search and preview untrusted Creator Store assets before inserting them.');

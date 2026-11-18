@@ -311,8 +311,9 @@ describe('MCP v2 tool runtime', () => {
     // expected_revision(s) on script writes (about 1,600 characters);
     // 52,300 adds capture_video (about 1,200 characters);
     // 52,900 adds wait_until with bounded timeout_s and poll_ms on the runtime
-    // eval tools (about 660 characters).
-    expect(serialized.length).toBeLessThanOrEqual(52_900);
+    // eval tools (about 660 characters); 53,000 adds pending tool calls and the
+    // response-budget cap to get_request_status (about 80 characters).
+    expect(serialized.length).toBeLessThanOrEqual(53_000);
     expect(catalog.filter((tool) => tool.outputSchema)).toHaveLength(50);
     expect(catalog.every((tool) => tool.description.length <= 120)).toBe(true);
     expect(inspectorCatalog).toHaveLength(26);
