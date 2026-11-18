@@ -1,9 +1,11 @@
 #!/usr/bin/env node
 // Verifies simulate_mouse_input move and scroll reach game
 // scripts on a live client, that touch device emulation is rejected for
-// cursor movement instead of reporting a false success, and that the
-// documented execute_luau recipe (VirtualInput + GuiInset) drives a GUI
-// element by path as a multi-step sequence with held-key cleanup.
+// cursor movement instead of reporting a false success, that a click read off
+// a Device Simulator screenshot (full device screen squeezed into the
+// viewport) hits that pixel, and that the documented execute_luau recipe
+// (VirtualInput + GuiInset) drives a GUI element by path as a multi-step
+// sequence with held-key cleanup.
 
 import { McpClient, runTest, assert, startPlaytestAndWait, safeStopPlaytest } from './lib/mcp-client.mjs';
 
@@ -75,6 +77,44 @@ return {
 const KEY_STATE = String.raw`
 task.wait(0.1)
 return { w = game:GetService("UserInputService"):IsKeyDown(Enum.KeyCode.W) }
+`;
+
+// Places a button in the safe area near the right edge, where a squeezed
+// screenshot would be most wrong, and returns its centre in full-screen pixels
+// (relative to a ScreenInsets=None frame): the grid screenshots are returned in.
+const SIM_SETUP = String.raw`
+task.wait(0.5)
+local pg = game:GetService("Players").LocalPlayer.PlayerGui
+local gui = pg.${GUI}
+local probeGui = Instance.new("ScreenGui")
+probeGui.ScreenInsets = Enum.ScreenInsets.None
+probeGui.IgnoreGuiInset = true
+local probe = Instance.new("Frame")
+probe.Size = UDim2.fromScale(1, 1)
+probe.BackgroundTransparency = 1
+probe.Parent = probeGui
+probeGui.Parent = pg
+local target = Instance.new("TextButton")
+target.Name = "SimTarget"
+target.Size = UDim2.fromOffset(40, 40)
+target.Position = UDim2.new(1, -120, 0, 100)
+target.Parent = gui
+target.Activated:Connect(function() gui:SetAttribute("simActivated", (gui:GetAttribute("simActivated") or 0) + 1) end)
+task.wait(0.2)
+local full = probe.AbsoluteSize
+local centre = target.AbsolutePosition + target.AbsoluteSize / 2 - probe.AbsolutePosition
+local vp = workspace.CurrentCamera.ViewportSize
+probeGui:Destroy()
+return {
+  full = { full.X, full.Y },
+  viewport = { vp.X, vp.Y },
+  image = { math.round(centre.X), math.round(centre.Y) },
+}
+`;
+
+const SIM_READ = String.raw`
+task.wait(0.2)
+return { activated = game:GetService("Players").LocalPlayer.PlayerGui.${GUI}:GetAttribute("simActivated") or 0 }
 `;
 
 const CLEANUP = String.raw`
@@ -186,6 +226,29 @@ await runTest('simulate_mouse_input move and scroll reach the game', async ({ tr
     try {
       const touch = await client.callToolError('simulate_mouse_input', { target: 'client-1', action: 'move', x: hx, y: hy });
       assert(JSON.stringify(touch).includes('touch device emulation'), 'move under touch emulation is rejected, not a false success');
+    } finally {
+      await client.callTool('set_device_simulator', { target: 'client-1', stopSimulation: true });
+    }
+
+    await client.callTool('set_device_simulator', { target: 'client-1', deviceId: 'iphone_14', orientation: 'LandscapeRight' });
+    try {
+      const sim = parsed(await evalClient(SIM_SETUP, 'simulator setup'), 'simulator setup');
+      assert(sim.full[0] > sim.viewport[0] + 1,
+        `iphone_14 LandscapeRight squeezes the device screen into the viewport (full ${sim.full}, viewport ${sim.viewport})`);
+      // Screenshots are resampled to the full device screen, the space clicks use.
+      const shot = await client.callTool('capture_screenshot', { target: 'client-1' });
+      console.log(`  simulator screenshot ${shot.width}x${shot.height} from ${shot.source}; message: ${shot.message}`);
+      assert(Math.abs(shot.width - sim.full[0]) <= 1 && Math.abs(shot.height - sim.full[1]) <= 1,
+        `simulator screenshot ${shot.width}x${shot.height} (${shot.source}) matches the full device screen ${sim.full}`);
+      assert(String(shot.message).includes('covers the full'), 'simulator screenshot message names the device screen');
+      const [ix, iy] = sim.image;
+      const clicked = await mouse({ action: 'click', x: ix, y: iy });
+      assert(clicked.success === true && clicked.screenPosition === undefined,
+        `simulator click passes screenshot pixels straight through (${JSON.stringify(clicked)})`);
+      const { activated } = parsed(await evalClient(SIM_READ, 'simulator click read'), 'simulator click read');
+      assert(activated === 1, `click at screenshot pixel (${ix},${iy}) activates the button under the simulator (got ${activated})`);
+      const move = await client.callToolError('simulate_mouse_input', { target: 'client-1', action: 'move', x: ix, y: iy });
+      assert(JSON.stringify(move).includes('touch device emulation'), 'move under the iphone_14 preset is rejected');
     } finally {
       await client.callTool('set_device_simulator', { target: 'client-1', stopSimulation: true });
     }

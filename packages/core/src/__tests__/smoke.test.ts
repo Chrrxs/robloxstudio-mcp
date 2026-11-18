@@ -1347,6 +1347,58 @@ describe('Smoke', () => {
     }
   });
 
+  test('manage_instance launch timeout names a plugin version rejection for that launch', async () => {
+    const registryDir = fs.mkdtempSync(path.join(os.tmpdir(), 'robloxstudio-mcp-registry-'));
+    const liveProcessIds = new Set<number>();
+    const processAdapter = {
+      currentBootId: () => 'boot-1',
+      resolveStudioExe: () => 'RobloxStudioBeta.exe',
+      spawnStudio: () => {
+        liveProcessIds.add(6543);
+        return { pid: 9003, nativePid: 6543, unref: () => {} };
+      },
+      listStudioProcesses: () => [...liveProcessIds].map((Id) => ({
+        Id,
+        Name: 'RobloxStudioBeta',
+        Path: 'RobloxStudioBeta.exe',
+        MainWindowTitle: 'Roblox Studio',
+      })),
+      stopProcess: (pid: number) => {
+        liveProcessIds.delete(pid);
+      },
+    };
+
+    try {
+      const bridge = new BridgeService();
+      const tools = new RobloxStudioTools(bridge);
+      (tools as any).instanceManager = new StudioInstanceManager({ registryDir, processAdapter });
+      const rejection = {
+        role: 'edit', placeId: 0, pluginVersion: '3.4.4', pluginVariant: 'main', serverVersion: '3.5.0', port: 58741,
+      };
+      bridge.recordVersionRejection({
+        ...rejection, peerId: 'peer:other', instanceId: 'instance:other', placeName: 'Other.rbxl', dataModelName: 'Other.rbxl',
+      });
+      bridge.recordVersionRejection({
+        ...rejection, peerId: 'peer:old', instanceId: 'instance:old', placeName: 'place.rbxl', dataModelName: 'place.rbxl',
+      });
+      bridge.recordVersionRejection({
+        ...rejection, peerId: 'peer:other-2', instanceId: 'instance:other-2', placeName: 'Other.rbxl', dataModelName: 'Other.rbxl',
+      });
+
+      const launched = JSON.parse((await tools.manageInstance({
+        action: 'launch',
+        source: 'local_file',
+        local_place_file: '/tmp/version-rejection/place.rbxl',
+        timeout_ms: 10,
+      })).content[0].text);
+      const expected = 'Studio connected but was rejected: Studio plugin v3.4.4 ≠ server v3.5.0; ' +
+        'restart the MCP server that owns port 58741 or reinstall the matching plugin.';
+      expect(launched).toEqual(expect.objectContaining({ state: 'failed', error: expected, failure_reason: expected }));
+    } finally {
+      fs.rmSync(registryDir, { recursive: true, force: true });
+    }
+  });
+
   test('manage_instance retains terminal status after an unconnected process exits', async () => {
     const registryDir = fs.mkdtempSync(path.join(os.tmpdir(), 'robloxstudio-mcp-registry-'));
     const liveProcessIds = new Set<number>();

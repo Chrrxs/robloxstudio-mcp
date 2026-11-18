@@ -29,6 +29,7 @@ import * as path from 'path';
 import { captureMacStudioWindow, prepareMacHostCapture } from './host-capture-macos.js';
 import { captureLinuxStudioWindow, hasLinuxStudioX11Session, LINUX_NO_STUDIO_DISPLAY_ERROR } from './host-capture-linux.js';
 import type { X11Session } from './host-capture-linux.js';
+import { rgbaToPng } from './png-encoder.js';
 
 // macOS uses the app bundle ID; Windows uses the verified executable name;
 // Linux uses `x11` plus the X display name, and carries that display and its
@@ -61,6 +62,9 @@ export type ViewportMarkerHint = {
   viewportWidth: number;
   viewportHeight: number;
   markerSize: number;
+  // Where the plugin pins the markers: the middle of each viewport edge, or
+  // (older plugins) the corners.
+  markerLayout?: 'corners' | 'edges';
 };
 
 const HOST_CAPTURE_TIMEOUT_MS = 20_000;
@@ -70,6 +74,11 @@ const MARKER_MAX_G = 60;
 // The marker bounding box must match the viewport within this ratio, or be a
 // consistent DPI scale of it (same factor on both axes within this tolerance).
 const MARKER_SCALE_TOLERANCE = 0.03;
+// Blobs searched for the four corners; more than this is noise, not markers.
+const MARKER_MAX_CANDIDATES = 128;
+const MARKER_MAX_REPORTED_BLOBS = 8;
+const MARKER_DIAGNOSTIC_PREFIX = 'viewport-markers-';
+const MARKER_DIAGNOSTICS_KEPT = 5;
 
 export function isHostCaptureDisabled(env: NodeJS.ProcessEnv = process.env): boolean {
   const value = (env.ROBLOX_STUDIO_HOST_CAPTURE ?? '').trim().toLowerCase();
@@ -159,65 +168,278 @@ function isMarkerPixel(rgba: Buffer, offset: number): boolean {
   return rgba[offset] >= MARKER_MIN_RB && rgba[offset + 1] <= MARKER_MAX_G && rgba[offset + 2] >= MARKER_MIN_RB;
 }
 
-// Locates the viewport inside a window capture from the corner markers.
-// Returns undefined (with a reason) when the markers cannot be found or the
-// box they span does not look like the viewport the plugin reported.
+type MarkerBlob = { x: number; y: number; width: number; height: number; pixels: number };
+
+// 8-connected runs of marker pixels. Only the first `limit` blobs are kept,
+// but every marker pixel and blob is counted (and bounded) for the fallback
+// and the failure report.
+function findMarkerBlobs(
+  rgba: Buffer,
+  width: number,
+  height: number,
+  limit: number,
+): { pixels: number; count: number; blobs: MarkerBlob[]; bounds: ViewportRect } {
+  const visited = new Uint8Array(width * height);
+  const blobs: MarkerBlob[] = [];
+  const stack: number[] = [];
+  let pixels = 0;
+  let count = 0;
+  let boundsMinX = width;
+  let boundsMinY = height;
+  let boundsMaxX = -1;
+  let boundsMaxY = -1;
+  for (let start = 0; start < width * height; start++) {
+    if (visited[start] || !isMarkerPixel(rgba, start * 4)) continue;
+    visited[start] = 1;
+    stack.push(start);
+    let minX = width;
+    let minY = height;
+    let maxX = -1;
+    let maxY = -1;
+    let blobPixels = 0;
+    while (stack.length > 0) {
+      const index = stack.pop()!;
+      const x = index % width;
+      const y = (index - x) / width;
+      blobPixels++;
+      if (x < minX) minX = x;
+      if (x > maxX) maxX = x;
+      if (y < minY) minY = y;
+      if (y > maxY) maxY = y;
+      for (let dy = -1; dy <= 1; dy++) {
+        const ny = y + dy;
+        if (ny < 0 || ny >= height) continue;
+        for (let dx = -1; dx <= 1; dx++) {
+          const nx = x + dx;
+          if (nx < 0 || nx >= width) continue;
+          const neighbour = ny * width + nx;
+          if (visited[neighbour] || !isMarkerPixel(rgba, neighbour * 4)) continue;
+          visited[neighbour] = 1;
+          stack.push(neighbour);
+        }
+      }
+    }
+    pixels += blobPixels;
+    count++;
+    boundsMinX = Math.min(boundsMinX, minX);
+    boundsMinY = Math.min(boundsMinY, minY);
+    boundsMaxX = Math.max(boundsMaxX, maxX);
+    boundsMaxY = Math.max(boundsMaxY, maxY);
+    if (blobs.length < limit) blobs.push({ x: minX, y: minY, width: maxX - minX + 1, height: maxY - minY + 1, pixels: blobPixels });
+  }
+  const bounds = { x: boundsMinX, y: boundsMinY, width: boundsMaxX - boundsMinX + 1, height: boundsMaxY - boundsMinY + 1 };
+  return { pixels, count, blobs, bounds };
+}
+
+// The box around every marker pixel, accepted when its corners are marker
+// pixels: markers merged with magenta game UI at a corner are not square blobs.
+function boundingBoxMarkers(rgba: Buffer, width: number, bounds: ViewportRect, markerSize: number): boolean {
+  const inset = Math.max(1, Math.floor(markerSize / 4));
+  const maxX = bounds.x + bounds.width - 1;
+  const maxY = bounds.y + bounds.height - 1;
+  if (bounds.width <= inset * 2 || bounds.height <= inset * 2) return false;
+  const corners: Array<[number, number]> = [
+    [bounds.x + inset, bounds.y + inset],
+    [maxX - inset, bounds.y + inset],
+    [bounds.x + inset, maxY - inset],
+    [maxX - inset, maxY - inset],
+  ];
+  return corners.every(([x, y]) => isMarkerPixel(rgba, (y * width + x) * 4));
+}
+
+// A marker is a filled square. Thin strips and lines of marker-coloured pixels
+// (seen in iPad Fit to Window frames) and large magenta areas are not.
+function isMarkerShaped(blob: MarkerBlob, markerSize: number): boolean {
+  const short = Math.min(blob.width, blob.height);
+  const long = Math.max(blob.width, blob.height);
+  return short >= 2 && short / long >= 0.6 && long <= Math.max(64, markerSize * 8) && blob.pixels >= 0.7 * blob.width * blob.height;
+}
+
+function similarMarkers(a: MarkerBlob, b: MarkerBlob): boolean {
+  const sizeA = Math.max(a.width, a.height);
+  const sizeB = Math.max(b.width, b.height);
+  return Math.abs(sizeA - sizeB) <= 2 || Math.max(sizeA, sizeB) / Math.min(sizeA, sizeB) <= 1.5;
+}
+
+function matchesViewportAspect(rect: ViewportRect, hint: ViewportMarkerHint): boolean {
+  const scaleX = rect.width / hint.viewportWidth;
+  const scaleY = rect.height / hint.viewportHeight;
+  return Math.abs(scaleX - scaleY) <= MARKER_SCALE_TOLERANCE * Math.max(scaleX, scaleY);
+}
+
+// The outermost set of four similar squares that sit at the corners of an
+// axis-aligned rectangle, preferring one with the reported viewport aspect.
+function findMarkerRectangle(candidates: MarkerBlob[], hint: ViewportMarkerHint): { rect: ViewportRect; aspectMatches: boolean } | undefined {
+  let best: { rect: ViewportRect; aspectMatches: boolean } | undefined;
+  for (const topLeft of candidates) {
+    for (const bottomRight of candidates) {
+      const right = bottomRight.x + bottomRight.width - 1;
+      const bottom = bottomRight.y + bottomRight.height - 1;
+      // Opposite corners must not overlap each other.
+      if (bottomRight.x < topLeft.x + topLeft.width || bottomRight.y < topLeft.y + topLeft.height) continue;
+      if (!similarMarkers(topLeft, bottomRight)) continue;
+      const tolerance = Math.max(2, Math.round(Math.max(topLeft.width, topLeft.height) / 4));
+      const near = (a: number, b: number) => Math.abs(a - b) <= tolerance;
+      const topRight = candidates.find((blob) => blob !== topLeft && blob !== bottomRight && similarMarkers(blob, topLeft)
+        && near(blob.y, topLeft.y) && near(blob.x + blob.width - 1, right));
+      const bottomLeft = candidates.find((blob) => blob !== topLeft && blob !== bottomRight && similarMarkers(blob, topLeft)
+        && near(blob.x, topLeft.x) && near(blob.y + blob.height - 1, bottom));
+      if (!topRight || !bottomLeft || topRight === bottomLeft) continue;
+      const minX = Math.min(topLeft.x, bottomLeft.x);
+      const minY = Math.min(topLeft.y, topRight.y);
+      const maxX = Math.max(right, topRight.x + topRight.width - 1);
+      const maxY = Math.max(bottom, bottomLeft.y + bottomLeft.height - 1);
+      const rect = { x: minX, y: minY, width: maxX - minX + 1, height: maxY - minY + 1 };
+      const aspectMatches = matchesViewportAspect(rect, hint);
+      const better = best === undefined
+        || (aspectMatches && !best.aspectMatches)
+        || (aspectMatches === best.aspectMatches && rect.width * rect.height > best.rect.width * best.rect.height);
+      if (better) best = { rect, aspectMatches };
+    }
+  }
+  return best;
+}
+
+// Four similar squares at the middle of the viewport's edges: a left/right pair
+// sharing a centre row and a top/bottom pair sharing a centre column, each pair
+// centred on the other. Their outer edges are the viewport's edges.
+function findEdgeMarkerRectangle(candidates: MarkerBlob[], hint: ViewportMarkerHint): { rect: ViewportRect; aspectMatches: boolean } | undefined {
+  const centreX = (blob: MarkerBlob) => blob.x + (blob.width - 1) / 2;
+  const centreY = (blob: MarkerBlob) => blob.y + (blob.height - 1) / 2;
+  const tolerance = (a: MarkerBlob, b: MarkerBlob) => Math.max(2, Math.max(a.width, a.height, b.width, b.height) / 2);
+  type Pair = { first: MarkerBlob; second: MarkerBlob; centre: number; middle: number };
+  const horizontal: Pair[] = [];
+  const vertical: Pair[] = [];
+  for (const first of candidates) {
+    for (const second of candidates) {
+      if (first === second || !similarMarkers(first, second)) continue;
+      const tol = tolerance(first, second);
+      if (second.x >= first.x + first.width && Math.abs(centreY(first) - centreY(second)) <= tol) {
+        horizontal.push({ first, second, centre: (centreY(first) + centreY(second)) / 2, middle: (first.x + second.x + second.width - 1) / 2 });
+      }
+      if (second.y >= first.y + first.height && Math.abs(centreX(first) - centreX(second)) <= tol) {
+        vertical.push({ first, second, centre: (centreX(first) + centreX(second)) / 2, middle: (first.y + second.y + second.height - 1) / 2 });
+      }
+    }
+  }
+  let best: { rect: ViewportRect; aspectMatches: boolean } | undefined;
+  for (const sides of horizontal) {
+    for (const ends of vertical) {
+      if (new Set([sides.first, sides.second, ends.first, ends.second]).size !== 4) continue;
+      const tol = Math.max(tolerance(sides.first, sides.second), tolerance(ends.first, ends.second));
+      if (Math.abs(sides.middle - ends.centre) > tol || Math.abs(ends.middle - sides.centre) > tol) continue;
+      const rect = {
+        x: sides.first.x,
+        y: ends.first.y,
+        width: sides.second.x + sides.second.width - sides.first.x,
+        height: ends.second.y + ends.second.height - ends.first.y,
+      };
+      const aspectMatches = matchesViewportAspect(rect, hint);
+      const better = best === undefined
+        || (aspectMatches && !best.aspectMatches)
+        || (aspectMatches === best.aspectMatches && rect.width * rect.height > best.rect.width * best.rect.height);
+      if (better) best = { rect, aspectMatches };
+    }
+  }
+  return best;
+}
+
+function describeBlobs(count: number, blobs: MarkerBlob[]): string {
+  const largest = [...blobs].sort((a, b) => b.pixels - a.pixels).slice(0, MARKER_MAX_REPORTED_BLOBS);
+  const boxes = largest.map((blob) => `${blob.width}x${blob.height} at ${blob.x},${blob.y}`).join(', ');
+  return `${count} blob${count === 1 ? '' : 's'} (${boxes}${count > largest.length ? ', ...' : ''})`;
+}
+
+// Locates the viewport inside a window capture from the corner markers: the
+// four marker-shaped blobs that frame a rectangle of the viewport's aspect.
+// Other marker-coloured pixels (game UI, Studio chrome, thin strips) are
+// ignored. Returns a reason when no such rectangle is in the frame.
 export function findViewportRect(
   rgba: Buffer,
   width: number,
   height: number,
   hint: ViewportMarkerHint,
 ): { rect: ViewportRect } | { error: string } {
-  let minX = width;
-  let minY = height;
-  let maxX = -1;
-  let maxY = -1;
-  for (let y = 0; y < height; y++) {
-    const row = y * width * 4;
-    for (let x = 0; x < width; x++) {
-      if (!isMarkerPixel(rgba, row + x * 4)) continue;
-      if (x < minX) minX = x;
-      if (x > maxX) maxX = x;
-      if (y < minY) minY = y;
-      if (y > maxY) maxY = y;
-    }
-  }
-  if (maxX < 0) {
+  const edges = hint.markerLayout === 'edges';
+  const expected = `expected four ${hint.markerSize} px squares at the ${edges ? 'middle of the edges' : 'corners'} of the ${hint.viewportWidth}x${hint.viewportHeight} viewport`;
+  const { pixels, count, blobs, bounds } = findMarkerBlobs(rgba, width, height, MARKER_MAX_CANDIDATES * 8);
+  if (pixels === 0) {
     // The grab reads the window's own pixels, so other windows on top do not
     // matter; a Studio tab in front of the place viewport does.
     return {
-      error: 'no viewport markers were visible in the Studio window capture (if a script or plugin tab such as ' +
-        "UI Labs is in front of the place's viewport tab, select the place tab and retry)",
+      error: `no viewport markers were visible in the Studio window capture (${width}x${height} frame; ${expected}; ` +
+        "if a script or plugin tab such as UI Labs is in front of the place's viewport tab, select the place tab and retry)",
     };
   }
 
-  const rect = { x: minX, y: minY, width: maxX - minX + 1, height: maxY - minY + 1 };
+  const candidates = blobs.filter((blob) => isMarkerShaped(blob, hint.markerSize)).slice(0, MARKER_MAX_CANDIDATES);
+  const found = edges ? findEdgeMarkerRectangle(candidates, hint) : findMarkerRectangle(candidates, hint);
+  if (found?.aspectMatches) return { rect: found.rect };
+  // The box around every marker pixel only has marker corners in the corner layout.
+  const boxed = !edges && boundingBoxMarkers(rgba, width, bounds, hint.markerSize);
+  if (boxed && matchesViewportAspect(bounds, hint)) return { rect: bounds };
 
-  // All four corners of the box must themselves be marker pixels; a stray
-  // magenta pixel elsewhere in Studio's chrome would otherwise stretch the box.
-  const inset = Math.max(1, Math.floor(hint.markerSize / 4));
-  const corners: Array<[number, number]> = [
-    [minX + inset, minY + inset],
-    [maxX - inset, minY + inset],
-    [minX + inset, maxY - inset],
-    [maxX - inset, maxY - inset],
-  ];
-  for (const [x, y] of corners) {
-    if (!isMarkerPixel(rgba, (y * width + x) * 4)) {
-      return { error: `viewport markers were found but do not form a rectangle (box ${rect.width}x${rect.height} at ${rect.x},${rect.y})` };
+  const seen = `${pixels} marker pixel${pixels === 1 ? '' : 's'} in ${describeBlobs(count, blobs)}, ${candidates.length} marker-shaped`;
+  const rect = found?.rect ?? (boxed ? bounds : undefined);
+  if (!rect) {
+    return { error: `viewport markers were found but do not form a rectangle: ${seen}; ${expected}` };
+  }
+  return {
+    error:
+      `viewport marker box ${rect.width}x${rect.height} at ${rect.x},${rect.y} does not match the reported ` +
+      `${hint.viewportWidth}x${hint.viewportHeight} viewport aspect (${seen})`,
+  };
+}
+
+export function viewportDiagnosticsDirectory(): string {
+  return path.join(os.tmpdir(), 'robloxstudio-mcp', 'capture-diagnostics');
+}
+
+// Keeps a frame whose markers could not be read so the failure can be looked
+// at. Only the newest few are kept; returns undefined when it cannot be saved,
+// since the capture error matters more than the diagnostic copy.
+export function saveViewportMarkerFrame(
+  rgba: Buffer,
+  width: number,
+  height: number,
+  label: string,
+  directory = viewportDiagnosticsDirectory(),
+  keep = MARKER_DIAGNOSTICS_KEPT,
+): string | undefined {
+  try {
+    fs.mkdirSync(directory, { recursive: true });
+    const previous = fs.readdirSync(directory)
+      .filter((name) => name.startsWith(MARKER_DIAGNOSTIC_PREFIX) && name.endsWith('.png'))
+      .sort();
+    for (const name of previous.slice(0, Math.max(0, previous.length - keep + 1))) {
+      fs.rmSync(path.join(directory, name), { force: true });
     }
+    // Window captures can carry zero alpha, which would save an invisible image.
+    const opaque = Buffer.from(rgba.subarray(0, width * height * 4));
+    for (let offset = 3; offset < opaque.length; offset += 4) opaque[offset] = 255;
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const safeLabel = label.replace(/[^A-Za-z0-9_-]/g, '');
+    const file = path.join(directory, `${MARKER_DIAGNOSTIC_PREFIX}${stamp}-${safeLabel}-${Math.random().toString(36).slice(2, 8)}.png`);
+    fs.writeFileSync(file, rgbaToPng(opaque, width, height));
+    return file;
+  } catch {
+    return undefined;
   }
+}
 
-  const scaleX = rect.width / hint.viewportWidth;
-  const scaleY = rect.height / hint.viewportHeight;
-  if (Math.abs(scaleX - scaleY) > MARKER_SCALE_TOLERANCE * Math.max(scaleX, scaleY)) {
-    return {
-      error:
-        `viewport marker box ${rect.width}x${rect.height} does not match the reported ` +
-        `${hint.viewportWidth}x${hint.viewportHeight} viewport aspect`,
-    };
-  }
-  return { rect };
+// findViewportRect for a live capture: a failure also saves the marker frame
+// and names it in the error.
+export function locateViewportInFrame(
+  rgba: Buffer,
+  width: number,
+  height: number,
+  hint: ViewportMarkerHint,
+  label: string,
+): { rect: ViewportRect } | { error: string } {
+  const located = findViewportRect(rgba, width, height, hint);
+  if ('rect' in located) return located;
+  const saved = saveViewportMarkerFrame(rgba, width, height, label);
+  return { error: saved ? `${located.error}; marker frame saved to ${saved}` : located.error };
 }
 
 // Crops the window capture to the viewport rect and resamples it to the

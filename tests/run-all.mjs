@@ -63,9 +63,9 @@ const FEATURE_TESTS = [
   'micro-profiler-responsiveness.mjs',
 ];
 // Long-running/inherently failing investigation scenarios are explicit opt-ins.
-const DIAGNOSTIC_TESTS = ['client-broker-backlog-repro.mjs', 'capture-service-video-probe.mjs', 'luau-recipe-stress.mjs', 'luau-http-budget-repro.mjs', 'studio-websocket-quota.mjs', 'play-server-shutdown-disconnect-repro.mjs', 'studio-http-concurrency-repro.mjs', 'micro-profiler-state-verification.mjs', 'micro-profiler-recording-verification.mjs', 'micro-profiler-friction-verification.mjs', 'client-broker-transfer-repro.mjs'];
+const DIAGNOSTIC_TESTS = ['issue-181-client-input-repro.mjs', 'client-broker-backlog-repro.mjs', 'capture-service-video-probe.mjs', 'luau-recipe-stress.mjs', 'luau-http-budget-repro.mjs', 'studio-websocket-quota.mjs', 'play-server-shutdown-disconnect-repro.mjs', 'studio-http-concurrency-repro.mjs', 'micro-profiler-state-verification.mjs', 'micro-profiler-recording-verification.mjs', 'micro-profiler-friction-verification.mjs', 'client-broker-transfer-repro.mjs'];
 // These require explicit environment setup and are not part of the default suite.
-const CONFIGURED_TESTS = ['capture-regressions.mjs', 'capture-video.mjs'];
+const CONFIGURED_TESTS = ['capture-regressions.mjs', 'capture-video.mjs', 'multiplayer-exited-client.mjs'];
 const featureSmoke = process.argv.includes('--smoke');
 const requestedTestIndex = process.argv.indexOf('--test');
 const requestedTest = requestedTestIndex === -1 ? undefined : process.argv[requestedTestIndex + 1];

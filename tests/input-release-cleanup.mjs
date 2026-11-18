@@ -54,9 +54,16 @@ local task = {wait = function()
   if staleDuringWait then stale = true end
 end}
 
+-- No Device Simulator here: move is never refused for touch emulation.
+local DeviceScreen = {
+  measureScreenScale = function() return {x = 1, y = 1} end,
+  isScaled = function(scale) return scale.x ~= 1 or scale.y ~= 1 end,
+  isDeviceSimulating = function() return false end,
+}
+local modules = {RenderMonitor = RenderMonitor, DeviceScreen = DeviceScreen}
 local TS = {import = function(_, _, name)
-  assert(name == 'RenderMonitor', tostring(name))
-  return RenderMonitor
+  assert(modules[name], tostring(name))
+  return modules[name]
 end}
 local script = {Parent = {Parent = {Parent = {include = {RuntimeLib = TS}}}}}
 local require = function(module) return module end

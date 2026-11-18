@@ -96,6 +96,47 @@ export interface TopologySnapshot {
   multiplayerGroups: MultiplayerGroup[];
 }
 
+/** A Studio /ready refused because its plugin version differs from this server's. */
+export interface PluginVersionRejection {
+  peerId: string;
+  instanceId: string;
+  role: string;
+  placeId: number;
+  placeName: string;
+  dataModelName: string;
+  pluginVersion: string;
+  pluginVariant: string;
+  serverVersion: string;
+  /** Local port of the server that refused it, so callers know which process to restart. */
+  port?: number;
+  rejectedAt: number;
+  hint: string;
+}
+
+export type PluginVersionRejectionInput = Omit<PluginVersionRejection, 'rejectedAt' | 'hint'>;
+
+const MAX_VERSION_REJECTIONS = 32;
+export const VERSION_REJECTION_TTL_MS = 10 * 60_000;
+
+export function describeVersionRejection(rejection: PluginVersionRejectionInput): string {
+  const owner = rejection.port !== undefined ? `the MCP server that owns port ${rejection.port}` : 'the MCP server';
+  return `Studio plugin v${rejection.pluginVersion} ≠ server v${rejection.serverVersion}; ` +
+    `restart ${owner} or reinstall the matching plugin.`;
+}
+
+export function parsePluginVersionRejections(value: unknown): PluginVersionRejection[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter((entry: unknown): entry is PluginVersionRejection =>
+    !!entry && typeof entry === 'object'
+    && 'peerId' in entry && typeof entry.peerId === 'string'
+    && 'instanceId' in entry && typeof entry.instanceId === 'string'
+    && 'role' in entry && typeof entry.role === 'string'
+    && 'pluginVersion' in entry && typeof entry.pluginVersion === 'string'
+    && 'serverVersion' in entry && typeof entry.serverVersion === 'string'
+    && 'rejectedAt' in entry && typeof entry.rejectedAt === 'number'
+    && 'hint' in entry && typeof entry.hint === 'string');
+}
+
 export interface RegisterPeerInput {
   peerId: string;
   transportPeerId: string;
@@ -514,6 +555,8 @@ export class BridgeService implements StudioTransportQueue {
   private readonly peerClosedListeners = new Set<PeerClosedListener>();
   private readonly deliveryOwnersByTransportPeer = new Map<string, Set<string>>();
   private readonly requestTimeout = 30_000;
+  // Keyed by instance and peer so a retrying plugin keeps one, refreshed entry.
+  private readonly versionRejections = new Map<string, PluginVersionRejection>();
 
   onPeerRegistered(listener: PeerRegisteredListener): () => void {
     this.peerRegisteredListeners.add(listener);
@@ -816,6 +859,7 @@ export class BridgeService implements StudioTransportQueue {
       connectedAt: prior?.connectedAt ?? now,
     };
     this.peersById.set(input.peerId, registered);
+    this.clearVersionRejections(input.instanceId);
     if (multiplayerGroupId) this.attachInstanceToGroup(input.instanceId, multiplayerGroupId);
 
     this.notifyPeerRegistered(toPublicPeer(registered));
@@ -982,6 +1026,33 @@ export class BridgeService implements StudioTransportQueue {
 
   getPublicMultiplayerGroups(): PublicMultiplayerGroup[] {
     return this.getMultiplayerGroups().map(copyGroup);
+  }
+
+  recordVersionRejection(input: PluginVersionRejectionInput, now = Date.now()): PluginVersionRejection {
+    const key = `${input.instanceId}\0${input.peerId}`;
+    const rejection: PluginVersionRejection = { ...input, rejectedAt: now, hint: describeVersionRejection(input) };
+    this.versionRejections.delete(key);
+    this.versionRejections.set(key, rejection);
+    while (this.versionRejections.size > MAX_VERSION_REJECTIONS) {
+      const oldest = this.versionRejections.keys().next().value;
+      if (oldest === undefined) break;
+      this.versionRejections.delete(oldest);
+    }
+    return rejection;
+  }
+
+  clearVersionRejections(instanceId: string): void {
+    for (const [key, rejection] of this.versionRejections) {
+      if (rejection.instanceId === instanceId) this.versionRejections.delete(key);
+    }
+  }
+
+  /** Recent, unexpired version rejections, oldest first. */
+  getVersionRejections(now = Date.now()): PluginVersionRejection[] {
+    for (const [key, rejection] of this.versionRejections) {
+      if (now - rejection.rejectedAt > VERSION_REJECTION_TTL_MS) this.versionRejections.delete(key);
+    }
+    return Array.from(this.versionRejections.values(), (rejection) => ({ ...rejection }));
   }
 
   getTopologySnapshot(): TopologySnapshot {

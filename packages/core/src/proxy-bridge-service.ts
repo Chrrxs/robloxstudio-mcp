@@ -1,6 +1,7 @@
-import { BridgeService, isRequestStage, isValidOperationId, MultiplayerGroupInUseError, parseFailureDetails, parseObservations, PRIMARY_PROXY_FEATURES, RequestFailure, requiresAtomicProperties, requiresScriptPreconditions, toPublicPeer } from './bridge-service.js';
+import { BridgeService, isRequestStage, parsePluginVersionRejections, isValidOperationId, MultiplayerGroupInUseError, parseFailureDetails, parseObservations, PRIMARY_PROXY_FEATURES, RequestFailure, requiresAtomicProperties, requiresScriptPreconditions, toPublicPeer } from './bridge-service.js';
 import type {
   MultiplayerGroup,
+  PluginVersionRejection,
   PublicStudioPeer,
   RequestFailureDetails,
   PrimaryProxyFeature,
@@ -82,6 +83,7 @@ export class ProxyBridgeService extends BridgeService {
   private cachedPeers: StudioPeer[] = [];
   private cachedInstances: StudioInstance[] = [];
   private cachedMultiplayerGroups: MultiplayerGroup[] = [];
+  private cachedVersionRejections: PluginVersionRejection[] = [];
   private readonly initialRefresh: Promise<void>;
   private refreshTimer?: NodeJS.Timeout;
   private static REFRESH_INTERVAL_MS = 1000;
@@ -169,6 +171,8 @@ export class ProxyBridgeService extends BridgeService {
       this.cachedMultiplayerGroups = body.multiplayerGroups;
       this.primaryFeatures = parsePrimaryFeatures('proxyFeatures' in body ? body.proxyFeatures : undefined);
       this.primaryVersion = 'serverVersion' in body && typeof body.serverVersion === 'string' ? body.serverVersion : undefined;
+      // Only the port owner sees /ready, so its rejections are the ones callers need.
+      this.cachedVersionRejections = parsePluginVersionRejections('versionRejections' in body ? body.versionRejections : undefined);
       for (const peer of body.peers) {
         if (peerPublicationChanged(previousPeers.get(peer.peerId), peer)) {
           this.notifyPeerRegistered(toPublicPeer(peer));
@@ -194,6 +198,10 @@ export class ProxyBridgeService extends BridgeService {
 
   override getMultiplayerGroups(): MultiplayerGroup[] {
     return this.cachedMultiplayerGroups;
+  }
+
+  override getVersionRejections(): PluginVersionRejection[] {
+    return this.cachedVersionRejections.map((rejection) => ({ ...rejection }));
   }
 
   override getTopologySnapshot(): TopologySnapshot {

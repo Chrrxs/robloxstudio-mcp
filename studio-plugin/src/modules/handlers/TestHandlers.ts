@@ -3,6 +3,14 @@ import StopPlayMonitor from "../StopPlayMonitor";
 import PluginSession from "../PluginSession";
 import PeerRole from "../PeerRole";
 
+// Communication injects the server broker's client list; importing ClientBroker
+// here would pull its whole handler graph into this module.
+let describeClientProxies: (() => Record<string, unknown>[]) | undefined;
+
+function setClientProxyDescriber(describer: () => Record<string, unknown>[]) {
+	describeClientProxies = describer;
+}
+
 interface StudioTestServiceMultiplayer extends StudioTestService {
 	ExecuteMultiplayerTestAsync(numPlayers: number, testArgs: unknown): unknown;
 	AddPlayers(numPlayers: number): void;
@@ -345,6 +353,7 @@ function multiplayerTestState(_requestData: Record<string, unknown>) {
 	const players = getPlayersSnapshot();
 	response.players = players;
 	response.playerCount = players.size();
+	if (peer === "server" && describeClientProxies !== undefined) response.clients = describeClientProxies();
 
 	if (peer === "client") {
 		response.localPlayer = Players.LocalPlayer ? Players.LocalPlayer.Name : undefined;
@@ -435,4 +444,5 @@ export = {
 	multiplayerTestAddPlayers,
 	multiplayerTestLeaveClient,
 	multiplayerTestEnd,
+	setClientProxyDescriber,
 };

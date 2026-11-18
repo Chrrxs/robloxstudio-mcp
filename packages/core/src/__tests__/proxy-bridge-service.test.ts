@@ -318,6 +318,31 @@ describe('ProxyBridgeService', () => {
     }
   });
 
+  test('mirrors the primary version rejections from its topology', async () => {
+    const primary = new BridgeService();
+    primary.recordVersionRejection({
+      peerId: 'old-peer', instanceId: 'instance:old', role: 'edit', placeId: 0, placeName: 'Old.rbxl',
+      dataModelName: 'Old.rbxl', pluginVersion: '3.4.4', pluginVariant: 'main', serverVersion: '3.5.0', port: 58741,
+    });
+    const fetchMock = jest.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+      if (String(input) === 'http://primary/topology') {
+        return jsonResponse({ ...topology(), versionRejections: [...primary.getVersionRejections(), { bogus: true }] });
+      }
+      throw new Error(`unexpected fetch ${String(input)}`);
+    });
+    const proxy = new ProxyBridgeService('http://primary');
+    try {
+      await proxy.waitForInitialRefresh();
+      expect(proxy.getVersionRejections()).toEqual([expect.objectContaining({
+        instanceId: 'instance:old',
+        hint: 'Studio plugin v3.4.4 ≠ server v3.5.0; restart the MCP server that owns port 58741 or reinstall the matching plugin.',
+      })]);
+    } finally {
+      proxy.stop();
+      fetchMock.mockRestore();
+    }
+  });
+
   test('preserves observed completion through proxy failures and request status parsing', async () => {
     const observations = { executionStartedAt: 10, executionCompletedAt: 20, executionOutcome: 'error' };
     const details = { requestId: 'completed', targetPeerId: 'edit-peer', stage: 'response_delivery', outcome: 'unknown', ...observations };

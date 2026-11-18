@@ -328,7 +328,13 @@ describe('video recorder helpers', () => {
 const MAGENTA: [number, number, number] = [255, 0, 255];
 
 // A fake WGC frame: grey chrome, a viewport at `viewport`, and corner markers when shown.
-function windowFrame(width: number, height: number, viewport: { x: number; y: number; width: number; height: number }, markers: boolean) {
+function windowFrame(
+  width: number,
+  height: number,
+  viewport: { x: number; y: number; width: number; height: number },
+  markers: boolean,
+  strip = false,
+) {
   const rgba = Buffer.alloc(width * height * 4, 60);
   const paint = (x0: number, y0: number, w: number, h: number, rgb: [number, number, number]) => {
     for (let y = y0; y < y0 + h; y++) {
@@ -346,6 +352,8 @@ function windowFrame(width: number, height: number, viewport: { x: number; y: nu
     paint(viewport.x, viewport.y + viewport.height - size, size, size, MAGENTA);
     paint(viewport.x + viewport.width - size, viewport.y + viewport.height - size, size, size, MAGENTA);
   }
+  // What iPad Fit to Window frames held instead of the markers (issue #183).
+  if (strip) paint(200, 20, 3, 150, MAGENTA);
   return { width, height, rgba };
 }
 
@@ -370,6 +378,7 @@ class FakeRecording implements VideoRecordingProcess {
 class FakeBackend implements VideoRecorderBackend {
   probeResult: VideoRecorderProbe = { ok: true, ffmpegPath: 'ffmpeg-test', encoder: 'libx264', sources: ['gfxcapture', 'gdigrab'] };
   failingSources = new Set<CaptureSource>();
+  stripOnlySources = new Set<CaptureSource>();
   markersShown: () => boolean = () => false;
   started: StartVideoOptions[] = [];
   recordings: FakeRecording[] = [];
@@ -385,7 +394,8 @@ class FakeBackend implements VideoRecorderBackend {
     this.grabbedWindows.push([windowId, source]);
     this.grabbedSessions.push(x11Session);
     if (this.failingSources.has(source)) throw new Error(`${source} cannot read the window`);
-    return windowFrame(400, 200, { x: 50, y: 30, width: 300, height: 120 }, this.markersShown());
+    if (this.stripOnlySources.has(source)) return windowFrame(400, 200, { x: 50, y: 30, width: 300, height: 120 }, false, true);
+    return windowFrame(400, 200, { x: 50, y: 30, width: 300, height: 120 }, this.markersShown(), this.markersShown());
   }
 
   start(options: StartVideoOptions) {
@@ -520,6 +530,36 @@ describe('capture_video tool', () => {
     expect(failed.error).toBe(
       'Could not locate the Studio viewport: gfxcapture cannot read the window; gdigrab cannot read the window',
     );
+  });
+
+  test('records through the next source when the first frame lacks the corner markers', async () => {
+    const { tools, backend, events, markers } = makeTools();
+    backend.stripOnlySources.add('gfxcapture');
+    const started = textOf(await tools.captureVideo({ action: 'start', output_path: path.join(outputDirectory, 'a.mp4') }));
+    expect(started.video.source).toBe('gdigrab');
+    expect(backend.grabbedWindows).toEqual([[777, 'gfxcapture'], [777, 'gdigrab']]);
+    expect(backend.started[0]).toMatchObject({ source: 'gdigrab', crop: { x: 50, y: 30, width: 300, height: 120 } });
+    expect(events).toEqual(['prepare', 'show', 'hide', 'finish']);
+    expect(markers.shown).toBe(false);
+  });
+
+  test('explains unreadable marker frames with counts, saved frames and a next step', async () => {
+    const { tools, backend } = makeTools();
+    backend.stripOnlySources.add('gfxcapture');
+    backend.failingSources.add('gdigrab');
+    const failed = textOf(await tools.captureVideo({ action: 'start', output_path: path.join(outputDirectory, 'a.mp4') }));
+    const saved = /marker frame saved to (\S+\.png)/.exec(failed.error)?.[1];
+    try {
+      expect(failed.error).toMatch(/^Could not locate the Studio viewport: gfxcapture frame: viewport markers were found but do not form a rectangle: 450 marker pixels in 1 blob \(3x150 at 200,20\), 0 marker-shaped/);
+      expect(failed.error).toContain('; gdigrab cannot read the window. capture_screenshot');
+      expect(failed.error).toContain('set_device_simulator stopSimulation=true');
+      expect(failed.error).not.toMatch(/Fit to Window|FitToWindow/);
+      expect(saved).toBeDefined();
+      expect(fs.existsSync(saved!)).toBe(true);
+    } finally {
+      if (saved) fs.rmSync(saved, { force: true });
+    }
+    expect(backend.started).toHaveLength(0);
   });
 
   test('refuses a second start while recording', async () => {

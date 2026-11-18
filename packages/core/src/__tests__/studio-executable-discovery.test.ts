@@ -117,6 +117,35 @@ describe.each(['windows', 'wsl'] as const)('%s automatic Studio executable disco
     },
   );
 
+  function marker(exe: string, mtime: number, contents = ''): void {
+    const file = path.join(path.dirname(exe), '.crdownload');
+    writeFileSync(file, contents);
+    utimesSync(file, mtime, mtime);
+  }
+
+  test('launches past an empty download marker older than the executable and AppSettings.xml', async () => {
+    install('older-complete', 1000, 'complete');
+    const newest = install('newer-finished', 2000, 'complete');
+    marker(newest, 1990);
+    expect(resolveStudioExe()).toBe(newest);
+    await expect(manager().launch({ source: 'published_place', placeId: 1, universeId: 2 })).rejects.toThrow('Reached native launch boundary');
+    expect(windowsStudioLauncher).toHaveBeenCalledWith(newest, expect.any(Array), undefined, undefined);
+  });
+
+  test.each([
+    ['newer than the executable', 2010, 3000, ''],
+    ['newer than AppSettings.xml', 1990, 1980, ''],
+    ['non-empty', 1990, 3000, 'partial'],
+  ])('still rejects a download marker that is %s', (_label, markerMtime, settingsMtime, contents) => {
+    install('older-complete', 1000, 'complete');
+    const newest = install('newer-unfinished', 2000, 'complete');
+    const settings = path.join(path.dirname(newest), 'AppSettings.xml');
+    utimesSync(settings, settingsMtime, settingsMtime);
+    marker(newest, markerMtime, contents);
+    expect(() => resolveStudioExe()).toThrow(incompleteMessage);
+    expect(() => resolveStudioExe()).toThrow(/\.crdownload.*pass studio_executable to manage_instance launch, or set ROBLOX_STUDIO_EXE/s);
+  });
+
   test('explicit executable overrides retain their behavior for incomplete installations', async () => {
     const exactExe = install('explicit', 2000, 'missing-settings');
     process.env.ROBLOX_STUDIO_EXE = exactExe;
