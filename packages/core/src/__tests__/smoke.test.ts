@@ -12,6 +12,7 @@ import * as os from 'os';
 import * as path from 'path';
 import { rgbaToPng } from '../png-encoder.js';
 import * as hostCapture from '../host-capture.js';
+import { StudioHttpClient } from '../tools/studio-client.js';
 
 const SMOKE_TEST_CLAIM_OWNER = 'smoke-test';
 
@@ -35,6 +36,38 @@ async function claimQueuedRequestSoon(bridge: BridgeService, transportPeerId: st
     await Promise.resolve();
   }
   return null;
+}
+
+// Answers the playtest readiness probe (`return true`) as a live plugin
+// would; every other request still goes through the bridge queue.
+function answerRuntimeEvals(): jest.SpyInstance {
+  const forward = StudioHttpClient.prototype.request as (...args: unknown[]) => Promise<unknown>;
+  return jest.spyOn(StudioHttpClient.prototype, 'request').mockImplementation(function (this: StudioHttpClient, ...args: unknown[]) {
+    return args[0] === '/api/eval-runtime' ? Promise.resolve({ bridge: 'ok', ok: true, result: 'true' }) : forward.apply(this, args);
+  } as never);
+}
+
+type RuntimeEvalProbe = { peerId: string; code: unknown; timeoutMs: number; signal: unknown };
+
+// Scripts the readiness probe per runtime Peer and records each call; every other
+// request still goes through the bridge queue.
+function scriptRuntimeEvals(answer: (peerId: string, timeoutMs: number) => Promise<unknown>) {
+  const probes: RuntimeEvalProbe[] = [];
+  const forward = StudioHttpClient.prototype.request as (...args: unknown[]) => Promise<unknown>;
+  const spy = jest.spyOn(StudioHttpClient.prototype, 'request').mockImplementation(function (this: StudioHttpClient, ...args: unknown[]) {
+    if (args[0] !== '/api/eval-runtime') return forward.apply(this, args);
+    const probe = { peerId: String(args[2]), code: (args[1] as { code?: unknown }).code, timeoutMs: Number(args[3]), signal: args[4] };
+    probes.push(probe);
+    return answer(probe.peerId, probe.timeoutMs);
+  } as never);
+  return { probes, spy };
+}
+
+// A probe the Peer never answers: it fails when its request timeout fires.
+function rejectAfter(ms: number): Promise<never> {
+  const { promise, reject } = Promise.withResolvers<never>();
+  setTimeout(() => reject(new Error(`Request timeout after ${ms}ms`)), ms);
+  return promise;
 }
 
 const READY = {
@@ -2601,7 +2634,8 @@ describe('Smoke', () => {
     const tools = new RobloxStudioTools(bridge);
     bridge.registerPeer(READY);
 
-    const resultPromise = tools.startPlaytest('play');
+    const answers = answerRuntimeEvals();
+    const resultPromise = tools.startPlaytest('play').finally(() => answers.mockRestore());
     const pending = claimQueuedRequest(bridge, 'session-1');
     expect(pending).toBeTruthy();
     bridge.resolveRequest(pending!.requestId, { success: true, message: 'started' });
@@ -2656,7 +2690,8 @@ describe('Smoke', () => {
     const tools = new RobloxStudioTools(bridge);
     bridge.registerPeer(READY);
 
-    const resultPromise = tools.startPlaytest('run');
+    const answers = answerRuntimeEvals();
+    const resultPromise = tools.startPlaytest('run').finally(() => answers.mockRestore());
     const pending = claimQueuedRequest(bridge, 'session-1');
     expect(pending).toBeTruthy();
     bridge.resolveRequest(pending!.requestId, { success: true, message: 'started' });
@@ -2897,7 +2932,8 @@ describe('Smoke', () => {
     const tools = new RobloxStudioTools(bridge);
     bridge.registerPeer(READY);
 
-    const resultPromise = tools.soloPlaytest('start', 'run', 1);
+    const answers = answerRuntimeEvals();
+    const resultPromise = tools.soloPlaytest('start', 'run', 1).finally(() => answers.mockRestore());
     const pending = claimQueuedRequest(bridge, 'session-1');
     expect(pending).toBeTruthy();
     bridge.resolveRequest(pending!.requestId, { success: true, message: 'started' });
@@ -2917,8 +2953,236 @@ describe('Smoke', () => {
     expect(body).toEqual({
       success: true,
       action: 'start',
-      message: 'Playtest started.',
+      elapsedMs: expect.any(Number),
+      mode: 'run',
+      message: 'Playtest started; every runtime peer answered an eval.',
       roles: ['edit', 'server'],
+      targets: [{ role: 'server', instance_id: 'instance:test', target: 'server' }],
+    });
+  });
+
+  test('solo_playtest start defaults to play and returns every runtime target', async () => {
+    const bridge = new BridgeService();
+    const tools = new RobloxStudioTools(bridge);
+    bridge.registerPeer(READY);
+
+    const answers = answerRuntimeEvals();
+    const resultPromise = tools.soloPlaytest('start').finally(() => answers.mockRestore());
+    const pending = claimQueuedRequest(bridge, 'session-1');
+    expect(pending?.request).toMatchObject({ endpoint: '/api/start-playtest', data: { mode: 'play' } });
+    bridge.resolveRequest(pending!.requestId, { success: true, message: 'started' });
+    for (const role of ['server', 'client']) {
+      bridge.registerPeer({ ...READY, peerId: `${role}-1`, transportPeerId: 'server-1', role, isRunning: true });
+    }
+
+    expect(JSON.parse((await resultPromise).content[0].text)).toMatchObject({
+      success: true,
+      mode: 'play',
+      targets: [
+        { role: 'server', instance_id: 'instance:test', target: 'server' },
+        { role: 'client-1', instance_id: 'instance:test', target: 'client-1' },
+      ],
+    });
+  });
+
+  describe('playtest readiness eval', () => {
+    let bridge: BridgeService;
+    let tools: RobloxStudioTools;
+
+    beforeEach(() => {
+      jest.useFakeTimers();
+      bridge = new BridgeService();
+      tools = new RobloxStudioTools(bridge);
+      bridge.registerPeer(READY);
+    });
+
+    afterEach(() => {
+      jest.restoreAllMocks();
+      jest.clearAllTimers();
+      jest.useRealTimers();
+    });
+
+    // Resolves the edit Peer's start request, then registers fresh runtime Peers.
+    function startSolo(roles: string[]) {
+      const pending = claimQueuedRequest(bridge, 'session-1');
+      expect(pending?.request.endpoint).toBe('/api/start-playtest');
+      bridge.resolveRequest(pending!.requestId, { success: true, message: 'started' });
+      for (const role of roles) {
+        bridge.registerPeer({ ...READY, peerId: `${role}-1`, transportPeerId: 'server-1', role, isRunning: true });
+      }
+    }
+
+    function track<T>(promise: Promise<T>) {
+      const state: { settled: boolean; value?: T; error?: unknown } = { settled: false };
+      promise.then(
+        (value) => Object.assign(state, { settled: true, value }),
+        (error: unknown) => Object.assign(state, { settled: true, error }),
+      );
+      return state;
+    }
+
+    function body(result: unknown) {
+      return JSON.parse((result as { content: Array<{ text: string }> }).content[0].text);
+    }
+
+    test('names the peers that never answer the readiness eval', async () => {
+      const result = track(tools.soloPlaytest('start', 'run', undefined, READY.instanceId, 1));
+      startSolo(['server']);
+
+      await jest.advanceTimersByTimeAsync(1_000);
+      expect(result.settled).toBe(true);
+      expect(body(result.value)).toMatchObject({
+        success: false,
+        error: 'start_failed',
+        message: 'Playtest did not become ready before ready_timeout_s.',
+        runtimeReady: false,
+        running: true,
+        recoveryHint: 'The playtest is still running; retry eval on the notReady peers, or stop the playtest before starting again.',
+        targets: [],
+        notReady: [{ role: 'server', error: expect.stringContaining('timeout') }],
+      });
+    });
+
+    test('retries a peer until its eval succeeds and probes each peer by role', async () => {
+      let serverProbes = 0;
+      const evals = scriptRuntimeEvals(async (peerId) =>
+        peerId === 'server-1' && ++serverProbes === 1 ? { ok: false, error: 'still loading' } : { ok: true, result: 'true' });
+      const result = track(tools.soloPlaytest('start'));
+      startSolo(['server', 'client']);
+
+      await jest.advanceTimersByTimeAsync(250);
+      expect(result.settled).toBe(true);
+      expect(body(result.value)).toMatchObject({
+        success: true,
+        mode: 'play',
+        targets: [
+          { role: 'server', instance_id: READY.instanceId, target: 'server' },
+          { role: 'client-1', instance_id: READY.instanceId, target: 'client-1' },
+        ],
+      });
+      expect(evals.probes.map((probe) => [probe.peerId, probe.code])).toEqual([
+        ['server-1', 'return true'],
+        ['client-1', 'return true'],
+        ['server-1', 'return true'],
+      ]);
+    });
+
+    test('ready_timeout_s takes precedence over timeout and failures list only peers that answered', async () => {
+      scriptRuntimeEvals(async (peerId) => peerId === 'server-1' ? { ok: false, error: 'still loading' } : { ok: true, result: 'true' });
+      const result = track(tools.soloPlaytest('start', 'play', 1, READY.instanceId, 3));
+      startSolo(['server', 'client']);
+
+      await jest.advanceTimersByTimeAsync(2_999);
+      expect(result.settled).toBe(false);
+      await jest.advanceTimersByTimeAsync(1);
+      expect(result.settled).toBe(true);
+      expect(body(result.value)).toMatchObject({
+        success: false,
+        timedOut: true,
+        running: true,
+        elapsedMs: 3_000,
+        targets: [{ role: 'client-1', instance_id: READY.instanceId, target: 'client-1' }],
+        notReady: [{ role: 'server', error: 'still loading' }],
+      });
+      // The playtest stays up for inspection, so a retried start is refused until it stops.
+      expect(body(await tools.soloPlaytest('start'))).toMatchObject({ success: false, error: 'Playtest already running.' });
+    });
+
+    test('later probes never run past the deadline', async () => {
+      let serverProbes = 0;
+      const evals = scriptRuntimeEvals(async (peerId, timeoutMs) =>
+        peerId === 'server-1' && ++serverProbes > 1 ? rejectAfter(timeoutMs) : { ok: false, error: 'still loading' });
+      const result = track(tools.soloPlaytest('start', 'play', undefined, READY.instanceId, 1));
+      startSolo(['server', 'client']);
+
+      await jest.advanceTimersByTimeAsync(1_000);
+      expect(result.settled).toBe(true);
+      expect(body(result.value)).toMatchObject({ success: false, elapsedMs: 1_000 });
+      // The second server probe gets only the 750 ms left; the client is not probed again.
+      expect(evals.probes.map((probe) => [probe.peerId, probe.timeoutMs])).toEqual([
+        ['server-1', 1_000],
+        ['client-1', 1_000],
+        ['server-1', 750],
+      ]);
+    });
+
+    test('ends early when a pending peer leaves', async () => {
+      scriptRuntimeEvals(async (peerId) => peerId === 'client-1' ? { ok: false, error: 'still loading' } : { ok: true, result: 'true' });
+      const result = track(tools.soloPlaytest('start'));
+      startSolo(['server', 'client']);
+
+      await jest.advanceTimersByTimeAsync(100);
+      bridge.unregisterPeer('client-1');
+      await jest.advanceTimersByTimeAsync(150);
+      expect(result.settled).toBe(true);
+      expect(body(result.value)).toMatchObject({
+        success: false,
+        message: 'Playtest started, but client-1 disconnected before answering an eval.',
+        timedOut: false,
+        roles: ['edit', 'server'],
+        targets: [{ role: 'server', instance_id: READY.instanceId, target: 'server' }],
+        notReady: [{ role: 'client-1', error: 'disconnected before answering an eval' }],
+        disconnected: ['client-1'],
+        running: true,
+        recoveryHint: expect.stringContaining('still running without client-1'),
+      });
+    });
+
+    test('stops probing when the caller aborts', async () => {
+      const controller = new AbortController();
+      const evals = scriptRuntimeEvals(async () => ({ ok: false, error: 'still loading' }));
+      const result = track(tools.soloPlaytest('start', 'run', undefined, READY.instanceId, undefined, controller.signal));
+      startSolo(['server']);
+
+      await jest.advanceTimersByTimeAsync(600);
+      expect(evals.probes).toHaveLength(3);
+      expect(evals.probes.every((probe) => probe.signal === controller.signal)).toBe(true);
+      controller.abort();
+      await jest.advanceTimersByTimeAsync(0);
+      expect(result.settled).toBe(true);
+      expect(result.error).toBeDefined();
+      await jest.advanceTimersByTimeAsync(1_000);
+      expect(evals.probes).toHaveLength(3);
+    });
+
+    test('multiplayer start reports peers that never answer and keeps the group running', async () => {
+      (tools as unknown as { _buildMultiplayerState: () => Promise<unknown> })._buildMultiplayerState = async () => ({
+        peers: [{ role: 'edit' }, { role: 'server' }, { role: 'client-1' }],
+        clientRoles: ['client-1'],
+        playerCount: 1,
+      });
+      scriptRuntimeEvals(async (peerId) => peerId === 'client-1' ? { ok: false, error: 'still loading' } : { ok: true, result: 'true' });
+      const result = track(tools.multiplayerPlaytest('start', 1, undefined, undefined, undefined, 5, 'instance:test', 2));
+      const pending = claimQueuedRequest(bridge, 'session-1');
+      expect(pending?.request.endpoint).toBe('/api/multiplayer-test-start');
+      bridge.resolveRequest(pending!.requestId, { success: true, testId: 'test-1' });
+      for (const role of ['server', 'client']) {
+        bridge.registerPeer({
+          ...READY,
+          peerId: `${role}-1`,
+          transportPeerId: 'server-1',
+          instanceId: `instance:${role}`,
+          multiplayerGroupId: 'test-1',
+          role,
+          isRunning: true,
+        });
+      }
+
+      await jest.advanceTimersByTimeAsync(2_000);
+      expect(result.settled).toBe(true);
+      const failure = body(result.value);
+      expect(failure).toMatchObject({
+        success: false,
+        action: 'start',
+        error: 'runtime_eval_not_ready',
+        message: 'Multiplayer Studio test started, but some runtime peers did not answer an eval before ready_timeout_s.',
+        multiplayerGroupId: 'test-1',
+        notReady: [{ role: 'client-1', error: 'still loading' }],
+        running: true,
+        recoveryHint: 'The playtest is still running; retry eval on the notReady peers, or end the playtest before starting again.',
+        elapsedMs: 2_000,
+      });
+      expect(bridge.getMultiplayerGroups().map((group) => group.id)).toContain('test-1');
     });
   });
 
@@ -3065,7 +3329,7 @@ describe('Smoke', () => {
     expect(JSON.parse((await resultPromise).content[0].text)).toMatchObject({
       success: false,
       action: 'start',
-      message: 'Playtest did not become ready before timeout.',
+      message: 'Playtest did not become ready before ready_timeout_s.',
       runtimeReady: false,
       timedOut: true,
       roles: ['edit'],
@@ -3107,7 +3371,8 @@ describe('Smoke', () => {
     const bridge = new BridgeService();
     const tools = new RobloxStudioTools(bridge);
     bridge.registerPeer(READY);
-    const resultPromise = tools.soloPlaytest('start', 'run', 60, READY.instanceId);
+    const answers = answerRuntimeEvals();
+    const resultPromise = tools.soloPlaytest('start', 'run', 60, READY.instanceId).finally(() => answers.mockRestore());
     const start = claimQueuedRequest(bridge, READY.transportPeerId);
     bridge.resolveRequest(start!.requestId, { success: true, testId: 'solo-2' });
 
@@ -3122,8 +3387,11 @@ describe('Smoke', () => {
     expect(JSON.parse((await resultPromise).content[0].text)).toEqual({
       success: true,
       action: 'start',
-      message: 'Playtest started.',
+      elapsedMs: expect.any(Number),
+      mode: 'run',
+      message: 'Playtest started; every runtime peer answered an eval.',
       roles: ['edit', 'server'],
+      targets: [{ role: 'server', instance_id: READY.instanceId, target: 'server' }],
     });
   });
 
@@ -3191,7 +3459,9 @@ describe('Smoke', () => {
     });
     bridge.registerPeer(READY);
 
-    const resultPromise = tools.multiplayerPlaytest('start', 1, undefined, undefined, undefined, 2, 'instance:test');
+    const answers = answerRuntimeEvals();
+    const resultPromise = tools.multiplayerPlaytest('start', 1, undefined, undefined, undefined, 2, 'instance:test')
+      .finally(() => answers.mockRestore());
     const pending = claimQueuedRequest(bridge, 'session-1');
     expect(pending?.request).toMatchObject({
       endpoint: '/api/multiplayer-test-start',
@@ -3230,9 +3500,14 @@ describe('Smoke', () => {
     expect(body).toEqual({
       success: true,
       action: 'start',
-      message: 'Multiplayer playtest started.',
+      elapsedMs: expect.any(Number),
+      message: 'Multiplayer playtest started; every runtime peer answered an eval.',
       multiplayerGroupId: 'test-1',
       roles: ['edit', 'server', 'client-1'],
+      targets: [
+        { role: 'server', instance_id: 'instance:server-server', target: 'server' },
+        { role: 'client-1', instance_id: 'instance:client-1-client-1', target: 'client-1' },
+      ],
       playerCount: 1,
     });
   });
@@ -3260,6 +3535,7 @@ describe('Smoke', () => {
     expect(body).toEqual({
       success: false,
       action: 'start',
+      elapsedMs: expect.any(Number),
       error: 'multiplayer_start_not_detected',
       message: 'Multiplayer Studio test start was requested, but MCP did not detect the required server/client peers before timeout.',
       multiplayerGroupId: 'test-timeout',
@@ -3298,6 +3574,7 @@ describe('Smoke', () => {
     expect(body).toEqual({
       success: false,
       action: 'start',
+      elapsedMs: expect.any(Number),
       error,
       message,
       multiplayerGroupId: 'test-refused',

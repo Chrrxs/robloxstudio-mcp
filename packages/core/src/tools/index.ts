@@ -400,8 +400,23 @@ function encodeImageFromRgbaResponse(
   };
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+// An aborted signal rejects with its reason at once, so cancelled waits stop polling.
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  const { promise, resolve, reject } = Promise.withResolvers<void>();
+  if (signal?.aborted) {
+    reject(signal.reason);
+    return promise;
+  }
+  const onAbort = () => {
+    clearTimeout(timer);
+    reject(signal?.reason);
+  };
+  const timer = setTimeout(() => {
+    signal?.removeEventListener('abort', onAbort);
+    resolve();
+  }, ms);
+  signal?.addEventListener('abort', onAbort, { once: true });
+  return promise;
 }
 
 // Resolves with the promise's value if it settles within ms, otherwise undefined.
@@ -594,6 +609,37 @@ function sleepUnlessAborted(ms: number, signal: AbortSignal | undefined): Promis
   }
   return promise;
 }
+
+/** A runtime peer a playtest start proved can run code, and how to address it. */
+export interface RuntimeReadyTarget {
+  role: string;
+  instance_id: string;
+  target: string;
+}
+
+type RuntimeEvalReadiness = {
+  ready: boolean;
+  targets: RuntimeReadyTarget[];
+  notReady: Array<{ role: string; error: string }>;
+  // Pending roles that left the scope; they do not come back, so the wait ended early.
+  disconnected: string[];
+};
+
+// Readiness-failure fields: the playtest is left running so the agent can inspect it,
+// and a new start is refused until it stops.
+function runtimeEvalFailure(readiness: RuntimeEvalReadiness, running: boolean, stopAction: 'stop' | 'end') {
+  return {
+    running,
+    disconnected: readiness.disconnected.length > 0 ? readiness.disconnected : undefined,
+    recoveryHint: !running
+      ? undefined
+      : readiness.disconnected.length > 0
+        ? `The playtest is still running without ${readiness.disconnected.join(', ')}; ${stopAction} the playtest and start again to get every peer back.`
+        : `The playtest is still running; retry eval on the notReady peers, or ${stopAction} the playtest before starting again.`,
+  };
+}
+
+const DEFAULT_PLAYTEST_READY_TIMEOUT_S = 90;
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {
   return value !== null && typeof value === 'object' && !Array.isArray(value)
@@ -2124,10 +2170,11 @@ export class RobloxStudioTools {
     requiredRoles: string[],
     timeoutSec = 60,
     soloStart?: { editPeerId: string; testId: string },
+    signal?: AbortSignal,
   ): Promise<{ ok: boolean; roles: string[]; timedOut: boolean; studioError?: string }> {
     const deadline = Date.now() + timeoutSec * 1000;
     while (Date.now() < deadline) {
-      const refresh = this.bridge.refreshTopologyForRouting();
+      const refresh = this.bridge.refreshTopologyForRouting(signal);
       if (refresh) await refresh;
       const peers = this.bridge.getPeersInScope(instanceId);
       const roles = peers.map((peer) => peer.role);
@@ -2145,7 +2192,7 @@ export class RobloxStudioTools {
           return { ok: false, roles: this._rolesForScope(instanceId), timedOut: false, studioError };
         }
       }
-      await sleep(250);
+      await sleep(250, signal);
     }
     return {
       ok: false,
@@ -2169,6 +2216,55 @@ export class RobloxStudioTools {
     }
   }
 
+  // A registered runtime peer can still be loading; a trivial eval proves its
+  // DataModel runs code. Polls every runtime role until each answers, one leaves,
+  // or the deadline passes, then lists how to address each peer that answered.
+  private async _waitForRuntimeEval(instanceId: string, deadline: number, signal?: AbortSignal): Promise<RuntimeEvalReadiness> {
+    const pending = new Map(this._runtimeTargetsForScope(instanceId).map((peer) => [peer.role, 'not probed']));
+    const disconnected: string[] = [];
+    let firstPass = true;
+    probing: while (pending.size > 0) {
+      for (const role of [...pending.keys()]) {
+        // A playtest peer that left does not return, so polling it until the deadline is pointless.
+        const present = new Set(this._runtimeTargetsForScope(instanceId).map((peer) => peer.role));
+        disconnected.push(...[...pending.keys()].filter((pendingRole) => !present.has(pendingRole)));
+        if (disconnected.length > 0) {
+          for (const gone of disconnected) pending.set(gone, 'disconnected before answering an eval');
+          break probing;
+        }
+        // Every peer gets one probe of at least 1 s, so a start that detected its
+        // peers just before the deadline still reports a real error for each one.
+        // Later probes never start, nor run, past the deadline.
+        const remainingMs = deadline - Date.now();
+        if (!firstPass && remainingMs <= 0) break probing;
+        const timeoutMs = firstPass ? Math.max(1_000, Math.min(5_000, remainingMs)) : Math.min(5_000, remainingMs);
+        try {
+          const response = await this._request('/api/eval-runtime', { code: 'return true' }, instanceId, role, timeoutMs, signal);
+          if (response.ok === true) pending.delete(role);
+          else pending.set(role, String(response.error ?? 'eval did not succeed'));
+        } catch (error) {
+          if (signal?.aborted) throw error;
+          pending.set(role, errorMessage(error));
+        }
+      }
+      firstPass = false;
+      if (pending.size === 0 || Date.now() >= deadline) break;
+      await sleep(250, signal);
+    }
+    // Solo runtime peers share the edit Instance ID and need target=<role>; grouped
+    // peers also answer to their role-suffixed ID. Passing both always works.
+    const grouped = this.bridge.getMultiplayerGroups().some((group) => group.instanceIds.includes(instanceId));
+    const peers = this._runtimeTargetsForScope(instanceId).filter((peer) => !pending.has(peer.role));
+    const targets = ['server', ...this._clientRolesForScope(instanceId)]
+      .flatMap((role) => peers.filter((peer) => peer.role === role))
+      .map((peer) => ({ role: peer.role, instance_id: grouped ? `${peer.instanceId}-${peer.role}` : peer.instanceId, target: peer.role }));
+    return {
+      ready: pending.size === 0,
+      targets,
+      notReady: [...pending].map(([role, error]) => ({ role, error })),
+      disconnected,
+    };
+  }
 
   async getFileTree(path: string = '', instance_id?: string) {
     const response = await this._callSingle('/api/file-tree', { path }, undefined, instance_id);
@@ -4305,7 +4401,14 @@ export class RobloxStudioTools {
     });
   }
 
-  async soloPlaytest(action: string, mode?: string, timeout?: number, instance_id?: string) {
+  async soloPlaytest(
+    action: string,
+    mode?: string,
+    timeout?: number,
+    instance_id?: string,
+    ready_timeout_s?: number,
+    signal?: AbortSignal,
+  ) {
     if (action !== 'start' && action !== 'stop' && action !== 'status') {
       throw new Error('solo_playtest requires action=start|stop|status');
     }
@@ -4324,17 +4427,24 @@ export class RobloxStudioTools {
     }
 
     if (action === 'start') {
-      if (mode !== 'play' && mode !== 'run') {
-        throw new Error('solo_playtest action=start requires mode=play|run');
+      const startMode = mode ?? 'play';
+      if (startMode !== 'play' && startMode !== 'run') {
+        throw new Error('solo_playtest mode must be play or run (default play)');
       }
-      return this._withinResponseBudget('solo_playtest', action, [instance_id, mode, timeout], async () => {
-        const body = this._parseTextResult(await this.startPlaytest(mode, undefined, instance_id, timeout));
+      // The defaulted mode and the effective readiness timeout key the job, so two
+      // different starts never join one another.
+      const readyTimeoutS = ready_timeout_s ?? timeout;
+      return this._withinResponseBudget('solo_playtest', action, [instance_id, startMode, readyTimeoutS], async () => {
+        const body = this._parseTextResult(await this.startPlaytest(startMode, undefined, instance_id, readyTimeoutS, signal));
         if (body.success === true && body.runtimeReady !== false) {
           return this._textResult({
             success: true,
             action,
-            message: 'Playtest started.',
+            mode: startMode,
+            message: 'Playtest started; every runtime peer answered an eval.',
             roles: Array.isArray(body.roles) ? body.roles : undefined,
+            targets: body.targets,
+            elapsedMs: body.elapsedMs,
           });
         }
         return this._textResult({
@@ -4342,10 +4452,13 @@ export class RobloxStudioTools {
           ...body,
           success: false,
           action,
+          mode: startMode,
           error: body.error ?? 'start_failed',
-          message: body.success === true
-            ? 'Playtest did not become ready before timeout.'
-            : body.message ?? 'Playtest did not start.',
+          message: body.success !== true
+            ? body.message ?? 'Playtest did not start.'
+            : Array.isArray(body.disconnected)
+              ? `Playtest started, but ${body.disconnected.join(', ')} disconnected before answering an eval.`
+              : 'Playtest did not become ready before ready_timeout_s.',
           roles: Array.isArray(body.roles) ? body.roles : undefined,
         });
       });
@@ -4373,7 +4486,13 @@ export class RobloxStudioTools {
     });
   }
 
-  async startPlaytest(mode: string, numPlayers?: number, instance_id?: string, timeout = 60) {
+  async startPlaytest(
+    mode: string,
+    numPlayers?: number,
+    instance_id?: string,
+    timeout = DEFAULT_PLAYTEST_READY_TIMEOUT_S,
+    signal?: AbortSignal,
+  ) {
     if (mode !== 'play' && mode !== 'run') {
       throw new Error('mode must be "play" or "run"');
     }
@@ -4413,13 +4532,15 @@ export class RobloxStudioTools {
     }
     const response = await this._requestPeer('/api/start-playtest', data, resolved.targetPeerId);
     let wait: { ok: boolean; roles: string[]; timedOut: boolean; studioError?: string } | undefined;
+    let readiness: RuntimeEvalReadiness | undefined;
     if (response?.success === true) {
       const requiredRoles = mode === 'play' ? ['server', 'client-1'] : ['server'];
       // Older plugins do not return a testId; they keep the readiness-only wait.
       const soloStart = typeof response.testId === 'string'
         ? { editPeerId: resolved.targetPeerId, testId: response.testId }
         : undefined;
-      wait = await this._waitForRuntimeRolesFresh(resolved.targetInstanceId, startedAt, requiredRoles, timeout, soloStart);
+      wait = await this._waitForRuntimeRolesFresh(resolved.targetInstanceId, startedAt, requiredRoles, timeout, soloStart, signal);
+      if (wait.ok) readiness = await this._waitForRuntimeEval(resolved.targetInstanceId, startedAt + timeout * 1000, signal);
     }
     const body = wait?.studioError !== undefined
       ? {
@@ -4429,13 +4550,21 @@ export class RobloxStudioTools {
         runtimeReady: false,
         timedOut: false,
         roles: wait.roles,
+        elapsedMs: Date.now() - startedAt,
       }
       : wait
         ? {
           ...response,
-          runtimeReady: wait.ok,
-          timedOut: wait.timedOut,
-          roles: wait.roles,
+          runtimeReady: wait.ok && readiness?.ready === true,
+          timedOut: wait.timedOut || (readiness?.ready === false && readiness.disconnected.length === 0),
+          // Peers can leave during the eval wait; report the scope as it is now.
+          roles: readiness ? this._rolesForScope(resolved.targetInstanceId) : wait.roles,
+          targets: readiness?.targets,
+          notReady: readiness?.ready === false ? readiness.notReady : undefined,
+          ...(readiness?.ready === false
+            ? runtimeEvalFailure(readiness, this._runtimeTargetsForScope(resolved.targetInstanceId).length > 0, 'stop')
+            : {}),
+          elapsedMs: Date.now() - startedAt,
         }
         : response;
     return {
@@ -4603,6 +4732,7 @@ export class RobloxStudioTools {
     clientCount: number,
     timeoutSec = 30,
     connectedAfter?: number,
+    signal?: AbortSignal,
   ): Promise<{ ok: boolean; roles: string[]; timedOut: boolean; phase?: string; error?: unknown }> {
     const deadline = Date.now() + timeoutSec * 1000;
     let lastPhase: string | undefined;
@@ -4614,7 +4744,7 @@ export class RobloxStudioTools {
           const freshRoles = new Set(peers.filter((peer) => peer.connectedAt >= connectedAfter).map((peer) => peer.role));
           const freshClientCount = [...freshRoles].filter((role) => /^client-\d+$/.test(role)).length;
           if (!freshRoles.has('server') || freshClientCount !== clientCount) {
-            await sleep(250);
+            await sleep(250, signal);
             continue;
           }
         }
@@ -4622,7 +4752,7 @@ export class RobloxStudioTools {
       }
       try {
         const remainingMs = Math.max(1, Math.min(1000, deadline - Date.now()));
-        const editState = await this._request('/api/multiplayer-test-state', {}, instanceId, 'edit', remainingMs);
+        const editState = await this._request('/api/multiplayer-test-state', {}, instanceId, 'edit', remainingMs, signal);
         const session = editState?.session;
         if (typeof session?.phase === 'string') {
           lastPhase = session.phase;
@@ -4633,7 +4763,7 @@ export class RobloxStudioTools {
       } catch {
         // Keep waiting; normal startup is driven by runtime peers registering.
       }
-      await sleep(250);
+      await sleep(250, signal);
     }
     return { ok: false, roles: this._rolesForScope(instanceId), timedOut: true, phase: lastPhase };
   }
@@ -4646,6 +4776,8 @@ export class RobloxStudioTools {
     value?: unknown,
     timeout?: number,
     instance_id?: string,
+    ready_timeout_s?: number,
+    signal?: AbortSignal,
   ) {
     if (
       action !== 'start' &&
@@ -4684,8 +4816,10 @@ export class RobloxStudioTools {
       });
     }
 
-    return this._withinResponseBudget('multiplayer_playtest', action, [instance_id, numPlayers, target, testArgs, value, timeout], () =>
-      this._multiplayerPlaytestAction(action, numPlayers, target, testArgs, value, timeout, instance_id));
+    return this._withinResponseBudget(
+      'multiplayer_playtest', action, [instance_id, numPlayers, target, testArgs, value, timeout, ready_timeout_s],
+      () => this._multiplayerPlaytestAction(action, numPlayers, target, testArgs, value, timeout, instance_id, ready_timeout_s, signal),
+    );
   }
 
   // start, add_players, leave_client and end, run under the response budget.
@@ -4697,9 +4831,11 @@ export class RobloxStudioTools {
     value: unknown,
     timeout: number | undefined,
     instance_id: string | undefined,
+    ready_timeout_s: number | undefined,
+    signal: AbortSignal | undefined,
   ): Promise<ToolCallResult> {
     if (action === 'start') {
-      const body = this._parseTextResult(await this.multiplayerTestStart(numPlayers as number, testArgs, timeout, instance_id));
+      const body = this._parseTextResult(await this.multiplayerTestStart(numPlayers as number, testArgs, ready_timeout_s ?? timeout, instance_id, signal));
       const stateValue = body.state;
       const state: Record<string, unknown> = stateValue !== null && typeof stateValue === 'object' && !Array.isArray(stateValue)
         ? { ...stateValue }
@@ -4717,10 +4853,12 @@ export class RobloxStudioTools {
       return this._textResult(launched ? {
         success: true,
         action,
-        message: 'Multiplayer playtest started.',
+        message: 'Multiplayer playtest started; every runtime peer answered an eval.',
         multiplayerGroupId,
         roles: Array.isArray(body.roles) ? body.roles : undefined,
+        targets: body.targets,
         playerCount: typeof state.playerCount === 'number' ? state.playerCount : undefined,
+        elapsedMs: body.elapsedMs,
       } : {
         success: false,
         action,
@@ -4730,6 +4868,9 @@ export class RobloxStudioTools {
           : body.message ?? 'Multiplayer playtest did not start.',
         multiplayerGroupId,
         roles: Array.isArray(body.roles) ? body.roles : undefined,
+        notReady: body.notReady,
+        running: typeof body.running === 'boolean' ? body.running : undefined,
+        elapsedMs: body.elapsedMs,
         studioError: typeof body.studioError === 'string' ? body.studioError : undefined,
         recoveryHint: typeof body.recoveryHint === 'string' ? body.recoveryHint : undefined,
       });
@@ -4800,7 +4941,7 @@ export class RobloxStudioTools {
     });
   }
 
-  async multiplayerTestStart(numPlayers: number, testArgs?: unknown, timeout?: number, instance_id?: string) {
+  async multiplayerTestStart(numPlayers: number, testArgs?: unknown, timeout?: number, instance_id?: string, signal?: AbortSignal) {
     if (!Number.isInteger(numPlayers) || numPlayers < 1 || numPlayers > 8) {
       throw new Error('numPlayers must be an integer from 1 to 8');
     }
@@ -4837,10 +4978,14 @@ export class RobloxStudioTools {
     }
 
     await this.bridge.createMultiplayerGroupEverywhere(groupId, editTarget.instanceId);
-    const wait = await this._waitForMultiplayerStart(editTarget.instanceId, numPlayers, timeout ?? 60, startedAt);
+    const readyTimeoutS = timeout ?? DEFAULT_PLAYTEST_READY_TIMEOUT_S;
+    const wait = await this._waitForMultiplayerStart(editTarget.instanceId, numPlayers, readyTimeoutS, startedAt, signal);
     const launched = wait.ok;
+    const readiness = wait.ok
+      ? await this._waitForRuntimeEval(editTarget.instanceId, startedAt + readyTimeoutS * 1000, signal)
+      : undefined;
     const state = await this._buildMultiplayerState(editTarget.instanceId);
-    const success = wait.ok;
+    const success = wait.ok && readiness?.ready === true;
     const runtimeStillConnected = this._runtimeTargetsForScope(editTarget.instanceId).length > 0;
     const definitelyFailed = state.phase === 'failed' && !runtimeStillConnected;
     if (definitelyFailed) await this.bridge.removeMultiplayerGroupEverywhere(groupId);
@@ -4851,6 +4996,7 @@ export class RobloxStudioTools {
         'multiplayer playtest',
       )
       : undefined;
+    const evalFailure = readiness?.ready === false ? runtimeEvalFailure(readiness, runtimeStillConnected, 'end') : undefined;
     return {
       content: [{
         type: 'text',
@@ -4858,20 +5004,31 @@ export class RobloxStudioTools {
           ...response,
           multiplayerGroupId: groupId,
           success,
-          ready: wait.ok,
+          ready: success,
           launched,
           startRequested: true,
-          timedOut: wait.timedOut,
+          timedOut: wait.timedOut || (readiness?.ready === false && readiness.disconnected.length === 0),
           wait,
-          roles: wait.roles,
+          // Peers can leave during the eval wait; report the scope as it is now.
+          roles: readiness ? this._rolesForScope(editTarget.instanceId) : wait.roles,
+          targets: readiness?.targets,
+          notReady: readiness?.ready === false ? readiness.notReady : undefined,
+          running: evalFailure?.running,
+          disconnected: evalFailure?.disconnected,
           state,
-          error: success ? undefined : startFailure?.error ?? wait.error ?? 'multiplayer_start_not_detected',
+          error: success
+            ? undefined
+            : startFailure?.error ?? (readiness?.ready === false ? 'runtime_eval_not_ready' : wait.error ?? 'multiplayer_start_not_detected'),
           message: success
-            ? 'Multiplayer Studio test started and runtime peers detected.'
-            : startFailure?.message ??
-              'Multiplayer Studio test start was requested, but MCP did not detect the required server/client peers before timeout.',
+            ? 'Multiplayer Studio test started and every runtime peer answered an eval.'
+            : startFailure?.message ?? (evalFailure?.disconnected
+              ? `Multiplayer Studio test started, but ${evalFailure.disconnected.join(', ')} disconnected before answering an eval.`
+              : evalFailure
+                ? 'Multiplayer Studio test started, but some runtime peers did not answer an eval before ready_timeout_s.'
+                : 'Multiplayer Studio test start was requested, but MCP did not detect the required server/client peers before timeout.'),
           studioError: startFailure?.studioError,
-          recoveryHint: startFailure?.recoveryHint,
+          recoveryHint: startFailure?.recoveryHint ?? evalFailure?.recoveryHint,
+          elapsedMs: Date.now() - startedAt,
           startedAt,
         }),
       }],
