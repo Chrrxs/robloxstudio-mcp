@@ -32,6 +32,8 @@ export type LinuxHostCaptureDeps = {
   readFile: (file: string) => Buffer;
   listProcessIds: () => number[];
   runXTool: (executable: string, args: string[], session: X11Session, maxBytes: number) => Promise<Buffer>;
+  // The server's real UID; undefined where the OS has none (Windows).
+  currentUid?: () => number | undefined;
 };
 
 // Only DISPLAY and XAUTHORITY are taken from the environment; nothing else in
@@ -52,7 +54,7 @@ export const LINUX_NO_STUDIO_DISPLAY_ERROR =
 // Only this user's processes are read, as in listWineStudioProcesses: another
 // user's Studio is never ours to capture, and its environment is not ours to read.
 function ownedByCurrentUser(pid: number, deps: LinuxHostCaptureDeps): boolean {
-  const uid = process.getuid?.();
+  const uid = deps.currentUid?.();
   if (uid === undefined) return true;
   try {
     return realUidFromStatus(deps.readFile(`/proc/${pid}/status`).toString('utf8')) === uid;
@@ -124,6 +126,7 @@ const DEFAULT_DEPS: LinuxHostCaptureDeps = {
   readFile: (file) => fs.readFileSync(file),
   listProcessIds: () => fs.readdirSync('/proc').filter((name) => /^\d+$/.test(name)).map(Number),
   runXTool: runBoundedXTool,
+  currentUid: () => process.getuid?.(),
 };
 
 export function parseClientList(output: string): number[] {

@@ -46,6 +46,7 @@ function fakeHost(processes: Record<number, FakeProcess>, displays: Record<strin
       return Buffer.from(value);
     },
     listProcessIds: () => Object.keys(processes).map(Number),
+    currentUid: () => OWN_UID,
     runXTool: async (executable, args, session) => {
       calls.push({ executable, args, session });
       if (broken.includes(session.display)) throw new Error(`cannot open display ${session.display}`);
