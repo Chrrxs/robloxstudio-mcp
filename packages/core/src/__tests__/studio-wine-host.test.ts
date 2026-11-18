@@ -13,7 +13,11 @@ import {
 import { RobloxStudioTools } from '../tools/index.js';
 import * as studioPlatform from '../studio-platform.js';
 import { fileTimeToUnixMs } from '../studio-sign-in.js';
-import { defaultManagedInstanceRegistryDir, ManagedInstanceRegistry } from '../managed-instance-registry.js';
+import {
+  defaultManagedInstanceRegistryDir,
+  ManagedInstanceRegistry,
+  type ManagedInstanceRegistryRecord,
+} from '../managed-instance-registry.js';
 import {
   isWineStudioCommand,
   killOrphanedWineLaunchGate,
@@ -619,6 +623,48 @@ describe('Wine host managed Studio lifecycle', () => {
     expect(record.closedAt).toBeUndefined();
     expect(hasExited(record.nativeProcessId!)).toBe(false);
     await studio.completeByLaunchId(record.recordId!);
+  });
+
+  // The launch attaches its exit listener only after persisting the record, so
+  // a gate that dies first never reports its exit. Refreshes must still see it.
+  linuxTest('a gate that dies before the exit listener is attached is recorded as exited', async () => {
+    let killedGate = false;
+    class KillGateOnFirstPersist extends ManagedInstanceRegistry {
+      override async upsert(record: ManagedInstanceRegistryRecord): Promise<void> {
+        if (!killedGate && record.processAuthorizationState === 'pending' && record.nativeProcessId) {
+          killedGate = true;
+          const pid = record.nativeProcessId;
+          process.kill(pid, 'SIGKILL');
+          // Reaped means Node has already emitted the child's exit event.
+          await waitUntil(() => hasExited(pid));
+        }
+        await super.upsert(record);
+      }
+    }
+    // No grace period: two misses alone confirm an exit.
+    const studio = new StudioInstanceManager({
+      registry: new KillGateOnFirstPersist(path.join(fixture, 'registry')),
+      processAdapter: { currentBootId: () => 'wine-boot' },
+      confirmedExitGraceMs: 0,
+    });
+    managers.push(studio);
+
+    const record = await studio.launch({
+      source: 'local_file',
+      localPlaceFile: placeFile,
+      studioExecutable: exe,
+      requireProcessIdentity: true,
+    });
+    expect(killedGate).toBe(true);
+    expect(record.closedAt).toBeUndefined();
+    await studio.list();
+    await studio.list();
+
+    expect(record).toMatchObject({
+      processObservationStatus: 'not_running',
+      failureReason: 'Studio process exited before the MCP plugin connected.',
+    });
+    expect(record.closedAt).toBeDefined();
   });
 
   linuxTest('a snapshot taken while the launch was gated does not override its authorization', async () => {

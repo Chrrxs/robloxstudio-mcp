@@ -23,6 +23,7 @@ import {
   listWineStudioProcesses,
   spawnWineStudio,
   stopWineStudio,
+  readWineProcessStartTime,
   toWineWindowsPath,
 } from './studio-wine.js';
 
@@ -2535,13 +2536,15 @@ export class StudioInstanceManager {
     if (!studioProcess) {
       // Until authorization execs Studio in it, a Wine launch is a gate shell
       // that Studio enumeration never lists, so its absence there is no
-      // evidence of an exit. The gate is this broker's own child, whose exit
-      // marks the record.
+      // evidence of an exit. Check the gate itself instead: it can die before
+      // the exit listener is attached, so the listener alone is not enough.
       if (
         record.processAuthorizationState === 'pending' &&
         record.recordId !== undefined &&
         this.launchControls.has(record.recordId) &&
-        this.getLifecycleCapabilities().processIdentity.launcher === 'wine-retained'
+        this.getLifecycleCapabilities().processIdentity.launcher === 'wine-retained' &&
+        record.nativeProcessStartedAt !== undefined &&
+        readWineProcessStartTime(processId) === record.nativeProcessStartedAt
       ) {
         return { status: 'running', observedAt: snapshot.observedAt };
       }
