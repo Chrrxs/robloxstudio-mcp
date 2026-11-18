@@ -495,18 +495,41 @@ export interface RuntimeWaitOptions {
 }
 
 const DEFAULT_WAIT_TIMEOUT_S = 20;
-const MAX_WAIT_TIMEOUT_S = 600;
+// One wait never outlasts the longest operation wait the bridge allows.
+const MAX_WAIT_TIMEOUT_S = MAX_OPERATION_WAIT_MS / 1000;
 const DEFAULT_WAIT_POLL_MS = 250;
-const WAIT_COMPILE_ERROR = /\b(Expected|Incomplete statement|Malformed number|Unfinished string)\b/;
+// Every probe is a bridge request whose result the bridge retains (at most
+// 1024, oldest evicted first). Long waits poll less often so one wait cannot
+// push out much of that history, including a retry's operation_id result.
+const MAX_WAIT_PROBES = 120;
+// Fallback for replies that lack the plugin's eval shape: Luau parse
+// diagnostics as `<chunk>:<line>: <message>`, or the engine's generic load failure.
+const WAIT_COMPILE_ERROR = /:\d+: (Expected|Incomplete statement|Malformed|Unfinished|Cannot use '\.\.\.' outside of a vararg function|String literal contains malformed escape sequence|Attribute name is missing)|Requested module experienced an error while loading/;
+// Plugin-side failures that also come back without output but are not about the payload.
+const EVAL_SETUP_ERROR = /^(ModuleScript Source set failed|Eval bridge returned invalid result)/;
 const PLAYTEST_NOT_RUNNING_ERROR = 'eval_*_runtime requires a running playtest.';
+const WAIT_YIELD_ERROR = 'wait_until must not yield';
 
-// Runs the condition as a function body (an expression gains `return (...)`),
-// keeping it on line 1 so Luau error lines match the caller's text. The reply
-// is "T" or "F" for truthiness followed by the value as text.
-export function buildWaitProbe(condition: string): string {
-  const body = /\breturn\b/.test(condition) ? condition : `return (${condition}\n)`;
-  return `local __mcp_value = (function() ${body}
-end)()
+export type WaitProbeForm = 'expression' | 'block';
+
+// Runs the condition as a function body (the expression form gains
+// `return (...)`), keeping it on line 1 so Luau error lines match the caller's
+// text. The body runs in a coroutine: a condition that waits (WaitForChild,
+// task.wait, InvokeServer) is cancelled instead of staying suspended in the
+// game and holding a plugin request slot after the probe gave up on it. The
+// reply is "T" or "F" for truthiness followed by the value as text.
+export function buildWaitProbe(condition: string, form: WaitProbeForm = 'expression'): string {
+  const body = form === 'block' ? condition : `return (${condition}\n)`;
+  return `local __mcp_thread = coroutine.create(function() ${body}
+end)
+local __mcp_ok, __mcp_value = coroutine.resume(__mcp_thread)
+if coroutine.status(__mcp_thread) ~= "dead" then
+\ttask.cancel(__mcp_thread)
+\terror("${WAIT_YIELD_ERROR}: it called something that waits, such as WaitForChild, task.wait, or a remote call. Use FindFirstChild or read the state directly.", 0)
+end
+if not __mcp_ok then
+\terror(__mcp_value, 0)
+end
 local __mcp_shown
 if type(__mcp_value) == "table" then
 \tlocal ok, encoded = pcall(function() return game:GetService("HttpService"):JSONEncode(__mcp_value) end)
@@ -515,6 +538,30 @@ else
 \t__mcp_shown = tostring(__mcp_value)
 end
 return (if __mcp_value then "T" else "F") .. __mcp_shown`;
+}
+
+// The plugin's eval wrapper runs the payload under xpcall and always replies
+// with an output array, so a runtime error carries output. A payload that
+// failed to load (a compile error) is reported by the bridge without one.
+function isWaitLoadFailure(response: StudioToolResponse): boolean {
+  if (response.ok === true || response.output !== undefined) return false;
+  const error = typeof response.error === 'string' ? response.error : '';
+  if (response.bridge === 'ok' && response.ok === false) return !EVAL_SETUP_ERROR.test(error);
+  return WAIT_COMPILE_ERROR.test(error);
+}
+
+// Resolves after ms, or as soon as the signal aborts.
+function sleepUnlessAborted(ms: number, signal: AbortSignal | undefined): Promise<void> {
+  if (signal?.aborted) return Promise.resolve();
+  const { promise, resolve } = Promise.withResolvers<void>();
+  const timer = setTimeout(done, ms);
+  signal?.addEventListener('abort', done, { once: true });
+  function done() {
+    clearTimeout(timer);
+    signal?.removeEventListener('abort', done);
+    resolve();
+  }
+  return promise;
 }
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {
@@ -2519,14 +2566,14 @@ export class RobloxStudioTools {
     };
   }
 
-  async evalServerRuntime(code: string | undefined, instance_id?: string, operation_id?: string, wait: RuntimeWaitOptions = {}) {
+  async evalServerRuntime(code: string | undefined, instance_id?: string, operation_id?: string, wait: RuntimeWaitOptions = {}, signal?: AbortSignal) {
     if (!code && wait.wait_until === undefined) {
       throw new Error('eval_server_runtime requires code or wait_until');
     }
-    return this._evalRuntime('eval_server_runtime', 'server', code, instance_id, operation_id, wait);
+    return this._evalRuntime('eval_server_runtime', 'server', code, instance_id, operation_id, wait, signal);
   }
 
-  async evalClientRuntime(code: string | undefined, target?: string, instance_id?: string, operation_id?: string, wait: RuntimeWaitOptions = {}) {
+  async evalClientRuntime(code: string | undefined, target?: string, instance_id?: string, operation_id?: string, wait: RuntimeWaitOptions = {}, signal?: AbortSignal) {
     if (!code && wait.wait_until === undefined) {
       throw new Error('eval_client_runtime requires code or wait_until');
     }
@@ -2534,7 +2581,7 @@ export class RobloxStudioTools {
       throw new Error(`eval_client_runtime requires target=client-N (got: ${target})`);
     }
     return this._evalRuntime(
-      'eval_client_runtime', { requested: target, fallback: 'client-1', accepts: isClientRole }, code, instance_id, operation_id, wait,
+      'eval_client_runtime', { requested: target, fallback: 'client-1', accepts: isClientRole }, code, instance_id, operation_id, wait, signal,
     );
   }
 
@@ -2546,6 +2593,7 @@ export class RobloxStudioTools {
     instance_id: string | undefined,
     operation_id: string | undefined,
     wait: RuntimeWaitOptions,
+    signal: AbortSignal | undefined,
   ) {
     const condition = wait.wait_until;
     if (condition === undefined) {
@@ -2562,26 +2610,40 @@ export class RobloxStudioTools {
     if (!Number.isInteger(pollMs) || pollMs < 50 || pollMs > 10_000) {
       throw new Error(`${tool} poll_ms must be an integer from 50 to 10000`);
     }
-    const role = typeof target === 'string' ? target : target.requested ?? target.fallback;
+    const intervalMs = Math.max(pollMs, Math.ceil(timeoutS * 1000 / MAX_WAIT_PROBES));
     const startedAt = Date.now();
     const deadline = startedAt + timeoutS * 1000;
     const finish = (body: Record<string, unknown>) => this._textResult({ ...body, elapsed_ms: Date.now() - startedAt });
+    // Once a request has been routed, a later routing failure means the peer
+    // left mid-wait; before that it is the caller's targeting error.
+    let routedRole: string | undefined;
+    const send = (data: { code: string }, timeoutMs?: number, requestSignal?: AbortSignal, operationId?: string) =>
+      this._withSinglePeer(target, instance_id, requestSignal, (targetPeerId) => {
+        routedRole = this.bridge.getPeerById(targetPeerId)?.role
+          ?? (typeof target === 'string' ? target : target.requested ?? target.fallback);
+        return this._requestPeer('/api/eval-runtime', data, targetPeerId, timeoutMs, requestSignal, operationId);
+      });
     let codeResult: Record<string, unknown> = {};
     if (code) {
-      const response = await this._callSingle('/api/eval-runtime', { code }, target, instance_id, undefined, undefined, operation_id);
+      const response = await send({ code }, undefined, undefined, operation_id);
       if (response.ok !== true) {
         return finish({ ...response, satisfied: false, polls: 0, error: `code failed, so wait_until was not polled: ${String(response.error ?? 'unknown error')}` });
       }
       codeResult = { code_result: response.result, code_output: response.output };
     }
-    const probe = buildWaitProbe(condition);
+    // The expression form runs first, so `return` inside a string, a comment, or
+    // a nested function stays part of the expression. Text that only loads as a
+    // block switches to the block form for the rest of the wait.
+    let form: WaitProbeForm = 'expression';
+    let probe = buildWaitProbe(condition, form);
     let polls = 0;
     let lastValue: string | undefined;
     let lastError: string | undefined;
     for (;;) {
+      signal?.throwIfAborted();
       polls += 1;
       try {
-        const response = await this._callSingle('/api/eval-runtime', { code: probe }, target, instance_id, Math.max(1_000, Math.min(10_000, deadline - Date.now())));
+        const response = await send({ code: probe }, Math.max(1_000, Math.min(10_000, deadline - Date.now())), signal);
         const reply = response.ok === true && typeof response.result === 'string' ? response.result : undefined;
         if (reply !== undefined && (reply.startsWith('T') || reply.startsWith('F'))) {
           lastValue = reply.slice(1);
@@ -2589,22 +2651,34 @@ export class RobloxStudioTools {
           if (reply.startsWith('T')) return finish({ ...codeResult, satisfied: true, value: lastValue, polls });
         } else {
           lastError = String(response.error ?? `unexpected eval reply: ${JSON.stringify(response)}`);
-          if (WAIT_COMPILE_ERROR.test(lastError)) {
-            return finish({ ...codeResult, satisfied: false, polls, error: `wait_until does not compile: ${lastError}` });
-          }
           if (response.error === PLAYTEST_NOT_RUNNING_ERROR) {
             return finish({ ...codeResult, satisfied: false, polls, error: `The playtest stopped while waiting: ${lastError}` });
           }
+          if (isWaitLoadFailure(response)) {
+            if (form === 'expression' && /\breturn\b/.test(condition)) {
+              form = 'block';
+              probe = buildWaitProbe(condition, form);
+              continue;
+            }
+            return finish({ ...codeResult, satisfied: false, polls, error: `wait_until does not compile: ${lastError}` });
+          }
+          // Waiting again would only cancel the same yield again.
+          if (lastError.includes(WAIT_YIELD_ERROR)) {
+            return finish({ ...codeResult, satisfied: false, polls, value: lastValue, error: lastError });
+          }
         }
       } catch (error) {
+        if (signal?.aborted) throw error;
         if (error instanceof RoutingFailure) {
-          return finish({ ...codeResult, satisfied: false, polls, value: lastValue, error: `The ${role} peer is gone, so wait_until cannot finish: ${error.message}` });
+          if (routedRole === undefined) throw error;
+          return finish({ ...codeResult, satisfied: false, polls, value: lastValue, error: `The ${routedRole} peer is gone, so wait_until cannot finish: ${error.message}` });
         }
         lastError = errorMessage(error);
       }
-      if (Date.now() + pollMs >= deadline) break;
-      await sleep(pollMs);
+      if (polls >= MAX_WAIT_PROBES || Date.now() + intervalMs >= deadline) break;
+      await sleepUnlessAborted(intervalMs, signal);
     }
+    signal?.throwIfAborted();
     return finish({
       ...codeResult,
       satisfied: false,

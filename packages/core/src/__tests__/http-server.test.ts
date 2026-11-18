@@ -326,17 +326,19 @@ describe('HTTP Server', () => {
       expect(multiplayerPlaytest).toHaveBeenLastCalledWith('start', 2, undefined, undefined, undefined, 5, 'place:test');
     });
 
-    test('runtime eval handlers forward the wait options', async () => {
+    test('runtime eval handlers forward the wait options and cancellation signal', async () => {
       const evalServerRuntime = jest.fn(async () => ({ content: [] }));
       const evalClientRuntime = jest.fn(async () => ({ content: [] }));
       const fakeTools = { evalServerRuntime, evalClientRuntime } as unknown as RobloxStudioTools;
       const wait = { wait_until: 'workspace:GetAttribute("Ready")', timeout_s: 12, poll_ms: 100 };
 
-      await TOOL_HANDLERS.eval_server_runtime(fakeTools, { instance_id: 'place:test', operation_id: 'op-1', ...wait });
-      await TOOL_HANDLERS.eval_client_runtime(fakeTools, { code: 'return 1', target: 'client-2', ...wait });
+      const { signal } = new AbortController();
 
-      expect(evalServerRuntime).toHaveBeenLastCalledWith(undefined, 'place:test', 'op-1', wait);
-      expect(evalClientRuntime).toHaveBeenLastCalledWith('return 1', 'client-2', undefined, undefined, wait);
+      await TOOL_HANDLERS.eval_server_runtime(fakeTools, { instance_id: 'place:test', operation_id: 'op-1', ...wait }, { signal });
+      await TOOL_HANDLERS.eval_client_runtime(fakeTools, { code: 'return 1', target: 'client-2', ...wait }, { signal });
+
+      expect(evalServerRuntime).toHaveBeenLastCalledWith(undefined, 'place:test', 'op-1', wait, signal);
+      expect(evalClientRuntime).toHaveBeenLastCalledWith('return 1', 'client-2', undefined, undefined, wait, signal);
     });
 
     test('selection handler forwards the lifecycle action and options together', async () => {

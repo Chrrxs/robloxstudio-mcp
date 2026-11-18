@@ -444,14 +444,18 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
         },
         wait_until: {
           type: 'string',
-          description: 'Luau condition polled until truthy.'
+          description: 'Luau condition polled until truthy; must not yield.'
         },
         timeout_s: {
           type: 'number',
+          exclusiveMinimum: 0,
+          maximum: 300,
           description: 'Wait limit in seconds; default 20.'
         },
         poll_ms: {
           type: 'integer',
+          minimum: 50,
+          maximum: 10000,
           description: 'Poll interval in ms; default 250.'
         },
         instance_id: {
@@ -475,14 +479,18 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
         },
         wait_until: {
           type: 'string',
-          description: 'Luau condition polled until truthy.'
+          description: 'Luau condition polled until truthy; must not yield.'
         },
         timeout_s: {
           type: 'number',
+          exclusiveMinimum: 0,
+          maximum: 300,
           description: 'Wait limit in seconds; default 20.'
         },
         poll_ms: {
           type: 'integer',
+          minimum: 50,
+          maximum: 10000,
           description: 'Poll interval in ms; default 250.'
         },
         target: {
