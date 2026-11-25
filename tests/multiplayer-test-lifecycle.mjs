@@ -52,11 +52,17 @@ await runTest('multiplayer_test lifecycle controls clients explicitly', async ({
     assert((state.roles ?? []).includes('client-2'), 'state includes client-2 after add');
     assert((state.playerCount ?? 0) >= 2, 'server sees both players');
 
-    const leave = await client.callTool('multiplayer_playtest', { action: 'leave_client', target: 'client-2', timeout: 45, instance_id: instanceId });
-    assert(leave.success === true, 'multiplayer_playtest leave_client succeeds');
+    // Issue #188: the engine keeps a departed client's Player for about 55 s;
+    // the server must remove it once the client's process exits.
+    const leaveStartedAt = Date.now();
+    const leave = await client.callTool('multiplayer_playtest', { action: 'leave_client', target: 'client-2', timeout: 30, instance_id: instanceId });
+    const leaveSeconds = (Date.now() - leaveStartedAt) / 1000;
+    assert(leave.success === true, `multiplayer_playtest leave_client succeeds (${JSON.stringify(leave)})`);
+    assert(leaveSeconds < 15, `leave_client returns promptly (${leaveSeconds.toFixed(1)} s)`);
 
     state = await client.callTool('multiplayer_playtest', { action: 'status', instance_id: instanceId });
     assert(!(state.roles ?? []).includes('client-2'), 'state no longer includes client-2');
+    assert(state.playerCount === 1, `server no longer counts client-2's Player (${state.playerCount})`);
 
     const end = await client.callTool('multiplayer_playtest', {
       action: 'end',

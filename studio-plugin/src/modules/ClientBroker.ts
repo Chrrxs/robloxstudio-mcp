@@ -1050,6 +1050,57 @@ function invokeClientCapture(
 }
 
 const LEAVE_CLIENT_ENDPOINT = "/api/multiplayer-test-leave-client";
+// After a client confirms its leave, a heartbeat gap this long since the later of
+// its last heartbeat and the confirmation means its Studio process has exited.
+// Heartbeats arrive every second; the process exits within about a second.
+const LEAVE_EXIT_SILENCE_SECONDS = 3;
+// How long the server watches a confirmed leave before handing the wait back to MCP.
+const LEAVE_EXIT_MAX_WAIT_SECONDS = 15;
+const LEAVE_EXIT_POLL_SECONDS = 0.1;
+
+// The client answers the leave request before StudioTestService.LeaveTest runs,
+// and the engine keeps the Player of a client that left this way until its
+// connection timeout, about 55 s later. The client's bridge heartbeat stops with
+// its process, so once it does, the server removes the Player itself. A client
+// that keeps sending heartbeats is still running and is left alone: kicking it
+// would leave its window open on a disconnect dialog.
+function completeConfirmedLeave(call: ClientCall, result: unknown): unknown {
+	if (!typeIs(result, "table")) return result;
+	const reply = result as Record<string, unknown>;
+	if (reply.success !== true) return result;
+	const { entry, target } = call;
+	const playerName = entry.player.Name;
+	const confirmedAt = Workspace.GetServerTimeNow();
+	const waitUntil = math.min(call.deadlineAt, os.clock() + LEAVE_EXIT_MAX_WAIT_SECONDS);
+	while (true) {
+		if (entry.player.Parent === undefined) {
+			unregisterProxy(entry.player, entry);
+			return result;
+		}
+		if (call.context.isCancelled() || !RunService.IsRunning() || entry.heartbeat === undefined) return result;
+		const silenceSeconds = Workspace.GetServerTimeNow() - math.max(entry.heartbeat.receivedAt, confirmedAt);
+		if (silenceSeconds > LEAVE_EXIT_SILENCE_SECONDS) break;
+		const remaining = waitUntil - os.clock();
+		if (remaining <= 0) return result;
+		task.wait(math.min(LEAVE_EXIT_POLL_SECONDS, remaining));
+	}
+	const [kicked, kickError] = pcall(() =>
+		entry.player.Kick("The MCP server removed this client after it left the test."),
+	);
+	if (!kicked) {
+		return {
+			...reply,
+			message: `${target} confirmed the leave and its MCP bridge stopped, but removing its Player ${playerName} from the server failed: ${tostring(kickError)}`,
+		};
+	}
+	unregisterProxy(entry.player, entry);
+	return {
+		...reply,
+		removedByServer: true,
+		localPlayer: playerName,
+		message: `${target} left and its Studio process exited. The server removed its Player ${playerName} instead of waiting out the engine's connection timeout.`,
+	};
+}
 
 // A client whose Studio process exited keeps its Player on the server until the
 // engine's connection timeout, a minute or more later, but its bridge heartbeat
@@ -1067,7 +1118,7 @@ function leaveClient(
 	let failure = admitClientCall(call);
 	if (failure === undefined) {
 		const outcome = invokeClient(call, LEAVE_CLIENT_ENDPOINT, data);
-		if (outcome.ok) return outcome.result;
+		if (outcome.ok) return completeConfirmedLeave(call, outcome.result);
 		failure = outcome.failure;
 	}
 	const playerName = entry.player.Name;
