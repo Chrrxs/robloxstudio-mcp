@@ -4,8 +4,10 @@ import * as os from 'os';
 import * as path from 'path';
 import { promisify } from 'util';
 import {
+  buildWindowsStudioStopManyScript,
   listStudioProcesses,
   observeStudioProcesses,
+  observeStudioProcessTree,
   StudioInstanceManager,
   type ManagedStudioInstance,
 } from '../studio-instance-manager.js';
@@ -98,8 +100,8 @@ function withPowerShellDiagnostics<Args extends unknown[]>(
 
 // Execute the production query in real Windows PowerShell, replacing only its OS
 // process source. The missing-name branch uses the actual Get-Process error.
-function usePowerShellProcessSource(body: string): void {
-  const prelude = `function Get-Process { [CmdletBinding()] param([string[]]$Name) ${body} }; `;
+function usePowerShellProcessSource(body: string, extraPrelude = ''): void {
+  const prelude = `function Get-Process { [CmdletBinding()] param([string[]]$Name) ${body} }; ${extraPrelude}`;
   const withPrelude = (args: string[]) => [...args.slice(0, -1), prelude + args[args.length - 1]];
   mockExecFileSync.mockImplementation((_command, args) => {
     const startedAt = Date.now();
@@ -167,6 +169,52 @@ describe('native Studio process enumeration', () => {
     expect(listStudioProcesses()).toEqual(expected);
     await expect(observeStudioProcesses()).resolves.toMatchObject({ status: 'ok', processes: expected });
   }));
+
+  // Issue #190: test windows are found by parent PID and command line.
+  nativeTest('joins Win32_Process parents and command lines onto the Studio processes', withPowerShellDiagnostics(async () => {
+    usePowerShellProcessSource(`foreach ($idValue in 4242..4243) { [PSCustomObject]@{
+      Id = $idValue; Name = 'RobloxStudioBeta'; Path = 'C:\\RobloxStudioBeta.exe';
+      MainWindowTitle = 'Studio'; StartTime = [datetime]::FromFileTimeUtc(133700123459000000)
+    } }`, `function Get-CimInstance { param([Parameter(Position = 0)][string]$ClassName, [string]$Filter)
+      if ($ClassName -ne 'Win32_Process' -or $Filter -ne "Name='RobloxStudioBeta.exe'") { throw "unexpected query $ClassName $Filter" }
+      [PSCustomObject]@{ ProcessId = 4243; ParentProcessId = 4242; CommandLine = 'RobloxStudioBeta.exe -task StartServer -localProjectFile "C:\\a b.rbxl"' }
+    }; `);
+    await expect(observeStudioProcessTree()).resolves.toEqual({
+      status: 'ok',
+      observedAt: expect.any(Number),
+      processes: [
+        { Id: 4242, MainWindowTitle: 'Studio', StartTimeUtcFileTime: '133700123459000000' },
+        {
+          Id: 4243,
+          ParentId: 4242,
+          CommandLine: 'RobloxStudioBeta.exe -task StartServer -localProjectFile "C:\\a b.rbxl"',
+          MainWindowTitle: 'Studio',
+          StartTimeUtcFileTime: '133700123459000000',
+        },
+      ],
+    });
+  }));
+
+  nativeTest('stops only exact process identities in one call', withPowerShellDiagnostics(async () => {
+    const run = (script: string) => actualExecFileAsync(powershellExecutable, ['-NoProfile', '-Command', script], { encoding: 'utf8', timeout: 30000 });
+    const started = JSON.parse((await run([
+      "$p = Start-Process -FilePath ping.exe -ArgumentList '-n','120','127.0.0.1' -WindowStyle Hidden -PassThru",
+      'ConvertTo-Json @{ pid = $p.Id; started = [string]$p.StartTime.ToUniversalTime().ToFileTimeUtc() } -Compress',
+    ].join('; '))).stdout) as { pid: number; started: string };
+    const alive = async () => (await run(`[bool](Get-Process -Id ${started.pid} -ErrorAction SilentlyContinue)`)).stdout.trim() === 'True';
+    try {
+      // Same PID with another creation time is another process: never end it.
+      await run(buildWindowsStudioStopManyScript([{ pid: started.pid, startedAt: String(BigInt(started.started) + 1n) }]));
+      expect(await alive()).toBe(true);
+      await run(buildWindowsStudioStopManyScript([
+        { pid: 2147483000, startedAt: '133700123459000000' },
+        { pid: started.pid, startedAt: started.started },
+      ]));
+      expect(await alive()).toBe(false);
+    } finally {
+      await run(`Stop-Process -Id ${started.pid} -Force -ErrorAction SilentlyContinue`).catch(() => undefined);
+    }
+  }), 60_000);
 
   nativeTest('PowerShell permission failures are not swallowed as missing processes', withPowerShellDiagnostics(async () => {
     usePowerShellProcessSource("Write-Error -Message 'Access denied' -Category PermissionDenied -ErrorId 'PermissionDenied'");

@@ -507,7 +507,8 @@ describe('proxy discovery and tool routing before the next topology poll', () =>
 
       expect(await observerTools.getConnectedInstances()).toEqual(discovered);
       await observerTools.getMemoryBreakdown('server', undefined, 'instance:runtime-server');
-      expect(harness.forwarded).toEqual(['runtime-peer', 'runtime-peer']);
+      // End asks the edit plugin whether Studio still runs a test before removing the group.
+      expect(harness.forwarded).toEqual(['runtime-peer', 'instance:other/edit', 'runtime-peer']);
       expect(harness.primary.getInstances()).toHaveLength(2);
       expect(harness.primary.getMultiplayerGroups()).toHaveLength(1);
       expect(harness.proxy.getMultiplayerGroups()).toHaveLength(1);

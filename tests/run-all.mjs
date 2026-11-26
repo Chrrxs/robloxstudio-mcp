@@ -55,6 +55,7 @@ const FULL_TESTS = [
   'virtual-input.mjs',
   'multiplayer-add-player-end-regression.mjs',
   'multiplayer-test-lifecycle.mjs',
+  'multiplayer-test-windows.mjs',
   'studio-websocket-transport.mjs',
 ];
 const FEATURE_TESTS = [
