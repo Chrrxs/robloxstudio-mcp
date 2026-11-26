@@ -110,7 +110,9 @@ still loading or never connected:
   the same way, so a failed start leaves nothing running. A start whose peers
   registered but did not answer an eval stays running for inspection, as before.
 - `start` first closes test windows left by an earlier start
-  (`closedStaleTestWindows`).
+  (`closedStaleTestWindows`), once Studio no longer reports that test starting
+  or running. Windows of a start still in progress are left alone, and Studio
+  refuses the new start.
 - `status` reports `testWindows`, and `unansweredTestWindows` when some of them
   have no connected plugin.
 
