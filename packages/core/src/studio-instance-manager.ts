@@ -107,7 +107,9 @@ export type StudioProcessTreeSnapshot =
 /** The test windows of one edit Studio, or why they cannot be listed. */
 export type PlaytestProcessListing =
   | { status: 'ok'; editProcessId: number; processes: PlaytestProcess[] }
-  | { status: 'unavailable'; reason: string };
+  | { status: 'unavailable'; reason: string }
+  /** Windows could be listed here, but this attempt failed: nothing is known. */
+  | { status: 'error'; error: string };
 
 export interface PlaytestProcessCloseResult {
   closed: PlaytestProcess[];
@@ -2288,7 +2290,10 @@ export class StudioInstanceManager {
       }
     }
 
+    // Listing the edit's test windows does not consume the close budget either.
+    const listStarted = Date.now();
     const testWindows = await this.playtestProcessesOfEdit(processId, record.nativeProcessStartedAt);
+    deadline += Date.now() - listStarted;
     // Never cut an automatic sign-in short (see studio-sign-in.ts). The wait is
     // bounded separately and does not consume the close budget.
     if (!abort) deadline = await this.beforeStudioStop(record.nativeProcessStartedAt, deadline);
@@ -2362,7 +2367,9 @@ export class StudioInstanceManager {
     if (!process) {
       throw new Error(`Could not find a Studio process for connected instance "${instance.instanceId}".`);
     }
+    const listStarted = Date.now();
     const testWindows = await this.playtestProcessesOfEdit(process.Id, process.StartTimeUtcFileTime);
+    deadline += Date.now() - listStarted;
     deadline = await this.beforeStudioStop(process.StartTimeUtcFileTime, deadline);
     await this.closeProcess(process.Id, process.StartTimeUtcFileTime, undefined, deadline);
     await this.closeOrphanedPlaytestProcesses(testWindows);
@@ -2377,7 +2384,7 @@ export class StudioInstanceManager {
     const snapshot = await this.readProcessTreeSnapshot();
     if (snapshot.status === 'unavailable') return snapshot;
     if (snapshot.status === 'error') {
-      return { status: 'unavailable', reason: `Could not list Studio processes: ${snapshot.error}` };
+      return { status: 'error', error: `Could not list Studio processes: ${snapshot.error}` };
     }
     const edit = await this.findEditProcessNode(instance, snapshot.processes);
     if ('reason' in edit) return { status: 'unavailable', reason: edit.reason };
@@ -2422,7 +2429,8 @@ export class StudioInstanceManager {
     }
 
     for (;;) {
-      const snapshot = await this.readProcessTreeSnapshot(Math.max(1, deadline - Date.now()));
+      // A stop that used most of the budget still leaves verification time to answer.
+      const snapshot = await this.readProcessTreeSnapshot(Math.max(5000, deadline - Date.now()));
       if (snapshot.status !== 'ok') {
         return {
           closed: [],
@@ -2449,10 +2457,11 @@ export class StudioInstanceManager {
 
   // The test windows of one exact edit Studio process; empty when they cannot be listed.
   private async playtestProcessesOfEdit(processId: number, startedAt: string | undefined): Promise<PlaytestProcess[]> {
+    // Without its creation time a PID (perhaps a WSL spawn PID) names no exact Windows process.
+    if (startedAt === undefined) return [];
     const snapshot = await this.readProcessTreeSnapshot();
     if (snapshot.status !== 'ok') return [];
-    const edit = snapshot.processes.find((node) =>
-      node.Id === processId && (startedAt === undefined || node.StartTimeUtcFileTime === startedAt));
+    const edit = snapshot.processes.find((node) => node.Id === processId && node.StartTimeUtcFileTime === startedAt);
     return edit ? findPlaytestProcesses(edit, snapshot.processes) : [];
   }
 
@@ -2472,14 +2481,19 @@ export class StudioInstanceManager {
       return registryRecord ? this.fromRegistryRecord(registryRecord) : undefined;
     })();
     if (record && record.closedAt === undefined && record.nativeProcessId !== undefined) {
+      if (record.nativeProcessStartedAt === undefined) {
+        return { reason: 'The managed edit Studio has no recorded process creation time.' };
+      }
       const edit = processes.find((node) => node.Id === record.nativeProcessId &&
-        (record.nativeProcessStartedAt === undefined || node.StartTimeUtcFileTime === record.nativeProcessStartedAt));
+        node.StartTimeUtcFileTime === record.nativeProcessStartedAt);
       return edit ?? { reason: 'The managed edit Studio process is not running.' };
     }
     const edits = processes.filter((node) => playtestProcessRole(node.CommandLine) === undefined);
     let match: StudioProcessInfo | undefined;
     try {
-      match = this.findProcessForConnectedInstance(instance, edits);
+      // Only a window title names this edit: a sole local Studio could be
+      // another machine's, when the bridge accepts remote plugins.
+      match = this.findProcessForConnectedInstance(instance, edits, { requireTitleMatch: true });
     } catch (error) {
       return { reason: error instanceof Error ? error.message : String(error) };
     }
@@ -2605,9 +2619,10 @@ export class StudioInstanceManager {
   private findProcessForConnectedInstance(
     instance: ConnectedStudioInstance,
     processes: StudioProcessInfo[],
+    { requireTitleMatch = false }: { requireTitleMatch?: boolean } = {},
   ): StudioProcessInfo | undefined {
     if (processes.length === 0) return undefined;
-    if (processes.length === 1) return processes[0];
+    if (processes.length === 1 && !requireTitleMatch) return processes[0];
 
     const names = [instance.dataModelName, instance.placeName]
       .map((name) => name.trim())

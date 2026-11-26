@@ -729,14 +729,20 @@ type MultiplayerStartWait = { ok: boolean; roles: string[]; timedOut: boolean; p
 /** Test windows of a multiplayer playtest found by process, and what closing them did. */
 type TestWindowCleanup =
   | { tracked: false; reason: string }
-  | { tracked: true; found: number; closed: number; remaining: number; error?: string };
+  // listingFailed: this platform lists windows, but a listing failed, so none can be ruled out.
+  | { tracked: true; found: number; closed: number; remaining: number; listingFailed?: boolean; error?: string };
 
 function testWindowFields(cleanup: TestWindowCleanup): Record<string, unknown> {
   if (!cleanup.tracked) return {};
   return {
     ...(cleanup.closed > 0 ? { closedTestWindows: cleanup.closed } : {}),
-    ...(cleanup.remaining > 0 ? { remainingTestWindows: cleanup.remaining, testWindowError: cleanup.error } : {}),
+    ...(cleanup.remaining > 0 ? { remainingTestWindows: cleanup.remaining } : {}),
+    ...(cleanup.error !== undefined ? { testWindowError: cleanup.error } : {}),
   };
+}
+
+function isActiveMultiplayerPhase(phase: string | undefined): boolean {
+  return phase === 'starting' || phase === 'running';
 }
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {
@@ -4949,6 +4955,7 @@ export class RobloxStudioTools {
   private async _closeTestWindows(instanceId: string, graceMs: number): Promise<TestWindowCleanup> {
     let listing = await this._listTestWindows(instanceId);
     if (listing.status === 'unavailable') return { tracked: false, reason: listing.reason };
+    if (listing.status === 'error') return { tracked: true, found: 0, closed: 0, remaining: 0, listingFailed: true, error: listing.error };
     const found = listing.processes.length;
     const graceDeadline = Date.now() + graceMs;
     while (listing.status === 'ok' && listing.processes.length > 0 && Date.now() < graceDeadline) {
@@ -4956,6 +4963,7 @@ export class RobloxStudioTools {
       listing = await this._listTestWindows(instanceId);
     }
     if (listing.status === 'unavailable') return { tracked: false, reason: listing.reason };
+    if (listing.status === 'error') return { tracked: true, found, closed: 0, remaining: 0, listingFailed: true, error: listing.error };
     if (listing.processes.length === 0) return { tracked: true, found, closed: 0, remaining: 0 };
     const result = await this.instanceManager.closePlaytestProcesses(listing.processes);
     return {
@@ -4967,44 +4975,56 @@ export class RobloxStudioTools {
     };
   }
 
-  // The edit plugin's multiplayer session phase; undefined when it cannot answer.
-  private async _multiplayerEditPhase(instanceId: string): Promise<string | undefined> {
-    if (!this._rolesForScope(instanceId).includes('edit')) return undefined;
+  // The edit plugin's multiplayer session; empty when it cannot answer.
+  private async _multiplayerEditSession(instanceId: string): Promise<{ phase?: string; testId?: string }> {
+    if (!this._rolesForScope(instanceId).includes('edit')) return {};
     try {
       const editState = await this._request('/api/multiplayer-test-state', {}, instanceId, 'edit', 2000);
-      return typeof editState?.session?.phase === 'string' ? editState.session.phase : undefined;
+      const session = editState?.session;
+      return {
+        phase: typeof session?.phase === 'string' ? session.phase : undefined,
+        testId: typeof session?.testId === 'string' ? session.testId : undefined,
+      };
     } catch {
-      return undefined;
+      return {};
     }
   }
 
   /**
    * Closes the test windows of a playtest whose plugins are gone, and confirms
-   * the teardown only when none remain and Studio no longer reports the test
+   * the teardown only when none remain and Studio no longer reports that test
    * starting or running. Studio can open the windows seconds after its start
    * call, so while it still reports the test running this keeps closing new
-   * ones until `timeoutSec`. Without process tracking, only the phase counts.
+   * ones until `timeoutSec`. Studio runs one test at a time: once it reports a
+   * different test (`testId`, by default the one running at the first check),
+   * that test's windows are someone else's and are left alone.
+   * Without process tracking, only the phase counts.
    */
   private async _endTestWindows(
     instanceId: string,
     timeoutSec: number,
     graceMs: number,
+    ownTestId?: string,
   ): Promise<{ cleanup: TestWindowCleanup; confirmed: boolean; editPhase?: string }> {
     const deadline = Date.now() + timeoutSec * 1000;
     let found = 0;
     let closed = 0;
     let grace = graceMs;
+    let session = await this._multiplayerEditSession(instanceId);
+    const testId = ownTestId ?? session.testId;
+    const anotherTest = () => isActiveMultiplayerPhase(session.phase) && testId !== undefined && session.testId !== testId;
+    if (anotherTest()) return { cleanup: { tracked: true, found, closed, remaining: 0 }, confirmed: true, editPhase: session.phase };
     for (;;) {
       const cleanup = await this._closeTestWindows(instanceId, grace);
       grace = 0;
-      const editPhase = await this._multiplayerEditPhase(instanceId);
-      const studioIdle = editPhase !== 'starting' && editPhase !== 'running';
-      if (!cleanup.tracked) return { cleanup, confirmed: studioIdle, editPhase };
+      session = await this._multiplayerEditSession(instanceId);
+      const over = !isActiveMultiplayerPhase(session.phase) || anotherTest();
+      if (!cleanup.tracked) return { cleanup, confirmed: over, editPhase: session.phase };
       found += cleanup.found;
       closed += cleanup.closed;
       const total: TestWindowCleanup = { ...cleanup, found, closed };
-      if (cleanup.remaining > 0) return { cleanup: total, confirmed: false, editPhase };
-      if (studioIdle || Date.now() >= deadline) return { cleanup: total, confirmed: studioIdle, editPhase };
+      if (cleanup.listingFailed || cleanup.remaining > 0) return { cleanup: total, confirmed: false, editPhase: session.phase };
+      if (over || Date.now() >= deadline) return { cleanup: total, confirmed: over, editPhase: session.phase };
       await sleep(Math.min(1000, Math.max(1, deadline - Date.now())));
     }
   }
@@ -5171,7 +5191,6 @@ export class RobloxStudioTools {
         roles: Array.isArray(body.roles) ? body.roles : undefined,
         targets: body.targets,
         playerCount: typeof state.playerCount === 'number' ? state.playerCount : undefined,
-        closedStaleTestWindows: typeof body.closedStaleTestWindows === 'number' ? body.closedStaleTestWindows : undefined,
         elapsedMs: body.elapsedMs,
       } : {
         success: false,
@@ -5191,7 +5210,9 @@ export class RobloxStudioTools {
         closedTestWindows: typeof body.closedTestWindows === 'number' ? body.closedTestWindows : undefined,
         remainingTestWindows: typeof body.remainingTestWindows === 'number' ? body.remainingTestWindows : undefined,
         testWindowError: typeof body.testWindowError === 'string' ? body.testWindowError : undefined,
-        closedStaleTestWindows: typeof body.closedStaleTestWindows === 'number' ? body.closedStaleTestWindows : undefined,
+        teardownError: typeof body.teardownError === 'string' ? body.teardownError : undefined,
+        testWindows: typeof body.testWindows === 'number' ? body.testWindows : undefined,
+        editPhase: typeof body.editPhase === 'string' ? body.editPhase : undefined,
       });
     }
 
@@ -5297,49 +5318,36 @@ export class RobloxStudioTools {
       });
     }
 
-    // Test windows left by an earlier start that no plugin answered for (they
-    // never connected, or Studio opened them after that start gave up). While
-    // Studio still reports a test starting or running, the windows may be
-    // another caller's start still loading: leave them, and Studio refuses this start.
+    // Test windows with no connected plugin: left by an earlier start, opened
+    // outside MCP, or another caller's start still loading. Studio runs one
+    // test at a time, so say so rather than close windows that may not be ours.
     const staleListing = await this._listTestWindows(editTarget.instanceId);
-    const priorPhase = staleListing.status === 'ok' && staleListing.processes.length > 0
-      ? await this._multiplayerEditPhase(editTarget.instanceId)
-      : undefined;
-    const stale = staleListing.status === 'ok' && staleListing.processes.length > 0 &&
-      priorPhase !== 'starting' && priorPhase !== 'running'
-      ? await this._endTestWindows(editTarget.instanceId, 15, 0)
-      : undefined;
-    const closedStaleTestWindows = stale?.cleanup.tracked && stale.cleanup.closed > 0 ? stale.cleanup.closed : undefined;
-    if (stale?.cleanup.tracked && stale.cleanup.remaining > 0) {
+    if (staleListing.status === 'ok' && staleListing.processes.length > 0) {
+      const { phase } = await this._multiplayerEditSession(editTarget.instanceId);
       return this._textResult({
         success: false,
         error: 'stale_test_windows',
-        message: `${stale.cleanup.remaining} test window(s) from an earlier playtest are still running and could not be closed.`,
-        testWindowError: stale.cleanup.error,
+        message: isActiveMultiplayerPhase(phase)
+          ? `Studio is still starting a multiplayer test: ${staleListing.processes.length} test window(s) are open and no plugin has connected yet. Wait for it, or end it with multiplayer_playtest action="end".`
+          : `${staleListing.processes.length} test window(s) of this Studio are running without a connected MCP plugin. Close them with multiplayer_playtest action="end", then start again.`,
+        testWindows: staleListing.processes.length,
+        editPhase: phase,
         roles: this._rolesForScope(editTarget.instanceId),
       });
     }
 
     const startedAt = Date.now();
-    let response: StudioToolResponse;
-    try {
-      response = await this._requestPeer(
-        '/api/multiplayer-test-start',
-        { numPlayers, testArgs: testArgs ?? {} },
-        editTarget.targetPeerId,
-      );
-    } catch (error) {
-      // The plugin may have started the test anyway; close whatever it opens.
-      await this._endTestWindows(editTarget.instanceId, 30, 0);
-      throw error;
-    }
+    const response = await this._requestPeer(
+      '/api/multiplayer-test-start',
+      { numPlayers, testArgs: testArgs ?? {} },
+      editTarget.targetPeerId,
+    );
     const groupId = typeof response?.testId === 'string' ? response.testId : undefined;
     if (response?.error || response?.success !== true || groupId === undefined) {
       if (groupId !== undefined) await this.bridge.removeMultiplayerGroupEverywhere(groupId);
       return this._textResult({
         ...response,
         error: response?.error ?? 'Multiplayer start did not return a testId.',
-        closedStaleTestWindows,
       });
     }
 
@@ -5354,13 +5362,16 @@ export class RobloxStudioTools {
         : undefined;
     } catch (error) {
       // A cancelled start leaves nobody to end the playtest it began.
-      await this._teardownFailedStart(editTarget.instanceId);
+      await this._teardownFailedStart(editTarget.instanceId, groupId);
       throw error;
     }
     const launched = wait.ok;
     // Peers that never all registered leave a playtest nobody is told is
     // running; end it and close its windows, including ones still opening.
-    const startTeardown = wait.ok ? undefined : await this._teardownFailedStart(editTarget.instanceId);
+    // A start Studio refused opened no window: any open ones are another test's.
+    const startTeardown = wait.ok || wait.phase === 'failed'
+      ? undefined
+      : await this._teardownFailedStart(editTarget.instanceId, groupId);
     const state = await this._buildMultiplayerState(editTarget.instanceId);
     const success = wait.ok && readiness?.ready === true;
     const runtimeStillConnected = this._runtimeTargetsForScope(editTarget.instanceId).length > 0;
@@ -5413,7 +5424,6 @@ export class RobloxStudioTools {
           studioError: startFailure?.studioError,
           recoveryHint: startFailure?.recoveryHint ?? evalFailure?.recoveryHint,
           ...startTeardown,
-          closedStaleTestWindows,
           elapsedMs: Date.now() - startedAt,
           startedAt,
         }),
@@ -5422,25 +5432,33 @@ export class RobloxStudioTools {
   }
 
   // Ends a start that failed or was cancelled: through the server plugin when
-  // one connected, and by closing every test window either way.
-  private async _teardownFailedStart(instanceId: string): Promise<Record<string, unknown>> {
+  // one connected, and by closing the test's windows either way.
+  private async _teardownFailedStart(instanceId: string, testId: string): Promise<Record<string, unknown>> {
+    let ended: Record<string, unknown>;
     try {
-      const body = this._parseTextResult(await this.multiplayerTestEnd('start_failed', 30, instanceId));
-      return {
-        teardownConfirmed: body.teardownConfirmed === true,
-        closedTestWindows: typeof body.closedTestWindows === 'number' ? body.closedTestWindows : undefined,
-        remainingTestWindows: typeof body.remainingTestWindows === 'number' ? body.remainingTestWindows : undefined,
-        teardownError: typeof body.error === 'string' ? body.error : undefined,
-      };
+      ended = this._parseTextResult(await this.multiplayerTestEnd('start_failed', 30, instanceId));
     } catch (error) {
       // For example clients connected without a server: no plugin can end the test.
-      const teardown = await this._endTestWindows(instanceId, 30, 0);
-      return {
-        teardownConfirmed: false,
-        ...testWindowFields(teardown.cleanup),
-        teardownError: error instanceof Error ? error.message : String(error),
-      };
+      ended = { error: error instanceof Error ? error.message : String(error) };
     }
+    const closedByEnd = typeof ended.closedTestWindows === 'number' ? ended.closedTestWindows : 0;
+    if (ended.teardownConfirmed === true) {
+      return { teardownConfirmed: true, ...(closedByEnd > 0 ? { closedTestWindows: closedByEnd } : {}) };
+    }
+    // The server refused EndTest, or no plugin could be asked: close the windows directly.
+    const teardown = await this._endTestWindows(instanceId, 30, 0, testId);
+    const { cleanup } = teardown;
+    const closed = closedByEnd + (cleanup.tracked ? cleanup.closed : 0);
+    const runtimeLeft = this._runtimeTargetsForScope(instanceId).length > 0;
+    return {
+      teardownConfirmed: cleanup.tracked && teardown.confirmed && !runtimeLeft,
+      ...(closed > 0 ? { closedTestWindows: closed } : {}),
+      ...(cleanup.tracked && cleanup.remaining > 0 ? { remainingTestWindows: cleanup.remaining } : {}),
+      ...(cleanup.tracked && cleanup.error !== undefined ? { testWindowError: cleanup.error } : {}),
+      teardownError: typeof ended.error === 'string'
+        ? ended.error
+        : cleanup.tracked ? undefined : `Test windows cannot be closed here: ${cleanup.reason}`,
+    };
   }
 
   async multiplayerTestState(instance_id?: string) {
@@ -5571,7 +5589,7 @@ export class RobloxStudioTools {
       if (!hasRuntime) {
         // No plugin to ask, but a test window whose plugin is still loading, or
         // never connected, keeps running until its process is closed.
-        const teardown = await this._endTestWindows(instanceId, timeout ?? 30, 0);
+        const teardown = await this._endTestWindows(instanceId, timeout ?? 30, 0, group?.id);
         const { cleanup } = teardown;
         const found = cleanup.tracked ? cleanup.found : 0;
         if (group && teardown.confirmed) await this.bridge.removeMultiplayerGroupEverywhere(group.id);
@@ -5617,9 +5635,19 @@ export class RobloxStudioTools {
     );
     // Plugins disconnecting is not the windows exiting: close any test window
     // still running, including one whose plugin never connected.
-    const teardown = await this._endTestWindows(scopeInstanceId, wait.ok ? 10 : 0, wait.ok ? TEST_WINDOW_EXIT_GRACE_MS : 0);
+    let teardown = await this._endTestWindows(
+      scopeInstanceId, wait.ok ? 10 : 0, wait.ok ? TEST_WINDOW_EXIT_GRACE_MS : 0, group?.id,
+    );
     if (!wait.ok && teardown.cleanup.tracked && teardown.cleanup.closed > 0) {
+      // Closing the windows drops their plugins; then Studio ends the test.
       wait = await this._waitForRuntimeRoles(scopeInstanceId, { noRuntime: true }, 10);
+      if (wait.ok) {
+        const settled = await this._endTestWindows(scopeInstanceId, 10, 0, group?.id);
+        const before = teardown.cleanup;
+        teardown = settled.cleanup.tracked
+          ? { ...settled, cleanup: { ...settled.cleanup, found: before.found + settled.cleanup.found, closed: before.closed + settled.cleanup.closed } }
+          : settled;
+      }
     }
     const teardownConfirmed = wait.ok && teardown.confirmed;
     const state = await this._buildMultiplayerState(scopeInstanceId);

@@ -197,6 +197,19 @@ describe('StudioInstanceManager test windows', () => {
     });
   });
 
+  test('a sole Studio whose title does not name the instance is not assumed to be its edit', async () => {
+    // With a remotely reachable bridge, the connected edit may be another machine's Studio.
+    processes = [edit(100, '1000', PLACE, 'Other - Roblox Studio'), testWindow(200, 100, '2000', 'Server')];
+    await expect(manager.listPlaytestProcesses(INSTANCE)).resolves.toMatchObject({ status: 'unavailable' });
+  });
+
+  test('a failed process listing is an error, not an unsupported platform', async () => {
+    adapter.observeStudioProcessTree = () => ({ status: 'error', observedAt: Date.now(), error: 'timed out' });
+    await expect(manager.listPlaytestProcesses(INSTANCE)).resolves.toEqual({
+      status: 'error', error: 'Could not list Studio processes: timed out',
+    });
+  });
+
   test('closing a managed edit Studio also closes the test windows it started', async () => {
     const record: ManagedStudioInstance = {
       recordId: 'playtest-launch',

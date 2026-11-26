@@ -100,7 +100,9 @@ Studio runs each window of a multiplayer playtest, the Server and every client,
 as its own Studio process: the Server is a child of the edit Studio, and each
 client is a child of the Server. On Windows and WSL, `multiplayer_playtest`
 finds these windows by process, so it also sees a window whose MCP plugin is
-still loading or never connected:
+still loading or never connected. It finds the edit Studio by its
+`manage_instance` launch, or else by a window title that names exactly one
+Studio:
 
 - `end` closes every test window that is still running after the playtest ends,
   and reports `teardownConfirmed: true` only once none remains. It reports
@@ -109,10 +111,9 @@ still loading or never connected:
 - A `start` whose peers do not all register before `ready_timeout_s` is ended
   the same way, so a failed start leaves nothing running. A start whose peers
   registered but did not answer an eval stays running for inspection, as before.
-- `start` first closes test windows left by an earlier start
-  (`closedStaleTestWindows`), once Studio no longer reports that test starting
-  or running. Windows of a start still in progress are left alone, and Studio
-  refuses the new start.
+- `start` refuses with `stale_test_windows` while test windows without a
+  connected plugin are open: they may be left from an earlier start, opened in
+  Studio, or another caller's start still loading. `end` closes them.
 - `status` reports `testWindows`, and `unansweredTestWindows` when some of them
   have no connected plugin.
 

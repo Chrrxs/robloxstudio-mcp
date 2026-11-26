@@ -3647,7 +3647,6 @@ describe('Smoke', () => {
       roles: ['edit'],
       studioError,
       ...(hinted ? { recoveryHint: expect.stringMatching(/stop\/end cannot clear it: reopen the place/) } : {}),
-      teardownConfirmed: true,
     });
     // A refused start never ran, so its group does not linger.
     expect(bridge.getMultiplayerGroups()).toEqual([]);
