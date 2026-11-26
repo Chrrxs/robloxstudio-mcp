@@ -3202,8 +3202,12 @@ describe('Smoke', () => {
 
       await jest.advanceTimersByTimeAsync(600);
       expect(evals.probes).toHaveLength(3);
-      expect(evals.probes.every((probe) => probe.signal === controller.signal)).toBe(true);
+      // Probes share the start's own signal, which follows the caller's while it waits.
+      const probeSignal = evals.probes[0].signal;
+      expect(probeSignal).toBeInstanceOf(AbortSignal);
+      expect(evals.probes.every((probe) => probe.signal === probeSignal)).toBe(true);
       controller.abort();
+      expect(probeSignal).toHaveProperty('aborted', true);
       await jest.advanceTimersByTimeAsync(0);
       expect(result.settled).toBe(true);
       expect(result.error).toBeDefined();

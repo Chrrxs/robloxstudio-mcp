@@ -210,6 +210,16 @@ describe('multiplayer_playtest test windows (issue #190)', () => {
     expect(body(await pending)).toMatchObject({ success: true, closedStaleTestWindows: 2 });
   });
 
+  test('start leaves windows alone while Studio still reports another start in progress', async () => {
+    const { tools, bridge, closed } = harness([{ status: 'ok', editProcessId: 100, processes: WINDOWS }], ['running']);
+    const pending = tools.multiplayerPlaytest('start', 1, undefined, undefined, undefined, 5, 'instance:test');
+    const request = await claimSoon(bridge);
+    expect(request.endpoint).toBe('/api/multiplayer-test-start');
+    bridge.resolveRequest(request.requestId, { error: 'A multiplayer Studio test is already running' });
+    expect(body(await pending)).toMatchObject({ success: false, error: 'A multiplayer Studio test is already running' });
+    expect(closed).toEqual([]);
+  });
+
   test('status counts test windows no connected plugin answers for', async () => {
     const { tools } = harness([{ status: 'ok', editProcessId: 100, processes: WINDOWS }]);
     (tools as unknown as { _buildMultiplayerState: () => Promise<unknown> })._buildMultiplayerState = async () => ({

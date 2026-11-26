@@ -1614,11 +1614,16 @@ export class RobloxStudioTools {
   // Runs `run` but answers within the response budget. A call still running then
   // returns a pending request id; an identical call (same key) while it runs
   // joins it instead of starting the work again.
+  // `run` gets a signal that follows the caller's only while the caller waits.
+  // Once the call answers pending, the work belongs to the server: an HTTP
+  // transport closes after sending that answer and aborts the request's signal
+  // ("Connection closed"), which must not stop the work it reported as running.
   private async _withinResponseBudget(
     tool: string,
     action: string,
     args: unknown[],
-    run: () => Promise<ToolCallResult>,
+    run: (signal: AbortSignal | undefined) => Promise<ToolCallResult>,
+    signal?: AbortSignal,
   ): Promise<ToolCallResult> {
     const now = Date.now();
     for (const [id, job] of this.toolJobs) {
@@ -1627,9 +1632,21 @@ export class RobloxStudioTools {
     const key = JSON.stringify([tool, action, ...args]);
     let job = [...this.toolJobs.values()].find((candidate) => candidate.key === key && candidate.outcome === undefined);
     const joined = job !== undefined;
+    let detachCaller = () => {};
     if (!job) {
+      let jobSignal: AbortSignal | undefined;
+      if (signal) {
+        const jobAbort = new AbortController();
+        const forward = () => jobAbort.abort(signal.reason);
+        if (signal.aborted) forward();
+        else {
+          signal.addEventListener('abort', forward, { once: true });
+          detachCaller = () => signal.removeEventListener('abort', forward);
+        }
+        jobSignal = jobAbort.signal;
+      }
       const created: ToolJob = { id: `${tool}-${randomUUID()}`, key, tool, action, startedAt: now, done: Promise.resolve() };
-      created.done = run().then(
+      created.done = run(jobSignal).then(
         (result) => { created.outcome = { result }; },
         (error: unknown) => { created.outcome = { error }; },
       ).finally(() => { created.settledAt = Date.now(); });
@@ -1637,6 +1654,7 @@ export class RobloxStudioTools {
       job = created;
     }
     const outcome = await this._awaitToolJob(job, responseBudgetMs());
+    detachCaller();
     if (!outcome) return this._textResult({ ...this._toolJobPending(job), ...(joined ? { joinedRunningCall: true } : {}) });
     // A result delivered within the budget is not kept; a joined caller leaves it for the first.
     if (!joined) this.toolJobs.delete(job.id);
@@ -2913,7 +2931,7 @@ export class RobloxStudioTools {
     // Key on the target as the caller passed it: an omitted target routes by
     // instance_id, so it can reach a different peer than an explicit client-N.
     const requestedTarget = typeof target === 'string' ? target : target.requested;
-    return this._withinResponseBudget(tool, 'wait_until', [instance_id, requestedTarget, code, condition, timeoutS, pollMs, operation_id], async () => {
+    return this._withinResponseBudget(tool, 'wait_until', [instance_id, requestedTarget, code, condition, timeoutS, pollMs, operation_id], async (signal) => {
       const intervalMs = Math.max(pollMs, Math.ceil(timeoutS * 1000 / MAX_WAIT_PROBES));
       const startedAt = Date.now();
       const deadline = startedAt + timeoutS * 1000;
@@ -2991,7 +3009,7 @@ export class RobloxStudioTools {
         lastError,
         error: `wait_until timed out after ${timeoutS}s: the condition never became truthy.`,
       });
-    });
+    }, signal);
   }
 
   async setNetworkProfile(profile: string, target?: string, overrides?: Record<string, unknown>, instance_id?: string) {
@@ -4558,8 +4576,8 @@ export class RobloxStudioTools {
       // The defaulted mode and the effective readiness timeout key the job, so two
       // different starts never join one another.
       const readyTimeoutS = ready_timeout_s ?? timeout;
-      return this._withinResponseBudget('solo_playtest', action, [instance_id, startMode, readyTimeoutS], async () => {
-        const body = this._parseTextResult(await this.startPlaytest(startMode, undefined, instance_id, readyTimeoutS, signal));
+      return this._withinResponseBudget('solo_playtest', action, [instance_id, startMode, readyTimeoutS], async (jobSignal) => {
+        const body = this._parseTextResult(await this.startPlaytest(startMode, undefined, instance_id, readyTimeoutS, jobSignal));
         if (body.success === true && body.runtimeReady !== false) {
           return this._textResult({
             success: true,
@@ -4585,7 +4603,7 @@ export class RobloxStudioTools {
               : 'Playtest did not become ready before ready_timeout_s.',
           roles: Array.isArray(body.roles) ? body.roles : undefined,
         });
-      });
+      }, signal);
     }
 
     return this._withinResponseBudget('solo_playtest', action, [instance_id, timeout], async () => {
@@ -5112,7 +5130,8 @@ export class RobloxStudioTools {
 
     return this._withinResponseBudget(
       'multiplayer_playtest', action, [instance_id, numPlayers, target, testArgs, value, timeout, ready_timeout_s],
-      () => this._multiplayerPlaytestAction(action, numPlayers, target, testArgs, value, timeout, instance_id, ready_timeout_s, signal),
+      (jobSignal) => this._multiplayerPlaytestAction(action, numPlayers, target, testArgs, value, timeout, instance_id, ready_timeout_s, jobSignal),
+      signal,
     );
   }
 
@@ -5279,9 +5298,15 @@ export class RobloxStudioTools {
     }
 
     // Test windows left by an earlier start that no plugin answered for (they
-    // never connected, or Studio opened them after that start gave up).
+    // never connected, or Studio opened them after that start gave up). While
+    // Studio still reports a test starting or running, the windows may be
+    // another caller's start still loading: leave them, and Studio refuses this start.
     const staleListing = await this._listTestWindows(editTarget.instanceId);
-    const stale = staleListing.status === 'ok' && staleListing.processes.length > 0
+    const priorPhase = staleListing.status === 'ok' && staleListing.processes.length > 0
+      ? await this._multiplayerEditPhase(editTarget.instanceId)
+      : undefined;
+    const stale = staleListing.status === 'ok' && staleListing.processes.length > 0 &&
+      priorPhase !== 'starting' && priorPhase !== 'running'
       ? await this._endTestWindows(editTarget.instanceId, 15, 0)
       : undefined;
     const closedStaleTestWindows = stale?.cleanup.tracked && stale.cleanup.closed > 0 ? stale.cleanup.closed : undefined;
