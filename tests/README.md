@@ -54,7 +54,7 @@ The full gate uses one prepared WTI snapshot. It runs functional coverage inside
 the main matching auto-install session, then completes variant/mismatch checks,
 process identity, lifecycle, and parallel isolation. It does not launch feature
 smoke or another functional editor separately. On the current successful path
-this schedules 23 Studio processes, including multiplayer servers and clients.
+this schedules 25 Studio processes, including multiplayer servers and clients.
 The runner stops at the first failure and reports remaining checks as not run.
 
 | Change area | Required live command |

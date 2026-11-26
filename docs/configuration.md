@@ -90,6 +90,39 @@ replacement signs the Windows account out of Studio. The wait reads only sign-in
 event names and times from Studio's log. It does not count against the close
 timeout, and a Studio that finished signing in closes without delay.
 
+Closing an edit Studio also closes the multiplayer test windows it started. A
+test window is its own Studio process, and it keeps running after its edit
+Studio is gone.
+
+## Multiplayer test windows
+
+Studio runs each window of a multiplayer playtest, the Server and every client,
+as its own Studio process: the Server is a child of the edit Studio, and each
+client is a child of the Server. On Windows and WSL, `multiplayer_playtest`
+finds these windows by process, so it also sees a window whose MCP plugin is
+still loading or never connected. It finds the edit Studio by its
+`manage_instance` launch, or else by a window title that names exactly one
+Studio:
+
+- `end` closes every test window that is still running after the playtest ends,
+  and reports `teardownConfirmed: true` only once none remains. It reports
+  `closedTestWindows` when it had to close any. While Studio still reports the
+  test starting, `end` keeps closing windows that Studio opens late.
+- A `start` whose peers do not all register before `ready_timeout_s` is ended
+  the same way, so a failed start leaves nothing running. A start whose peers
+  registered but did not answer an eval stays running for inspection, as before.
+- `start` refuses with `stale_test_windows` while test windows without a
+  connected plugin are open: they may be left from an earlier start, opened in
+  Studio, or another caller's start still loading. `end` closes them.
+- `status` reports `testWindows`, and `unansweredTestWindows` when some of them
+  have no connected plugin.
+
+On other platforms, `end` cannot see a window whose plugin is not connected. It
+then reports `teardownConfirmed: false` while Studio still reports the test as
+running; close those windows in Studio. Set
+`ROBLOX_STUDIO_TEST_WINDOW_CLEANUP=off` to never list or close test windows by
+process.
+
 ## Version compatibility
 
 The Studio plugin and MCP server must have the same version. `/ready` rejects a
@@ -329,6 +362,7 @@ capture works (see [Host window capture](#host-window-capture)).
 | `ROBLOX_STUDIO_NO_AUTH` | Unset | Set to `1` or `true` to disable HTTP tool authentication. This is not recommended. |
 | `ROBLOX_STUDIO_ALLOWED_ORIGINS` | None | Comma-separated browser origins allowed to call the HTTP API cross-origin. |
 | `ROBLOX_STUDIO_HOST_CAPTURE` | Unset | Set to `0`, `false`, or `off` to disable the host window capture fallback for `capture_screenshot` and `capture_video`. |
+| `ROBLOX_STUDIO_TEST_WINDOW_CLEANUP` | Unset | Set to `0`, `false`, or `off` to stop `multiplayer_playtest` and `manage_instance` `close` from finding and closing multiplayer test windows by process. See [Multiplayer test windows](#multiplayer-test-windows). |
 | `ROBLOX_STUDIO_FFMPEG` | `ffmpeg` on `PATH` | FFmpeg executable used by `capture_video` (8.0+ on Windows, 5.1+ with `x11grab` on native Linux). See [Video recording](#video-recording). |
 | `ROBLOX_OPEN_CLOUD_API_KEY` | None | Roblox Open Cloud key used by features such as audio preview, place version access, monetization, and experience settings. Required permissions depend on the tool. |
 | `MCP_PLUGINS_DIR` | Platform Studio Plugins folder | Override the destination used by plugin installation. |

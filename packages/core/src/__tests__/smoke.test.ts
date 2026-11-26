@@ -3202,8 +3202,12 @@ describe('Smoke', () => {
 
       await jest.advanceTimersByTimeAsync(600);
       expect(evals.probes).toHaveLength(3);
-      expect(evals.probes.every((probe) => probe.signal === controller.signal)).toBe(true);
+      // Probes share the start's own signal, which follows the caller's while it waits.
+      const probeSignal = evals.probes[0].signal;
+      expect(probeSignal).toBeInstanceOf(AbortSignal);
+      expect(evals.probes.every((probe) => probe.signal === probeSignal)).toBe(true);
       controller.abort();
+      expect(probeSignal).toHaveProperty('aborted', true);
       await jest.advanceTimersByTimeAsync(0);
       expect(result.settled).toBe(true);
       expect(result.error).toBeDefined();
@@ -3219,7 +3223,7 @@ describe('Smoke', () => {
       });
       scriptRuntimeEvals(async (peerId) => peerId === 'client-1' ? { ok: false, error: 'still loading' } : { ok: true, result: 'true' });
       const result = track(tools.multiplayerPlaytest('start', 1, undefined, undefined, undefined, 5, 'instance:test', 2));
-      const pending = claimQueuedRequest(bridge, 'session-1');
+      const pending = await claimQueuedRequestSoon(bridge, 'session-1');
       expect(pending?.request.endpoint).toBe('/api/multiplayer-test-start');
       bridge.resolveRequest(pending!.requestId, { success: true, testId: 'test-1' });
       for (const role of ['server', 'client']) {
@@ -3528,7 +3532,7 @@ describe('Smoke', () => {
     const answers = answerRuntimeEvals();
     const resultPromise = tools.multiplayerPlaytest('start', 1, undefined, undefined, undefined, 2, 'instance:test')
       .finally(() => answers.mockRestore());
-    const pending = claimQueuedRequest(bridge, 'session-1');
+    const pending = await claimQueuedRequestSoon(bridge, 'session-1');
     expect(pending?.request).toMatchObject({
       endpoint: '/api/multiplayer-test-start',
       data: { numPlayers: 1, testArgs: {} },
@@ -3589,7 +3593,7 @@ describe('Smoke', () => {
     bridge.registerPeer(READY);
 
     const resultPromise = tools.multiplayerPlaytest('start', 1, undefined, undefined, undefined, 0.1, 'instance:test');
-    const pending = claimQueuedRequest(bridge, 'session-1');
+    const pending = await claimQueuedRequestSoon(bridge, 'session-1');
     bridge.resolveRequest(pending!.requestId, {
       success: true,
       message: 'Multiplayer Studio test starting with 1 player(s).',
@@ -3603,17 +3607,13 @@ describe('Smoke', () => {
       action: 'start',
       elapsedMs: expect.any(Number),
       error: 'multiplayer_start_not_detected',
-      message: 'Multiplayer Studio test start was requested, but MCP did not detect the required server/client peers before timeout.',
+      message: 'Multiplayer Studio test start was requested, but MCP did not detect the required server/client peers before timeout. MCP ended the attempt.',
       multiplayerGroupId: 'test-timeout',
       roles: ['edit'],
+      teardownConfirmed: true,
     });
-    expect(bridge.getMultiplayerGroups()).toEqual([
-      expect.objectContaining({
-        id: 'test-timeout',
-        controllerInstanceId: 'instance:test',
-        instanceIds: ['instance:test'],
-      }),
-    ]);
+    // Issue #190: a start nobody is told is running is ended, not left behind.
+    expect(bridge.getMultiplayerGroups()).toEqual([]);
   });
 
   test.each([
@@ -3633,7 +3633,7 @@ describe('Smoke', () => {
     bridge.registerPeer(READY);
 
     const resultPromise = tools.multiplayerPlaytest('start', 2, undefined, undefined, undefined, 60, 'instance:test');
-    const pending = claimQueuedRequest(bridge, 'session-1');
+    const pending = await claimQueuedRequestSoon(bridge, 'session-1');
     bridge.resolveRequest(pending!.requestId, { success: true, testId: 'test-refused' });
 
     const body = JSON.parse((await resultPromise).content[0].text);

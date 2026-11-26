@@ -176,7 +176,11 @@ describe('eval_*_runtime wait_until', () => {
     controller.abort(new Error('caller went away'));
     await cancelled;
     expect(request).toHaveBeenCalledTimes(2);
-    expect(request.mock.calls.every((call) => call[4] === controller.signal)).toBe(true);
+    // Each probe gets the wait's own signal, which follows the caller's while it waits.
+    const probeSignal = request.mock.calls[0][4];
+    expect(probeSignal).toBeInstanceOf(AbortSignal);
+    expect(request.mock.calls.every((call) => call[4] === probeSignal)).toBe(true);
+    expect((probeSignal as AbortSignal).reason).toBe(controller.signal.reason);
   });
 
   test('spreads long waits so one wait sends at most 120 probes', async () => {
@@ -226,6 +230,26 @@ describe('eval_*_runtime wait_until', () => {
     expect(result.content).toHaveLength(1);
     expect(parse(result)).toMatchObject({ requestId: pending.requestId, state: 'settled', outcome: 'result', result: { satisfied: true, value: 'true' } });
     expect(normalizeToolResult(result, 'modern').isError).toBeUndefined();
+  });
+
+  // Issue #190: over HTTP the transport closes right after sending the pending
+  // answer and aborts the request's signal; the reported-running work goes on.
+  test('a wait that answered pending keeps running when its caller\'s signal aborts afterwards', async () => {
+    jest.replaceProperty(process, 'env', { ...process.env, ROBLOX_STUDIO_MCP_RESPONSE_BUDGET_MS: '1000' });
+    let flipped = false;
+    const { tools } = setup(() => ({ bridge: 'ok', ok: true, result: flipped ? 'Ttrue' : 'Ffalse' }));
+    const caller = new AbortController();
+
+    const first = tools.evalServerRuntime(undefined, 'instance:solo', undefined, { wait_until: 'workspace:GetAttribute("flip")', timeout_s: 30 }, caller.signal);
+    await jest.advanceTimersByTimeAsync(1000);
+    const pending = parse(await first);
+    expect(pending).toMatchObject({ state: 'pending' });
+    caller.abort(new Error('Connection closed'));
+
+    flipped = true;
+    const status = tools.getRequestStatus(pending.requestId, 5000);
+    await jest.advanceTimersByTimeAsync(500);
+    expect(parse(await status)).toMatchObject({ state: 'settled', outcome: 'result', result: { satisfied: true } });
   });
 
   test('a call that names client-1 does not join a running wait that omitted target', async () => {
