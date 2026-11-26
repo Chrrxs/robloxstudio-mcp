@@ -42,12 +42,12 @@ await runTest('multiplayer_playtest closes test windows it cannot reach', async 
 
   try {
     // The windows need seconds to register; a 1 s ready timeout gives up first.
-    const failed = await client.callTool('multiplayer_playtest', {
+    const failed = await client.callToolError('multiplayer_playtest', {
       action: 'start',
       numPlayers: 1,
       ready_timeout_s: 1,
       instance_id: instanceId,
-    });
+    }, 90_000);
     assert(failed.success === false, `a start that times out fails (${JSON.stringify(failed)})`);
     assert(failed.error === 'multiplayer_start_not_detected', `it reports undetected peers (${failed.error})`);
     assert(failed.teardownConfirmed === true, `MCP ends the abandoned attempt (${JSON.stringify(failed)})`);
